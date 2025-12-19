@@ -1974,7 +1974,7 @@ def fused_experts_impl(
             if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
                 pass
             elif ocp_mx_scheme.endswith("a_fp8"):
-                # perform QDQ (quantize and dequantize) on activation for emulation purpose, 
+                # perform QDQ (quantize and dequantize) on activation for emulation purpose,
                 # because of no native kernel for weight in ocp_mx_scheme and activation in FP8.
                 qcurr_hidden_states, a1q_scale = ops.scaled_fp8_quant(
                     curr_hidden_states, a1_scale, use_per_token_if_dynamic=False

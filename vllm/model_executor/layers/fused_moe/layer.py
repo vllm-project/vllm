@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Optional, Literal, cast, get_args, overload
+from typing import Literal, cast, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -590,8 +590,12 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        self.model_type = getattr(self.vllm_config.model_config.hf_config, "model_type", None)
-        self.is_mxfp4_quant, self.emulate_quant = self._is_mxfp4_and_emulate_quant(quant_config, self.quant_method)
+        self.model_type = getattr(
+            self.vllm_config.model_config.hf_config, "model_type", None
+        )
+        self.is_mxfp4_quant, self.emulate_quant = self._is_mxfp4_and_emulate_quant(
+            quant_config, self.quant_method
+        )
 
         # Round up hidden size if needed.
         hidden_size, is_rounded_hidden_size = maybe_roundup_hidden_size(
@@ -879,14 +883,20 @@ class FusedMoE(CustomOp):
                     dp_size=get_dp_group().world_size,
                 )
 
-    def _is_mxfp4_and_emulate_quant(self, quant_config: Optional[QuantizationConfig], quant_method: FusedMoEMethodBase) -> bool:
+    def _is_mxfp4_and_emulate_quant(
+        self, quant_config: QuantizationConfig | None, quant_method: FusedMoEMethodBase
+    ) -> bool:
         if quant_config:
             if quant_config.get_name() == "mxfp4":
                 return True, False
-            elif quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2:
+            elif (
+                quant_config.get_name() == "quark"
+                and quant_method.weight_dtype == "mxfp4"
+                and quant_method.fp4_dtype == torch.float4_e2m1fn_x2
+            ):
                 return True, quant_method.emulate
         return False, False
-    
+
     def _maybe_setup_shared_experts_stream(
         self,
         hidden_states: torch.Tensor,
@@ -1151,7 +1161,6 @@ class FusedMoE(CustomOp):
         shard_id: str,
         expert_id: int,
         return_success: bool = False,
-        quark_loading: bool = False, # TODO: refactor this flag
     ) -> bool | None:
         if self.quant_config:
             if self.quant_config.get_name() == "mxfp4":
@@ -1164,8 +1173,10 @@ class FusedMoE(CustomOp):
                     dim2 = loaded_weight.shape[2]
                     param.data[:, :dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
-            
-            elif self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss":
+
+            elif (
+                self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss"
+            ):
                 # TODO (xuebwang-amd): this is for gpt-oss, how to unify?
                 expert_data = param.data[expert_id]
                 if "input_scale" in weight_name:
@@ -1393,7 +1404,7 @@ class FusedMoE(CustomOp):
                     param=param,
                     loaded_weight=loaded_weight,
                     expert_id=expert_id,
-                    combined_w13=True
+                    combined_w13=True,
                 )
             else:
                 WEIGHT_SCALE_SUPPORTED = [e.value for e in FusedMoeWeightScaleSupported]

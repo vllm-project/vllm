@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -833,7 +834,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 # TODO (xuebwang-amd)
                 raise NotImplementedError()
 
-            else:  
+            else:
                 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                     rocm_aiter_fused_experts,
                 )
@@ -908,8 +909,10 @@ class Quark_OCPMX_W4A16_MoEMethod(QuarkMoEMethod):
         self.emulate = (
             not current_platform.supports_mx() or not self.ocp_mx_scheme == "w_mxfp4"
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
-        self.emulate = True if self.model_type == "gpt_oss" else self.emulate # TODO (xuebwang-amd)
-        
+        self.emulate = (
+            True if self.model_type == "gpt_oss" else self.emulate
+        )  # TODO (xuebwang-amd)
+
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
@@ -1112,7 +1115,9 @@ class Quark_OCPMX_W4A16_MoEMethod(QuarkMoEMethod):
 
         if not self.emulate:
             # TODO (xuebwang-amd)
-            raise NotImplementedError(f"Currently, native kernel for weight in ocp_mx_scheme and activation in bf16/fp16 is not provided.")
+            raise NotImplementedError(
+                "Currently, native kernel for weight in ocp_mx_scheme and activation in bf16/fp16 is not provided."
+            )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -1460,7 +1465,9 @@ class Quark_OCPMX_FP8_MoEMethod(QuarkMoEMethod):
 
         if not self.emulate:
             # TODO (xuebwang-amd)
-            raise NotImplementedError(f"Currently, native kernel for weight in ocp_mx_scheme and activation in FP8 is not provided.")
+            raise NotImplementedError(
+                "Currently, native kernel for weight in ocp_mx_scheme and activation in FP8 is not provided."
+            )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 

@@ -109,15 +109,19 @@ def triton_kernel_moe_forward(
             global_num_experts=global_num_experts,
             expert_map=expert_map,
         )
-    
+
     elif quant_config.use_mxfp4_w4a8 and quant_config.ocp_mx_scheme.startswith(
         "w_mxfp4"
     ):
-       # TODO (xuebwang-amd)
-        raise NotImplementedError(f"Currently, native kernel for weight in ocp_mx_scheme and activation in FP8 is not provided.")
+        # TODO (xuebwang-amd)
+        raise NotImplementedError(
+            "Currently, native kernel for weight in ocp_mx_scheme and activation in FP8 is not provided."
+        )
 
     else:
-        raise NotImplementedError(f"Unsupported quant_config={quant_config} for fused experts with triton kernel.")
+        raise NotImplementedError(
+            f"Unsupported quant_config={quant_config} for fused experts with triton kernel."
+        )
 
 
 # This is a triton implementation of the fused_experts function
@@ -189,7 +193,9 @@ def triton_kernel_fused_experts(
     elif isinstance(quant_config._w1.scale, PrecisionConfig):
         w1_precision = quant_config.w1_precision
     else:
-        raise TypeError(f"quant_config._w1.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'.")
+        raise TypeError(
+            "quant_config._w1.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'."
+        )
 
     if isinstance(quant_config._w2.scale, torch.nn.Parameter):
         w2_scale = quant_config._w2.scale.detach()
@@ -198,7 +204,9 @@ def triton_kernel_fused_experts(
     elif isinstance(quant_config._w2.scale, PrecisionConfig):
         w2_precision = quant_config.w2_precision
     else:
-        raise TypeError(f"quant_config._w2.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'.")
+        raise TypeError(
+            "quant_config._w2.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'."
+        )
 
     matmul_ogs(
         hidden_states,

@@ -32,7 +32,7 @@ class OCP_MX_Scheme(str, Enum):
 
     @classmethod
     def from_quant_dtype(cls, input_dtype: str | None, weight_dtype: str | None):
-        if input_dtype not in OCP_MX_DTYPES and weight_dtype not in OCP_MX_DTYPES:  # or
+        if input_dtype not in OCP_MX_DTYPES and weight_dtype not in OCP_MX_DTYPES:
             return None
         elif input_dtype is None and weight_dtype == "mxfp4":
             return cls.w_mxfp4

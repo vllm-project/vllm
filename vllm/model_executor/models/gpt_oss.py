@@ -318,9 +318,9 @@ class GptOssModel(nn.Module):
         # Params for weights, weight scales, activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="w1",  # "gate_proj",
-            ckpt_down_proj_name="w2",  # "down_proj",
-            ckpt_up_proj_name="w3",  # "up_proj",
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
             num_redundant_experts=0,
         )
@@ -759,12 +759,9 @@ class GptOssModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
                 for mapping in expert_params_mapping:
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
-                    is_expert_weight = True
-
                     param_name, weight_name, expert_id, shard_id = mapping
                     weight_name = (
                         weight_name[:-1] if weight_name.endswith(".") else weight_name
