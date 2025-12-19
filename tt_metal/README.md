@@ -10,7 +10,7 @@
 
 ## vLLM and TT-Metal Branches
 For the latest versions of vLLM and tt-metal, git-checkout the following branches in each repo separately:
-- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (do not commit to this branch)
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (PRs must be submitted to this branch)
 - tt-metal branch: [main](https://github.com/tenstorrent/tt-metal)
 
 >[!NOTE]
@@ -22,28 +22,21 @@ vLLM requires Python 3.9+ (Python 3.10.12 is the default `python3` on Ubuntu 22.
 ## Environment Creation
 
 **To create the vLLM+tt-metal environment (first time):**
-1. Install and build tt-metal following the instructions in [INSTALLING.md](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md). Ensure that the necessary environment variables for running tt-metal tests were set.
-2. From the main vLLM directory, run:
+1. Install tt-metal following the instructions in [INSTALLING.md](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md) (build and create the virtual environment if [installing tt-metal from source](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md#source)). Ensure that the necessary environment variables for running tt-metal tests were set.  
+2. Enter the environment which has tt-metal installed (e.g. `source $PYTHON_ENV_DIR/bin/activate` if using python virtual environment), and then from the main vLLM directory install vLLM:
 
     ```sh
-    export vllm_dir=$(pwd)
-    source $vllm_dir/tt_metal/setup-metal.sh
-    ```
-  
-3. (Optional step when installing tt-metal from source) In step 2, `PYTHON_ENV_DIR` is set to `${TT_METAL_HOME}/build/python_env_vllm`. Create the tt-metal virtual environment following the instructions in [INSTALLING.md#option-1-from-source](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md#option-1-from-source). Then, enter that virtual environment with `source $PYTHON_ENV_DIR/bin/activate`.
-4. Install vLLM:
-
-    ```sh
-    pip3 install --upgrade pip
-    cd $vllm_dir && pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+    source tt_metal/install-vllm-tt.sh
     ```
 
 **To activate the vLLM+tt-metal environment (after the first time):**
-1. Ensure `$vllm_dir` contains the path to vLLM and run:
+1. Set `VLLM_TARGET_DEVICE` and activate virtual environment if using one (where `PYTHON_ENV_DIR` is set to the path of the python virtual environment):
 
     ```sh
-    source $vllm_dir/tt_metal/setup-metal.sh && source $PYTHON_ENV_DIR/bin/activate
+    export VLLM_TARGET_DEVICE="tt" && source $PYTHON_ENV_DIR/bin/activate
     ```
+
+2. Ensure that the `PYTHONPATH` environment variable contains the path to tt-metal (should already have been set when installing tt-metal).
 
 ## Accessing the Meta-Llama Hugging Face Models
 
@@ -62,8 +55,7 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
 
 ## Preparing the TT-Metal Models
 
-1. Ensure that `$PYTHONPATH` contains the path to tt-metal (should already have been done when installing tt-metal)
-2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2 and Qwen-2.5, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers) for preparing the weights and environment variables, and install any extra requirements (e.g. `pip install -r models/tt_transformers/requirements.txt`).
+For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2 and Qwen-2.5, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers) for preparing the weights and environment variables.
 
 ## Running the Offline Inference Example
 
@@ -81,7 +73,7 @@ To measure performance (Llama70B on QuietBox) for a single batch of 32 prompts (
 MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 ```
 
-> **⚠️ Enabling V1 Backend**: V1 support has been added for text-only models. This can be enabled by setting `VLLM_USE_V1=1` and `--num_scheduler_steps 1`, though it may still have limitations compared to the default V0 backend. To disable multiprocessing in V1 (to step through code or make scheduling deterministic), set `VLLM_ENABLE_V1_MULTIPROCESSING=0` (note: not compatible with DP models). To run a model with DP attention, set the DP factor with `--data_parallel_size`, set the max batch size as the max batch per DP group, and set `--async_engine` (only for offline script) for proper load balancing.
+> **⚠️ Enabling V1 Backend**: V1 can be enabled by setting `VLLM_USE_V1=1` and `--num_scheduler_steps 1`, though it may still have limitations compared to the default V0 backend. To disable multiprocessing in V1 (to step through code or make scheduling deterministic), set `VLLM_ENABLE_V1_MULTIPROCESSING=0` (note: not compatible with DP models). To run a model with DP attention, set the DP factor with `--data_parallel_size`, set the max batch size as the max batch per DP group, and set `--async_engine` (only for offline script) for proper load balancing.
 
 **Note 1**: Custom TT options can be set using `--override_tt_config` with a json string, e.g. `--override_tt_config '{"sample_on_device_mode": "all"}'`, however these shouldn't be used unless the model supports them (most currently do not). Supported parameters are:
 - `sample_on_device_mode`: ["all", "decode_only"]

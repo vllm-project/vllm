@@ -84,6 +84,8 @@ Find the full list of supported models [here](https://docs.vllm.ai/en/latest/mod
 
 ## Getting Started
 
+**⚠️ Running on Tenstorrent hardware**: To use vLLM with Tenstorrent hardware, please follow the instructions in [tt_metal/README.md](https://github.com/tenstorrent/vllm/blob/dev/tt_metal/README.md) (Note: `dev` is the main development branch).
+
 Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
 
 ```bash
