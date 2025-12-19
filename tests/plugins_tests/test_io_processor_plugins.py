@@ -7,7 +7,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
 
 MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"

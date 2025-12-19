@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -282,13 +282,11 @@ class Glm4MoeAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=partial_rotary_factor,
         )
         self.attn = Attention(
             self.num_heads,

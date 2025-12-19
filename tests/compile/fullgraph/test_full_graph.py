@@ -122,7 +122,9 @@ def test_full_graph(
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
                 custom_ops=["+rms_norm"],
-                pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+                pass_config=PassConfig(
+                    fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+                ),
             ),
             *model_info,
         )
@@ -195,20 +197,19 @@ def test_custom_compile_config(
     ],
 )
 def test_fp8_kv_scale_compile(
-    monkeypatch: pytest.MonkeyPatch,
     compilation_mode: int,
     model: str,
     backend: AttentionBackendEnum | None,
 ):
-    if backend:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
-
     model_kwargs = {
         "quantization": "fp8",
         "kv_cache_dtype": "fp8_e4m3",
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
+    if backend:
+        model_kwargs["attention_config"] = {"backend": backend.name}
+
     run_model(compilation_mode, model, **model_kwargs)
 
 

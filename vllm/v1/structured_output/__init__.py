@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -40,6 +40,16 @@ class StructuredOutputManager:
         self.reasoner: ReasoningParser | None = None
         self.vllm_config = vllm_config
 
+        # When in external_launcher mode, async grammar compilation causes deadlocks
+        # due to external_launcher mode having a scheduler for each TP rank.
+        # Async grammar compilation causes the WAITING_FOR_FSM → WAITING transition to
+        # happen at different times on different TP ranks,
+        # breaking the determinism assumption that external_launcher relies on.
+        self._use_async_grammar_compilation = (
+            vllm_config.parallel_config.distributed_executor_backend
+            != "external_launcher"
+        )
+
         self._grammar_bitmask: torch.Tensor | None = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
@@ -61,7 +71,7 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = init_tokenizer_from_configs(
+            self.tokenizer = cached_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
             reasoning_parser = (
@@ -138,10 +148,13 @@ class StructuredOutputManager:
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
 
-        grammar = self.executor.submit(self._async_create_grammar, request)
+        if self._use_async_grammar_compilation:
+            grammar = self.executor.submit(self._create_grammar, request)
+        else:
+            grammar = self._create_grammar(request)  # type: ignore[assignment]
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
-    def _async_create_grammar(
+    def _create_grammar(
         self,
         request: Request,
     ) -> StructuredOutputGrammar:
@@ -326,7 +339,9 @@ class StructuredOutputManager:
             return True
 
         # Check if reasoning ends in *this* step
-        if self.reasoner.is_reasoning_end(request.all_token_ids):
+        if self.reasoner.is_reasoning_end_streaming(
+            request.all_token_ids, request.all_token_ids[request.num_computed_tokens :]
+        ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass
             structured_req.reasoning_ended = True

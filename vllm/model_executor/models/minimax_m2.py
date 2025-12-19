@@ -30,7 +30,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -199,9 +199,13 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        if (
+            rope_parameters is not None
+            and "partial_rotary_factor" not in rope_parameters
+        ):
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
