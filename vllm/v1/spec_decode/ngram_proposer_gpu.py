@@ -13,9 +13,12 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
@@ -268,7 +271,7 @@ class NgramProposerGPU:
         assert vllm_config.speculative_config.prompt_lookup_max is not None
 
         compilation_config = CompilationConfig(
-            level=3,
+            mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["none"],
             splitting_ops=[],
             compile_sizes=[],
@@ -280,7 +283,7 @@ class NgramProposerGPU:
                 "coordinate_descent_tuning": True,
                 "use_mixed_mm": False,
             },
-            use_cudagraph=False,
+            cudagraph_mode=CUDAGraphMode.NONE,
         )
 
         self.vllm_config = VllmConfig(compilation_config=compilation_config)
@@ -426,11 +429,12 @@ class NgramProposerGPU:
                 sampled_flags & valid_mask & (num_tokens_no_spec >= self.min_n)
             )
 
-            draft_tokens, is_empty_draft_tokens = self.kernel(
-                num_tokens_no_spec,
-                token_ids_gpu,
-                combined_mask,
-            )
+            with record_function_or_nullcontext("ngram_proposer_gpu: kernel"):
+                draft_tokens, is_empty_draft_tokens = self.kernel(
+                    num_tokens_no_spec,
+                    token_ids_gpu,
+                    combined_mask,
+                )
 
             return draft_tokens, is_empty_draft_tokens
 
