@@ -255,7 +255,7 @@ class CompilerManager:
         if (
             is_compile_cache_enabled(
                 additional_inductor_config,
-                compilation_config.disable_compile_cache,
+                compilation_config.enable_compile_cache,
             )
             and handle is not None
         ):
@@ -641,10 +641,10 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
+        # Honors opt-outs such as CompilationMode.NONE or VLLM_ENABLE_COMPILE_CACHE=0.
         disable_cache = not is_compile_cache_enabled(
             self.inductor_config,
-            self.compilation_config.disable_compile_cache,
+            self.compilation_config.enable_compile_cache,
         )
 
         if disable_cache:

@@ -25,8 +25,8 @@ The factors considered include:
 
 With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by either:
 
-- Setting the config flag: `--compilation-config '{"disable_compile_cache": true}'`
-- Setting the environment variable: `VLLM_DISABLE_COMPILE_CACHE=1`
+- Setting the config flag: `--compilation-config '{"enable_compile_cache": false}'`
+- Setting the environment variable: `VLLM_ENABLE_COMPILE_CACHE=0`
 
 The environment variable takes precedence over the config flag if both are set.
 

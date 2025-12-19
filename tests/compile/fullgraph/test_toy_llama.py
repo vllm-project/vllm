@@ -342,7 +342,7 @@ def test_toy_llama(
 ):
     # We disable the vLLM compile cache into a new tmp dir for 1 reason:
     # 1. To make sure we can properly track the number of Inductor compilations.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
