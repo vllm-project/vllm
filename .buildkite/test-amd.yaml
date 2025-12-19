@@ -993,7 +993,7 @@ steps:
   commands:
   - export MIOPEN_DEBUG_CONV_DIRECT=0
   - export MIOPEN_DEBUG_CONV_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
@@ -1533,29 +1533,6 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
-
-- label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 120
-  gpu: b200
-  optional: true # run on nightlies
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
-
-- label: Multi-Modal Accuracy Eval (Small Models) # 160min
-  timeout_in_minutes: 240
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
-  commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: LM Eval Large Models (4 Card)
   mirror_hardwares: [amdexperimental, amdproduction]
