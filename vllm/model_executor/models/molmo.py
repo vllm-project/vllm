@@ -17,7 +17,8 @@ from transformers import BatchFeature, PretrainedConfig, ProcessorMixin, TensorT
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import Attention, MultiHeadAttention
+from vllm.attention.layer import Attention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -222,7 +223,7 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
         self.scale = self.head_dim**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads, self.head_dim, self.scale, num_kv_heads=self.num_kv_heads
         )
 
@@ -433,7 +434,6 @@ class MolmoAttention(nn.Module):
         # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -1354,8 +1354,6 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 class MolmoForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsQuant
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping

@@ -201,9 +201,6 @@ class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     dummy_inputs=OpenCUADummyInputsBuilder,
 )
 class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
-    merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw"}
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -243,18 +240,12 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         )
 
         if multimodal_config.get_limit_per_prompt("image"):
-            attn_backend_override = (
-                multimodal_config.mm_encoder_attn_backend
-                if multimodal_config is not None
-                else None
-            )
             self.visual = OpenCUAVisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                multimodal_config=self.multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
-                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
