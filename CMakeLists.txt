@@ -63,13 +63,16 @@ set(TORCH_SUPPORTED_VERSION_ROCM "2.10.0")
 # Try to find python package with an executable that exactly matches
 # `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
 #
-if (VLLM_PYTHON_EXECUTABLE)
-  find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
-else()
+if(NOT VLLM_PYTHON_EXECUTABLE)
+    find_program(VLLM_PYTHON_EXECUTABLE "python3" "python")
+endif()
+if(NOT VLLM_PYTHON_EXECUTABLE)
   message(FATAL_ERROR
-    "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
+    "python not found, please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
     " before running cmake configure.")
 endif()
+
+find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
 
 #
 # Update cmake's `CMAKE_PREFIX_PATH` with torch location.
