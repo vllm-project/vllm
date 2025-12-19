@@ -106,7 +106,7 @@ else()
 endif()
 
 if (AVX2_FOUND)
-    list(APPEND CXX_COMPILE_FLAGS "-mavx2")
+    list(APPEND CXX_COMPILE_FLAGS_AVX2 "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
 
 # FIXME: fix support for power...
@@ -196,20 +196,21 @@ message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 set(VLLM_EXTENSION_TARGET_NAME "_C")
 message(STATUS "Configured CPU extension: ${VLLM_EXTENSION_TARGET_NAME}")
 
+list(APPEND CXX_COMPILE_FLAGS_AVX2 ${CXX_COMPILE_FLAGS})
 define_extension_target(
     ${VLLM_EXTENSION_TARGET_NAME}
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
     LIBRARIES ${LIBS}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+    COMPILE_FLAGS ${CXX_COMPILE_FLAGS} ${CXX_COMPILE_FLAGS_AVX2}
     USE_SABI 3
     WITH_SOABI
 )
 
 message(STATUS "Configuring with AVX512 support") # TODO: cleanup status messages
 
-list(APPEND CXX_COMPILE_FLAGS
+list(APPEND CXX_COMPILE_FLAGS_AVX512
     "-mavx512f"
     "-mavx512vl"
     "-mavx512bw"
@@ -220,7 +221,7 @@ find_isa(${CPUINFO} "avx512_bf16" AVX512BF16_FOUND)
 if (AVX512BF16_FOUND OR ENABLE_AVX512BF16)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-        list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+        list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512bf16")
         set(ENABLE_AVX512BF16 ON)
     else()
         set(ENABLE_AVX512BF16 OFF)
@@ -235,7 +236,7 @@ find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
 if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-        list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+        list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512vnni")
         set(ENABLE_AVX512VNNI ON)
     else()
         set(ENABLE_AVX512VNNI OFF)
@@ -248,9 +249,10 @@ endif()
 
 find_isa(${CPUINFO} "amx_bf16" AMXBF16_FOUND)
 if (AMXBF16_FOUND OR ENABLE_AMXBF16)
+    # FIXME add support for AMX
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-        list(APPEND CXX_COMPILE_FLAGS "-mamx-bf16" "-mamx-tile")
+        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile")
         set(ENABLE_AMXBF16 ON)
         add_compile_definitions(-DCPU_CAPABILITY_AMXBF16)
     else()
@@ -265,6 +267,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels (only for x86-AVX512 /ARM platforms)
+list(APPEND ONEDNN_CXX_COMPILE_FLAGS ${CXX_COMPILE_FLAGS} ${CXX_COMPILE_FLAGS_AVX512})
 if((ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
@@ -291,6 +294,7 @@ if((ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR
             set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
         endif()
 
+        # TODO: move ACL building to separate file
         # Fetch and populate ACL
         if(DEFINED ENV{ACL_ROOT_DIR} AND IS_DIRECTORY "$ENV{ACL_ROOT_DIR}")
             message(STATUS "Using ACL from specified source directory: $ENV{ACL_ROOT_DIR}")
@@ -389,30 +393,31 @@ if((ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
     target_link_libraries(dnnl_ext dnnl torch)
-    target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    target_compile_options(dnnl_ext PRIVATE ${ONEDNN_CXX_COMPILE_FLAGS} -fPIC) # FIXME: this should handle AVX512 and others
     list(APPEND LIBS dnnl_ext)
     set(USE_ONEDNN ON)
 else()
     set(USE_ONEDNN OFF)
 endif()
 
-set(VLLM_EXT_SRC
+set(VLLM_EXT_AVX512_SRC
     "csrc/cpu/shm.cpp"
     "csrc/cpu/cpu_wna16.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
-    ${VLLM_EXT_SRC}
+    ${VLLM_EXT_AVX512_SRC}
 )
 
 # FIXME: enable these if required
 if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
-set(VLLM_EXT_SRC
-    "csrc/cpu/sgl-kernels/gemm.cpp"
-    "csrc/cpu/sgl-kernels/gemm_int8.cpp"
-    "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
-    "csrc/cpu/sgl-kernels/moe.cpp"
-    "csrc/cpu/sgl-kernels/moe_int8.cpp"
-    "csrc/cpu/sgl-kernels/moe_fp8.cpp"
-    ${VLLM_EXT_SRC})
+    set(VLLM_EXT_AVX512_SRC
+        "csrc/cpu/sgl-kernels/gemm.cpp"
+        "csrc/cpu/sgl-kernels/gemm_int8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe.cpp"
+        "csrc/cpu/sgl-kernels/moe_int8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        ${VLLM_EXT_AVX512_SRC}
+    )
 add_compile_definitions(-DCPU_CAPABILITY_AVX512)
 endif()
 
@@ -423,18 +428,21 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
 endif()
 
 if(USE_ONEDNN)
-set(VLLM_EXT_SRC
-    "csrc/cpu/dnnl_kernels.cpp"
-    ${VLLM_EXT_SRC})
+    set(VLLM_EXT_AVX512_SRC
+        "csrc/cpu/dnnl_kernels.cpp"
+        ${VLLM_EXT_AVX512_SRC}
+    )
 endif()
 
+
+list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS})
 define_extension_target(
     "${VLLM_EXTENSION_TARGET_NAME}_avx512"
     DESTINATION vllm
     LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC}
+    SOURCES ${VLLM_EXT_AVX512_SRC}
     LIBRARIES ${LIBS}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+    COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
     USE_SABI 3
     WITH_SOABI
 )
