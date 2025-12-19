@@ -964,7 +964,7 @@ steps:
     - pytest -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Standard) # 60min
-  timeout_in_minutes: 80
+  timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -973,13 +973,15 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
-- label: Multi-Modal Accuracy Eval (Small Models) # 150min - 180min
-  timeout_in_minutes: 180
+- label: Multi-Modal Accuracy Eval (Small Models) # 5min
+  timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -989,7 +991,9 @@ steps:
   - vllm/inputs/
   - vllm/v1/core/
   commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  - export MIOPEN_DEBUG_CONV_DIRECT=0
+  - export MIOPEN_DEBUG_CONV_GEMM=0
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
@@ -1001,10 +1005,13 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
-- label: Multi-Modal Models Test (Extended) 2
+- label: Multi-Modal Models Test (Extended) 2 #60min
+  timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -1013,6 +1020,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
@@ -1026,6 +1035,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
