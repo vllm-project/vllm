@@ -6,7 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -269,7 +269,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")
 class Molmo2VideoBackend(VideoLoader):
-
     @classmethod
     def get_candidate_target_fps(
         cls,
@@ -278,7 +277,8 @@ class Molmo2VideoBackend(VideoLoader):
         max_fps: float = 8.0,
     ) -> list[float]:
         """
-        Return the subset of `video_fps` factors that remain multiples of `sampling_fps`.
+        Return the subset of `video_fps` factors that remain multiples
+        of `sampling_fps`.
 
         Examples:
             >>> get_candidate_target_fps(video_fps=6, sampling_fps=2)
@@ -290,7 +290,8 @@ class Molmo2VideoBackend(VideoLoader):
             >>> get_candidate_target_fps(video_fps=5, sampling_fps=2)
             Traceback (most recent call last):
                 ...
-            ValueError: sampling_fps=2 must divide video_fps=5 to produce consistent frame steps.
+            ValueError: sampling_fps=2 must divide video_fps=5 to produce
+                consistent frame steps.
         """
         video_fps = int(video_fps)
         sampling_fps = int(sampling_fps)
@@ -299,9 +300,14 @@ class Molmo2VideoBackend(VideoLoader):
         if sampling_fps is None:
             raise ValueError("sampling_fps must be provided")
         if video_fps <= 0 or sampling_fps <= 0:
-            raise ValueError(f"video_fps and sampling_fps must be positive (got {video_fps}, {sampling_fps})")
+            raise ValueError(
+                "video_fps and sampling_fps must be positive "
+                f"(got {video_fps}, {sampling_fps})"
+            )
         if video_fps % sampling_fps != 0:
-            raise ValueError(f"sampling_fps={sampling_fps} must divide video_fps={video_fps}.")
+            raise ValueError(
+                f"sampling_fps={sampling_fps} must divide video_fps={video_fps}."
+            )
 
         candidates = []
         for candidate in range(sampling_fps, video_fps + 1, sampling_fps):
@@ -309,7 +315,7 @@ class Molmo2VideoBackend(VideoLoader):
                 break
             if video_fps % candidate == 0:
                 candidates.append(float(candidate))
-        
+
         return candidates
 
     @classmethod
@@ -322,7 +328,6 @@ class Molmo2VideoBackend(VideoLoader):
         candidate_target_fps: list[float] | None = None,
         **kwargs,
     ) -> npt.NDArray:
-
         if frame_sample_mode == "fps":
             assert candidate_target_fps is not None
             # Try larger and larger FPSs until we hit one that can't span the video
@@ -336,13 +341,15 @@ class Molmo2VideoBackend(VideoLoader):
             return times
         elif frame_sample_mode == "uniform_last_frame":
             if max_fps is not None:
-                max_duration = (max_frames-1) / max_fps  # -1 to include the last frame
+                max_duration = (
+                    max_frames - 1
+                ) / max_fps  # -1 to include the last frame
                 if max_duration < duration:
                     times = np.linspace(
                         0, duration, num=max_frames, endpoint=True, dtype=np.float64
                     )
                 else:
-                    times = np.arange(0.0, stop=duration, step=1/max_fps)
+                    times = np.arange(0.0, stop=duration, step=1 / max_fps)
                     times = np.concatenate([times, [duration]], axis=0)
                     assert len(times) <= max_frames
             else:
@@ -387,7 +394,7 @@ class Molmo2VideoBackend(VideoLoader):
         candidate_target_fps: list[float] | None = None
         if frame_sample_mode == "fps":
             candidate_target_fps = cls.get_candidate_target_fps(video_fps, sampling_fps)
-        
+
         time_stamps = vr.get_frame_timestamp(list(range(len(vr))))
         duration = time_stamps[-1][1] - time_stamps[0][0]
 
@@ -401,7 +408,9 @@ class Molmo2VideoBackend(VideoLoader):
         target_timestamps = np.array(target_timestamps)
         offset = time_stamps[0, 0]
 
-        ix = np.searchsorted(time_stamps[:, 1], target_timestamps + offset, side='right')
+        ix = np.searchsorted(
+            time_stamps[:, 1], target_timestamps + offset, side="right"
+        )
         ix = np.minimum(ix, len(time_stamps) - 1)
         frames = vr.get_batch(ix).asnumpy()
 
@@ -432,7 +441,8 @@ class Molmo2VideoBackend(VideoLoader):
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         import av
 
-        # Behaves the same as the old version using `imageio.v3` but avoid extra the dependency
+        # Behaves the same as the old version using `imageio.v3`
+        # but avoid extra the dependency
         with av.open(BytesIO(data)) as container:
             video_stream = container.streams.video[0]
             fps = video_stream.average_rate or video_stream.guessed_rate
@@ -445,7 +455,10 @@ class Molmo2VideoBackend(VideoLoader):
             if frame_sample_mode is None:
                 # Use transformers transformers.video_utils.VideoMetadata format
                 frames = np.stack(
-                    [frame.to_ndarray(format="rgb24", channel_last=True) for frame in frames],
+                    [
+                        frame.to_ndarray(format="rgb24", channel_last=True)
+                        for frame in frames
+                    ],
                     axis=0,
                 )
                 metadata = {
@@ -469,7 +482,7 @@ class Molmo2VideoBackend(VideoLoader):
             if container_end is None or container_end < frames[-1].pts:
                 # Some problem with stream duration, so use the frame PTS directly
                 # and guess the duration of the last frame
-                end = frames[-1].pts * stream.time_base + 1/fps
+                end = frames[-1].pts * stream.time_base + 1 / fps
             else:
                 end = container_end
             duration = float(end - start)
@@ -488,11 +501,18 @@ class Molmo2VideoBackend(VideoLoader):
             offset = float(start)
 
             timestamps = np.array(timestamps)
-            end_time_stamps = np.array([float(frame.pts * stream.time_base) for frame in frames[1:]] + [duration])
-            indices = np.searchsorted(end_time_stamps, timestamps + offset, side='right')
+            end_time_stamps = np.array(
+                [float(frame.pts * stream.time_base) for frame in frames[1:]]
+                + [duration]
+            )
+            indices = np.searchsorted(
+                end_time_stamps, timestamps + offset, side="right"
+            )
             indices = np.minimum(indices, len(end_time_stamps) - 1)
 
-            frames = [frames[i].to_ndarray(format="rgb24", channel_last=True) for i in indices]
+            frames = [
+                frames[i].to_ndarray(format="rgb24", channel_last=True) for i in indices
+            ]
 
             metadata = {
                 "total_num_frames": len(frames),
@@ -527,7 +547,11 @@ class Molmo2VideoBackend(VideoLoader):
 
         if frame_sample_mode is None:
             # Convert to THWC format
-            frames = decoder.get_frames_at(list(range(total_frames))).data.numpy().transpose(0, 2, 3, 1)
+            frames = (
+                decoder.get_frames_at(list(range(total_frames)))
+                .data.numpy()
+                .transpose(0, 2, 3, 1)
+            )
             # Use transformers transformers.video_utils.VideoMetadata format
             metadata = {
                 "total_num_frames": total_frames,
@@ -541,9 +565,10 @@ class Molmo2VideoBackend(VideoLoader):
                 "do_sample_frames": True,
             }
             return frames, metadata
-        
-        # If the first frame starts at > 0, we effectively clip the video starting at that time
-        # since (most) video players would also skip to that time
+
+        # If the first frame starts at > 0, we effectively clip the video
+        # starting at that time, since (most) video players would also
+        # skip to that time
         time_offset = decoder.metadata.begin_stream_seconds_from_content
         # Note this duration does assume we started playing at `time_offset`
         duration = decoder.metadata.duration_seconds
@@ -560,20 +585,22 @@ class Molmo2VideoBackend(VideoLoader):
             candidate_target_fps,
         )
 
-        # Floating point/rounding issues might cause `target_timestamps` to be very slightly
-        # out-of-bounds, to handle this we sanity check then clip them
+        # Floating point/rounding issues might cause `target_timestamps`
+        # to be very slightly out-of-bounds. To handle this,
+        # we sanity check then clip.
         assert all(x >= 0 for x in target_timestamps)
-        assert all(x < duration+1e-6 for x in target_timestamps)
+        assert all(x < duration + 1e-6 for x in target_timestamps)
 
-        # 1e-6 padding since torchcodec can throw out-of-bounds errors even if you ask for the
-        # exact boundary value, we should still get the first/last frame anyway
+        # 1e-6 padding since torchcodec can throw out-of-bounds errors,
+        # even if you ask for the exact boundary value. We should still
+        # get the first/last frame anyway.
         max_timestamp = decoder.metadata.end_stream_seconds_from_content - 1e-6
         min_timestamp = decoder.metadata.begin_stream_seconds_from_content + 1e-6
         # Note we avoid using numpy ops here to reduce floating precision issues
         timestamps = [x + time_offset for x in target_timestamps]
         timestamps = [max(min_timestamp, min(max_timestamp, x)) for x in timestamps]
         frames = decoder.get_frames_played_at(timestamps).numpy().transpose(0, 2, 3, 1)
-        
+
         metadata = {
             "total_num_frames": total_frames,
             "fps": video_fps,
@@ -593,14 +620,13 @@ class Molmo2VideoBackend(VideoLoader):
     def load_bytes(
         cls,
         data: bytes,
-        backend: Literal["decord", "torchcodec"] = "decord",
-        frame_sample_mode: str | None = None,
         num_frames: int = -1,
-        max_fps: int = 2,
-        sampling_fps: int = 2,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-
+        backend = cast(Literal["decord", "torchcodec"], kwargs.pop("backend", "decord"))
+        frame_sample_mode = cast(str | None, kwargs.pop("frame_sample_mode", None))
+        max_fps = cast(int, kwargs.pop("max_fps", 0))
+        sampling_fps = cast(int, kwargs.pop("sampling_fps", 0))
         if backend == "torchcodec":
             out = cls.load_bytes_torchcodec(
                 data,
@@ -620,7 +646,7 @@ class Molmo2VideoBackend(VideoLoader):
                     sampling_fps,
                     **kwargs,
                 )
-            except Exception as e:
+            except Exception:
                 out = cls.load_bytes_pyav(
                     data,
                     frame_sample_mode,
@@ -629,7 +655,7 @@ class Molmo2VideoBackend(VideoLoader):
                     sampling_fps,
                     **kwargs,
                 )
-            
+
         return out
 
 
