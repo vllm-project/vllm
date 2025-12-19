@@ -203,6 +203,9 @@ class TestGetScorePrompt:
         mock_model_no_score_template,
     ):
         """Test when apply_hf_chat_template succeeds."""
+        template = (
+            'TEMPLATE_USED {{ messages[0]["content"] }} {{ messages[1]["content"] }}'
+        )
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -219,6 +222,7 @@ class TestGetScorePrompt:
                 tokenization_kwargs,
                 "test query",
                 "test doc",
+                score_template=template,  # Providing a template
             )
 
         assert full_prompt == "TEMPLATE_USED test query test doc"

@@ -193,16 +193,20 @@ def get_score_prompt(
     model = get_model_cls(model_config)
 
     def default_tokenizer_encode():
-        if model_config.use_pad_token:
-            # cross_encoder models defaults to using pad_token.
-            prompt_inputs = tokenizer(
-                text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
-            )
-            full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+        if supports_score_template(model):
+            full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
+            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
         else:
-            # `llm as reranker` models defaults to not using pad_token.
-            full_prompt = prompt_1 + prompt_2
-            prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+            if model_config.use_pad_token:
+                # cross_encoder models defaults to using pad_token.
+                prompt_inputs = tokenizer(
+                    text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+                )
+                full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+            else:
+                # `llm as reranker` models defaults to not using pad_token.
+                full_prompt = prompt_1 + prompt_2
+                prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
         return full_prompt, prompt_inputs
 
     # Models implementing SupportsScoreTemplate must use their custom
@@ -210,10 +214,7 @@ def get_score_prompt(
     # Attempting to use tokenizer_config.json templates would most likely break
     # these models, as often they just inherit the template from the original LLM.
     # CLI --chat-template overrides are still supported.
-    if supports_score_template(model) and score_template is None:
-        full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
-        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
-    elif score_template is None:
+    if score_template is None:
         full_prompt, prompt_inputs = default_tokenizer_encode()
     else:
         # Try applying a score template from the CLI arg or tokenizer_config.json
