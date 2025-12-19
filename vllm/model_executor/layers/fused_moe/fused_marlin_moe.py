@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 
@@ -542,8 +543,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         assert (
             quant_config.use_mxfp4_w4a16
             or quant_config.use_int4_w4a16
-            or quant_config.use_int8_w8a16
-        ), "Supports only mxfp4_w4a16, int4_w4a16 or int8_w8a16"
+            or quant_config.use_fp8_w8a16
+        ), "Supports only mxfp4_w4a16, int4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -558,9 +559,13 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
             return scalar_types.uint4b8.id
         elif self.quant_config.use_mxfp4_w4a16:
             return scalar_types.float4_e2m1f.id
-        else:
-            # TODO: actuall check if fp8
+        elif (
+            self.quant_config.use_fp8_w8a16
+            and current_platform.fp8_dtype() == torch.float8_e4m3fn
+        ):
             return scalar_types.float8_e4m3fn.id
+        else:
+            raise NotImplementedError("Unsupported quantization type.")
 
     def moe_problem_size(
         self,
