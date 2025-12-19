@@ -8,12 +8,19 @@ The results are automatically published to the public [vLLM Performance Dashboar
 ## Manually Trigger the benchmark
 
 Use [vllm-ci-test-repo images](https://gallery.ecr.aws/q9t5s3a7/vllm-ci-test-repo) with vLLM benchmark suite.
-For CPU environment, please use the image with "-cpu" postfix.
+For x86 CPU environment, please use the image with "-cpu" postfix. For AArch64 CPU environment, please use the image with "-arm64-cpu" postfix.
 
-Here is an example for docker run command for CPU.
+Here is an example for docker run command for CPU. For GPUs skip setting the `ON_CPU` env var.
 
 ```bash
-docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface  -e HF_TOKEN=''  --shm-size=16g --name vllm-cpu-ci  public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:1da94e673c257373280026f75ceb4effac80e892-cpu
+export VLLM_COMMIT=1da94e673c257373280026f75ceb4effac80e892 # use full commit hash from the main branch
+export HF_TOKEN=<valid Hugging Face token>
+if [[ "$(uname -m)" == aarch64 || "$(uname -m)" == arm64 ]]; then
+  IMG_SUFFIX="arm64-cpu"
+else
+  IMG_SUFFIX="cpu"
+fi
+docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface -e HF_TOKEN=$HF_TOKEN -e ON_ARM64_CPU=1 --shm-size=16g --name vllm-cpu-ci public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}-${IMG_SUFFIX}
 ```
 
 Then, run below command inside the docker instance.
@@ -26,7 +33,7 @@ When run, benchmark script generates results under **benchmark/results** folder,
 
 ### Runtime environment variables
 
-- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
+- `ON_CPU`: set the value to '1' on Intel® Xeon® and Arm® Neoverse™ Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
