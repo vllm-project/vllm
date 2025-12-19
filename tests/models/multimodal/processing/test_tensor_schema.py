@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
+import torch
 import torch.nn as nn
 from PIL import Image
 
@@ -30,10 +31,12 @@ from vllm.model_executor.models.interfaces import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.platforms import current_platform
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
 from .test_common import get_model_ids_to_test, get_text_token_prompts
@@ -129,13 +132,13 @@ def create_batched_mm_kwargs(
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()
-    items = [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+
     return group_mm_kwargs_by_modality(
-        items,
-        merge_by_field_config=model_cls.merge_by_field_config,
+        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
     )
 
 
+# TODO(Isotr0py): Don't initalize model during test
 @contextmanager
 def initialize_dummy_model(
     model_cls: type[nn.Module],
@@ -150,16 +153,21 @@ def initialize_dummy_model(
         backend="nccl",
     )
     initialize_model_parallel(tensor_model_parallel_size=1)
+
+    current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
         with set_default_torch_dtype(model_config.dtype):
+            torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
+            torch.set_default_device(current_device)
         yield model
 
     del model
     cleanup_dist_env_and_memory()
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
 def test_model_tensor_schema(model_id: str):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
@@ -176,6 +184,12 @@ def test_model_tensor_schema(model_id: str):
         exist_overrides=model_info.hf_overrides,
     )
 
+    # ROCm: Detect if model uses AWQ quantization and set appropriate dtype
+    if "awq" in model_id.lower() and current_platform.is_rocm():
+        dtype = "float16"
+    else:
+        dtype = model_info.dtype
+
     model_config = ModelConfig(
         model_id,
         tokenizer=model_info.tokenizer or model_id,
@@ -187,13 +201,13 @@ def test_model_tensor_schema(model_id: str):
         enable_prompt_embeds=model_info.require_embed_inputs,
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype,
+        dtype=dtype,
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert supports_multimodal(model_cls)
 
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    factories = model_cls._processor_factory
 
     inputs_parse_methods = []
     for attr_name in dir(model_cls):

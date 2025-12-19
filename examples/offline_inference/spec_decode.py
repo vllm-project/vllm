@@ -133,7 +133,7 @@ def main(args):
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
@@ -158,11 +158,7 @@ def main(args):
             print(f"generated text: {output.outputs[0].text}")
             print("-" * 50)
 
-    try:
-        metrics = llm.get_metrics()
-    except AssertionError:
-        print("Metrics are not supported in the V0 engine.")
-        return
+    metrics = llm.get_metrics()
 
     total_num_output_tokens = sum(
         len(output.outputs[0].token_ids) for output in outputs

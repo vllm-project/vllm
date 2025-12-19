@@ -33,6 +33,7 @@ import os
 from time import sleep
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 
@@ -221,6 +222,11 @@ if __name__ == "__main__":
     dp_per_node = dp_size // node_size
 
     from multiprocessing import Process
+
+    if current_platform.is_rocm():
+        from multiprocessing import set_start_method
+
+        set_start_method("spawn", force=True)
 
     procs = []
     for local_dp_rank, global_dp_rank in enumerate(

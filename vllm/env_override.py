@@ -95,7 +95,7 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
 # fix inductor partition + attention-nvfp4 quant fusion, tested in
-# `tests/compile/test_fusions_e2e.py::test_attn_quant`.
+# `tests/compile/distributed/test_fusions_e2e.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
 
 

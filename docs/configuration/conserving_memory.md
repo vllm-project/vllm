@@ -49,9 +49,6 @@ llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
 
 By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
 
-!!! warning
-    CUDA graph capture takes up more memory in V1 than in V0.
-
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 
 ??? code

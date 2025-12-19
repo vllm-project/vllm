@@ -9,8 +9,8 @@ from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _is_torch_equal_or_newer
@@ -172,8 +172,8 @@ def test_splitting_ops_dynamic():
     config = VllmConfig()
     # Default V1 config leaves cudagraph mode unset; splitting ops are only
     # populated when the engine decides to use piecewise compilation.
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert not config.compilation_config.splitting_ops_contain_attention()
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
     config = VllmConfig(
@@ -191,7 +191,7 @@ def test_splitting_ops_dynamic():
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -206,7 +206,7 @@ def test_splitting_ops_dynamic():
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
+                pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 # work around for accessing all attntion ops
@@ -219,7 +219,7 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -227,10 +227,36 @@ def test_splitting_ops_dynamic():
     # With inductor graph partition, attn_fusion and splitting_ops
     # work together. Default splitting_ops include attention ops.
     assert config.compilation_config.splitting_ops_contain_attention()
-    # enable_attn_fusion is directly supported under
+    # fuse_attn_quant is directly supported under
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_moe_splitting_ops_deepep_ht_inductor_partition():
+    # Inductor partition case: user-provided splitting_ops should be
+    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=[
+                "vllm::unified_attention",
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ],
+        ),
+    )
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops == [
+        "vllm::unified_attention",
+        "vllm::moe_forward",
+        "vllm::moe_forward_shared",
+    ]
 
 
 def test_should_split():
@@ -301,7 +327,7 @@ def test_should_split():
         "cudagraph_capture_sizes",
         "max_cudagraph_capture_size",
         "tp_size",
-        "enable_sequence_parallelism",
+        "enable_sp",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
@@ -339,7 +365,7 @@ def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
     max_cudagraph_capture_size,
     tp_size,
-    enable_sequence_parallelism,
+    enable_sp,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
@@ -355,11 +381,12 @@ def test_cudagraph_sizes_post_init(
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
-            pass_config={
-                "enable_sequence_parallelism": enable_sequence_parallelism,
-                "enable_fusion": True,
-                "enable_noop": True,
-            },
+            pass_config=PassConfig(
+                enable_sp=enable_sp,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+            ),
             cudagraph_mode=cudagraph_mode,
         )
         engine_args = EngineArgs(

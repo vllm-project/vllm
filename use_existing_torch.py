@@ -3,9 +3,7 @@
 
 import glob
 
-requires_files = glob.glob("requirements/*.txt")
-requires_files += ["pyproject.toml"]
-for file in requires_files:
+for file in (*glob.glob("requirements/*.txt"), "pyproject.toml"):
     print(f">>> cleaning {file}")
     with open(file) as f:
         lines = f.readlines()
@@ -17,5 +15,4 @@ for file in requires_files:
                     f.write(line)
                 else:
                     print(line.strip())
-    print(f"<<< done cleaning {file}")
-    print()
+    print(f"<<< done cleaning {file}\n")
