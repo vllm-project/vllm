@@ -536,7 +536,7 @@ __global__ void group_idx_and_topk_idx_kernel(
     T const* bias, int64_t const num_tokens, int64_t const n_group,
     int64_t const topk_group, int64_t const topk, int64_t const num_experts,
     int64_t const num_experts_per_group, bool renormalize,
-    double routed_scaling_factor) {
+    float routed_scaling_factor) {
   int32_t warp_id = threadIdx.x / WARP_SIZE;
   int32_t lane_id = threadIdx.x % WARP_SIZE;
   int32_t case_id =

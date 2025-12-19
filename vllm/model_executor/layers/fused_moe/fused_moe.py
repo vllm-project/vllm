@@ -1376,7 +1376,7 @@ def fused_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    packed = False
+    packed: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
