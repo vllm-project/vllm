@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm._ops_dispatch import get_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -230,7 +231,7 @@ def per_token_group_quant_int8(
     )
     # prefer CUDA kernel if available
     if current_platform.is_cuda():
-        torch.ops._C.per_token_group_quant_int8(
+        get_ops().per_token_group_quant_int8(
             x, x_q, x_s, group_size, eps, float(int8_min), float(int8_max)
         )
         return x_q, x_s

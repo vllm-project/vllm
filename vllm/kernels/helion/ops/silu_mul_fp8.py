@@ -6,6 +6,7 @@ from typing import Any
 import regex as re
 import torch
 
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
 
@@ -131,5 +132,5 @@ def pick_silu_mul_fp8_config(
 def silu_mul_fp8_baseline(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
     out = torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
-    torch.ops._C.silu_and_mul_quant(out, input, scale)
+    get_ops().silu_and_mul_quant(out, input, scale)
     return out

@@ -11,6 +11,7 @@ from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,

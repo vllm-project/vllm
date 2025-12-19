@@ -42,6 +42,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
 
+from vllm._ops_dispatch import has_op
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
@@ -388,9 +389,7 @@ class GroupCoordinator:
             current_platform.is_cuda_alike() or current_platform.is_tpu()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"
-        )
+        self.use_cpu_custom_send_recv = current_platform.is_cpu() and has_op("init_shm_manager")
 
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True

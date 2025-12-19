@@ -14,6 +14,7 @@ from compressed_tensors.quantization import (
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._ops_dispatch import get_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -2302,7 +2303,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             renormalize=layer.renormalize,
         )
 
-        return torch.ops._C.dynamic_4bit_int_moe(
+        return get_ops().dynamic_4bit_int_moe(
             x,
             topk_ids.to(torch.long),
             topk_weights,

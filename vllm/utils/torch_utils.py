@@ -16,6 +16,7 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
+from vllm._ops_dispatch import get_ops
 import vllm.envs as envs
 from vllm.logger import init_logger
 
@@ -641,7 +642,7 @@ def weak_ref_tensor(tensor: Any) -> Any:
     This ignores 0-size tensors as those don't allocate any memory.
     """
     if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
-        return torch.ops._C.weak_ref_tensor(tensor)
+        return get_ops().weak_ref_tensor(tensor)
     else:
         return tensor
 
@@ -682,9 +683,9 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
 
     if current_platform.is_xpu():
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
-        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
+        return get_ops().get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda() or current_platform.is_rocm():
-        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+        return get_ops().get_cuda_view_from_cpu_tensor(cpu_tensor)
     else:
         raise ValueError(
             f"`get_accelerator_view_from_cpu_tensor` is currently "

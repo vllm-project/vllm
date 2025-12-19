@@ -7,6 +7,7 @@ from enum import Enum
 import torch
 import torch.nn.functional as F
 
+from vllm._ops_dispatch import get_ops
 
 class MoEActivation(Enum):
     """Activation functions for MoE layers."""
@@ -112,11 +113,11 @@ def apply_moe_activation(
 
     # Activations with gated multiplication (gate × activation(up))
     if activation == MoEActivation.SILU:
-        torch.ops._C.silu_and_mul(output, input)
+        get_ops().silu_and_mul(output, input)
     elif activation == MoEActivation.GELU:
-        torch.ops._C.gelu_and_mul(output, input)
+        get_ops().gelu_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUOAI:
-        torch.ops._C.swigluoai_and_mul(output, input)
+        get_ops().swigluoai_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 

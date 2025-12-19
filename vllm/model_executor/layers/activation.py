@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm._ops_dispatch import get_ops
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -94,7 +95,7 @@ class FatreluAndMul(CustomOp):
         super().__init__()
         self.threshold = threshold
         if current_platform.is_cuda_alike():
-            self.op = torch.ops._C.fatrelu_and_mul
+            self.op = get_ops().fatrelu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -130,7 +131,7 @@ class SiluAndMul(CustomOp):
     def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
-            self.op = torch.ops._C.silu_and_mul
+            self.op = get_ops().silu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -168,7 +169,7 @@ class MulAndSilu(CustomOp):
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
-            self.op = torch.ops._C.mul_and_silu
+            self.op = get_ops().mul_and_silu
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -272,9 +273,9 @@ class GeluAndMul(CustomOp):
             or current_platform.is_xpu()
         ):
             if approximate == "none":
-                self.op = torch.ops._C.gelu_and_mul
+                self.op = get_ops().gelu_and_mul
             elif approximate == "tanh":
-                self.op = torch.ops._C.gelu_tanh_and_mul
+                self.op = get_ops().gelu_tanh_and_mul
         if current_platform.is_rocm() and approximate == "tanh":
             logger.warning_once(
                 "[ROCm] PyTorch's native GELU with tanh approximation is unstable "
@@ -330,7 +331,7 @@ class SwigluOAIAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        torch.ops._C.swigluoai_and_mul(out, x, self.alpha, self.limit)
+        get_ops().swigluoai_and_mul(out, x, self.alpha, self.limit)
         return out
 
     def extra_repr(self) -> str:
@@ -387,7 +388,7 @@ class NewGELU(CustomOp):
             or current_platform.is_cpu()
             or current_platform.is_xpu()
         ):
-            self.op = torch.ops._C.gelu_new
+            self.op = get_ops()._C.gelu_new
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -415,7 +416,7 @@ class FastGELU(CustomOp):
             or current_platform.is_cpu()
             or current_platform.is_xpu()
         ):
-            self.op = torch.ops._C.gelu_fast
+            self.op = get_ops()._C.gelu_fast
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -443,7 +444,7 @@ class QuickGELU(CustomOp):
             or current_platform.is_cpu()
             or current_platform.is_xpu()
         ):
-            self.op = torch.ops._C.gelu_quick
+            self.op = get_ops()._C.gelu_quick
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""

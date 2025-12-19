@@ -1727,7 +1727,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
         dtype=torch.int32,
         device=input_tensor.device,
     )
-    torch.ops._C.silu_and_mul_scaled_fp4_experts_quant(
+    get_ops().silu_and_mul_scaled_fp4_experts_quant(
         output,
         output_scales,
         input_tensor,
@@ -2813,7 +2813,7 @@ def dsv3_fused_a_gemm(
     Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
     Requires SM 9.0+ (Hopper).
     """
-    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+    get_ops().dsv3_fused_a_gemm(output, mat_a, mat_b)
 
 
 if has_op("weight_packed_linear"):

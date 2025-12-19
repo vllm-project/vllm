@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
+from vllm._ops_dispatch import get_ops
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
@@ -26,25 +27,25 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
-RMS_OP = torch.ops._C.rms_norm.default
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-ROTARY_OP = torch.ops._C.rotary_embedding.default
+RMS_OP = get_ops().rms_norm.default
+RMS_ADD_OP = get_ops().fused_add_rms_norm.default
+ROTARY_OP = get_ops().rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8StaticTensorSym: get_ops().static_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTensorSym: get_ops().dynamic_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: get_ops().dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 
-if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+if current_platform.is_cuda() and has_op("scaled_fp4_quant"):
+    QUANT_OPS[kNvfp4Dynamic] = get_ops().scaled_fp4_quant.default  # noqa: E501
 
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128Sym] = get_ops().per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = get_ops().per_token_group_fp8_quant.default  # noqa: E501
 
-SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+SILU_MUL_OP = get_ops().silu_and_mul.default
 
 
 class MatcherCustomOp(ABC):

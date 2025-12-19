@@ -9,6 +9,7 @@ from typing import final
 
 import torch
 
+from vllm._ops_dispatch import get_ops
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger

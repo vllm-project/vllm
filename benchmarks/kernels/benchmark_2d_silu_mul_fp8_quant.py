@@ -10,6 +10,7 @@ import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 
+from vllm._ops_dispatch import get_ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _per_token_group_quant_fp8_colmajor,
     silu_mul_per_token_group_quant_fp8_colmajor,
@@ -152,7 +153,7 @@ def reference(
     quant_out: torch.Tensor,
     use_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    torch.ops._C.silu_and_mul(act_out, input)
+    get_ops().silu_and_mul(act_out, input)
     return reference_quant(act_out, quant_out, use_ue8m0)
 
 

@@ -4,8 +4,8 @@
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
@@ -623,12 +624,12 @@ def run_cutlass_moe_fp4(
         # Fused SiLU+Mul+NVFP4 quantization
         # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
         # c3 reuses workspace13 after c1 is consumed.
-        int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
+        int_fp4, int_blockscale = get_ops().silu_and_mul_scaled_fp4_experts_quant(
             c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
     else:
         apply_moe_activation(activation, c2, c1)
-        int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
+        int_fp4, int_blockscale = get_ops().scaled_fp4_experts_quant(
             c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
 

@@ -5,10 +5,11 @@ from collections.abc import Callable
 from typing import ParamSpec
 
 import torch
-import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
+import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
+from vllm._ops_dispatch import get_ops
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
@@ -22,7 +23,7 @@ from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
-FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+FUSED_QK_ROPE_OP = get_ops().fused_qk_norm_rope.default
 
 P = ParamSpec("P")
 

@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
+from vllm._ops_dispatch import get_ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,

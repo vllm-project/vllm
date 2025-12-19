@@ -10,6 +10,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._ops_dispatch import get_ops, has_op
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -46,8 +47,8 @@ if find_spec("flashinfer"):
     except ImportError:
         pass
 
-if hasattr(torch.ops._C, "scaled_fp4_quant"):
-    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+if has_op("scaled_fp4_quant"):
+    STATIC_FP4_QUANT_OP = get_ops().scaled_fp4_quant.default
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce

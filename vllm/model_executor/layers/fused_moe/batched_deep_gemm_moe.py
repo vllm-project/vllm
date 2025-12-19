@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm._ops_dispatch import get_ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -211,7 +212,7 @@ def persistent_masked_m_silu_mul_quant(
     ).to_int()
 
     if cuda_arch >= 80:
-        torch.ops._C.persistent_masked_m_silu_mul_quant(
+        get_ops().persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:

@@ -3,11 +3,12 @@
 from typing import Any, NamedTuple
 
 import torch
-import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
+import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
+from vllm._ops_dispatch import get_ops
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
@@ -54,19 +55,18 @@ def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
     return torch.empty(*args, **kwargs, dtype=torch.int64, device="cuda")
 
 
-RMS_OP = torch.ops._C.rms_norm.default
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+RMS_OP = get_ops().rms_norm.default
+RMS_ADD_OP = get_ops().fused_add_rms_norm.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8StaticTensorSym: get_ops().static_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTensorSym: get_ops().dynamic_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: get_ops().dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
-if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
-if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+if current_platform.is_cuda() and has_op("scaled_fp4_quant"):
+    QUANT_OPS[kNvfp4Dynamic] = get_Ops().scaled_fp4_quant.default
+    QUANT_OPS[kFp8Dynamic128Sym] = get_ops().per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = get_ops().per_token_group_fp8_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -89,28 +89,28 @@ class FusedRMSQuantKey(NamedTuple):
 FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8StaticTensorSym, False
-    ): torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8StaticTensorSym, True
-    ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
+    ): get_ops().fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): get_ops().rms_norm_per_block_quant.default,  # noqa: E501
 }
 
 

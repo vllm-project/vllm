@@ -24,6 +24,7 @@ import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 
 from ..fx_utils import is_func
@@ -38,7 +39,7 @@ class ScatterSplitReplacementPass(VllmInductorPass):
 
     Here's an example graph with q_size = 512, kv_size = 64:
     split_with_sizes_1 = torch.ops.aten.split_with_sizes.default(qkv, (512, 64, 64), -1)
-    at = auto_functionalized(torch.ops._C.rotary_embedding.default(positions, q, k))
+    at = auto_functionalized(get_ops().rotary_embedding.default(positions, q, k))
     q = operator.getitem(at, 1)
     k = operator.getitem(at, 2)
     torch.ops.aten.slice_scatter.default(qkv, q, [0, 512], -1)
@@ -50,7 +51,7 @@ class ScatterSplitReplacementPass(VllmInductorPass):
 
     After this pass, this sequence of nodes is replaced with:
     split_with_sizes_1 = torch.ops.aten.split_with_sizes.default(qkv, (512, 64, 64), -1)
-    at = auto_functionalized(torch.ops._C.rotary_embedding.default(positions, q, k))
+    at = auto_functionalized(get_ops().rotary_embedding.default(positions, q, k))
     q = operator.getitem(at, 1)
     k = operator.getitem(at, 2)
     v = operator.getitem(split_with_sizes_1, 2)
@@ -60,7 +61,7 @@ class ScatterSplitReplacementPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph) -> None:
         count = 0
 
-        target_ops = [torch.ops._C.rotary_embedding.default]
+        target_ops = [get_ops().rotary_embedding.default]
         if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
             target_ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
 

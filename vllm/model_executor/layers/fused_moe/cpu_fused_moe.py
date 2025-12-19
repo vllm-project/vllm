@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm._ops_dispatch import get_ops, has_op
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
@@ -187,7 +188,7 @@ class SGLFusedMOE:
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        torch.ops._C.fused_experts_cpu(
+        get_ops().fused_experts_cpu(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -268,7 +269,7 @@ class CPUFusedMOE:
         self,
         layer: torch.nn.Module,
     ) -> tuple[bool, str]:
-        if not hasattr(torch.ops._C, "prepack_moe_weight"):
+        if not has_op("prepack_moe_weight"):
             return False, "none"
 
         dtype = layer.w13_weight.dtype

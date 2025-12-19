@@ -5,6 +5,7 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._ops_dispatch import get_ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -141,7 +142,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         # WEIGHT
         weight = getattr(layer, w_q_name)
-        packed_weight = torch.ops._C.convert_weight_packed(weight)
+        packed_weight = get_ops().convert_weight_packed(weight)
         replace_parameter(
             layer, w_q_name, torch.nn.Parameter(packed_weight, requires_grad=False)
         )
@@ -207,7 +208,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_layer_params(layer)
-        return torch.ops._C.int8_scaled_mm_with_quant(
+        return get_ops().int8_scaled_mm_with_quant(
             x,
             w_q,
             w_s,

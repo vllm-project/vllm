@@ -7,6 +7,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
+from vllm._ops_dispatch import get_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
@@ -253,7 +254,7 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             cutlass_mm_output: torch.Tensor,
         ) -> torch.Tensor:
             cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
-                torch.ops._C.cutlass_scaled_mm.default,
+                get_ops().cutlass_scaled_mm.default,
                 out=cutlass_mm_output,
                 a=input,
                 b=weight,
@@ -335,7 +336,7 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             )
 
             cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
-                torch.ops._C.cutlass_scaled_mm.default,
+                get_ops().cutlass_scaled_mm.default,
                 out=output,
                 a=all_gather,
                 b=weight,
