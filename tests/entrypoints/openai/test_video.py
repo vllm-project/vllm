@@ -302,7 +302,7 @@ async def test_chat_streaming_video(
     "video_urls", [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))]
 )
 @pytest.mark.flaky(
-    reruns=2 if current_platform.is_rocm() else 0,
+    reruns=2,
     reruns_delay=5,
     condition=current_platform.is_rocm(),
 )
