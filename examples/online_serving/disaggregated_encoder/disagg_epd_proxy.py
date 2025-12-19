@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import logging
 import os
 import random
@@ -73,16 +74,11 @@ def extract_mm_items(request_data: dict) -> list[dict]:
     return items
 
 
-async def fanout_encoder_primer(
+async def _encode_fanout(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
-) -> None:
-    """
-    1. Build one request *per MM item* with all text removed.
-    2. Send them concurrently to the encode cluster.
-    3. Raise if any of them fails.
-    """
+):
     logger.info("[%s] Processing multimodal items...", req_id)
 
     mm_items = extract_mm_items(orig_request)
@@ -155,6 +151,69 @@ async def fanout_encoder_primer(
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
     )
+
+
+async def _encode_single_request(
+    orig_request: dict,
+    e_url: str,
+    req_id: str,
+) -> None:
+    """
+    1. Build one request *per MM item* with all text removed.
+    2. Send them concurrently to the encode cluster.
+    3. Raise if any of them fails.
+    """
+    logger.info("[%s] Processing multimodal items...", req_id)
+
+    request_data = copy.deepcopy(orig_request)
+    headers = {"x-request-id": req_id}
+    request_data["max_tokens"] = 1
+    request_data["stream"] = False
+    request_data.pop("stream_options", None)
+    if "max_completion_tokens" in request_data:
+        request_data["max_completion_tokens"] = 1
+
+    try:
+        encode_response = await encode_session.post(
+            f"{e_url}/v1/chat/completions", json=request_data, headers=headers
+        )
+        encode_response.raise_for_status()
+
+        if encode_response.status != 200:
+            encode_text = await encode_response.text()
+            raise HTTPException(
+                status_code=encode_response.status,
+                detail={"error": "Encoder request failed", "message": encode_text},
+            )
+        logger.debug("Encoder processing completed successfully for req_id: %s", req_id)
+
+        return encode_response
+
+    except Exception as e:
+        logger.error("Encoder processing failed: %s", str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Encoder processing error", "message": str(e)},
+        ) from e
+
+    logger.info("[%s] Encoder request completed successfully", req_id)
+
+
+async def fanout_encoder_primer(
+    orig_request: dict,
+    req_id: str,
+):
+    mode = app.state.encoder_dispatch_mode
+
+    if mode == EncoderDispatchMode.SINGLE:
+        e_url = random.choice(app.state.e_urls)
+        await _encode_single_request(orig_request, e_url, req_id)
+
+    elif mode == EncoderDispatchMode.FANOUT:
+        await _encode_fanout(orig_request, app.state.e_urls, req_id)
+
+    else:
+        raise RuntimeError(f"Unknown encoder dispatch mode: {mode}")
 
 
 async def maybe_prefill(
@@ -237,6 +296,18 @@ async def process_prefill_stage(
         ) from e
 
 
+def has_mm_input(request_data: dict):
+    if "messages" not in request_data:
+        return False
+    for message in request_data["messages"]:
+        if not isinstance(message.get("content"), list):
+            continue
+        for content_item in message["content"]:
+            if content_item.get("type") in ["image_url", "audio_url", "input_audio"]:
+                return True
+    return False
+
+
 ###############################################################################
 # Middleware for request/response logging
 ###############################################################################
@@ -291,7 +362,7 @@ async def log_requests(request: Request, call_next):
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
     timeout = aiohttp.ClientTimeout(total=100_000)
-    connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    connector = aiohttp.TCPConnector(limit=0, force_close=False, keepalive_timeout=0)
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:
         # only setup if prefill instance(s) exist
@@ -316,25 +387,35 @@ async def on_shutdown() -> None:
 
 
 async def forward_non_stream(
-    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
+    req_data: dict, req_id: str, p_url: str, d_url: str
 ) -> dict:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        async def run_encoder():
+            await fanout_encoder_primer(req_data, req_id)
+
+        if has_mm_input(req_data):
+            await non_stream_retry_wrap(run_encoder)
 
         # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
+        async def run_prefill():
+            return await maybe_prefill(req_data, p_url, req_id)
 
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
+        req_data = await non_stream_retry_wrap(run_prefill)
 
-        # Non-streaming response
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions", json=req_data, headers=headers
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        async def run_decode_non_stream():
+            # Step 3: Process through Decode instance
+            logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
+
+            # Non-streaming response
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions", json=req_data, headers=headers
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+        return await non_stream_retry_wrap(run_decode_non_stream)
 
     except HTTPException:
         raise
@@ -343,32 +424,89 @@ async def forward_non_stream(
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
+async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001):
+    last_exc = None
+    first_chunk_sent = False
+    for attempt in range(max_retries):
+        try:
+            async for chunk in forward_func():
+                first_chunk_sent = True
+                yield chunk
+            return
+        except Exception as e:
+            if first_chunk_sent:
+                raise
+            if isinstance(e, HTTPException) and e.status_code < 500:
+                raise
+            last_exc = e
+            logger.warning(
+                "attempt %s / %s failed retrying... ",
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(delay * (attempt + 1))
+
+    raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
+
+
+async def non_stream_retry_wrap(
+    forward_func, max_retries: int = 3, delay: float = 0.001
+):
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            result = await forward_func()
+            return result
+        except Exception as e:
+            if isinstance(e, HTTPException) and e.status_code < 500:
+                raise
+            last_exc = e
+            logger.warning(
+                "attempt %s / %s failed retrying... ",
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(delay * (attempt + 1))
+    raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
+
+
 async def forward_stream(
-    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
+    req_data: dict, req_id: str, p_url: str, d_url: str
 ) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        async def run_encoder():
+            await fanout_encoder_primer(req_data, req_id)
+
+        if has_mm_input(req_data):
+            await non_stream_retry_wrap(run_encoder)
 
         # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
+        async def run_prefill():
+            return await maybe_prefill(req_data, p_url, req_id)
 
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
+        req_data = await non_stream_retry_wrap(run_prefill)
 
-        # Streaming response
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions",
-            json=req_data,
-            headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(1024):
-                if chunk:
-                    yield chunk.decode("utf-8", errors="ignore")
+        async def run_decode_stream():
+            # Step 3: Process through Decode instance
+            logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
 
-        logger.info("[%s] Streaming completed", req_id)
+            # Streaming response
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions",
+                json=req_data,
+                headers=headers,
+            ) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.content.iter_chunked(1024):
+                    if chunk:
+                        yield chunk.decode("utf-8", errors="ignore")
+
+            logger.info("[%s] Streaming completed", req_id)
+
+        async for chunk in stream_retry_wrap(run_decode_stream):
+            yield chunk
 
     except HTTPException:
         logger.exception("[%s] HTTPException in forward_stream", req_id)
@@ -391,7 +529,6 @@ async def chat_completions(request: Request):
         req_data = await request.json()
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
-        e_urls = app.state.e_urls  # we want the full list for fan-out
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
         d_url = random.choice(app.state.d_urls)
 
@@ -399,10 +536,10 @@ async def chat_completions(request: Request):
 
         if is_streaming:
             return StreamingResponse(
-                forward_stream(req_data, req_id, e_urls, p_url, d_url),
+                forward_stream(req_data, req_id, p_url, d_url),
                 media_type="text/event-stream",
             )
-        result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
+        result = await forward_non_stream(req_data, req_id, p_url, d_url)
         return JSONResponse(content=result)
 
     except HTTPException:
@@ -572,6 +709,13 @@ if __name__ == "__main__":
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
 
+    parser.add_argument(
+        "--encoder-dispatch-mode",
+        choices=["single", "fanout"],
+        default="single",
+        help="Encoder dispatch mode: single (one request) or fanout (per-MM-item)",
+    )
+
     args = parser.parse_args()
     app.state.e_urls = [
         u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
@@ -590,6 +734,10 @@ if __name__ == "__main__":
             u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
         ]
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
+
+    app.state.encoder_dispatch_mode = EncoderDispatchMode(
+        args.encoder_dispatch_mode
+    )
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)
     logger.info("Encode servers: %s", app.state.e_urls)
