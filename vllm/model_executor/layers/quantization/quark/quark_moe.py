@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -386,7 +385,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             router_logits=router_logits,
         )
 
-        if self.rocm_aiter_moe_enabled:  #  or rocm_aiter_ops._FMOE_ENABLED
+        if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 rocm_aiter_fused_experts,
             )
@@ -832,7 +831,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 and self.mxfp4_backend == Mxfp4Backend.TRITON
             ):
                 # TODO (xuebwang-amd)
-                raise NotImplementedError()
+                raise NotImplementedError(
+                    "Triton kernel based fused MoE for GPT_OSS model in Quark(MoE) format is not integrated or provided yet."
+                )
 
             else:
                 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
@@ -1087,31 +1088,14 @@ class Quark_OCPMX_W4A16_MoEMethod(QuarkMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
-            )
+        topk_weights, topk_ids, _ = layer.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+        )
 
         if not self.emulate:
             # TODO (xuebwang-amd)
@@ -1121,21 +1105,6 @@ class Quark_OCPMX_W4A16_MoEMethod(QuarkMoEMethod):
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype,
-            )
-
             return fused_experts(
                 x,
                 layer.w13_weight,
@@ -1143,10 +1112,10 @@ class Quark_OCPMX_W4A16_MoEMethod(QuarkMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -1437,31 +1406,14 @@ class Quark_OCPMX_FP8_MoEMethod(QuarkMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
-            )
+        topk_weights, topk_ids, _ = layer.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+        )
 
         if not self.emulate:
             # TODO (xuebwang-amd)
@@ -1470,21 +1422,6 @@ class Quark_OCPMX_FP8_MoEMethod(QuarkMoEMethod):
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
-
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype,
-            )
 
             return fused_experts(
                 x,
