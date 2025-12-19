@@ -317,7 +317,7 @@ class RocmAiterRMSNormFusionPass(VllmPatternMatcherPass):
 
     def uuid(self) -> Any:
         fusion_patterns = [
-            AiterFusedAddRMSNormDynamicQuantPattern,
+            AiterRMSNormDynamicQuantPattern,
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
