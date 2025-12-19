@@ -48,11 +48,11 @@ class ChatTemplate:
 # Cogagent
 def load_model(name, **kwargs):
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    name = "/home/burto/base/programs/transcoder/SuperTranslator/checkpoints/cogagent_ckpt4500merged"
+    name = "zai-org/cogagent-vqa-hf"
     llm = LLM(
         model=name,
-        #tokenizer="lmsys/vicuna-7b-v1.5",
-        #tokenizer_mode="slow",
+        tokenizer="lmsys/vicuna-7b-v1.5",
+        tokenizer_mode="slow",
         enforce_eager=True,
         dtype="bfloat16",
         quantization="bitsandbytes",
@@ -84,7 +84,7 @@ def get_multi_modal_input(
     image_repeat_prob
 ) -> list[dict[Literal['prompt', 'multi_modal_data'], str | dict]]:
     
-    # Input image and question
+    # Input image and question (Fixed input for testing)
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
     prompts = [
@@ -139,8 +139,6 @@ def main(args):
     model_name = args.model_type
     llm = load_model(model_name)
     
-    # We set temperature to 0.2 so that outputs can be different
-    # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=64,
@@ -212,4 +210,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
+
 
