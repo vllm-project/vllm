@@ -57,8 +57,6 @@ from vllm.entrypoints.openai.serving_engine import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt
@@ -73,6 +71,8 @@ from vllm.tokenizers.mistral import (
     truncate_tool_call_ids,
     validate_request_params,
 )
+from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
@@ -161,6 +161,55 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+    async def warmup(self) -> None:
+        """
+        Warm up the chat template processing to avoid first-request latency.
+
+        This method triggers Jinja2 template compilation and content format
+        detection that would otherwise happen on the first real request,
+        causing increased latency on the first request.
+        """
+        logger.info("Warming up chat template processing...")
+        start_time = time.perf_counter()
+
+        try:
+            # Get the tokenizer from the engine
+            tokenizer = await self.engine_client.get_tokenizer()
+
+            # Create a minimal dummy request
+            dummy_request = ChatCompletionRequest(
+                messages=[{"role": "user", "content": "warmup"}],
+                model=None,
+                max_completion_tokens=1,
+            )
+
+            # Call _preprocess_chat to trigger template compilation
+            # This forces:
+            # 1. Chat template content format detection
+            # 2. Jinja2 template compilation
+            # 3. Tokenizer initialization for chat
+            await self._preprocess_chat(
+                dummy_request,
+                tokenizer,
+                dummy_request.messages,
+                chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                add_generation_prompt=True,
+                continue_final_message=False,
+                tool_dicts=None,
+                documents=None,
+                chat_template_kwargs=None,
+                tool_parser=None,
+                add_special_tokens=False,
+            )
+
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info("Chat template warmup completed in %.1fms", elapsed)
+
+        except Exception:
+            # Log but don't fail server startup if warmup fails
+            logger.exception("Chat template warmup failed")
 
     async def create_chat_completion(
         self,
@@ -332,6 +381,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(
@@ -964,21 +1014,9 @@ class OpenAIServingChat(OpenAIServing):
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
                         if not reasoning_end_arr[i]:
-                            delta_message = (
-                                reasoning_parser.extract_reasoning_streaming(
-                                    previous_text,
-                                    current_text,
-                                    delta_text,
-                                    previous_token_ids,
-                                    current_token_ids,
-                                    output_token_ids,
-                                )
-                            )
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
-                            # Remove the text and token ids related
-                            # to 'reasoning'.
                             if (
                                 res.prompt_token_ids
                                 and reasoning_parser.is_reasoning_end(
@@ -987,30 +1025,38 @@ class OpenAIServingChat(OpenAIServing):
                             ):
                                 reasoning_end_arr[i] = True
                                 current_token_ids = output_token_ids
-                                if delta_message and delta_message.content:
-                                    current_text = delta_message.content
-                                    delta_message.content = None
-                                else:
-                                    current_text = ""
-                            # When encountering think end id in delta_token_ids,
-                            # set reasoning status to end.
-                            # Remove the text and token ids related
-                            # to 'reasoning'.
-                            if reasoning_parser.is_reasoning_end(output_token_ids):
-                                reasoning_end_arr[i] = True
-                                current_token_ids = (
-                                    reasoning_parser.extract_content_ids(
-                                        output_token_ids
+                                # Don't update current_text, keep it as is from delta
+                            else:
+                                delta_message = (
+                                    reasoning_parser.extract_reasoning_streaming(
+                                        previous_text,
+                                        current_text,
+                                        delta_text,
+                                        previous_token_ids,
+                                        current_token_ids,
+                                        output_token_ids,
                                     )
                                 )
-                                if delta_message and delta_message.content:
-                                    current_text = delta_message.content
-                                    delta_message.content = None
-                                else:
-                                    current_text = ""
+
+                                # When encountering think end id in delta_token_ids,
+                                # set reasoning status to end.
+                                # Remove the text and token ids related
+                                # to 'reasoning'.
+                                if reasoning_parser.is_reasoning_end(output_token_ids):
+                                    reasoning_end_arr[i] = True
+                                    current_token_ids = (
+                                        reasoning_parser.extract_content_ids(
+                                            output_token_ids
+                                        )
+                                    )
+                                    if delta_message and delta_message.content:
+                                        current_text = delta_message.content
+                                        delta_message.content = None
+                                    else:
+                                        current_text = ""
 
                         # handle tool calls only after reasoning is done,
-                        else:
+                        if reasoning_end_arr[i]:
                             delta_token_ids = output_token_ids
                             # First time to tool call,
                             # add the remaining text and token ids
