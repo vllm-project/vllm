@@ -319,7 +319,10 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
-    - pytest -v -s v1/engine
+    # Run this test standalone for now;
+    # need to untangle use (implicit) use of spawn/fork across the tests.
+    - pytest -v -s v1/engine/test_preprocess_error_handling.py
+    - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
