@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-import functools
 from typing import cast
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (
@@ -16,13 +14,10 @@ from vllm.attention.backends.abstract import (
     MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.attention.selector import get_attn_backend
-from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
-from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -36,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -410,132 +404,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
             )
-
-
-class MultiHeadAttention(nn.Module):
-    """Multi-headed attention without any cache, used for ViT."""
-
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int | None = None,
-        # This has no effect, it is only here to make it easier to swap
-        # between Attention and MultiHeadAttention
-        prefix: str = "",
-        multimodal_config: MultiModalConfig | None = None,
-    ) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = scale
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.layer_name = prefix
-
-        assert self.num_heads % self.num_kv_heads == 0, (
-            f"num_heads ({self.num_heads}) is not "
-            f"divisible by num_kv_heads ({self.num_kv_heads})"
-        )
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        # During model initialization, the default dtype is set as the model
-        # weight and activation dtype.
-        dtype = torch.get_default_dtype()
-
-        # Determine the attention backend
-        attn_backend_override = None
-        if multimodal_config is not None:
-            attn_backend_override = multimodal_config.mm_encoder_attn_backend
-
-        self.attn_backend = get_vit_attn_backend(
-            head_size=head_size,
-            dtype=dtype,
-            attn_backend_override=attn_backend_override,
-        )
-
-        self._flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
-            self.attn_backend,
-        )
-
-        self.is_flash_attn_backend = self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }
-
-        self.fa_version = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            and current_platform.is_cuda()
-        ):
-            self.fa_version = get_flash_attn_version()
-            assert self._flash_attn_varlen_func is not None
-            self._flash_attn_varlen_func = functools.partial(
-                self._flash_attn_varlen_func, fa_version=self.fa_version
-            )
-
-        logger.info_once(
-            f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
-        )
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> torch.Tensor:
-        """Input shape:
-        (batch_size x seq_len x hidden_size) or
-        (batch_size x seq_len x num_heads x head_size)
-        """
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
-
-        query = query.view(bsz, q_len, self.num_heads, self.head_size)
-        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
-        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
-
-        if (num_repeat := self.num_queries_per_kv) > 1:
-            # Handle MQA and GQA
-            key = torch.repeat_interleave(key, num_repeat, dim=2)
-            value = torch.repeat_interleave(value, num_repeat, dim=2)
-
-        if self.is_flash_attn_backend:
-            assert self._flash_attn_varlen_func is not None
-            cu_seqlens_q = torch.arange(
-                0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
-            )
-            cu_seqlens_k = torch.arange(
-                0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
-            )
-
-            out = self._flash_attn_varlen_func(
-                query.flatten(0, 1),
-                key.flatten(0, 1),
-                value.flatten(0, 1),
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=q_len,
-                max_seqlen_k=kv_len,
-                softmax_scale=self.scale,
-            )
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
-            out = out.transpose(1, 2)
-        elif self.attn_backend == AttentionBackendEnum.PALLAS:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            from torch_xla.experimental.custom_kernel import flash_attention
-
-            out = flash_attention(query, key, value, sm_scale=self.scale)
-            out = out.transpose(1, 2)
-        else:
-            # ViT attention hasn't supported this backend yet
-            raise NotImplementedError(
-                f"ViT attention hasn't supported {self.attn_backend} backend yet."
-            )
-
-        return out.reshape(bsz, q_len, -1)
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):

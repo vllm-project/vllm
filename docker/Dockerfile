@@ -621,7 +621,7 @@ ENV UV_HTTP_TIMEOUT=500
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt; \
+        uv pip install --system -r /tmp/kv_connectors.txt || true; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
