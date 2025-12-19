@@ -1,0 +1,40 @@
+{%- for message in messages -%}
+
+{%- if message['role'] != 'chat' and loop.index != 1 -%}
+{{-'\n'-}}
+{%- endif -%}
+
+{% if message['role'] == 'chat_old'  or message['role'] == 'vqa' %}
+{{-'Question: '-}}
+{% elif message['role'] == 'chat' %}
+{{-' [INST] '-}}
+{% endif %}
+
+{%- if message['content'] is string -%}
+{{- message['content'] -}}
+{%- else -%}
+
+{%- for line in message['content'] -%}
+{%- if line['type'] == 'text' -%}
+{{- line['text'] -}}
+{%- endif -%}
+{%- endfor -%}
+
+{%- endif -%}
+
+
+{% if message['role'] == 'chat_old' %}
+{{-' Answer:'-}}
+{% elif message['role'] == 'vqa' %}
+{{-' Short Answer:'-}}
+{% endif %}
+
+{%- if message['role'] != 'chat' and loop.index == loop.length -%}
+{{-' '-}}
+{% endif %}
+
+{%- if message['role'] == 'chat' -%}
+{{' [/INST] '}}
+{%- endif -%}
+
+{%- endfor -%}
