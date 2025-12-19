@@ -55,6 +55,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    W8A8BlockFp8LinearOp,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
@@ -69,9 +72,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
     is_layer_skipped,
     swizzle_blockscale,
-)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
@@ -623,7 +623,9 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         del input_size, output_size
 
         if not self.quant_config.is_checkpoint_fp8_serialized:
-            raise ValueError("FP8_PB_WO currently only supports FP8-serialized checkpoints.")
+            raise ValueError(
+                "FP8_PB_WO currently only supports FP8-serialized checkpoints."
+            )
 
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
