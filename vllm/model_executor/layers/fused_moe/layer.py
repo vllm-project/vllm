@@ -249,7 +249,6 @@ def maybe_roundup_hidden_size(
     moe_parallel_config: FusedMoEParallelConfig,
     model_type: str,
     is_mxfp4_quant: bool,
-    emulate_quant: bool,
     is_lora_enabled: bool,
 ) -> tuple[int, bool]:
     """
@@ -278,7 +277,7 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant and not emulate_quant:
+    if model_type == "gpt_oss" and is_mxfp4_quant:
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -593,7 +592,7 @@ class FusedMoE(CustomOp):
         self.model_type = getattr(
             self.vllm_config.model_config.hf_config, "model_type", None
         )
-        self.is_mxfp4_quant, self.emulate_quant = self._is_mxfp4_and_emulate_quant(
+        self.is_mxfp4_quant = self._is_mxfp4_and_emulate_quant(
             quant_config, self.quant_method
         )
 
@@ -604,7 +603,6 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config,
             self.model_type,
             self.is_mxfp4_quant,
-            self.emulate_quant,
             is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
@@ -887,15 +885,13 @@ class FusedMoE(CustomOp):
         self, quant_config: QuantizationConfig | None, quant_method: FusedMoEMethodBase
     ) -> bool:
         if quant_config:
-            if quant_config.get_name() == "mxfp4":
-                return True, False
-            elif (
+            if quant_config.get_name() == "mxfp4" or (
                 quant_config.get_name() == "quark"
                 and quant_method.weight_dtype == "mxfp4"
                 and quant_method.fp4_dtype == torch.float4_e2m1fn_x2
             ):
-                return True, quant_method.emulate
-        return False, False
+                return True
+        return False
 
     def _maybe_setup_shared_experts_stream(
         self,
@@ -1163,6 +1159,9 @@ class FusedMoE(CustomOp):
         return_success: bool = False,
     ) -> bool | None:
         if self.quant_config:
+
+            # TODO (xuebwang-amd): combine below if-elif as one 
+            # and possibly unify deeply with existed loading utils
             if self.quant_config.get_name() == "mxfp4":
                 # (FIXME) for gpt-oss all experts are combined
                 if "bias" in weight_name:
@@ -1177,7 +1176,6 @@ class FusedMoE(CustomOp):
             elif (
                 self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss"
             ):
-                # TODO (xuebwang-amd): this is for gpt-oss, how to unify?
                 expert_data = param.data[expert_id]
                 if "input_scale" in weight_name:
                     assert loaded_weight.numel() == 1
