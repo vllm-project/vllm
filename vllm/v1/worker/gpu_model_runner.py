@@ -923,7 +923,6 @@ class GPUModelRunner(
                         self.input_batch.num_prompt_tokens[req_index]
                         + num_output_tokens
                     )
-                    self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
             # Update the block IDs.
@@ -968,7 +967,6 @@ class GPUModelRunner(
                     req_index, start_token_index:end_token_index
                 ] = new_token_ids
                 self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-                self.input_batch.num_tokens[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
@@ -984,8 +982,6 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index
                 ] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec tokens.
-                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
             # When speculative decoding is used with structured output,
             # the scheduler can drop draft tokens that do not
@@ -2702,7 +2698,6 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            self.input_batch.num_tokens[req_idx] = end_idx
 
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
@@ -2777,6 +2772,27 @@ class GPUModelRunner(
             **model_kwargs,
         )
 
+    @staticmethod
+    def _is_uniform_decode(
+        max_num_scheduled_tokens: int,
+        uniform_decode_query_len: int,
+        num_tokens: int,
+        num_reqs: int,
+        force_uniform_decode: bool | None = None,
+    ) -> bool:
+        """
+        Checks if it's a decode batch with same amount scheduled tokens
+        across all requests.
+        """
+        return (
+            (
+                (max_num_scheduled_tokens == uniform_decode_query_len)
+                and (num_tokens == max_num_scheduled_tokens * num_reqs)
+            )
+            if force_uniform_decode is None
+            else force_uniform_decode
+        )
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -2798,14 +2814,12 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        uniform_decode = (
-            (
-                (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
-            )
-            if force_uniform_decode is None
-            else force_uniform_decode
+        uniform_decode = self._is_uniform_decode(
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            uniform_decode_query_len=self.uniform_decode_query_len,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            force_uniform_decode=force_uniform_decode,
         )
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
@@ -2819,6 +2833,7 @@ class GPUModelRunner(
             else force_has_lora
         )
 
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         dispatch_cudagraph = (
             lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -2834,6 +2849,15 @@ class GPUModelRunner(
             num_tokens_padded, use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
+        if self.compilation_config.pass_config.enable_sp:
+            assert (
+                batch_descriptor.num_tokens
+                % self.vllm_config.parallel_config.tensor_parallel_size
+                == 0
+            ), (
+                "Sequence parallelism requires num_tokens to be "
+                "a multiple of tensor parallel size"
+            )
 
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
@@ -3369,9 +3393,13 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if self._draft_token_ids is None:
+        if not self.num_spec_tokens:
             return None
+
         req_ids = self.input_batch.req_ids
+        if self._draft_token_ids is None:
+            return DraftTokenIds(req_ids, [[] for _ in req_ids])
+
         if isinstance(self._draft_token_ids, torch.Tensor):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
