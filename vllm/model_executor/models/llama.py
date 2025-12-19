@@ -711,9 +711,17 @@ class LlamaForCausalLM(
 class LlamaBidirectionalForSequenceClassification(
     LlamaForCausalLM, SupportsCrossEncoding
 ):
+    # This class automatically supports SequenceClassification
+    # through conversion via as_seq_cls_model.
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
     pass
 
 
 @attn_type("encoder_only")
 class LlamaBidirectionalModel(LlamaForCausalLM):
+    # This class automatically supports Embedding
+    # through conversion via as_embedding_model.
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
     pass

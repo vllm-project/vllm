@@ -60,8 +60,12 @@ _empty_model_meta = ModelMeta(
 )
 
 
-class MtebEncoderMixin(mteb.EncoderProtocol):
+class VllmMtebEncoder(mteb.EncoderProtocol):
     mteb_model_meta = _empty_model_meta
+
+    def __init__(self, vllm_model):
+        self.llm = vllm_model
+        self.rng = np.random.default_rng(seed=42)
 
     def encode(
         self,
@@ -69,7 +73,15 @@ class MtebEncoderMixin(mteb.EncoderProtocol):
         *args,
         **kwargs,
     ) -> np.ndarray:
-        raise NotImplementedError
+        # Hoping to discover potential scheduling
+        # issues by randomizing the order.
+        sentences = [text for batch in inputs for text in batch["text"]]
+        r = self.rng.permutation(len(sentences))
+        sentences = [sentences[i] for i in r]
+        outputs = self.llm.embed(sentences, use_tqdm=False)
+        embeds = np.array(outputs)
+        embeds = embeds[np.argsort(r)]
+        return embeds
 
     def similarity(
         self,
@@ -96,44 +108,7 @@ class MtebEncoderMixin(mteb.EncoderProtocol):
         return sim
 
 
-class VllmMtebEncoder(MtebEncoderMixin):
-    def __init__(self, vllm_model):
-        self.llm = vllm_model
-        self.rng = np.random.default_rng(seed=42)
-
-    def encode(
-        self,
-        inputs: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
-    ) -> np.ndarray:
-        # Hoping to discover potential scheduling
-        # issues by randomizing the order.
-        sentences = [text for batch in inputs for text in batch["text"]]
-        r = self.rng.permutation(len(sentences))
-        sentences = [sentences[i] for i in r]
-        outputs = self.llm.embed(sentences, use_tqdm=False)
-        embeds = np.array(outputs)
-        embeds = embeds[np.argsort(r)]
-        return embeds
-
-
-class HFMtebEncoder(MtebEncoderMixin):
-    def __init__(self, hf_model):
-        self.model = hf_model
-
-    def encode(
-        self,
-        inputs: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
-    ) -> np.ndarray:
-        sentences = [text for batch in inputs for text in batch["text"]]
-        embeds = self.model.encode(sentences)
-        return embeds
-
-
-class OpenAIClientMtebEncoder(MtebEncoderMixin):
+class OpenAIClientMtebEncoder(VllmMtebEncoder):
     def __init__(self, model_name: str, client):
         self.model_name = model_name
         self.client = client
@@ -311,9 +286,7 @@ def mteb_test_embed_models(
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
 
-            st_main_score = run_mteb_embed_task(
-                HFMtebEncoder(hf_model), MTEB_EMBED_TASKS
-            )
+            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
             st_dtype = next(hf_model.model.parameters()).dtype
 
             # Check embeddings close to hf outputs
