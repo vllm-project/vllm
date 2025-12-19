@@ -10,6 +10,7 @@ DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.p
 PYTHON=${PYTHON_PROG:=python3} # try to read from env var, otherwise use python3
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
+INDEX_COMMENT="commit $BUILDKITE_COMMIT"
 
 # detect if python3.10+ is available
 has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
@@ -55,6 +56,13 @@ echo "Version in wheel: $version"
 pure_version="${version%%+*}"
 echo "Pure version (without variant): $pure_version"
 
+# for regular release versions, change SUBPATH from BUILDKITE_COMMIT to pure_version
+if [[ "$version" != *"dev"* ]]; then
+    SUBPATH="$pure_version"
+    S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
+    INDEX_COMMENT="version $pure_version"
+fi
+
 # copy wheel to its own bucket
 aws s3 cp "$wheel" "$S3_COMMIT_PREFIX"
 
@@ -74,7 +82,7 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 
 # call script to generate indicies for all existing wheels
 # this indices have relative paths that could work as long as it is next to the wheel directory in s3
-# i.e., the wheels are always in s3://vllm-wheels/<commit>/
+# i.e., the wheels are always in s3://vllm-wheels/<commit>/ or /<version>/
 # and indices can be placed in /<commit>/, or /nightly/, or /<version>/
 if [[ ! -z "$DEFAULT_VARIANT_ALIAS" ]]; then
     alias_arg="--alias-to-default $DEFAULT_VARIANT_ALIAS"
@@ -85,9 +93,9 @@ fi
 # HACK: we do not need regex module here, but it is required by pre-commit hook
 # To avoid any external dependency, we simply replace it back to the stdlib re module
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" $alias_arg
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "$INDEX_COMMENT" $alias_arg
 
-# copy indices to /<commit>/ unconditionally
+# copy indices to /<commit>/ or /<version>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 
@@ -95,13 +103,4 @@ aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
     echo "Uploading indices to overwrite /nightly/"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
-fi
-
-# re-generate and copy to /<pure_version>/ only if it does not have "dev" in the version
-if [[ "$version" != *"dev"* ]]; then
-    echo "Re-generating indices for /$pure_version/"
-    rm -rf "$INDICES_OUTPUT_DIR/*"
-    mkdir -p "$INDICES_OUTPUT_DIR"
-    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
-    aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi
