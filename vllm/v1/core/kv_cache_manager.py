@@ -377,6 +377,17 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def remove_skipped_blocks(self, request_id: str, num_tokens_need_slot: int) -> None:
+        """Remove the blocks that are no longer needed from `blocks` and replace
+        the removed blocks with null_block.
+
+        Args:
+            request_id: The request ID.
+            num_tokens_need_slot: The number of tokens that need a slot, including
+                tokens already computed and tokens to be computed.
+        """
+        self.coordinator.remove_skipped_blocks(request_id, num_tokens_need_slot)
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 

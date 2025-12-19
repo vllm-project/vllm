@@ -1581,6 +1581,13 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
+        # Free any out-of-window prefix blocks before we hand the block table to
+        # the connector.
+        self.kv_cache_manager.remove_skipped_blocks(
+            request_id=request.request_id,
+            num_tokens_need_slot=request.num_tokens,
+        )
+
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
         if not isinstance(self.connector, SupportsHMA):
