@@ -364,17 +364,16 @@ def initialize_ray_cluster(
         cluster_devices = ray.cluster_resources().get(device_str, 0.0)
         available_devices = ray.available_resources().get(device_str, 0.0)
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
-            if parallel_config.world_size > available_devices:
-                fmt, args = _devices_count_mismatch_msg_builder(
-                    available_devices=available_devices,
-                    scope="ray cluster available devices",
-                )
-                logger.warning(fmt, *args)
-
-            elif parallel_config.world_size > cluster_devices:
+            if parallel_config.world_size > cluster_devices:
                 fmt, args = _devices_count_mismatch_msg_builder(
                     available_devices=cluster_devices,
                     scope="ray cluster total resources",
+                )
+                logger.warning(fmt, *args)
+            elif parallel_config.world_size > available_devices:
+                fmt, args = _devices_count_mismatch_msg_builder(
+                    available_devices=available_devices,
+                    scope="ray cluster available devices",
                 )
                 logger.warning(fmt, *args)
 
