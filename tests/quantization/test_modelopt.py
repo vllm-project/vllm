@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from typing import NoReturn
 
 import pytest
 import torch
@@ -17,6 +18,28 @@ from tests.quantization.utils import is_quant_method_supported
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def _skip(msg: str) -> NoReturn:
+    pytest.skip(msg)
+    raise RuntimeError(msg)
+
+
+def _snapshot_download_or_skip(model_id: str) -> str:
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # pragma: no cover
+        _skip(f"huggingface_hub is required to download {model_id}: {e}")
+
+    try:
+        return snapshot_download(
+            repo_id=model_id,
+            repo_type="model",
+            # These checkpoints are already small; download full repo for simplicity.
+            allow_patterns=["*"],
+        )
+    except Exception as e:
+        _skip(f"Failed to download {model_id} from the HF Hub: {e}")
 
 
 @pytest.mark.skipif(
@@ -99,14 +122,8 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
 )
 def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
-    model_path = os.environ.get("VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH", "")
-
-    if not model_path or not os.path.exists(model_path):
-        pytest.skip(
-            "This test requires a local ModelOpt FP8_PER_CHANNEL_PER_TOKEN "
-            "checkpoint. Set VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH to the "
-            "checkpoint directory."
-        )
+    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
+    model_path = _snapshot_download_or_skip(model_id)
 
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
@@ -166,14 +183,8 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
 )
 def test_modelopt_fp8_pb_wo_checkpoint_setup(vllm_runner):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
-    model_path = os.environ.get("VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH", "")
-
-    if not model_path or not os.path.exists(model_path):
-        pytest.skip(
-            "This test requires a local ModelOpt FP8_PB_WO checkpoint. "
-            "Set VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH to the checkpoint "
-            "directory."
-        )
+    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
+    model_path = _snapshot_download_or_skip(model_id)
 
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
