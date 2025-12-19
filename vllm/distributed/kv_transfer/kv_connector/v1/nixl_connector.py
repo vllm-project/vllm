@@ -788,14 +788,9 @@ class NixlConnectorScheduler:
             # only submit as new req when not partial
             meta.add_new_req_to_save(
                 request_id=req_id,
-                local_block_ids=new_block_id_groups[0],
+                local_block_ids=new_block_ids,
                 kv_transfer_params=req.kv_transfer_params,
             )
-            assert scheduler_output.num_scheduled_tokens is not None
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            is_partial = (
-                req.num_computed_tokens + num_scheduled_tokens
-            ) < req.num_prompt_tokens
             if not is_partial:
                 # For non-partial prefills, once new req_meta is scheduled, it
                 # can be removed from _reqs_need_save.
