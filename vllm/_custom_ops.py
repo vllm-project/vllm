@@ -2127,8 +2127,6 @@ def grouped_topk(
     routed_scaling_factor: float,
     bias: torch.Tensor,
     scoring_func: int = 0,
-    # NOTE(elvircrn): Add docs
-    packed: bool = False
 ):
     """
     Perform grouped top-k routing for mixture of experts.
@@ -2156,7 +2154,6 @@ def grouped_topk(
         routed_scaling_factor,
         bias,
         scoring_func,
-        packed
     )
 
 

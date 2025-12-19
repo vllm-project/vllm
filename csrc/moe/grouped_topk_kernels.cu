@@ -536,7 +536,7 @@ __global__ void group_idx_and_topk_idx_kernel(
     T const* bias, int64_t const num_tokens, int64_t const n_group,
     int64_t const topk_group, int64_t const topk, int64_t const num_experts,
     int64_t const num_experts_per_group, bool renormalize,
-    float routed_scaling_factor) {
+    double routed_scaling_factor) {
   int32_t warp_id = threadIdx.x / WARP_SIZE;
   int32_t lane_id = threadIdx.x % WARP_SIZE;
   int32_t case_id =
@@ -691,172 +691,6 @@ __global__ void group_idx_and_topk_idx_kernel(
 #endif
 }
 
-
-template <typename T, typename IdxT, ScoringFunc SF, int NGroup = -1>
-__global__ void group_idx_and_topk_idx_kernel_packed(
-    T* scores, T const* group_scores, int32_t* packed_tensors,
-    T const* bias, int64_t const num_tokens, int64_t const n_group,
-    int64_t const topk_group, int64_t const topk, int64_t const num_experts,
-    int64_t const num_experts_per_group, bool renormalize,
-    double routed_scaling_factor) {
-  int32_t warp_id = threadIdx.x / WARP_SIZE;
-  int32_t lane_id = threadIdx.x % WARP_SIZE;
-  int32_t case_id =
-      blockIdx.x * NUM_WARPS_PER_BLOCK + warp_id;  // one per token
-  scores += case_id * num_experts;
-  group_scores += case_id * n_group;
-  packed_tensors += case_id * topk;
-
-  constexpr bool kUseStaticNGroup = (NGroup > 0);
-  // use int32 to avoid implicit conversion
-  int32_t const n_group_i32 =
-      kUseStaticNGroup ? NGroup : static_cast<int32_t>(n_group);
-
-  int32_t align_num_experts_per_group =
-      warp_topk::round_up_to_multiple_of<WARP_SIZE>(num_experts_per_group);
-
-  cg::thread_block block = cg::this_thread_block();
-  cg::thread_block_tile<32> tile = cg::tiled_partition<32>(block);
-
-  extern __shared__ char smem_buf[];  // NOTE: reuse the shared memory here to
-                                      // store the target topk idx
-  int32_t* s_topk_idx = reinterpret_cast<int32_t*>(smem_buf);
-  T* s_topk_value =
-      reinterpret_cast<T*>(s_topk_idx + NUM_WARPS_PER_BLOCK * topk) +
-      warp_id * topk;
-  s_topk_idx += warp_id * topk;
-
-  T value = neg_inf<T>();
-  T topk_group_value = neg_inf<T>();
-  int32_t num_equalto_topkth_group;
-
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");  // I think all prolog can be put before
-                                         // acqbulk because it's ptr arithmetic
-#endif
-
-  if (case_id < num_tokens) {
-    // calculate group_idx
-    int32_t target_num_min =
-        WARP_SIZE - n_group_i32 + static_cast<int32_t>(topk_group);
-    // The check is necessary to avoid abnormal input
-    if (lane_id < n_group_i32 && is_finite(group_scores[lane_id])) {
-      value = group_scores[lane_id];
-    }
-
-    int count_equal_to_top_value = WARP_SIZE - n_group_i32;
-    int pre_count_equal_to_top_value = 0;
-    // Use loop to find the largset top_group
-    while (count_equal_to_top_value < target_num_min) {
-      topk_group_value = cg::reduce(tile, value, cg::greater<T>());
-      if (value == topk_group_value) {
-        value = neg_inf<T>();
-      }
-      pre_count_equal_to_top_value = count_equal_to_top_value;
-      count_equal_to_top_value =
-          __popc(__ballot_sync(FULL_WARP_MASK, (value == neg_inf<T>())));
-    }
-    num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
-  }
-  __syncthreads();
-
-  warp_topk::WarpSelect</*capability*/ WARP_SIZE, /*greater*/ true, T, int32_t,
-                        /* is_stable */ true>
-      queue((int32_t)topk, neg_inf<T>());
-
-  int count_equalto_topkth_group = 0;
-  bool if_proceed_next_topk = topk_group_value != neg_inf<T>();
-  if (case_id < num_tokens && if_proceed_next_topk) {
-    auto process_group = [&](int i_group) {
-      if ((group_scores[i_group] > topk_group_value) ||
-          ((group_scores[i_group] == topk_group_value) &&
-           (count_equalto_topkth_group < num_equalto_topkth_group))) {
-        int32_t offset = i_group * num_experts_per_group;
-        for (int32_t i = lane_id; i < align_num_experts_per_group;
-             i += WARP_SIZE) {
-          T candidates = neg_inf<T>();
-          if (i < num_experts_per_group) {
-            // apply scoring function (if any) and add bias
-            T input = scores[offset + i];
-            if (is_finite(input)) {
-              T score = apply_scoring<SF>(input);
-              candidates = score + bias[offset + i];
-            }
-          }
-          queue.add(candidates, offset + i);
-        }
-        if (group_scores[i_group] == topk_group_value) {
-          count_equalto_topkth_group++;
-        }
-      }
-    };
-
-    if constexpr (kUseStaticNGroup) {
-#pragma unroll
-      for (int i_group = 0; i_group < NGroup; ++i_group) {
-        process_group(i_group);
-      }
-    } else {
-      for (int i_group = 0; i_group < n_group_i32; ++i_group) {
-        process_group(i_group);
-      }
-    }
-    queue.done();
-    // Get the topk_idx
-    queue.dumpIdx(s_topk_idx);
-  }
-
-  // Load the valid score value
-  // Calculate the summation
-  float topk_sum = 1e-20;
-  if (case_id < num_tokens && if_proceed_next_topk) {
-    for (int i = lane_id;
-         i < warp_topk::round_up_to_multiple_of<WARP_SIZE>(topk);
-         i += WARP_SIZE) {
-      T value = cuda_cast<T, float>(0.0f);
-      if (i < topk) {
-        // Load the score value (without bias) for normalization
-        T input = scores[s_topk_idx[i]];
-        value = apply_scoring<SF>(input);
-        s_topk_value[i] = value;
-      }
-      if (renormalize) {
-        topk_sum +=
-            cg::reduce(tile, cuda_cast<float, T>(value), cg::plus<float>());
-      }
-    }
-  }
-
-  __syncthreads();
-
-  if (case_id < num_tokens) {
-    if (if_proceed_next_topk) {
-      for (int i = lane_id; i < topk; i += WARP_SIZE) {
-        float base = cuda_cast<float, T>(s_topk_value[i]);
-        float value = renormalize ? (base / topk_sum * routed_scaling_factor)
-                                  : (base * routed_scaling_factor);
-        auto v16 = __float2bfloat16(value);
-        auto v16_s16= static_cast<int>(*reinterpret_cast<short*>(&v16));
-        int32_t packed_tensor = (s_topk_idx[i] << 16) | v16_s16;
-        packed_tensors[i] = packed_tensor;
-      }
-    } else {
-      for (int i = lane_id; i < topk; i += WARP_SIZE) {
-        float value = 1.0f / topk;
-        auto v16 = __float2bfloat16(value);
-        auto v16_s16 = static_cast<int>(*reinterpret_cast<short*>(&v16));
-        int32_t packed_tensor = (i << 16) | v16_s16;
-        packed_tensors[i] = packed_tensor;
-      }
-    }
-    // Note: when if_proceed_next_topk==false, choose the first 8 experts as the
-    // default result.
-  }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
-#endif
-}
-
 template <typename T, typename IdxT, ScoringFunc SF>
 inline void launch_group_idx_and_topk_kernel(
     cudaLaunchConfig_t const& config, T* scores, T* group_scores,
@@ -864,7 +698,7 @@ inline void launch_group_idx_and_topk_kernel(
     int64_t const num_tokens, int64_t const n_group, int64_t const topk_group,
     int64_t const topk, int64_t const num_experts,
     int64_t const num_experts_per_group, bool const renormalize,
-    double const routed_scaling_factor, bool packed) {
+    double const routed_scaling_factor) {
   auto launch = [&](auto* kernel_instance2) {
     cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
                        topk_values, topk_indices, bias, num_tokens, n_group,
@@ -872,62 +706,28 @@ inline void launch_group_idx_and_topk_kernel(
                        renormalize, routed_scaling_factor);
   };
 
-  auto launch_packed = [&](auto* kernel_instance2) {
-    cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                       reinterpret_cast<int32_t*>(topk_values), bias, num_tokens, n_group,
-                       topk_group, topk, num_experts, num_experts_per_group,
-                       renormalize, routed_scaling_factor);
-  };
-
-  if (!packed) {
-    switch (n_group) {
-      case 4: {
-        launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 4>);
-        break;
-      }
-      case 8: {
-        launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 8>);
-        break;
-      }
-      case 16: {
-        launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 16>);
-        break;
-      }
-      case 32: {
-        launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 32>);
-        break;
-      }
-      default: {
-        launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF>);
-        break;
-      }
+  switch (n_group) {
+    case 4: {
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 4>);
+      break;
     }
-  } else {
-    switch (n_group) {
-      case 4: {
-        launch_packed(&group_idx_and_topk_idx_kernel_packed<T, IdxT, SF, 4>);
-        break;
-      }
-      case 8: {
-        launch_packed(&group_idx_and_topk_idx_kernel_packed<T, IdxT, SF, 8>);
-        break;
-      }
-      case 16: {
-        launch_packed(&group_idx_and_topk_idx_kernel_packed<T, IdxT, SF, 16>);
-        break;
-      }
-      case 32: {
-        launch_packed(&group_idx_and_topk_idx_kernel_packed<T, IdxT, SF, 32>);
-        break;
-      }
-      default: {
-        launch_packed(&group_idx_and_topk_idx_kernel_packed<T, IdxT, SF>);
-        break;
-      }
+    case 8: {
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 8>);
+      break;
     }
-
+    case 16: {
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 16>);
+      break;
+    }
+    case 32: {
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 32>);
+      break;
+    }
+    default: {
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF>);
+      break;
+    }
   }
-
 }
 
 template <typename T, typename IdxT>
@@ -937,7 +737,7 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
                    int64_t const topk_group, int64_t const topk,
                    bool const renormalize, double const routed_scaling_factor,
                    int const scoring_func, bool enable_pdl = false,
-                   cudaStream_t const stream = 0, bool packed = false) {
+                   cudaStream_t const stream = 0) {
   int64_t num_cases = num_tokens * n_group;
   int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
   cudaLaunchConfig_t config;
@@ -990,14 +790,14 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
       launch_group_idx_and_topk_kernel<T, IdxT, SCORING_NONE>(
           config, scores, group_scores, topk_values, topk_indices, bias,
           num_tokens, n_group, topk_group, topk, num_experts,
-          num_experts_per_group, renormalize, routed_scaling_factor, packed);
+          num_experts_per_group, renormalize, routed_scaling_factor);
       break;
     }
     case SCORING_SIGMOID: {
       launch_group_idx_and_topk_kernel<T, IdxT, SCORING_SIGMOID>(
           config, scores, group_scores, topk_values, topk_indices, bias,
           num_tokens, n_group, topk_group, topk, num_experts,
-          num_experts_per_group, renormalize, routed_scaling_factor, packed);
+          num_experts_per_group, renormalize, routed_scaling_factor);
       break;
     }
     default:
@@ -1011,8 +811,7 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
       T const* bias, int64_t const num_tokens, int64_t const num_experts,   \
       int64_t const n_group, int64_t const topk_group, int64_t const topk,  \
       bool const renormalize, double const routed_scaling_factor,           \
-      int const scoring_func, bool enable_pdl, cudaStream_t const stream, \
-      bool packed);
+      int const scoring_func, bool enable_pdl, cudaStream_t const stream);
 
 INSTANTIATE_NOAUX_TC(float, int32_t);
 INSTANTIATE_NOAUX_TC(half, int32_t);
@@ -1023,7 +822,7 @@ INSTANTIATE_NOAUX_TC(__nv_bfloat16, int32_t);
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    torch::Tensor const& bias, int64_t scoring_func = 0, bool packed = false) {
+    torch::Tensor const& bias, int64_t scoring_func = 0) {
   auto data_type = scores.scalar_type();
   auto input_size = scores.sizes();
   int64_t num_tokens = input_size[0];
@@ -1042,14 +841,12 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
       {num_tokens, n_group}, torch::dtype(data_type).device(torch::kCUDA));
   // Always output float32 for topk_values (eliminates Python-side conversion)
   torch::Tensor topk_values = torch::empty(
-      {num_tokens, topk}, torch::dtype(!packed ? torch::kFloat32 : torch::kInt32).device(torch::kCUDA));
-
+      {num_tokens, topk}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
   torch::Tensor topk_indices = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
   auto stream = c10::cuda::getCurrentCUDAStream(scores.get_device());
 
-  // NOTE(elvircrn): Needs a kfloat + short case.
   switch (data_type) {
     case torch::kFloat16:
       // Handle Float16
@@ -1060,8 +857,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
           reinterpret_cast<half const*>(bias.data_ptr()), num_tokens,
           num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, static_cast<int>(scoring_func), false, stream,
-          packed);
+          routed_scaling_factor, static_cast<int>(scoring_func), false, stream);
       break;
     case torch::kFloat32:
       // Handle Float32
@@ -1072,8 +868,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
           reinterpret_cast<float const*>(bias.data_ptr()), num_tokens,
           num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, static_cast<int>(scoring_func), false, stream,
-          packed);
+          routed_scaling_factor, static_cast<int>(scoring_func), false, stream);
       break;
     case torch::kBFloat16:
       // Handle BFloat16
@@ -1084,9 +879,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
           reinterpret_cast<__nv_bfloat16 const*>(bias.data_ptr()), num_tokens,
           num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, static_cast<int>(scoring_func), false, stream,
-          packed);
-
+          routed_scaling_factor, static_cast<int>(scoring_func), false, stream);
       break;
     default:
       // Handle other data types

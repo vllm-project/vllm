@@ -3010,9 +3010,6 @@ class GPUModelRunner(
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
-                # NOTE(elvircrn): For this specific batch are we running full of piecewise.
-                # OK I have a full cudagraph that matches this shape
-                # OK I don't have
                 logger.debug(
                     "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
                     "should_ubatch: %s, num_tokens_across_dp: %s",
