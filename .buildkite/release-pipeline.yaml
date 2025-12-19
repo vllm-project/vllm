@@ -137,20 +137,20 @@ steps:
       - text: "What is the release version?"
         key: release-version
 
-  # - label: "Upload releasewheels to PyPI and GitHub"
-  #   depends_on:
-  #     - input-release-version
-  #     - build-wheel-x86-cuda-12-9
-  #     - build-wheel-x86-cuda-13-0
-  #     - build-wheel-x86-cpu
-  #     - build-wheel-arm64-cuda-12-9
-  #     - build-wheel-arm64-cuda-13-0
-  #     - build-wheel-arm64-cpu
-  #   id: upload-release-wheels
-  #   agents:
-  #     queue: small_cpu_queue_postmerge
-  #   commands:
-  #     - "bash .buildkite/scripts/upload-release-wheels.sh"
+  - label: "Upload releasewheels to PyPI and GitHub"
+    depends_on:
+      - input-release-version
+      - build-wheel-x86-cuda-12-9
+      - build-wheel-x86-cuda-13-0
+      - build-wheel-x86-cpu
+      - build-wheel-arm64-cuda-12-9
+      - build-wheel-arm64-cuda-13-0
+      - build-wheel-arm64-cpu
+    id: upload-release-wheels
+    agents:
+      queue: small_cpu_queue_postmerge
+    commands:
+      - "bash .buildkite/scripts/upload-release-wheels.sh"
 
   - block: "Build CPU release image"
     key: block-cpu-release-image-build
