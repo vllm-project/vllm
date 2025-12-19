@@ -57,8 +57,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
+from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
-    SupportsCrossEncoding,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -708,20 +708,14 @@ class LlamaForCausalLM(
 
 
 @attn_type("encoder_only")
-class LlamaBidirectionalForSequenceClassification(
-    LlamaForCausalLM, SupportsCrossEncoding
-):
-    # This class automatically supports SequenceClassification
-    # through conversion via as_seq_cls_model.
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
 
 
 @attn_type("encoder_only")
-class LlamaBidirectionalModel(LlamaForCausalLM):
-    # This class automatically supports Embedding
-    # through conversion via as_embedding_model.
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
