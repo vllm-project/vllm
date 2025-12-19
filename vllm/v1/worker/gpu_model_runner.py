@@ -4768,109 +4768,80 @@ class GPUModelRunner(
                 original_pool = self.model.cudagraph_wrapper.graph_pool
                 self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
+        def profile_graph_mode(
+            largest_size: int,
+            count: int,
+            cudagraph_runtime_mode: CUDAGraphMode,
+            uniform_decode: bool,
+            batch_sizes: list[int],
+            measure_first_capture: bool,
+            profile_seq_lens: int | None = None,
+        ) -> tuple[int, int]:
+            """Profile memory for a single CUDA graph mode.
+
+            Returns (first_capture_memory, per_graph_memory).
+            """
+            before_first_capture = self._warmup_and_capture(
+                largest_size,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                uniform_decode=uniform_decode,
+                profile_seq_lens=profile_seq_lens,
+                sync_and_empty_cache_before_capture=measure_first_capture,
+            )
+            torch.cuda.synchronize()
+            first_capture_memory = (
+                before_first_capture - torch.cuda.mem_get_info()[0]
+                if measure_first_capture
+                else 0
+            )
+            # Second capture measures per-graph overhead
+            per_graph = 0
+            if count > 1:
+                second_size = largest_size
+                for size in reversed(batch_sizes):
+                    if size < largest_size:
+                        second_size = size
+                        break
+                torch.cuda.synchronize()
+                before = self._warmup_and_capture(
+                    second_size,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    uniform_decode=uniform_decode,
+                    num_warmups=0,
+                )
+                torch.cuda.synchronize()
+                per_graph = before - torch.cuda.mem_get_info()[0]
+            return first_capture_memory, per_graph
+
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
+            full_first_capture_memory = 0
             full_per_graph = 0
             piecewise_per_graph = 0
-            full_first_capture_memory = 0
 
-            # Profile FULL graphs
             if full_largest is not None:
-                max_seq_len_for_profile = min(
-                    self.max_model_len,
-                    self.max_num_tokens // full_largest,
-                )
-                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(
-                        full_largest,
-                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                        force_attention=True,
-                        uniform_decode=True,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                    )
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                before_first_capture = torch.cuda.mem_get_info()[0]
-                self._dummy_run(
-                    full_largest,
+                full_first_capture_memory, full_per_graph = profile_graph_mode(
+                    largest_size=full_largest,
+                    count=full_count,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=True,
-                    skip_eplb=True,
-                    remove_lora=False,
-                    activate_lora=False,
-                    is_graph_capturing=True,
-                    profile_seq_lens=max_seq_len_for_profile,
+                    batch_sizes=self._get_decode_cudagraph_batch_sizes(),
+                    measure_first_capture=True,
+                    profile_seq_lens=min(
+                        self.max_model_len,
+                        self.max_num_tokens // full_largest,
+                    ),
                 )
-                torch.cuda.synchronize()
-                full_first_capture_memory = (
-                    before_first_capture - torch.cuda.mem_get_info()[0]
-                )
-                # Second capture measures per-graph overhead
-                if full_count > 1:
-                    decode_sizes = self._get_decode_cudagraph_batch_sizes()
-                    second_size = full_largest
-                    for size in reversed(decode_sizes):
-                        if size < full_largest:
-                            second_size = size
-                            break
-                    torch.cuda.synchronize()
-                    before = torch.cuda.mem_get_info()[0]
-                    self._dummy_run(
-                        second_size,
-                        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                        uniform_decode=True,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                        is_graph_capturing=True,
-                    )
-                    torch.cuda.synchronize()
-                    full_per_graph = before - torch.cuda.mem_get_info()[0]
 
-            # Profile PIECEWISE graphs
             if piecewise_largest is not None:
-                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(
-                        piecewise_largest,
-                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                        force_attention=False,
-                        uniform_decode=False,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                    )
-                # First capture sets up the memory pool (not measured)
-                self._dummy_run(
-                    piecewise_largest,
+                _, piecewise_per_graph = profile_graph_mode(
+                    largest_size=piecewise_largest,
+                    count=piecewise_count,
                     cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
                     uniform_decode=False,
-                    skip_eplb=True,
-                    remove_lora=False,
-                    activate_lora=False,
-                    is_graph_capturing=True,
+                    batch_sizes=self.cudagraph_batch_sizes,
+                    measure_first_capture=False,
                 )
-                # Second capture measures per-graph overhead
-                if piecewise_count > 1:
-                    second_size = piecewise_largest
-                    for size in reversed(self.cudagraph_batch_sizes):
-                        if size < piecewise_largest:
-                            second_size = size
-                            break
-                    torch.cuda.synchronize()
-                    before = torch.cuda.mem_get_info()[0]
-                    self._dummy_run(
-                        second_size,
-                        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-                        uniform_decode=False,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                        is_graph_capturing=True,
-                    )
-                    torch.cuda.synchronize()
-                    piecewise_per_graph = before - torch.cuda.mem_get_info()[0]
 
         # Cleanup: restore pool, clear entries, cleanup KV cache
         set_cudagraph_capturing_enabled(False)
@@ -5010,6 +4981,52 @@ class GPUModelRunner(
         )
         return cuda_graph_size, full_graph_memory
 
+    def _warmup_and_capture(
+        self,
+        num_tokens: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        uniform_decode: bool,
+        profile_seq_lens: int | None = None,
+        activate_lora: bool = False,
+        allow_microbatching: bool = False,
+        sync_and_empty_cache_before_capture: bool = False,
+        num_warmups: int | None = None,
+    ) -> int:
+        """Run warmups then capture a CUDA graph for a single batch size.
+
+        Returns free GPU memory (bytes) just before capture begins.
+        """
+        if num_warmups is None:
+            num_warmups = self.compilation_config.cudagraph_num_of_warmups
+        force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+        for _ in range(num_warmups):
+            self._dummy_run(
+                num_tokens,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                force_attention=force_attention,
+                uniform_decode=uniform_decode,
+                allow_microbatching=allow_microbatching,
+                skip_eplb=True,
+                remove_lora=False,
+                activate_lora=activate_lora,
+            )
+        if sync_and_empty_cache_before_capture:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        before_capture = torch.cuda.mem_get_info()[0]
+        self._dummy_run(
+            num_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            uniform_decode=uniform_decode,
+            allow_microbatching=allow_microbatching,
+            skip_eplb=True,
+            remove_lora=False,
+            activate_lora=activate_lora,
+            is_graph_capturing=True,
+            profile_seq_lens=profile_seq_lens,
+        )
+        return before_capture
+
     def _capture_cudagraphs(
         self,
         compilation_cases: list[tuple[int, bool]],
@@ -5048,33 +5065,12 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                 )
             )
-
-            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                self._dummy_run(
-                    num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
-                    uniform_decode=uniform_decode,
-                    allow_microbatching=allow_microbatching,
-                    skip_eplb=True,
-                    remove_lora=False,
-                    activate_lora=activate_lora,
-                )
-            self._dummy_run(
+            self._warmup_and_capture(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 uniform_decode=uniform_decode,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
                 activate_lora=activate_lora,
-                is_graph_capturing=True,
+                allow_microbatching=allow_microbatching,
             )
             torch.cuda.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
