@@ -234,7 +234,7 @@ def awq_dequantize_triton(
     qweight: torch.Tensor,
     scales: torch.Tensor,
     zeros: torch.Tensor,
-    block_size_x: int = 32,
+    block_size_x: int = 128,
     block_size_y: int = 32,
 ) -> torch.Tensor:
     K = qweight.shape[0]
