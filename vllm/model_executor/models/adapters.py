@@ -162,6 +162,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
         is_pooling_model = True
+        should_load_lm_head: bool = False
 
         def __init__(
             self,
@@ -174,15 +175,28 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             self.vllm_config = vllm_config
 
-            # These are not used in pooling models
-            objects_to_clean = [self]
-            if language_model := getattr(self, "language_model", None):
-                objects_to_clean.append(language_model)
+            mtml_config = getattr(
+                self.vllm_config.model_config.hf_config,
+                "multi_task_classification_config",
+                None,
+            )
 
-            for obj in objects_to_clean:
-                for attr in ("lm_head", "logits_processor"):
-                    if hasattr(obj, attr):
-                        delattr(obj, attr)
+            if mtml_config and any(
+                c.get("apply_to_logits", False) for c in mtml_config.values()
+            ):
+                # We want to keep lm_head for compute_logits (ONLY when one of
+                # the MTML classification heads pools from lm_head logits).
+                self.should_load_lm_head = True
+            else:
+                # These are not used in pooling models
+                objects_to_clean = [self]
+                if language_model := getattr(self, "language_model", None):
+                    objects_to_clean.append(language_model)
+
+                for obj in objects_to_clean:
+                    for attr in ("lm_head", "logits_processor"):
+                        if hasattr(obj, attr):
+                            delattr(obj, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
@@ -197,6 +211,9 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             load_lm_head: bool = False,
         ):
             # TODO: Support uninitialized params tracking
+
+            if self.should_load_lm_head:
+                load_lm_head = True
 
             # For most pooling models: We have deleted this attribute, so don't load it.
             # For converting an LLM into a seq cls model, we need the lm_head.
@@ -279,9 +296,13 @@ def as_seq_cls_model(cls: _T) -> _T:
     hidden state corresponding to the last token.
 
     Note:
-        We assume that the classification head is a single linear layer
-        stored as the attribute `score` of the top-level model;
-        please implement your own model if this is not the case.
+        If `multi_task_classification_config` is not present in the model's HF
+        config, we assume that the classification head is a single linear layer
+        stored as the attribute `score` of the top-level model.
+
+        If `multi_task_classification_config` is present, `cls` is adapted with
+        multi-task multi-layer classification heads, as documented in
+        `_MultiTaskClassification`.
     """
     # Avoid modifying existing classification models
     if is_pooling_model(cls):
@@ -304,30 +325,63 @@ def as_seq_cls_model(cls: _T) -> _T:
             text_config = vllm_config.model_config.hf_config.get_text_config()
             model_config = vllm_config.model_config
             quant_config = vllm_config.quant_config
-
-            self.score = ReplicatedLinear(
-                model_config.get_hidden_size(),
-                text_config.num_labels,
-                bias=False,
-                params_dtype=vllm_config.model_config.head_dtype,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=maybe_prefix(prefix, "score"),
+            multi_task_classification_config = getattr(
+                model_config.hf_config, "multi_task_classification_config", None
             )
+
+            if not multi_task_classification_config:
+                self.score = ReplicatedLinear(
+                    model_config.get_hidden_size(),
+                    text_config.num_labels,
+                    bias=False,
+                    params_dtype=vllm_config.model_config.head_dtype,
+                    quant_config=quant_config,
+                    return_bias=False,
+                    prefix=maybe_prefix(prefix, "score"),
+                )
+            else:
+                if getattr(model_config.hf_config, "head_dtype", None) != "model":
+                    # defer head dtype conversion at the end
+                    model_config.hf_config.head_dtype = "model"
+                    head_dtype = model_config.head_dtype
+                else:
+                    head_dtype = model_config.dtype
+
+                self.score = _MultiTaskClassification(
+                    multi_task_classification_config,
+                    model_config,
+                    quant_config,
+                    compute_logits=self.compute_logits,
+                    head_dtype=head_dtype,
+                    prefix=prefix,
+                )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
+            from vllm.model_executor.layers.pooler import PoolerIdentity
+
+            def get_act_fn(fallback):
+                if multi_task_classification_config:
+                    # disable act_fn in Pooler, as we already included
+                    # activation function as part of the multi-task
+                    # classification tower.
+                    return PoolerIdentity()
+                else:
+                    return fallback
+
             self.pooler = DispatchPooler(
                 {
                     "token_classify": Pooler.for_token_classify(
-                        pooler_config, classifier=self.score
+                        pooler_config, classifier=self.score, act_fn=get_act_fn(None)
                     ),
                     "classify": Pooler.for_classify(
-                        pooler_config, classifier=self.score, act_fn="classify"
+                        pooler_config,
+                        classifier=self.score,
+                        act_fn=get_act_fn("classify"),
                     ),
                     "score": Pooler.for_classify(
-                        pooler_config, classifier=self.score, act_fn="score"
+                        pooler_config, classifier=self.score, act_fn=get_act_fn("score")
                     ),
                 }
             )
@@ -520,3 +574,228 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     method = getattr(text_config, "method", None)
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
+
+
+class _MultiTaskClassification(nn.ModuleDict):
+    """\
+    Enables pooling models to support multi-task multi-layer multi-label
+    sequence classification head.
+
+    Supports the following features, all of which can be customized via config:
+
+    - multiple classification tasks
+    - each task supports multiple linear layers
+    - each task pools either hidden states or language model's LM head
+    - each task outputs to sigmoid/softmax activation via `PoolerClassify`
+
+    CONFIGURATION
+    =============
+
+    This classification head is enabled and configured via hf config key:
+    `multi_task_classification_config`. It is a dict mapping task names to the
+    task's classification head config:
+
+        "multi_task_classification_config": {
+            "task_1": {
+                "out_dims": [ h_1, h_2, ..., h_k ],
+                "apply_to_logits": true                 # optional
+            },
+            "task_2": { ... }
+        }
+
+    where h_1, h_2, ..., h_k corresponds to the output dimension of each linear
+    layers. The input dimension of the first layer is model's hidden_size or
+    lm_head vocab_size, depending on `apply_to_logits`. The last dimension h_k
+    is the num of labels for this task.
+
+    The `apply_to_logits` boolean flag is optional. When it is true (default to
+    false), the pooled hidden state first goes through LM head to obtain logits
+    before applying the multi-task classification towers.
+
+    OUTPUT
+    ======
+
+    The output of each request is a tensor of shape (num_tasks, max_num_labels),
+    representing the probabilities/scores of each label of each task. We allow
+    tasks to have different number of labels, in which case, the output tensor is
+    padded to the task with max number of labels.
+
+    E.g., for the above example, an output would be
+
+        [[ 0.7, 0.3, -inf ]     task_1 scores (with padding)
+         [ 0.3, 0.6, 0.1  ]]    task_2 scores
+
+    EXAMPLE
+    =======
+
+    To pool the last token's hidden state into a two-task multi-layer
+    classification tower with softmax, specify the following engine args:
+
+    >>> from vllm import LLM
+    ... from vllm.config.pooler import PoolerConfig
+    ... llm = LLM(
+    ...     model="Qwen/Qwen3-0.6B",
+    ...     convert="classify",
+    ...     runner="pooling",
+    ...     pooler_config=PoolerConfig(pooling_type="LAST"),
+    ...     load_format="dummy",
+    ...     hf_overrides={
+    ...         "multi_task_classification_config": {
+    ...             "task_1": {
+    ...                 "out_dims": [64, 64, 2],
+    ...             },
+    ...             "task_2": {
+    ...                 "out_dims": [16, 3],
+    ...             },
+    ...         }
+    ...     },
+    ... )
+    ... llm.encode(
+    ...     "the ultimate question of life the universe and everything is 42",
+    ...     pooling_task="classify",
+    ... )
+
+    The `multi_task_classification_config` config can also (and preferrably) be
+    specified in the model's HF config.
+
+    In above example, two classification tasks were setup, each can potentially
+    have different MLP layers and dimensions.
+
+                 task_1
+
+         ┌───────────────────┐
+         │       softmax     │
+         └─────────▲─────────┘
+                   │                           task_2
+                   │
+         ┌─────────┴─────────┐          ┌───────────────────┐
+         │ 64 x 2 (labels)   │          │       softmax     │
+         └─────────▲─────────┘          └──────────▲────────┘
+                   │                               │
+                   │                               │
+         ┌─────────┴─────────┐          ┌──────────┴────────┐
+         │      64 x 64      │          │ 16 x 3 (labels)   │
+         └─────────▲─────────┘          └──────────▲────────┘
+                   │                               │
+                   │                               │
+         ┌─────────┴─────────┐          ┌──────────┴────────┐
+         │   in_size x 64    │          │    in_size x 16   │
+         └───────────────────┘          └───────────────────┘
+                   ▲                               ▲
+                   │                               │
+                   └───────────────┬───────────────┘
+                                   │
+                         pooled hidden states (hidden_size)
+                         or LM head logits (vocab_size)
+
+
+    This corresponds to the following model arch:
+
+        (score): Tasks(
+          (task_1): Sequential(
+            (0): ReplicatedLinear(in_features=2048, output_features=64, bias=False)
+            (1): ReplicatedLinear(in_features=64, output_features=64, bias=False)
+            (2): ReplicatedLinear(in_features=64, output_features=2, bias=False)
+            (3): PoolerClassify()
+          )
+          (task_2): Sequential(
+            (0): ReplicatedLinear(in_features=2048, output_features=16, bias=False)
+            (1): ReplicatedLinear(in_features=16, output_features=3, bias=False)
+            (2): PoolerClassify()
+          )
+        )
+
+
+    The corresponding weights hierarchy:
+
+        score.task_1.0.weight...................torch.Size([64, 2048])
+        score.task_1.1.weight...................torch.Size([64, 64])
+        score.task_1.2.weight...................torch.Size([2, 64])
+        score.task_2.0.weight...................torch.Size([16, 2048])
+        score.task_2.1.weight...................torch.Size([3, 16])
+    """
+
+    def __init__(
+        self,
+        multi_task_classification_config,
+        model_config,
+        quant_config,
+        compute_logits=None,
+        head_dtype=torch.dtype,
+        prefix: str = "",
+    ):
+        self.compute_logits = compute_logits
+
+        class _Lambda(nn.Module):
+            def __init__(self, func):
+                super().__init__()
+                self.func = func
+
+            def forward(self, x):
+                return self.func(x)
+
+        def create_classification_head(task_config) -> nn.Module:
+            from vllm.model_executor.layers.linear import ReplicatedLinear
+
+            from .utils import maybe_prefix
+
+            apply_to_logits = task_config.get("apply_to_logits", False)
+            in_dim = (
+                model_config.get_vocab_size()
+                if apply_to_logits
+                else model_config.get_hidden_size()
+            )
+            layers = []
+            for i, out_dim in enumerate(task_config["out_dims"]):
+                layers.append(
+                    ReplicatedLinear(
+                        in_dim,
+                        out_dim,
+                        bias=False,
+                        params_dtype=model_config.head_dtype,
+                        quant_config=quant_config,
+                        return_bias=False,
+                        prefix=maybe_prefix(prefix, f"score_{i}"),
+                    ),
+                )
+                in_dim = out_dim
+
+            if apply_to_logits:
+                layers = [_Lambda(compute_logits), *layers]
+
+            from vllm.model_executor.layers.pooler import PoolerClassify
+
+            layers.append(PoolerClassify(static_num_labels=False))
+            layers.append(_Lambda(lambda inp: inp.to(head_dtype)))
+            return nn.Sequential(*layers)
+
+        tasks = {
+            task_name: create_classification_head(task_config)
+            for task_name, task_config in multi_task_classification_config.items()
+        }
+
+        max_num_labels = max(
+            c["out_dims"][-1] for c in multi_task_classification_config.values()
+        )
+
+        self.task_pads = {
+            task: max_num_labels - config["out_dims"][-1]
+            for task, config in multi_task_classification_config.items()
+        }
+
+        super().__init__(tasks)
+
+    def forward(self, hidden_state):
+        res = {
+            k: nn.functional.pad(
+                v(hidden_state),
+                # pad last dimension (labels) to max_num_labels
+                (0, self.task_pads[k]),
+                value=-torch.inf,  # -inf to signify padded positions
+            )
+            for k, v in self.items()
+        }
+
+        # for both BxL and L shaped tensors, stack along the L dimension
+        # B: batch dimension, L: label dimension
+        return torch.stack(tuple(res.values()), dim=-2)
