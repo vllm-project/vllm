@@ -57,5 +57,67 @@
             "max-num-seqs": 512,
             "async-scheduling": ""
         }
+    },
+    {
+        "test_name": "throughput_deepseek_r1",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "deepseek-ai/DeepSeek-R1",
+            "tensor_parallel_size": 8,
+            "load_format": "dummy",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "dataset_name": "sharegpt",
+            "num_prompts": 1000,
+            "backend": "vllm",
+            "max-model-len": 2048,
+            "max-num-seqs": 384,
+            "async-scheduling": ""
+        }
+    },
+    {
+        "test_name": "throughput_llama4_maverick_17b128e_instruct_fp8",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "tensor_parallel_size": 8,
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "dataset_name": "sharegpt",
+            "num_prompts": 1000,
+            "backend": "vllm",
+            "max-model-len": 2048,
+            "max-num-seqs": 512,
+            "async-scheduling": "",
+            "enable_expert_parallel": ""
+        }
+    },
+    {
+        "test_name": "throughput_qwen3_8b",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "Qwen/Qwen-3-8B",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "dataset_name": "sharegpt",
+            "num_prompts": 1000,
+            "max-num-seqs": 512,
+            "backend": "vllm",
+            "async-scheduling": ""
+        }
     }
 ]
