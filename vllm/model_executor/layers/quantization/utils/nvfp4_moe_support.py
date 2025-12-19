@@ -29,24 +29,8 @@ class NvFp4Support:
     use_marlin: bool
 
 
-def detect_nvfp4_moe_support(
-    class_name: str = "", use_marlin: bool = False
-) -> NvFp4Support:
+def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
     """Detect platform support for NV-FP4 fused-MoE path"""
-
-    # Force Marlin if requested in the case of NVFp4A16
-    if use_marlin:
-        if is_fp4_marlin_supported():
-            _logger.info_once("Using Marlin FP4 MoE kernel as requested.")
-            return NvFp4Support(
-                cutlass_supported=False,
-                allow_flashinfer=False,
-                use_marlin=True,
-            )
-        else:
-            raise ValueError(
-                "Marlin FP4 MoE kernel requested but not supported on current platform."
-            )
 
     cutlass_supported = cutlass_fp4_supported()
 
@@ -65,7 +49,7 @@ def detect_nvfp4_moe_support(
                 "FlashInfer kernels unavailable for %s on current platform.",
                 class_name or "NVFP4 path",
             )
-
+    use_marlin = False
     if not cutlass_supported:
         if is_fp4_marlin_supported():
             use_marlin = True
