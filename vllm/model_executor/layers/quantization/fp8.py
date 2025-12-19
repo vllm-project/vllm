@@ -1079,6 +1079,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 MoEPrepareAndFinalizeNoEP,
             )
 
+            config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
+            self.moe_quant_config = config
             self.kernel = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
                 TritonOrDeepGemmExperts(
