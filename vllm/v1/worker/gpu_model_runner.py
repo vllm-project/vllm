@@ -3443,6 +3443,9 @@ class GPUModelRunner(
         if not self.num_spec_tokens:
             return None
         req_ids = self._draft_token_req_ids
+        if req_ids is None:
+            req_ids = self.input_batch.req_ids
+            return DraftTokenIds(req_ids, [[] for _ in req_ids])
         assert req_ids is not None
         draft_token_ids = self._get_draft_token_ids_cpu(len(req_ids))
         if draft_token_ids is None:
