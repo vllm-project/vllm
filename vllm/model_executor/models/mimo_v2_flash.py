@@ -433,8 +433,7 @@ class MiMoV2Model(nn.Module):
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
         self.num_redundant_experts = eplb_config.num_redundant_experts
-        v_scale = getattr(config, "attention_value_scale", None)
-        self.v_scale = v_scale
+        self.v_scale = getattr(config, "attention_value_scale", None)
 
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
