@@ -27,6 +27,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -322,7 +326,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
-            result = fused_experts(
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonExperts(self.moe_quant_config),
+                shared_experts=None,
+            )
+            
+            result = self.kernel(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -330,7 +340,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_ids=topk_ids,
                 inplace=True,
                 activation=layer.activation,
-                quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
