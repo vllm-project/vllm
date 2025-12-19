@@ -232,18 +232,17 @@ __global__ void fusedQKNormRopeKernel(
     int const embed_dim = rotary_dim / 2;
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
-
-    if constexpr (interleave) {
-      // Perform interleaving. Use pre-computed cos/sin values.
+    int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
+    if (laneId < rotary_lanes) {
+      if constexpr (interleave) {
+        // Perform interleaving. Use pre-computed cos/sin values.
 #pragma unroll
-      for (int i = 0; i < numElemsPerThread / 2; ++i) {
-        int const idx0 = 2 * i;
-        int const idx1 = 2 * i + 1;
-        // Global dimension index in the head
-        int const dim_idx = laneId * numElemsPerThread + idx0;
+        for (int i = 0; i < numElemsPerThread / 2; ++i) {
+          int const idx0 = 2 * i;
+          int const idx1 = 2 * i + 1;
+          // Global dimension index in the head
+          int const dim_idx = laneId * numElemsPerThread + idx0;
 
-        // Only apply RoPE to dimensions < rotary_dim
-        if (dim_idx < rotary_dim) {
           float const val0 = elements[idx0];
           float const val1 = elements[idx1];
 
@@ -256,34 +255,32 @@ __global__ void fusedQKNormRopeKernel(
           elements[idx0] = val0 * cos_val - val1 * sin_val;
           elements[idx1] = val0 * sin_val + val1 * cos_val;
         }
-      }
-    } else {
-      // Before data exchange with in warp, we need to sync.
-      __syncwarp();
-      int pairOffset = (rotary_dim / 2) / numElemsPerThread;
-      // Get the data from the other half of the warp. Use pre-computed cos/sin
-      // values.
+      } else {
+        // Before data exchange with in warp, we need to sync.
+        __syncwarp();
+        int pairOffset = (rotary_dim / 2) / numElemsPerThread;
+        // Get the data from the other half of the warp. Use pre-computed
+        // cos/sin values.
 #pragma unroll
-      for (int i = 0; i < numElemsPerThread; i++) {
-        elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+        for (int i = 0; i < numElemsPerThread; i++) {
+          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
 
-        if (laneId < pairOffset) {
-          elements2[i] = -elements2[i];
-        }
-        int dim_idx = laneId * numElemsPerThread + i;
-        if (dim_idx >= rotary_dim) continue;
-        dim_idx = (dim_idx * 2) % rotary_dim;
-        int half_dim = dim_idx / 2;
-        float cos_val = CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
-        float sin_val = CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
-        if (dim_idx < rotary_dim) {
+          if (laneId < pairOffset) {
+            elements2[i] = -elements2[i];
+          }
+          int dim_idx = laneId * numElemsPerThread + i;
+
+          dim_idx = (dim_idx * 2) % rotary_dim;
+          int half_dim = dim_idx / 2;
+          float cos_val = CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
+          float sin_val = CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
+
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
+        // __shfl_xor_sync does not provide memfence. Need to sync again.
+        __syncwarp();
       }
-      // __shfl_xor_sync does not provide memfence. Need to sync again.
-      __syncwarp();
     }
-
     // Store.
     {
       vec_T vec;
