@@ -35,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -98,7 +97,6 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
@@ -1263,24 +1261,51 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.activation == "silu", (
                 f"{layer.activation} not supported for Marlin MoE."
             )
-            result = fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=self.marlin_input_dtype,
-                workspace=layer.workspace,
+            from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+                MarlinExperts,
             )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+
+            config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
+            self.moe_quant_config = config
+            kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                MarlinExperts(self.moe_quant_config),
+            )
+            result = kernel(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+            )
+
+            # fused_marlin_moe(
+            #     x,
+            #     layer.w13_weight,
+            #     layer.w2_weight,
+            #     None,
+            #     None,
+            #     layer.w13_weight_scale,
+            #     layer.w2_weight_scale,
+            #     router_logits,
+            #     topk_weights,
+            #     topk_ids,
+            #     quant_type_id=scalar_types.float8_e4m3fn.id,
+            #     apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            #     global_num_experts=layer.global_num_experts,
+            #     expert_map=layer.expert_map,
+            #     input_dtype=self.marlin_input_dtype,
+            #     workspace=layer.workspace,
+            # )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"

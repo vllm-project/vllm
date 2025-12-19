@@ -539,9 +539,11 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
-            "Supports only mxfp4_w4a16 or int4_w4a16"
-        )
+        assert (
+            quant_config.use_mxfp4_w4a16
+            or quant_config.use_int4_w4a16
+            or quant_config.use_int8_w8a16
+        ), "Supports only mxfp4_w4a16, int4_w4a16 or int8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -552,11 +554,13 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     @property
     def quant_type_id(self) -> int:
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
-        return (
-            scalar_types.uint4b8.id
-            if self.quant_config.use_int4_w4a16
-            else scalar_types.float4_e2m1f.id
-        )
+        if self.quant_config.use_int4_w4a16:
+            return scalar_types.uint4b8.id
+        elif self.quant_config.use_mxfp4_w4a16:
+            return scalar_types.float4_e2m1f.id
+        else:
+            # TODO: actuall check if fp8
+            return scalar_types.float8_e4m3fn.id
 
     def moe_problem_size(
         self,
