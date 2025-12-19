@@ -1,4 +1,6 @@
 name: vllm_ci
+file_to_mark_mapping:
+    vllm/kernels/: ["kernels"] # Testing for kernel/ to start with
 job_dirs:
   - ".buildkite/test_areas"
   - ".buildkite/image_build"

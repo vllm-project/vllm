@@ -97,6 +97,7 @@ follow_imports = "silent"
 
 [tool.pytest.ini_options]
 markers = [
+    # === Infrastructure Marks (existing) ===
     "slow_test",
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
@@ -107,6 +108,58 @@ markers = [
     "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
+
+    # === Core Functional Area Marks ===
+    # Tests can have multiple marks for cross-cutting concerns
+    "attention: tests for attention mechanisms and backends",
+    "kernels: tests for CUDA/compute kernels and low-level operations",
+    "quantization: tests for quantization methods (FP8, INT8, GPTQ, AWQ, etc.)",
+    "compilation: tests for torch.compile integration and full-graph mode",
+    "engine: tests for engine core, scheduling, and execution logic",
+    "model_loading: tests for model loading, weight management, and initialization",
+    "sampling: tests for sampling algorithms and logits processors",
+
+    # === Distributed & Parallelism ===
+    "distributed_comm: tests for distributed communication primitives (NCCL, custom all-reduce, etc.)",
+    "tensor_parallel: tests for tensor parallelism",
+    "pipeline_parallel: tests for pipeline parallelism",
+    "expert_parallel: tests for expert parallelism (MoE)",
+    "data_parallel: tests for data parallelism",
+
+    # === Model & Architecture Types ===
+    "models_language: tests for language models",
+    "models_multimodal: tests for multimodal models (vision, audio, etc.)",
+    "models_moe: tests for Mixture-of-Experts models",
+    "lora: tests for LoRA adapters and PEFT methods",
+
+    # === API & Serving ===
+    "entrypoints: tests for API entrypoints and serving interfaces",
+    "openai_api: tests for OpenAI API compatibility",
+    "offline_inference: tests for offline/batch inference",
+    "pooling: tests for pooling/embedding endpoints",
+
+    # === Advanced Features ===
+    "spec_decode: tests for speculative decoding",
+    "kv_cache: tests for KV cache management and offloading",
+    "tool_calling: tests for tool use and function calling",
+    "reasoning: tests for reasoning models and parsers",
+    "structured_output: tests for structured output (JSON, grammar)",
+    "multimodal: tests for multimodal processing and inputs",
+
+    # === V1 Engine ===
+    "v1: tests for V1 engine implementation",
+    "v1_core: tests for V1 core components",
+    "v1_distributed: tests for V1 distributed execution",
+
+    # === Platform-Specific ===
+    "cuda: tests for CUDA-specific functionality",
+    "rocm: tests for ROCm/AMD-specific functionality",
+    "tpu: tests for TPU-specific functionality",
+
+    # === Test Categories ===
+    "correctness: correctness validation tests",
+    "benchmark: performance benchmark tests",
+    "e2e: end-to-end integration tests",
 ]
 
 [tool.ty.src]
