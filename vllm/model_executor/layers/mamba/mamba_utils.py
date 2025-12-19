@@ -267,7 +267,7 @@ class MambaFullCopySpec(MambaCopySpec):
 class MambaConvCopySpec(MambaCopySpec):
     @staticmethod
     def block_idx_offset_func(accept_token_bias: int) -> int:
-        return accept_token_bias
+        return 0
     
     @staticmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
