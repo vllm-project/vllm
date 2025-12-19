@@ -119,10 +119,6 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 ## DeepSeekV3 ##
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason=("DEEP-GEMM is an NVIDIA backend and is not supported on ROCm."),
-)
 def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
     can_initialize("deepseek-ai/DeepSeek-V3.1", hf_overrides=HF_OVERRIDE_TEXT)
