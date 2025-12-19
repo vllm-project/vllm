@@ -916,22 +916,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert ssm_state_indices_decode is not None
             assert non_spec_query_start_loc is not None
             # Prepare the initial state for decoding
-            initial_state_decode = ssm_state.new_zeros(
-                (state_indices_decode.shape[0], *ssm_state.shape[1:])
+            valid_src_decode_slots = ssm_state_indices_decode >= 0
+            ssm_state_indices_decode_clamped = ssm_state_indices_decode.clamp(min=0)
+            initial_state_decode = ssm_state.index_select(
+                0, ssm_state_indices_decode_clamped.to(torch.long)
             )
-            valid_decode_slots = ssm_state_indices_decode >= 0
-            valid_decode_positions = torch.nonzero(
-                valid_decode_slots, as_tuple=False
-            ).squeeze(-1)
-            if valid_decode_positions.numel() > 0:
-                src_slots = ssm_state_indices_decode.index_select(
-                    0, valid_decode_positions
-                ).to(device=ssm_state.device, dtype=torch.long)
-                initial_state_decode.index_copy_(
-                    0,
-                    valid_decode_positions,
-                    ssm_state.index_select(0, src_slots),
-                )
+            initial_state_decode[~valid_src_decode_slots] = 0
+
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
                     q=query_non_spec,
@@ -948,20 +939,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
             # Store the final recurrent state
             valid_decode_slots = state_indices_decode >= 0
-            valid_decode_positions = torch.nonzero(
-                valid_decode_slots, as_tuple=False
-            ).squeeze(-1)
-            if valid_decode_positions.numel() > 0:
-                dest_slots = state_indices_decode.index_select(
-                    0, valid_decode_positions
-                ).to(device=ssm_state.device, dtype=torch.long)
-                ssm_state.index_copy_(
-                    0,
-                    dest_slots,
-                    last_recurrent_state.index_select(0, valid_decode_positions).to(
-                        ssm_state.dtype
-                    ),
-                )
+            dest_slots = state_indices_decode.clamp(min=0).to(
+                device=ssm_state.device, dtype=torch.long
+            )
+            valid_decode_slots_broadcast = valid_decode_slots.view(
+                -1, *([1] * (last_recurrent_state.dim() - 1))
+            )
+            prior_state = ssm_state.index_select(0, dest_slots).to(
+                last_recurrent_state.dtype
+            )
+            last_recurrent_state = torch.where(
+                valid_decode_slots_broadcast, last_recurrent_state, prior_state
+            )
+            ssm_state.index_copy_(
+                0, dest_slots, last_recurrent_state.to(ssm_state.dtype)
+            )
+
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
