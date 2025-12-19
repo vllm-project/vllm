@@ -697,18 +697,6 @@ class NixlConnectorScheduler:
                 local_block_ids=new_block_id_groups[0],
                 kv_transfer_params=req.kv_transfer_params,
             )
-            assert scheduler_output.num_scheduled_tokens is not None
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            is_partial = (
-                req.num_computed_tokens + num_scheduled_tokens
-            ) < req.num_prompt_tokens
-            if not is_partial:
-                # For non-partial prefills, once new req_meta is scheduled, it
-                # can be removed from _reqs_need_save.
-                # For partial prefill case, we will retain the request in
-                # _reqs_need_save until all blocks are scheduled with req_meta.
-                # Therefore, only pop if `not is_partial`.
-                self._reqs_need_save.pop(req_id)
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
@@ -744,6 +732,9 @@ class NixlConnectorScheduler:
         if not params:
             return False, None
 
+        # request is finished, now remove it from self._reqs_need_save
+        self._reqs_need_save.pop(request.request_id, None)
+
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
             # update_state_after_alloc must not have been called (the request
@@ -761,8 +752,6 @@ class NixlConnectorScheduler:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(request.request_id)
-            # Clear _reqs_need_save if a request is aborted as partial prefill.
-            self._reqs_need_save.pop(request.request_id, None)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
