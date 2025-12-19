@@ -1468,7 +1468,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         v,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running FlashAttention prefill context chunk")
+        logger.debug_once("Running FlashAttention prefill context chunk", scope="local")
         assert prefill.chunked_context is not None
         assert fp8_attention is False, (
             "FlashAttention prefill does not support fp8 attention"
@@ -1521,7 +1521,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         v,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running Cudnn prefill context chunk")
+        logger.debug_once("Running Cudnn prefill context chunk", scope="local")
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
@@ -1554,7 +1554,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return_softmax_lse,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running TRT-LLM ragged prefill new tokens")
+        logger.debug_once("Running TRT-LLM ragged prefill new tokens", scope="local")
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
@@ -1600,7 +1600,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         v,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running TRT-LLM ragged prefill context chunk")
+        logger.debug_once("Running TRT-LLM ragged prefill context chunk", scope="local")
         """TRT-LLM ragged attention for context chunks (non-causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
