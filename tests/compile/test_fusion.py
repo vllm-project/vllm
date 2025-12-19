@@ -379,7 +379,7 @@ def test_aiter_fusion_rmsnorm_quant(
         from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormFusionPass
 
         m.setenv("VLLM_ROCM_USE_AITER", "1")
-        rocm_aiter_ops.refresh_env_vars()
+        rocm_aiter_ops.refresh_env_variables()
 
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
