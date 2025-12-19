@@ -1384,7 +1384,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return_softmax_lse,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running FlashAttention prefill new tokens")
+        logger.debug_once("Running FlashAttention prefill new tokens", scope="local")
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
