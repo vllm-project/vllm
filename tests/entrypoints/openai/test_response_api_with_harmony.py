@@ -512,6 +512,9 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
 
     response = await client_with_timeout.responses.create(
         model=model_name,
+        # TODO: Ideally should be able to set max tool calls
+        # to prevent multi-turn, but it is not currently supported
+        # would speed up the test
         input=(
             "What's the first 4 digits after the decimal point of "
             "cube root of `19910212 * 20250910`? "
