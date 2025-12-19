@@ -499,10 +499,7 @@ class CpuPlatform(Platform):
         else:
             raise NotImplementedError("This requires AVX2 or AVX512.")
 
-        try:
-            importlib.import_module(module)
-        except ImportError as e:
-            logger.warning("Failed to import %s: %r", module, e)
+        importlib.import_module(module)
 
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
