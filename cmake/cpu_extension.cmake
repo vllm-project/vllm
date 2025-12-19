@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     set(MACOSX_FOUND TRUE)
 endif()
 
@@ -35,20 +35,14 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     )
 endif()
 
-if(MACOSX_FOUND)
-    list(APPEND CXX_COMPILE_FLAGS
-        "-DVLLM_CPU_EXTENSION")
-else()
-    list(APPEND CXX_COMPILE_FLAGS
-        "-fopenmp"
-        "-DVLLM_CPU_EXTENSION")
-endif()
 
-if (NOT MACOSX_FOUND)
+if(NOT MACOSX_FOUND)
+    list(APPEND CXX_COMPILE_FLAGS "-fopenmp")
+
     execute_process(COMMAND cat /proc/cpuinfo
                     RESULT_VARIABLE CPUINFO_RET
                     OUTPUT_VARIABLE CPUINFO)
-    if (NOT CPUINFO_RET EQUAL 0)
+    if(NOT CPUINFO_RET EQUAL 0)
         message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
     endif()
 endif()
@@ -63,7 +57,7 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
-
+# MacOS-specific
 function(check_sysctl TARGET OUT)
     execute_process(COMMAND sysctl -n "${TARGET}"
                     RESULT_VARIABLE SYSCTL_RET
