@@ -39,10 +39,14 @@ class NgramGPUKernel(nn.Module):
        - torch.compile generates specialized kernels for different shapes
 
     3. Graph Compilation:
-       - Uses fullgraph=True mode for maximum optimization
-       - All operations are tensor-based (no Python loops or conditionals
-            that depend on input values)
-       - The entire forward pass is compiled into a single CUDA graph
+       - Note: fullgraph=True does NOT mean the forward pass runs as a single
+         CUDA Graph. nsys profiling shows ~5 separate Triton kernel launches.
+         torch.compile with fullgraph=True ensures complete Dynamo tracing
+         without fallbacks, but Inductor still generates multiple kernels.
+       - CUDA Graph capture is disabled (cudagraph_mode=NONE) for this module
+         because: (1) the kernel launch overhead is minimal compared to the
+         actual computation, and (2) the n-gram matching workload is simple
+         enough that CUDA Graph capture would be overkill with little benefit.
     """
 
     def __init__(
