@@ -25,7 +25,7 @@ RERANK_MODELS = [
         "nvidia/llama-nemotron-rerank-1b-v2",
         architecture="LlamaBidirectionalForSequenceClassification",
         chat_template_name="nemotron-rerank.jinja",
-        mteb_score=0.34222,
+        mteb_score=0.33994,
     ),
 ]
 

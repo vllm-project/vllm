@@ -195,17 +195,18 @@ class TestGetScorePrompt:
             cross_encoder_tokenizer, full_prompt, engine_prompt
         )
 
-    def test_chat_template_resolution_succeeds(
+    def test_not_using_default_template(
         self,
         llm_reranker_model_config,
         cross_encoder_tokenizer,
         tokenization_kwargs,
         mock_model_no_score_template,
     ):
-        """Test when apply_hf_chat_template succeeds."""
-        template = (
-            'TEMPLATE_USED {{ messages[0]["content"] }} {{ messages[1]["content"] }}'
-        )
+        # FIXME: Models implementing SupportsScoreTemplate must use their custom
+        # template implementation by default to preserve existing functionality.
+        # Attempting to use tokenizer_config.json templates would most likely break
+        # these models, as often they just inherit the template from the original LLM.
+        # CLI --chat-template overrides are still supported.
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -213,7 +214,7 @@ class TestGetScorePrompt:
             ),
             patch(
                 "vllm.entrypoints.score_utils.apply_hf_chat_template",
-                return_value="TEMPLATE_USED test query test doc",
+                return_value="test querytest doc",
             ),
         ):
             full_prompt, engine_prompt = get_score_prompt(
@@ -222,10 +223,9 @@ class TestGetScorePrompt:
                 tokenization_kwargs,
                 "test query",
                 "test doc",
-                score_template=template,  # Providing a template
             )
 
-        assert full_prompt == "TEMPLATE_USED test query test doc"
+        assert full_prompt == "test querytest doc"
         assert "prompt_token_ids" in engine_prompt
         assert_prompt_tokenization_consistent(
             cross_encoder_tokenizer, full_prompt, engine_prompt
