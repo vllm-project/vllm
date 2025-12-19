@@ -31,7 +31,6 @@ class NvFp4Support:
 
 def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
     """Detect platform support for NV-FP4 fused-MoE path"""
-
     cutlass_supported = cutlass_fp4_supported()
 
     allow_flashinfer = cutlass_supported and (
@@ -49,6 +48,7 @@ def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
                 "FlashInfer kernels unavailable for %s on current platform.",
                 class_name or "NVFP4 path",
             )
+
     use_marlin = False
     if not cutlass_supported:
         if is_fp4_marlin_supported():
