@@ -69,6 +69,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Optional[Mapping[str, str]] = None
+    enable_metrics: Optional[dict[str, bool]] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -118,7 +119,7 @@ class EngineCoreOutput(
     trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
-
+    capture_metrics_result: Optional[dict[str, float]] = None
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

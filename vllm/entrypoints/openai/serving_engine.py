@@ -848,6 +848,9 @@ class OpenAIServing:
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
+        if request.enable_metrics is not None:
+            engine_prompt["enable_metrics"] = request.enable_metrics
+
         return conversation, [request_prompt], [engine_prompt]
 
     async def _generate_with_builtin_tools(

@@ -43,6 +43,7 @@ class Request:
         trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
+        enable_metrics: Optional[dict[str, bool]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -121,6 +122,7 @@ class Request:
         if block_hasher is not None:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
+        self.enable_metrics = enable_metrics
 
     @classmethod
     def from_engine_core_request(
@@ -145,6 +147,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            enable_metrics=request.enable_metrics
         )
 
     def append_output_token_ids(

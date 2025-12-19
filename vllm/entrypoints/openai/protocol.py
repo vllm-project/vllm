@@ -648,6 +648,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=("Additional request parameters with string or "
                      "numeric values, used by custom extensions."),
     )
+    enable_metrics: Optional[dict[str, bool]] = Field(
+        default=None,
+        description=("Enable or disable metrics for the request."),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -1886,6 +1890,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
+    capture_metrics_result: Optional[dict[str, float]] = None
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -1914,6 +1919,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: Optional[list[int]] = None
+    capture_metrics_result: Optional[dict[str, float]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

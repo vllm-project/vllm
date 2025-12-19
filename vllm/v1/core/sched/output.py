@@ -45,6 +45,7 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
     prompt_embeds: Optional[torch.Tensor] = None
+    enable_metrics: Optional[dict[str, bool]] = None
 
     @classmethod
     def from_request(
@@ -62,6 +63,7 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            enable_metrics=request.enable_metrics,
         )
 
     def __repr__(self) -> str:
