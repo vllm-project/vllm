@@ -73,6 +73,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         lora_request,
         trace_headers,
         priority,
+        data_parallel_rank,
     ):
         return dict(engine_prompt), {}
 
