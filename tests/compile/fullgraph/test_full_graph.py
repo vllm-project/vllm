@@ -117,11 +117,28 @@ def test_full_graph(
         for model_info in models_list(all=False)
     ]
     + [
-        # RMSNorm + quant fusion, only 8-bit quant models
+        # RMSNorm + custom quant fusion, only 8-bit quant models
         (
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                custom_ops=["+rms_norm"],
+                custom_ops=[
+                    "+rms_norm",
+                    "+quant_fp8",
+                ],  # doesn't fail CI with duplication pattern
+                pass_config=PassConfig(
+                    fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+                ),
+            ),
+            *model_info,
+        )
+        for model_info in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+    ]
+    + [
+        # RMSNorm + native quant fusion, only 8-bit quant models
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                custom_ops=["+rms_norm"],  # fails CI with duplication pattern error
                 pass_config=PassConfig(
                     fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
                 ),
