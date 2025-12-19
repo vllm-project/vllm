@@ -253,18 +253,31 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_tool_call_ids(request)
                 validate_request_params(request)
 
-            if (
-                request.tool_choice == "auto"
-                and not (self.enable_auto_tools and tool_parser is not None)
+            # Check if tool parsing is unavailable (common condition)
+            tool_parsing_unavailable = (
+                tool_parser is None
                 and not isinstance(tokenizer, MistralTokenizer)
                 and not self.use_harmony
+            )
+
+            # Validate tool_choice when tool parsing is required but unavailable
+            if tool_parsing_unavailable and request.tool_choice not in (
+                None,
+                "none",
             ):
-                # for hf tokenizers, "auto" tools requires
-                # --enable-auto-tool-choice and --tool-call-parser
-                return self.create_error_response(
-                    '"auto" tool choice requires '
-                    "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
+                if request.tool_choice == "auto" and not self.enable_auto_tools:
+                    # for hf tokenizers, "auto" tools requires
+                    # --enable-auto-tool-choice and --tool-call-parser
+                    return self.create_error_response(
+                        '"auto" tool choice requires '
+                        "--enable-auto-tool-choice and --tool-call-parser to be set"
+                    )
+                elif request.tool_choice != "auto":
+                    # "required" or named tool requires tool parser
+                    return self.create_error_response(
+                        f'tool_choice="{request.tool_choice}" requires '
+                        "--tool-call-parser to be set"
+                    )
 
             if request.tools is None or (
                 request.tool_choice == "none"
@@ -299,7 +312,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 # For GPT-OSS.
-                conversation, engine_prompts = self._make_request_with_harmony(request)
+                should_include_tools = tool_dicts is not None
+                conversation, engine_prompts = self._make_request_with_harmony(
+                    request, should_include_tools
+                )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -381,6 +397,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(
@@ -1832,6 +1849,7 @@ class OpenAIServingChat(OpenAIServing):
     def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,
+        should_include_tools: bool = True,
     ):
         messages: list[OpenAIMessage] = []
 
@@ -1849,12 +1867,14 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
             python_description=None,
-            with_custom_tools=request.tools is not None,
+            with_custom_tools=should_include_tools,
         )
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message(tools=request.tools)
+        dev_msg = get_developer_message(
+            tools=request.tools if should_include_tools else None
+        )
         messages.append(dev_msg)
 
         # Add user message.
