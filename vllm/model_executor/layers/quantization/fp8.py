@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
+from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -115,9 +116,8 @@ class Fp8MoeBackend(Enum):
     FLASHINFER_TRTLLM = 1
     FLASHINFER_CUTLASS = 2
     DEEPGEMM = 3
-    CUTLASS_BLOCK_SCALED_GROUPED_GEMM = 4
-    MARLIN = 5
-    TRITON = 6
+    MARLIN = 4
+    TRITON = 5
 
 
 def get_fp8_moe_backend(
@@ -187,17 +187,6 @@ def get_fp8_moe_backend(
         elif is_deep_gemm_supported():
             logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
-
-    # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
-    if (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-        and block_quant
-    ):
-        logger.info_once(
-            "Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE", scope="local"
-        )
-        return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
     logger.info_once("Using Triton backend for FP8 MoE")
@@ -361,6 +350,26 @@ class Fp8Config(QuantizationConfig):
         return None
 
 
+class CopyNumelCounter(TorchDispatchMode):
+    """
+    Tracks total number of elements modified with `copy_`. Useful for keeping
+    track of weight loading where underlying weights can be arbitrarily
+    transformed (such as with `narrow`) before calling copy.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.copied_numel = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        out = func(*args, **kwargs)
+        if func == torch.ops.aten.copy_.default:
+            self.copied_numel += args[0].numel()
+        return out
+
+
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -467,13 +476,15 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
 
             def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-                # load the current weight chunk
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-
                 # track how many elements we have updated
                 if not hasattr(layer, "_loaded_numel"):
                     layer._loaded_numel = 0
-                layer._loaded_numel += loaded_weight.numel()
+
+                # load the current weight chunk
+                copy_numel_counter = CopyNumelCounter()
+                with copy_numel_counter:
+                    res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+                layer._loaded_numel += copy_numel_counter.copied_numel
 
                 # if we have loaded all of the elements, call
                 # process_weights_after_loading
@@ -1318,25 +1329,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
-        elif self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM:
-            # TODO(rob): convert this to MK.
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            result = fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-                allow_deep_gemm=False,
-                allow_cutlass_block_scaled_grouped_gemm=True,
-            )
         else:
             result = self.kernel(
                 x,
@@ -1401,13 +1393,15 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         new_extra_weight_attrs = extra_weight_attrs
 
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # load the current weight chunk
-            res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-
             # add a counter to track how many elements we have updated
             if not hasattr(layer, "_loaded_numel"):
                 layer._loaded_numel = 0
-            layer._loaded_numel += loaded_weight.numel()
+
+            # load the current weight chunk
+            copy_numel_counter = CopyNumelCounter()
+            with copy_numel_counter:
+                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+            layer._loaded_numel += copy_numel_counter.copied_numel
 
             # if we have loaded all of the elements, call
             # process_weights_after_loading
