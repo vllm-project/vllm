@@ -177,7 +177,7 @@ class MistralToolParser(ToolParser):
         # < v11: content[BOT] [{tool_call1},{tool_call2}]
         else:
             if len(raw_tool_calls) != 1:
-                raise ValueError("Only one BOT token should have been outputted.")
+                raise ValueError(f"Only one BOT token should have been outputted, but got {model_output}")
             stringified_tool_calls = raw_tool_calls[0].strip()
             try:
                 tool_calls = json.loads(stringified_tool_calls)
@@ -191,8 +191,8 @@ class MistralToolParser(ToolParser):
                         stringified_tool_calls
                     )[0]
                     tool_calls = json.loads(raw_tool_call)
-                except (IndexError, json.JSONDecodeError):
-                    logger.exception("Error in extracting tool call from response.")
+                except (IndexError, json.JSONDecodeError) as e:
+                    logger.exception("Error in extracting tool call from response: {e}")
                     # If raw decoding and decoding post regex rule fails, then just
                     # return content.
                     return ExtractedToolCallInformation(
