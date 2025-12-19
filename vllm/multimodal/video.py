@@ -436,6 +436,8 @@ class Molmo2VideoBackend(VideoLoader):
         with av.open(BytesIO(data)) as container:
             video_stream = container.streams.video[0]
             fps = video_stream.average_rate or video_stream.guessed_rate
+            if not fps or fps <= 0:
+                raise ValueError("Could not determine a valid FPS for the video.")
 
             it = container.decode(video=0)
             frames = list(it)
@@ -498,8 +500,8 @@ class Molmo2VideoBackend(VideoLoader):
                 "duration": duration,
                 "video_backend": "pyav",
                 "frames_indices": timestamps * fps,
-                "height": frames.shape[1],
-                "width": frames.shape[2],
+                "height": video_stream.height,
+                "width": video_stream.width,
                 # extra field used to control hf processor's video
                 # sampling behavior
                 "do_sample_frames": False,

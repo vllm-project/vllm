@@ -2393,7 +2393,7 @@ class Molmo2ForConditionalGeneration(
     def _parse_and_validate_video_input(
         self,
         **kwargs: object,
-    ) -> Molmo2ImageInputs | None:
+    ) -> Molmo2VideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         if pixel_values_videos is None:
             return None
@@ -2601,6 +2601,9 @@ def _get_weights_with_merged_embedding(
             yield (name, weight)
     # this is compatible with most of quantization,
     # because they won't quantize embed_tokens
+    if "embedding" not in embedding_weights or "new_embedding" not in embedding_weights:
+        raise ValueError("Checkpoint is missing 'wte.embedding' or 'wte.new_embedding' weights required for Molmo2.")
+
     embedding_weights = torch.cat(
         [embedding_weights["embedding"], embedding_weights["new_embedding"]],
         dim=0,

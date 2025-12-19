@@ -1185,6 +1185,8 @@ def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
         placeholder = "<|image|>"
     elif modality == "video":
         placeholder = "<|video|>"
+    else:
+        raise ValueError(f"Unsupported modality for molmo2: {modality}")
 
     prompts = [
         f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
