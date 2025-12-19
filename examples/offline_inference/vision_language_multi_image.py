@@ -1394,6 +1394,7 @@ model_example_map = {
     "llava-next": load_llava_next,
     "llava-onevision": load_llava_onevision,
     "mistral3": load_mistral3,
+    "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
@@ -1412,7 +1413,6 @@ model_example_map = {
     "tarsier2": load_tarsier2,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,
-    "molmo2": load_molmo2,
 }
 
 
