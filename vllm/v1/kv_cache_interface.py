@@ -295,6 +295,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     kv_cache_specs: dict[str, KVCacheSpec]
 
+    def __hash__(self) -> int:
+        items = tuple(sorted(self.kv_cache_specs.items()))
+        return hash((type(self), self.block_size, items))
+
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
