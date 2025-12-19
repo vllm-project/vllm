@@ -2919,6 +2919,42 @@ def cpu_gemm_wna16(
     return output
 
 
+def cpu_prepack_moe_weight(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight(weight, output, isa)
+    return output
+
+
+def cpu_fused_moe(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe(
+        output,
+        input,
+        w13,
+        w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act,
+        isa,
+    )
+    return output
+
+
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
 
     @register_fake("_qutlass_C::matmul_mxf4_bf16_tn")
