@@ -523,6 +523,7 @@ class VllmBackend:
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        is_encoder: bool = False,
     ):
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -533,7 +534,7 @@ class VllmBackend:
         self.prefix = prefix or model_tag
 
         # Mark compilation for encoder.
-        self.is_encoder = model_is_encoder
+        self.is_encoder = is_encoder or model_is_encoder
 
         # Passes to run on the graph post-grad.
         self.pass_manager = resolve_obj_by_qualname(
@@ -808,7 +809,7 @@ class VllmBackend:
             or not self.compilation_config.cudagraph_copy_inputs
         ):
             return VllmSerializableFunction(
-                graph, example_inputs, self.prefix, self.split_gm
+                graph, example_inputs, self.prefix, self.split_gm, self.is_encoder
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -846,5 +847,5 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return VllmSerializableFunction(
-            graph, example_inputs, self.prefix, copy_and_call
+            graph, example_inputs, self.prefix, copy_and_call, self.is_encoder
         )
