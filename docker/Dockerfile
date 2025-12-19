@@ -597,36 +597,25 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Install generic test dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-uv pip install --system \
-    modelscope \
-    tensorizer \
-    'gpt-oss[eval]==0.0.5' \
-    'git+https://github.com/TIGER-AI-Lab/Mantis.git' \
-    --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5' \
-    --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-
-# Install KV connector dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-uv pip install --system -r requirements/kv_connectors.txt
-
-# Install quantization test dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-uv pip install --system \
-    torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129 \
-    conch-triton-kernels
-
-# Install lm-eval branch for streaming correctness tests
-RUN --mount=type=cache,target=/root/.cache/uv \
-uv pip install --system \
-    'git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api'
-
-# Install OpenTelemetry dependencies for tracing tests
-RUN --mount=type=cache,target=/root/.cache/uv \
-uv pip install --system \
-    'opentelemetry-sdk>=1.26.0' \
-    'opentelemetry-api>=1.26.0' \
-    'opentelemetry-exporter-otlp>=1.26.0' \
-    'opentelemetry-semantic-conventions-ai>=0.4.1'
+  uv pip install --system \
+  modelscope \
+  tensorizer \
+  'gpt-oss[eval]==0.0.5' \
+  'git+https://github.com/TIGER-AI-Lab/Mantis.git' \
+  --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5' \
+  --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2' \
+  # KV connector dependencies
+  -r requirements/kv_connectors.txt \
+  # Quantization test dependencies
+  torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129 \
+  conch-triton-kernels \
+  # Streaming correctness test dependencies from lm-eval branch
+  'git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api' \
+  # OpenTelemetry dependencies for tracing tests
+  'opentelemetry-sdk>=1.26.0' \
+  'opentelemetry-api>=1.26.0' \
+  'opentelemetry-exporter-otlp>=1.26.0' \
+  'opentelemetry-semantic-conventions-ai>=0.4.1'
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
