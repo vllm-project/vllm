@@ -80,12 +80,12 @@ def do_expand_kernel(
 
     # Identify A and B block pointers
     offset_k = tl.arange(0, BLOCK_K)
-    a_ptr = (
+    a_ptrs = (
         cur_input_ptr
         + ram[:, None] * input_d1_stride
         + offset_k[None, :] * input_d2_stride
     )
-    b_ptr = (
+    b_ptrs = (
         cur_lora_ptr
         + cur_lora_d0_stride * lora_index
         + offset_k[:, None] * cur_lora_d2_stride
@@ -96,20 +96,21 @@ def do_expand_kernel(
     SPLIT_K = 1
 
     accumulator = mm_k(
-        a_ptr,
-        b_ptr,
-        input_d2_stride,
-        cur_lora_d2_stride,
-        tl.full((BLOCK_M,), 1, tl.int1),
-        K,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        EVEN_K,
-        SPLIT_K,
-        CAST_TYPE,
-        cur_lora_ptr.dtype.element_ty,
-        USE_GDC,
+        a_ptrs=a_ptrs,
+        b_ptrs=b_ptrs,
+        ak_stride=input_d2_stride,
+        bk_stride=cur_lora_d2_stride,
+        token_mask=tl.full((BLOCK_M,), 1, tl.int1),  # no masking needed
+        K=K,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        EVEN_K=EVEN_K,
+        SPLIT_K=SPLIT_K,
+        CAST_TYPE=CAST_TYPE,
+        b_dtype=cur_lora_ptr.dtype.element_ty,
+        USE_GDC=USE_GDC,
+        IS_PRIMARY=True,  # IS_PRIMARY is always True in expand kernel
         base_k=0,
     )
 
@@ -122,7 +123,7 @@ def do_expand_kernel(
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N + cur_slice_start
     offset_cm = tl.arange(0, BLOCK_M)
-    c_ptr = (
+    c_ptrs = (
         out_ptr
         + ram[:, None] * output_d0_stride
         + offset_cn[None, :] * output_d1_stride
@@ -130,9 +131,9 @@ def do_expand_kernel(
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < (cur_slice_start + N))
 
     if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
+        tiled_out = tl.load(c_ptrs, mask=c_mask)
         tiled_c += tiled_out
-    tl.store(c_ptr, tiled_c, mask=c_mask)
+    tl.store(c_ptrs, tiled_c, mask=c_mask)
 
 
 @triton.jit
@@ -191,10 +192,10 @@ def do_shrink_kernel(
 
     # Identify A and B block pointers
     offset_k = pid_sk * BLOCK_K + tl.arange(0, BLOCK_K)
-    a_ptr = (
+    a_ptrs = (
         input_ptr + ram[:, None] * input_d0_stride + offset_k[None, :] * input_d1_stride
     )
-    b_ptr = (
+    b_ptrs = (
         cur_lora_ptr
         + lora_d0_stride * lora_index
         + rbn[None, :] * lora_d1_stride
@@ -203,30 +204,29 @@ def do_shrink_kernel(
 
     # Compute partial/complete block matrix product.
     accumulator = mm_k(
-        a_ptr,
-        b_ptr,
-        input_d1_stride,
-        lora_d2_stride,
-        tl.full((BLOCK_M,), 1, tl.int1),
-        K,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        EVEN_K,
-        SPLIT_K,
-        False,
-        cur_lora_ptr.dtype.element_ty,
-        False,  # USE_GDC is always False in shrink kernel
+        a_ptrs=a_ptrs,
+        b_ptrs=b_ptrs,
+        ak_stride=input_d1_stride,
+        bk_stride=lora_d2_stride,
+        token_mask=tl.full((BLOCK_M,), 1, tl.int1),  # no masking needed
+        K=K,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        EVEN_K=EVEN_K,
+        SPLIT_K=SPLIT_K,
+        CAST_TYPE=False,
+        b_dtype=cur_lora_ptr.dtype.element_ty,
+        USE_GDC=USE_GDC,
+        IS_PRIMARY=False,  # IS_PRIMARY is always False in shrink kernel
         base_k=pid_sk * BLOCK_K,
     )
     # GDC launch dependents hints the runtime system to launch dependent kernels.
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
     cur_out_ptr = out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * output_d0_stride
-    c_ptr = (
+    c_ptrs = (
         cur_out_ptr
         + ram[:, None] * output_d1_stride
         + offset_cn[None, :] * output_d2_stride
@@ -236,6 +236,6 @@ def do_shrink_kernel(
 
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:
-        tl.store(c_ptr, accumulator, mask=c_mask)
+        tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
-        tl.atomic_add(c_ptr, accumulator, mask=c_mask, sem="relaxed")
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")

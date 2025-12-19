@@ -157,31 +157,24 @@ def _fused_moe_lora_kernel(
         + offs_bn[None, :] * stride_bn
     )
 
-    if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
-        tl.extra.cuda.gdc_launch_dependents()
-
-    # accumulator
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    # GDC wait waits for ALL programs in the prior kernel to complete
-    # before continuing.
-    if USE_GDC and not IS_PRIMARY:
-        tl.extra.cuda.gdc_wait()
-
-    for k in range(0, grid_k):
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
-        # pre-fetch lora weight
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-            other=0.0,
-        )
-        accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+    accumulator = mm_k(
+        a_ptrs=a_ptrs,
+        b_ptrs=b_ptrs,
+        ak_stride=stride_ak,
+        bk_stride=stride_bk,
+        token_mask=token_mask,
+        K=K,
+        BLOCK_M=BLOCK_SIZE_M,
+        BLOCK_N=BLOCK_SIZE_N,
+        BLOCK_K=BLOCK_SIZE_K,
+        EVEN_K=EVEN_K,
+        SPLIT_K=SPLIT_K,
+        CAST_TYPE=None,
+        b_dtype=b_ptr.dtype.element_ty,
+        USE_GDC=USE_GDC,
+        IS_PRIMARY=IS_PRIMARY,
+        base_k=pid_sk * BLOCK_SIZE_K,
+    )
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
