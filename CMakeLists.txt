@@ -93,6 +93,17 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+#
+# Forward the non-CUDA device extensions to external CMake scripts.
+#
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    endif()
+
+    return()
+endif()
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -103,19 +114,6 @@ elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
   set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
 else()
   set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
-endif()
-
-#
-# Forward the non-CUDA device extensions to external CMake scripts.
-#
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
-    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-    else()
-        return()
-    endif()
-    return()
 endif()
 
 #
