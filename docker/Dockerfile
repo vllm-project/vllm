@@ -619,26 +619,28 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-# lmcache requires explicit specifying CUDA_HOME
-ARG torch_cuda_arch_list
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
     CUDA_HOME=/usr/local/cuda; \
+    # lmcache requires explicit specifying CUDA_HOME
+    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
+                libcublas-dev-${CUDA_VERSION_DASH} \
+                libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13 || true; \
+            uv pip install --system nixl-cu13; \
         fi; \
-    apt update -y && \
-        apt install -y --no-install-recommends \
-        libcusparse-dev-${CUDA_VERSION_DASH} \
-        libcublas-dev-${CUDA_VERSION_DASH} \
-        libcusolver-dev-${CUDA_VERSION_DASH} && \
-        rm -rf /var/lib/apt/lists/* && \
-    ls /usr/local/cuda/include/ && \
-    uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation || true; \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+            # if the above fails, install from source
+            apt-get update -y && \
+            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            apt-get purge -y ${BUILD_PKGS} && \
+            # clean up -dev packages, keep runtime libraries
+            rm -rf /var/lib/apt/lists/* \
+        ); \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
