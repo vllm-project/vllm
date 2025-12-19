@@ -510,25 +510,25 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Only register group quant patterns on CUDA where the C++ op exists
             if current_platform.is_cuda():
                 for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                    # for has_col_major_scales in [True, False]:
-                    #     for is_e8m0 in [True, False]:
-                    # Fuse fused_add_rms_norm + fp8 group quant
-                    FusedAddRMSNormGroupQuantPattern(
-                        epsilon,
-                        FP8_DTYPE,
-                        group_shape=group_shape,
-                        has_col_major_scales=False,
-                        is_e8m0=False,
-                    ).register(self.patterns)
+                    for has_col_major_scales in [True, False]:
+                        for is_e8m0 in [True, False]:
+                            # Fuse fused_add_rms_norm + fp8 group quant
+                            FusedAddRMSNormGroupQuantPattern(
+                                epsilon,
+                                FP8_DTYPE,
+                                group_shape=group_shape,
+                                has_col_major_scales=has_col_major_scales,
+                                is_e8m0=is_e8m0,
+                            ).register(self.patterns)
 
-                    # Fuse rms_norm + fp8 group quant
-                    RMSNormGroupQuantPattern(
-                        epsilon,
-                        FP8_DTYPE,
-                        group_shape=group_shape,
-                        has_col_major_scales=False,
-                        is_e8m0=False,
-                    ).register(self.patterns)
+                            # Fuse rms_norm + fp8 group quant
+                            RMSNormGroupQuantPattern(
+                                epsilon,
+                                FP8_DTYPE,
+                                group_shape=group_shape,
+                                has_col_major_scales=has_col_major_scales,
+                                is_e8m0=is_e8m0,
+                            ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
