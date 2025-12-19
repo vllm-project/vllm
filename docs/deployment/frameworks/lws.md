@@ -40,8 +40,14 @@ Deploy the following yaml file `lws.yaml`
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
-                    vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2"
+                  - |
+                    bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE) &
+                    while ! ray status --address="localhost:6379" > /dev/null 2>&1; do
+                        echo "[$(date)] $(LWS_LEADER_ADDRESS)Waiting for Ray head..."
+                        sleep 0.5
+                    done
+                    echo "[$(date)] Ray head ready!"
+                    exec vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
