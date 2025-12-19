@@ -24,7 +24,7 @@ from .fusion import (
     FusedRMSQuantKey,
 )
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import (
+from .rocm_matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
