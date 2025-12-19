@@ -533,11 +533,6 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        if self.scoring_func != "softmax" and not self.use_grouped_topk:
-            raise ValueError(
-                "Only softmax scoring function is supported for non-grouped topk."
-            )
-
         # ToDo: Better logic to determine the routing method type
         if routing_method_type is not None:
             self.routing_method_type = routing_method_type
@@ -1618,6 +1613,7 @@ class FusedMoE(CustomOp):
                 e_score_correction_bias=self.e_score_correction_bias.data,
                 topk=self.top_k,
                 renormalize=self.renormalize,
+                scoring_func=self.scoring_func,
             )
             if self.routed_scaling_factor != 1.0:
                 topk_weights *= self.routed_scaling_factor
@@ -1627,6 +1623,7 @@ class FusedMoE(CustomOp):
                 gating_output=router_logits,
                 topk=self.top_k,
                 renormalize=self.renormalize,
+                scoring_func=self.scoring_func,
                 indices_type=indices_type,
             )
         else:
