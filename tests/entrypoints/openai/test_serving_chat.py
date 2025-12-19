@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ErrorResponse,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -1444,3 +1445,69 @@ class TestServingChatWithHarmony:
                 },
             ],
         )
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_validation_without_parser():
+    """Test that tool_choice='required' or named tool without tool_parser
+    returns an appropriate error message."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    # Create serving_chat without tool_parser (enable_auto_tools=False)
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=False,  # No tool parser
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+
+    # Test tool_choice="required" without tool_parser
+    req_required = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice="required",
+    )
+    response_required = await serving_chat.create_chat_completion(req_required)
+    assert isinstance(response_required, ErrorResponse)
+    assert "tool_choice" in response_required.error.message
+    assert "--tool-call-parser" in response_required.error.message
+
+    # Test named tool_choice without tool_parser
+    req_named = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    response_named = await serving_chat.create_chat_completion(req_named)
+    assert isinstance(response_named, ErrorResponse)
+    assert "tool_choice" in response_named.error.message
+    assert "--tool-call-parser" in response_named.error.message
