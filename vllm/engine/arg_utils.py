@@ -483,6 +483,7 @@ class EngineArgs:
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
+    block_diagonal_sharded_loras: bool = LoRAConfig.block_diagonal_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
 
@@ -998,6 +999,11 @@ class EngineArgs:
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
+        lora_group.add_argument(
+            "--block-diagonal-sharded-loras",
+            **lora_kwargs["block_diagonal_sharded_loras"],
+        )
+
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument(
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
@@ -1633,6 +1639,7 @@ class EngineArgs:
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
                 lora_dtype=self.lora_dtype,
+                block_diagonal_sharded_loras=self.block_diagonal_sharded_loras,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,

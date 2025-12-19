@@ -40,34 +40,71 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         self.lora_config = lora_config
         #
+        lora_a_output_size_per_partition = (
+            lora_config.max_lora_rank
+            if not (
+                lora_config.fully_sharded_loras
+                or lora_config.block_diagonal_sharded_loras
+            )
+            else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+        lora_b_output_size_per_partition = (
+            self.output_size
+            if not (
+                lora_config.fully_sharded_loras
+                or lora_config.block_diagonal_sharded_loras
+            )
+            else divide(self.output_size, self.tp_size)
+        )
+
         if isinstance(self.base_layer, ReplicatedLinear):
+            lora_a_in_size = self.input_size
             lora_a_out_size = lora_config.max_lora_rank
+            lora_b_in_size = lora_a_out_size
             lora_b_out_size = self.output_size
 
         elif isinstance(self.base_layer, ColumnParallelLinear):
-            lora_a_out_size = (
-                lora_config.max_lora_rank
-                if not lora_config.fully_sharded_loras
-                else divide(lora_config.max_lora_rank, self.tp_size)
+            lora_a_in_size = self.input_size
+            lora_a_out_size = lora_a_output_size_per_partition
+            # if not BD-LoRA, we have a preceding all-gather, thus need to
+            # materialize full-rank
+            lora_b_in_size = (
+                lora_a_output_size_per_partition
+                if lora_config.block_diagonal_sharded_loras
+                else lora_config.max_lora_rank
             )
             lora_b_out_size = self.output_size
 
         elif isinstance(self.base_layer, RowParallelLinear):
-            lora_a_out_size = lora_config.max_lora_rank
+            lora_a_in_size = self.input_size
+            # if BD-LoRA, A matrix is diagonal and thus also needs to be sharded
+            # in output dimension
+            lora_a_out_size = (
+                lora_a_output_size_per_partition
+                if lora_config.block_diagonal_sharded_loras
+                else lora_config.max_lora_rank
+            )
+            lora_b_in_size = lora_a_out_size
+            # if BD-LoRA, full output is produced directly, dont need output per
+            # partition with additional
             lora_b_out_size = (
                 self.output_size
-                if not lora_config.fully_sharded_loras
-                else divide(self.output_size, self.tp_size)
+                if lora_config.block_diagonal_sharded_loras
+                else lora_b_output_size_per_partition
             )
         else:
             raise NotImplementedError
+        self.lora_a_out_size = lora_a_out_size
+        self.lora_a_in_size = lora_a_in_size
+        self.lora_b_out_size = lora_b_out_size
+        self.lora_b_in_size = lora_b_in_size
 
         self.lora_a_stacked = tuple(
             torch.zeros(
                 max_loras,
                 1,
                 lora_a_out_size,
-                self.input_size,
+                lora_a_in_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
@@ -78,7 +115,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 1,
                 lora_b_out_size,
-                lora_config.max_lora_rank,
+                lora_b_in_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
@@ -115,6 +152,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
             lora_a, non_blocking=True
         )
+
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )

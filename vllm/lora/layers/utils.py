@@ -54,7 +54,14 @@ def _not_fully_sharded_can_replace(can_replace):
 
     def dec(*args, **kwargs):
         decorate = kwargs.pop("decorate") if "decorate" in kwargs else True
-        condition = not kwargs["lora_config"].fully_sharded_loras if decorate else True
+        condition = (
+            (
+                not kwargs["lora_config"].fully_sharded_loras
+                and not kwargs["lora_config"].block_diagonal_sharded_loras
+            )
+            if decorate
+            else True
+        )
         return can_replace(*args, **kwargs) and condition
 
     return dec
@@ -68,7 +75,9 @@ def _fully_sharded_can_replace(can_replace):
 
     def dec(*args, **kwargs):
         return (
-            can_replace(*args, **kwargs) and kwargs["lora_config"].fully_sharded_loras
+            can_replace(*args, **kwargs)
+            and kwargs["lora_config"].fully_sharded_loras
+            and not kwargs["lora_config"].block_diagonal_sharded_loras
         )
 
     return dec

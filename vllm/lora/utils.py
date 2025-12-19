@@ -37,6 +37,12 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.lora.layers.block_diagonal_layers import (
+    MergedColumnParallelLinearWithBlockDiagonalShardedLoRA,
+    MergedQKVParallelLinearWithBlockDiagonalShardedLoRA,
+    QKVParallelLinearWithBlockDiagonalShardedLoRA,
+    RowParallelLinearWithBlockDiagonalShardedLoRA,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
@@ -72,6 +78,10 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
+    QKVParallelLinearWithBlockDiagonalShardedLoRA,
+    MergedColumnParallelLinearWithBlockDiagonalShardedLoRA,
+    MergedQKVParallelLinearWithBlockDiagonalShardedLoRA,
+    RowParallelLinearWithBlockDiagonalShardedLoRA,
     FusedMoE3DWithLoRA,
 }
 
