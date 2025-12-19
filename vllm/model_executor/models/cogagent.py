@@ -259,7 +259,7 @@ class VisionExpertAttention(nn.Module):
             mixed_raw_layer[language_token_ids], bias = (
                 self.language_expert_query_key_value(hidden_states[language_token_ids])
             )
-        else:  # self.tp_size > 1 # NOTE: Could also work for a unified graph
+        else: # NOTE: Investigate performance loss for a unified graph
             vision_states, bias = self.vision_expert_query_key_value(
                 hidden_states * vision_token_ids
             )
@@ -385,8 +385,6 @@ class CogAgentCrossAttention(nn.Module):
             key_states = None
             value_states = None
         else:
-            # review hidden attn mask? different head_size might not
-            # work properly
             encoder_states, no_bias = self.key_value(encoder_embeds)
             key_states, value_states = encoder_states.chunk(2, dim=-1)
 
@@ -414,7 +412,7 @@ class CogAgentDecoderLayer(nn.Module):
 
         # NOTE: VisionExpertAttention and CrossAttention can
         # have different hidden sizes. Current implentation
-        # works by padding KV cache block sizes to match.
+        # relies on padding KV cache block sizes to match.
 
         self.self_attn = VisionExpertAttention(
             config=config,
@@ -435,17 +433,14 @@ class CogAgentDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
-            # dtype=torch.float32
         )
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
-            # dtype=torch.float32
         )
         self.post_cross_attention_layernorm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
-            # dtype=torch.float32
         )
 
     def forward(
@@ -458,8 +453,7 @@ class CogAgentDecoderLayer(nn.Module):
     ) -> torch.FloatTensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
+        
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
@@ -469,8 +463,7 @@ class CogAgentDecoderLayer(nn.Module):
 
         hidden_states = residual + hidden_states
         cross_input = self.post_cross_attention_layernorm(hidden_states)
-
-        # Fully Connected
+        
         attention_output = self.cross_attn(
             hidden_states=cross_input, encoder_embeds=encoder_embeds
         )
@@ -508,22 +501,19 @@ class CogAgentModel(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
 
-        self.layers = nn.ModuleList(
-            [
-                CogAgentDecoderLayer(
-                    self.hf_config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{i}",
-                )
-                for i in range(self.hf_config.num_hidden_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            CogAgentDecoderLayer(
+                self.hf_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.layers.{i}",
+            )
+            for i in range(self.hf_config.num_hidden_layers)
+        ])
 
         self.norm = RMSNorm(
             self.hf_config.hidden_size,
             eps=self.hf_config.rms_norm_eps,
-            # dtype=torch.float32
         )
 
         self.num_image_tokens = get_max_image_tokens(self.hf_config.vision_config)
@@ -581,7 +571,7 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         "query_key_value": ["query_key_value"],
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
-
+    
     supported_lora_modules = [
         # EVA Large
         #"qkv_proj",
@@ -598,7 +588,6 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = []
     _no_split_modules = ["CogAgentDecoderLayer", "TransformerLayer", "Block"]
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
@@ -624,6 +613,7 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model.cross_vision"),
         )
+        
         self.lm_head = ParallelLMHead(
             self.hf_config.vocab_size,
             self.hf_config.hidden_size,
@@ -803,7 +793,8 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         cross_embeds: torch.Tensor = self.cross_vision(image_inputs.cross_pixel_values)
         image_embeds: torch.Tensor = self.vision(image_inputs.pixel_values)
 
-        # Pad and concat to enforce output constraints. This introduces a small overhead (in MB)
+        # Pad and concat to enforce output constraints.
+        # This introduces an overhead (with defaults, around 40 MB)
         batch = image_embeds.shape[0] if image_embeds.ndim >= 3 else 1
         embed_shape = [batch, sequence_length, hidden_size]
 
