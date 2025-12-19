@@ -807,15 +807,11 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        w1_scale = self.w13_precision_config
-        w2_scale = self.w2_precision_config
-
-        # TODO: how to set scale?
         return mxfp4_w4a4_moe_quant_config(
             w1_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
+            w1_scale=layer.w1_weight_scale,
+            w2_scale=layer.w2_weight_scale,
         )
 
     def apply(
@@ -830,9 +826,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
             )
 
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -926,7 +920,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        unpadded_hidden_size: int,
         intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
@@ -953,8 +946,10 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 intermediate_size_per_partition, 64
             )
 
-        self.unpadded_hidden_size = unpadded_hidden_size
-        self.hidden_pad = hidden_size - unpadded_hidden_size
+        self.unpadded_hidden_size = extra_weight_attrs.get(
+            "unpadded_hidden_size", hidden_size
+        )
+        self.hidden_pad = hidden_size - self.unpadded_hidden_size
         self.intermediate_pad = (
             intermediate_size_per_partition_after_pad - intermediate_size_per_partition
         )
