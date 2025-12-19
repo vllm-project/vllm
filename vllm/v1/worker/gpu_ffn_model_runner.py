@@ -137,10 +137,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
             else:
                 dp_metadata = None
             current_layer_idx = recv_metadata.layer_idx
-            logger.info(
-                f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
-                f" dp_metadata: {dp_metadata}"
-            )
+            # logger.info(
+            #     f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
+            #     f" dp_metadata: {dp_metadata}"
+            # )
             num_tokens = hidden_states.shape[0]
             if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
                 for work in recv_metadata.recv_handle_list:
