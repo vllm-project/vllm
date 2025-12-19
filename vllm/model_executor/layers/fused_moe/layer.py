@@ -335,7 +335,7 @@ class FusedMoE(CustomOp):
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
         topk_group: int | None = None,
-        quant_config: QuantizationConfig = None,
+        quant_config: QuantizationConfig | None = None,
         tp_size: int | None = None,
         ep_size: int | None = None,
         dp_size: int | None = None,
@@ -1123,6 +1123,7 @@ class FusedMoE(CustomOp):
         return_success: bool = False,
     ) -> bool | None:
         if self._is_mxfp4:
+            assert self.quant_config is not None
             if self.quant_config.get_name() == "mxfp4":
                 # (FIXME) for gpt-oss all experts are combined
                 if "bias" in weight_name:
@@ -2145,8 +2146,11 @@ class FusedMoE(CustomOp):
 
         return s
 
-    def is_mxfp4_quant(self, quant_config: QuantizationConfig) -> bool:
-        name = quant_config.get_name() if quant_config else None
+    def is_mxfp4_quant(self, quant_config: QuantizationConfig | None = None) -> bool:
+        if quant_config is None:
+            return False
+
+        name = quant_config.get_name()
         if name == "mxfp4":
             return True
         elif name == "quark":
@@ -2154,6 +2158,9 @@ class FusedMoE(CustomOp):
 
             vllm_config = get_current_vllm_config()
             model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+            from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+            assert isinstance(quant_config, QuarkConfig)
             # Padding for triton kernel only is enabled when it is gpt_oss
             return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
 
