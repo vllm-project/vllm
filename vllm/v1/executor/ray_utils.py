@@ -5,7 +5,7 @@ import os
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import vllm.platforms
 from vllm.config import ParallelConfig
@@ -319,50 +319,92 @@ def initialize_ray_cluster(
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
+
+    def _devices_count_mismatch_msg_builder(
+        *,
+        available_devices: int | float,
+        scope: str,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build a message for GPU mismatch error."""
+
+        fmt = (
+            "Required (%d) devices (TP=%d, PP=%d, PCP=%d) "
+            "exceeds %s available devices (%s). "
+            "This may result in placement group allocation failures. "
+            "Consider reducing world size (TP*PP*PCP) to %s or less, "
+            "or ensure Ray cluster has at least %d devices available."
+        )
+
+        args = (
+            parallel_config.world_size,
+            parallel_config.tensor_parallel_size,
+            parallel_config.pipeline_parallel_size,
+            parallel_config.prefill_context_parallel_size,
+            scope,
+            available_devices,
+            available_devices,
+            parallel_config.world_size,
+        )
+
+        return fmt, args
+
     assert_ray_available()
     from vllm.platforms import current_platform
-
-    # Prevalidate GPU requirements before Ray processing
-    if current_platform.is_cuda() and parallel_config.world_size > 1:
-        from vllm.utils.torch_utils import cuda_device_count_stateless
-
-        available_gpus = cuda_device_count_stateless()
-        if parallel_config.world_size > available_gpus:
-            logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
-                parallel_config.world_size,
-                available_gpus,
-                available_gpus,
-                parallel_config.world_size,
-            )
-
-    if ray.is_initialized():
-        logger.info("Ray is already initialized. Skipping Ray initialization.")
-    elif current_platform.is_rocm() or current_platform.is_xpu():
-        # Try to connect existing ray instance and create a new one if not found
-        try:
-            ray.init("auto")
-        except ConnectionError:
-            logger.warning(
-                "No existing RAY instance detected. "
-                "A new instance will be launched with current node resources."
-            )
-            ray.init(
-                address=ray_address,
-                num_gpus=parallel_config.world_size,
-                runtime_env=parallel_config.ray_runtime_env,
-            )
-    else:
-        ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
 
     device_str = current_platform.ray_device_key
     if not device_str:
         raise ValueError(
             f"current platform {current_platform.device_name} does not support ray."
         )
+
+    # distributed_executor_backend = ray, world_size = PP * TP * PCP
+    if ray.is_initialized():
+        logger.info("Ray is already initialized. Skipping Ray initialization.")
+
+        cluster_devices = ray.cluster_resources().get(device_str, 0.0)
+        available_devices = ray.available_resources().get(device_str, 0.0)
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            if parallel_config.world_size > available_devices:
+                fmt, args = _devices_count_mismatch_msg_builder(
+                    available_devices=available_devices,
+                    scope="ray cluster available devices",
+                )
+                logger.warning(fmt, *args)
+
+            elif parallel_config.world_size > cluster_devices:
+                fmt, args = _devices_count_mismatch_msg_builder(
+                    available_devices=cluster_devices,
+                    scope="ray cluster total resources",
+                )
+                logger.warning(fmt, *args)
+
+    else:
+        if current_platform.is_cuda_alike() and parallel_config.world_size > 1:
+            from vllm.utils.torch_utils import cuda_device_count_stateless
+
+            local_available_devices = cuda_device_count_stateless()
+            if parallel_config.world_size > local_available_devices:
+                fmt, args = _devices_count_mismatch_msg_builder(
+                    available_devices=local_available_devices, scope="local node"
+                )
+                logger.warning(fmt, *args)
+
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # Try to connect existing ray instance and create a new one if not found
+            try:
+                ray.init("auto")
+            except ConnectionError:
+                logger.warning(
+                    "No existing RAY instance detected. "
+                    "A new instance will be launched with current node resources."
+                )
+                ray.init(
+                    address=ray_address,
+                    num_gpus=parallel_config.world_size,
+                    runtime_env=parallel_config.ray_runtime_env,
+                )
+        else:
+            ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
 
     # Create or get the placement group for worker processes
     if parallel_config.placement_group:
