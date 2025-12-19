@@ -1294,7 +1294,8 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    topk_weights: torch.Tensor,
+    topk_weights: torch.Tensor = None,
+    packed: bool = False
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1357,10 +1358,12 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-        torch.bfloat16
-    ).view(torch.int16)
-    return packed_tensor
+    if packed:
+        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+            torch.bfloat16
+        ).view(torch.int16)
+        return packed_tensor
+    return topk_ids
 
 
 def fused_grouped_topk(
