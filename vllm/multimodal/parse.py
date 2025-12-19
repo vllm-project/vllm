@@ -126,6 +126,30 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
         return {}
 
 
+def validate_embedding_ndim(
+    tensor: torch.Tensor,
+    modality: str,
+    index: int | None = None,
+) -> None:
+    """Validate tensor ndim for multimodal embeddings.
+
+    Single embeddings should be 2D (seq_len, hidden_size).
+    Batched embeddings should be 3D (batch, seq_len, hidden_size).
+
+    Args:
+        tensor: The tensor to validate.
+        modality: The modality name for error messages (e.g., "image", "audio").
+        index: Optional index for list items, included in error messages.
+    """
+    if tensor.ndim < 2 or tensor.ndim > 3:
+        idx_str = f" [{index}]" if index is not None else ""
+        raise ValueError(
+            f"{modality.capitalize()} embedding{idx_str} must be 2D "
+            f"(seq_len, hidden_size) or 3D (batch, seq_len, hidden_size), "
+            f"got {tensor.ndim}D tensor with shape {tuple(tensor.shape)}"
+        )
+
+
 class EmbeddingItems(
     ModalityDataItems[torch.Tensor | list[torch.Tensor], torch.Tensor]
 ):
@@ -133,6 +157,63 @@ class EmbeddingItems(
     Base class for data items that are expressed as a batched embedding tensor,
     or a list of embedding tensors (one per item).
     """
+
+    def __init__(
+        self,
+        data: torch.Tensor | list[torch.Tensor],
+        modality: str,
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(data, modality)
+
+        # Validate ndim first (before hidden_size which depends on correct ndim)
+        self._validate_ndim()
+
+        # Validate hidden dimension if expected size is provided
+        if expected_hidden_size is not None:
+            self._validate_hidden_size(expected_hidden_size)
+
+    def _validate_ndim(self) -> None:
+        """Validate that embedding tensors have correct ndim (2D or 3D)."""
+        if isinstance(self.data, torch.Tensor):
+            validate_embedding_ndim(self.data, self.modality)
+        else:
+            # List of tensors: each should be 2D (seq_len, hidden_size)
+            for idx, tensor in enumerate(self.data):
+                if tensor.ndim != 2:
+                    raise ValueError(
+                        f"{self.modality.capitalize()} embedding [{idx}] must be "
+                        f"2D (seq_len, hidden_size), got {tensor.ndim}D tensor "
+                        f"with shape {tuple(tensor.shape)}"
+                    )
+
+    def _validate_hidden_size(self, expected_hidden_size: int) -> None:
+        """Validate that embedding hidden dimension matches expected size.
+
+        This validates hidden dimensions to prevent vulnerabilities: Embeddings
+        with correct ndim but wrong hidden dimension could bypass initial
+        checks and cause crashes during model inference when dimensions don't match.
+        """
+        if isinstance(self.data, torch.Tensor):
+            # Batched tensor: shape is (batch, seq_len, hidden_size)
+            actual_hidden_size = self.data.shape[-1]
+            if actual_hidden_size != expected_hidden_size:
+                raise ValueError(
+                    f"{self.modality.capitalize()} embedding hidden dimension "
+                    f"mismatch: got {actual_hidden_size}, but model expects "
+                    f"{expected_hidden_size}. Embedding shape: {tuple(self.data.shape)}"
+                )
+        else:
+            # List of tensors: each has shape (seq_len, hidden_size)
+            for idx, tensor in enumerate(self.data):
+                actual_hidden_size = tensor.shape[-1]
+                if actual_hidden_size != expected_hidden_size:
+                    raise ValueError(
+                        f"{self.modality.capitalize()} embedding [{idx}] hidden "
+                        f"dimension mismatch: got {actual_hidden_size}, but model "
+                        f"expects {expected_hidden_size}. "
+                        f"Embedding shape: {tuple(tensor.shape)}"
+                    )
 
     def _unwrap(
         self, item: torch.Tensor | MediaWithBytes[torch.Tensor]
@@ -228,8 +309,12 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
 
 class AudioEmbeddingItems(EmbeddingItems):
-    def __init__(self, data: torch.Tensor | list[torch.Tensor]) -> None:
-        super().__init__(data, "audio")
+    def __init__(
+        self,
+        data: torch.Tensor | list[torch.Tensor],
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(data, "audio", expected_hidden_size)
 
 
 class ImageSize(NamedTuple):
@@ -256,8 +341,12 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
 
 class ImageEmbeddingItems(EmbeddingItems):
-    def __init__(self, data: torch.Tensor | list[torch.Tensor]) -> None:
-        super().__init__(data, "image")
+    def __init__(
+        self,
+        data: torch.Tensor | list[torch.Tensor],
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(data, "image", expected_hidden_size)
 
 
 class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
@@ -287,8 +376,12 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
 
 class VideoEmbeddingItems(EmbeddingItems):
-    def __init__(self, data: torch.Tensor | list[torch.Tensor]) -> None:
-        super().__init__(data, "video")
+    def __init__(
+        self,
+        data: torch.Tensor | list[torch.Tensor],
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(data, "video", expected_hidden_size)
 
 
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
@@ -363,6 +456,10 @@ class MultiModalDataParser:
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
+        expected_hidden_size (int, optional): Expected hidden dimension for
+            embedding inputs. If provided, validates that user-supplied
+            embeddings have the correct hidden size to prevent crashes
+            during model inference.
     """
 
     def __init__(
@@ -371,6 +468,7 @@ class MultiModalDataParser:
         target_sr: float | None = None,
         audio_resample_method: Literal["librosa", "scipy"] = "librosa",
         video_needs_metadata: bool = False,
+        expected_hidden_size: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -379,6 +477,7 @@ class MultiModalDataParser:
             method=audio_resample_method,
         )
         self.video_needs_metadata = video_needs_metadata
+        self.expected_hidden_size = expected_hidden_size
 
     @classmethod
     def is_embeddings(
@@ -443,7 +542,7 @@ class MultiModalDataParser:
             return None
 
         if self.is_embeddings(data):
-            return AudioEmbeddingItems(data)
+            return AudioEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[AudioItem]
         if (
@@ -481,7 +580,7 @@ class MultiModalDataParser:
             return None
 
         if self.is_embeddings(data):
-            return ImageEmbeddingItems(data)
+            return ImageEmbeddingItems(data, self.expected_hidden_size)
 
         if (
             isinstance(data, (PILImage.Image, MediaWithBytes))
@@ -507,7 +606,7 @@ class MultiModalDataParser:
             return None
 
         if self.is_embeddings(data):
-            return VideoEmbeddingItems(data)
+            return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
         if (
