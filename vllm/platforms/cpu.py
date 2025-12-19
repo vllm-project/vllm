@@ -493,9 +493,11 @@ class CpuPlatform(Platform):
 
         if torch.cpu._is_avx512_supported():  # noqa: SIM108
             module = "vllm._C_avx512"
-        else:
+        elif torch.cpu._is_avx2_supported():
             # FIXME: dispatch on other instructions sets
             module = "vllm._C"
+        else:
+            raise NotImplementedError("This requires AVX2 or AVX512.")
 
         try:
             importlib.import_module(module)
