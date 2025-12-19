@@ -185,6 +185,23 @@ def has_flashinfer_cutedsl() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_fused_moe() -> bool:
+    """Return `True` if FlashInfer TRTLLM fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+    required_functions = [
+        ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+    ]
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -264,11 +281,15 @@ def supports_trtllm_attention() -> bool:
         return False
 
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
     """
+    This function should only be called during initialization stage when vllm config
+    is set.
     Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
@@ -284,7 +305,18 @@ def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     if force_use_trtllm_attention() is False:
         return False
     has_trtllm = supports_trtllm_attention()
-    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
+    # num_kv_heads=1 is not supported due to TMA descriptor building limitations.
+    # When num_kv_heads=1, the KV cache strides become degenerate (stride_heads ==
+    # stride_batch), which causes CUDA's cuTensorMapEncodeTiled to fail because
+    # TMA descriptors cannot handle degenerate 4D tensors with singleton dimensions.
+    # See: https://fburl.com/352mrydz
+    if has_trtllm and num_kv_heads == 1:
+        logger.warning_once(
+            "TRTLLM attention does not support num_kv_heads=1. "
+            "This configuration causes TMA descriptor building to fail due to "
+            "degenerate tensor strides. Falling back to FlashInfer attention."
+        )
+    return has_trtllm and (num_qo_heads % num_kv_heads == 0) and (num_kv_heads != 1)
 
 
 def use_trtllm_attention(
@@ -296,11 +328,12 @@ def use_trtllm_attention(
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
+    # None means auto-detection, True means force on, False means force off
+    force_use_trtllm: bool | None = None,
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
-    force_use_trtllm = force_use_trtllm_attention()
 
     # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
@@ -330,6 +363,15 @@ def use_trtllm_attention(
                 "TRTLLM attention is not supported for this combination of "
                 "query and key heads, but --attention-config.use_trtllm_attention is "
                 "set to 1"
+            )
+        return False
+
+    # num_kv_heads=1 is not supported
+    if num_kv_heads == 1:
+        if force_use_trtllm:
+            logger.warning_once(
+                "TRTLLM attention does not support num_kv_heads=1, "
+                "but --attention-config.use_trtllm_attention is set to 1"
             )
         return False
 

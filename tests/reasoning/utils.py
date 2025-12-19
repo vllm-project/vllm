@@ -4,7 +4,7 @@
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.reasoning import ReasoningParser
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 class StreamingReasoningReconstructor:

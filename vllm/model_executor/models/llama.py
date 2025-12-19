@@ -259,7 +259,6 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,

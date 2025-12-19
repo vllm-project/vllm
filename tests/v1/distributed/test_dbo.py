@@ -13,6 +13,7 @@ import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
+from vllm.utils.import_utils import has_deep_ep
 
 # Detect Blackwell / B200 (compute capability 10.x)
 try:
@@ -44,6 +45,7 @@ DEEPEP_BACKENDS = [
 ]
 
 
+@pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
 @pytest.mark.xfail(
     IS_BLACKWELL,

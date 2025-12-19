@@ -397,6 +397,25 @@ class BlockPool:
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
 
+    def evict_blocks(self, block_ids: set[int]) -> None:
+        """evict blocks from the prefix cache by their block IDs.
+
+        only evicts blocks that are currently cached (have a hash). blocks
+        with ref_cnt > 0 are not freed from the block pool, only evicted
+        from the prefix cache hash table.
+
+        Args:
+            block_ids: Set of block IDs to evict from cache.
+        """
+        for block_id in block_ids:
+            assert block_id < len(self.blocks), (
+                f"Invalid block_id {block_id} >= {len(self.blocks)}. "
+                f"This indicates a bug in the KV connector - workers should "
+                f"only report block IDs that were allocated by the scheduler."
+            )
+            block = self.blocks[block_id]
+            self._maybe_evict_cached_block(block)
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,

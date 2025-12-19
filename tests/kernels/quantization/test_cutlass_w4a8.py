@@ -21,6 +21,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
+if not current_platform.is_cuda():
+    pytest.skip("These tests use CUTLASS which requires CUDA", allow_module_level=True)
+
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of
 #  `is_quant_method_supported` conflates kernels with quantization methods

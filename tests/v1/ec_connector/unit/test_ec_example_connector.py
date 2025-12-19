@@ -38,7 +38,7 @@ class MockRequest:
             )
             self.mm_features.append(feature)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
+    def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self._token_counts)
         return self._token_counts[input_id]
 

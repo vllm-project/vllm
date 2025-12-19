@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from itertools import accumulate
 from typing import (
     TYPE_CHECKING,
@@ -169,11 +169,42 @@ class PlaceholderRange:
     between `offset` and `offset + length` to assign embeddings to.
     """
 
-    def get_num_embeds(self) -> int:
+    @cached_property
+    def embeds_cumsum(self) -> torch.Tensor | None:
         if self.is_embed is None:
+            return None
+
+        return self.is_embed.cumsum(dim=0)
+
+    @cached_property
+    def get_num_embeds(self) -> int:
+        if self.embeds_cumsum is None:
             return self.length
 
-        return int(self.is_embed.sum().item())
+        return int(self.embeds_cumsum[-1])
+
+    def get_embeds_indices_in_range(
+        self, start_idx: int, end_idx: int
+    ) -> tuple[int, int]:
+        """
+        Returns the starting and ending indices of the embeddings of encoder outputs
+        in the range of [start_idx, end_idx) in the placeholders.
+
+        For example, given:
+        PlaceholderRange(offset=2, length=5, is_embed=[False, True, False, True, True])
+
+        If start_idx=3 and end_idx=5, the output is (1, 3) because we want to get
+        the second and the third embeddings from the encoder output.
+        """
+        if self.embeds_cumsum is None:
+            return start_idx, end_idx
+
+        embeds_start_idx = (
+            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
+        )
+        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+
+        return embeds_start_idx, embeds_end_idx
 
     def extract_embeds_range(self) -> list[tuple[int, int]]:
         """Extract the start and end indices of the embedded region in prompt.
@@ -188,7 +219,7 @@ class PlaceholderRange:
             Returns full placeholder range if `is_embed` is `None`.
         """
         if self.is_embed is None:
-            return [(self.offset, self.offset + self.length)]
+            return [(self.offset, self.offset + self.length - 1)]
 
         mask_i = self.is_embed.int()
         starts = torch.nonzero(
@@ -954,7 +985,7 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.13.")
+@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
 class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
@@ -964,7 +995,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_hf_inputs` and "
         "access the tensor data using `.get_data()`."
     )
@@ -977,7 +1008,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_seq` and "
         "access the tensor data using `.get_data()`."
     )

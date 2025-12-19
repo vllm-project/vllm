@@ -283,8 +283,15 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
+
+        # Allow per-request override of video backend via kwargs.
+        # This enables users to specify a different backend than the
+        # global VLLM_VIDEO_LOADER_BACKEND env var, e.g.:
+        #   --media-io-kwargs '{"video": {"video_backend": "torchcodec"}}'
+        video_loader_backend = (
+            kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
         self.kwargs = kwargs
-        video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
