@@ -149,22 +149,15 @@ class MiMoV2MoE(nn.Module):
 
         dtype = getattr(config, "moe_router_dtype", "float32")
         self.gate_dtype = str_dtype_to_torch_dtype(dtype)
-
-        self.gate = ReplicatedLinear(
+        self.gate = nn.Linear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
-            quant_config=None,
-            params_dtype=self.gate_dtype,
-            prefix=f"{prefix}.gate",
-            return_bias=False,
+            dtype=self.gate_dtype,
         )
-        if config.topk_method == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.zeros(config.n_routed_experts, dtype=self.gate_dtype)
-            )
-        else:
-            self.gate.e_score_correction_bias = None
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
+        )
 
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
