@@ -23,7 +23,13 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import EngineId, TpKVTopology
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineId,
+    TpKVTopology,
+    kv_postprocess_blksize_and_layout_on_receive,
+    kv_postprocess_blksize_on_receive,
+    kv_postprocess_layout_on_receive,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
@@ -1741,110 +1747,59 @@ class NixlConnectorWorker:
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        enable_permute_local_kv: bool,
         block_ids_list: list[list[int]],
     ):
-        def _kv_postprocess_blksize(cache, indices, block_size_ratio):
-            """
-            Transforms the layout of received KV cache blocks to the local block_size.
-            (Only works for local blocksize > remote blocksize)
+        """
+        Post process device kv cache after receiving from remote.
 
-            example:
-            local blocksize = 16 tokens, remote blocksize = 4 tokens
-            local block[0] = remote block[0, 1, 2, 3]
-            remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
-            local is  |h0-b0..................|h1-b0..................|...
-            permute is to:
-            1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
-            2. permute => (H, nblocks, remoteN, D)
-            3. flatten => (H, localN, D)
-            """
-            blocks_to_update = cache.index_select(0, indices)
-            # use physical order
-            blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
-            n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
-            remote_block_size = block_size // block_size_ratio
-            n_blocks = block_size_ratio
+        3 types of post processing supported:
+            * kv_cache_postprocess_layout => convert from HND to NHD
+            * kv_cache_postprocess_blksize => convert from small block size
+              to large block size
+            * kv_cache_postprocess_blksize_and_layout => convert from small
+              block size to large block size and convert from HND to NHD
 
-            permuted_blocks = (
-                blocks_to_update.reshape(
-                    -1, n_blocks, n_kv_heads, remote_block_size, head_size
-                )
-                .permute(0, 2, 1, 3, 4)
-                .flatten(2, 3)
-            )
-            permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
-            cache.index_copy_(0, indices, permuted_blocks)
-
-        def _kv_postprocess_layout(cache, indices):
-            """Transforms the layout of received KV cache blocks to the local format.
-
-            This method corrects layout mismatches from direct memory copies by
-            permuting the tensor dimensions.
-
-            - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
-            - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
-
-            Implementation:
-            - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
-            - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
-            - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
-
-            """
-            blocks_to_update = cache.index_select(0, indices)
-            target_shape = list(blocks_to_update.shape)
-            target_shape[0] = -1
-            inv_order = [0, 2, 1, 3]
-            src_shape = tuple(target_shape[i] for i in inv_order)
-            blocks_to_update = cache.index_select(0, indices)
-            permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
-            cache.index_copy_(0, indices, permuted_blocks)
-
-        def _kv_postprocess_blksize_and_layout(cache, indices, block_size_ratio):
-            """
-            Transforms the layout of received KV cache to the local block_size and HND.
-            (Only works for local blocksize > remote blocksize)
-
-            prefill is HND, smaller block_size
-            decode(local) is NHD, larger block_size
-            """
-            blocks_to_update = cache.index_select(0, indices)
-
-            block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
-            remote_block_size = block_size // block_size_ratio
-            n_blocks = block_size_ratio
-
-            permuted_blocks = (
-                blocks_to_update.reshape(
-                    -1, n_blocks, n_kv_heads, remote_block_size, head_size
-                )
-                .permute(0, 1, 3, 2, 4)
-                .flatten(1, 2)
-            )
-            cache.index_copy_(0, indices, permuted_blocks)
-
+        """
         if len(self.device_kv_caches) == 0:
             return
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
+        if self.enable_permute_local_kv and block_size_ratio > 1:
+            logger.info_once(
+                "Post-processing device kv cache on receive by converting "
+                "block_size with %sx bigger and permuting layout from HND"
+                " to NHD.",
+                block_size_ratio,
+            )
+        elif self.enable_permute_local_kv:
+            logger.info_once(
+                "Post-processing device kv cache on receive by permuting layout"
+                "from HND to NHD."
+            )
+        else:
+            logger.info_once(
+                "Post-processing device kv cache on receive by converting "
+                "block_size with %sx bigger.",
+                block_size_ratio,
+            )
 
         split_k_and_v = self.kv_topo.split_k_and_v
-        sample_cache = list(self.device_kv_caches.values())[0][0]
-        device = sample_cache.device
 
         for block_ids in block_ids_list:
-            indices = torch.tensor(block_ids, device=device, dtype=torch.long)
+            indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
             for _, cache_or_caches in self.device_kv_caches.items():
                 cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
                 for cache in cache_list:
-                    if enable_permute_local_kv and block_size_ratio > 1:
-                        _kv_postprocess_blksize_and_layout(
+                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                        kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
                         )
-                    elif enable_permute_local_kv:
-                        _kv_postprocess_layout(cache, indices)
+                    elif self.enable_permute_local_kv:
+                        kv_postprocess_layout_on_receive(cache, indices)
                     else:
-                        _kv_postprocess_blksize(cache, indices, block_size_ratio)
+                        kv_postprocess_blksize_on_receive(
+                            cache, indices, block_size_ratio
+                        )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -1878,8 +1833,8 @@ class NixlConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             # post processing for heteroblocksize
-            block_size_ratio = int(
-                self.kv_topo.block_size_ratio_from_engine_id(meta.remote.engine_id)
+            block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
+                meta.remote.engine_id
             )
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
@@ -1891,9 +1846,7 @@ class NixlConnectorWorker:
             block_size_ratio,
             block_ids_list,
         ) in block_ids_for_blocksize_post_process.items():
-            self.post_process_device_kv_on_receive(
-                block_size_ratio, self.enable_permute_local_kv, block_ids_list
-            )
+            self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
