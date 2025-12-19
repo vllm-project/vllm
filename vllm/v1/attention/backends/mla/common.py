@@ -1495,7 +1495,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         v,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running FlashInfer prefill context chunk")
+        logger.debug_once("Running FlashInfer prefill context chunk", scope="local")
         assert isinstance(prefill, FlashInferPrefillMetadata)
         if fp8_attention:
             fp8_dtype = current_platform.fp8_dtype()
