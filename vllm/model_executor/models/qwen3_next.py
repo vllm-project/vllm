@@ -685,12 +685,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert state_indices_decode is not None
-            conv_indices_decode = state_indices_decode
-            if prefix_caching_enabled:
-                assert state_indices_tensor_d is not None
-                # Use the block indices for all chunks in the sequence
-                conv_indices_decode = state_indices_tensor_d
-
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
