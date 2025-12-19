@@ -329,7 +329,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.quant_fp8 = QuantFP8(
             quant_key.scale.static,
             quant_key.scale.group_shape,
-            has_col_major_scales=has_col_major_scales,
+            column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
         )
 
