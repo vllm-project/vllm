@@ -1062,7 +1062,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert config is not None
             self.moe_quant_config = config
 
-            if self.kernel_cls is FlashInferExperts:
+            if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
                 self.kernel = mk.FusedMoEModularKernel(
                     FlashInferAllGatherMoEPrepareAndFinalize(
                         use_dp=(self.moe.dp_size > 1),
@@ -1081,10 +1081,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
                 self.use_inplace = False
 
-            elif self.kernel_cls is TritonOrDeepGemmExperts:
+            elif self.fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.TRITON]:
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    self.kernel_cls(
+                    TritonOrDeepGemmExperts(
                         quant_config=self.moe_quant_config,
                         allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
                     ),
