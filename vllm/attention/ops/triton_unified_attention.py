@@ -189,9 +189,14 @@ def kernel_unified_attention_2d(
         + 1
     )
 
-    # adjust for potential padding in the last q_block by considering the
-    # actual sequence length
-    max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+    if USE_MM_PREFIX:
+        # image bidirectional attention ranges require a full range
+        # including q_block padding to make sure doc mask is correct
+        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
+    else:
+        # adjust for potential padding in the last q_block by considering the
+        # actual sequence length
+        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 
     # calculate the number of tiles that need to be processed to
     # cover the longest sequence prefix (due to causal masking, tiles beyond
@@ -202,7 +207,8 @@ def kernel_unified_attention_2d(
     # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
-    if SLIDING_WINDOW > 0:
+    # TODO(Isotr0py): sliding window pruning with image bidirectional mask
+    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
@@ -356,6 +362,12 @@ def kernel_unified_attention_2d(
         # update constants
         L = L * alpha + l_j
         M = m_j
+
+        if SLIDING_WINDOW:
+            qpos_lo = q_block_local_idx * BLOCK_Q
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+            )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         acc += tl.dot(P.to(V.dtype), V)
@@ -672,6 +684,12 @@ def kernel_unified_attention_3d(
         L = L * alpha + l_j
         M = m_j
 
+        if SLIDING_WINDOW:
+            qpos_lo = q_block_local_idx * BLOCK_Q
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+            )
+
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         acc += tl.dot(P.to(V.dtype), V)
 
@@ -800,7 +818,6 @@ def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
-    is_mm_prefix: bool,
     is_prefill: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
@@ -809,10 +826,6 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
-    if is_mm_prefix:
-        # Multimodal bidirectional attention needs a larger tile size
-        return 64
-
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
@@ -903,14 +916,12 @@ def unified_attention(
         head_size,
         sliding_window_val,
         q.element_size(),
-        is_mm_prefix=use_mm_prefix,
         is_prefill=True,
     )
     TILE_SIZE_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
-        is_mm_prefix=use_mm_prefix,
         is_prefill=False,
     )
 
