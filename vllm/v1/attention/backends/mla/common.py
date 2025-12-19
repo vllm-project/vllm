@@ -1407,7 +1407,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return_softmax_lse,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running FlashInfer prefill new tokens")
+        logger.debug_once("Running FlashInfer prefill new tokens", scope="local")
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
         if fp8_attention:
