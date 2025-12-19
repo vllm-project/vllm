@@ -18,14 +18,13 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 import transformers.utils.chat_template_utils as hf_chat_utils
-
-# OpenAI SDK may not have ChatCompletionFunctionToolParam on older versions.
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -35,13 +34,6 @@ from openai.types.chat import (
 from openai.types.chat import (
     ChatCompletionMessageParam as OpenAIChatCompletionMessageParam,
 )
-
-try:
-    from openai.types.chat import ChatCompletionFunctionToolParam
-except ImportError:  # Fallback for older openai versions
-    from openai.types.chat import (
-        ChatCompletionFunctionMessageParam as ChatCompletionFunctionToolParam,
-    )
 from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai.types.responses import ResponseInputImageParam
 from openai_harmony import Message as OpenAIHarmonyMessage
