@@ -1143,9 +1143,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.use_marlin:
             return fp8_w8a16_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
@@ -1268,12 +1266,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 MoEPrepareAndFinalizeNoEP,
             )
 
-            config = self.get_fused_moe_quant_config(layer)
-            assert config is not None
-            self.moe_quant_config = config
             kernel = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
-                MarlinExperts(self.moe_quant_config),
+                MarlinExperts(self.get_fused_moe_quant_config(layer)),
             )
             result = kernel(
                 hidden_states=x,
@@ -1287,25 +1282,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
             )
-
-            # fused_marlin_moe(
-            #     x,
-            #     layer.w13_weight,
-            #     layer.w2_weight,
-            #     None,
-            #     None,
-            #     layer.w13_weight_scale,
-            #     layer.w2_weight_scale,
-            #     router_logits,
-            #     topk_weights,
-            #     topk_ids,
-            #     quant_type_id=scalar_types.float8_e4m3fn.id,
-            #     apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            #     global_num_experts=layer.global_num_experts,
-            #     expert_map=layer.expert_map,
-            #     input_dtype=self.marlin_input_dtype,
-            #     workspace=layer.workspace,
-            # )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"

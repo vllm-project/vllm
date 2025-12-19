@@ -700,8 +700,8 @@ def fp8_w8a16_moe_quant_config(
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, None),
         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, None),
     )
