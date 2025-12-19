@@ -1042,54 +1042,52 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # done, then we will initialzie the TP case and DP/EP case
         # via the same code path (i.e. via maybe_init_modular_kernel).
         # NOTE(rob): in progress migrating all into this format.
-        if self.fp8_backend in [
-            Fp8MoeBackend.DEEPGEMM,
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-            Fp8MoeBackend.TRITON,
-        ]:
-            from vllm.model_executor.layers.fused_moe import (
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
                 FlashInferExperts,
-                TritonOrDeepGemmExperts,
             )
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
                 FlashInferAllGatherMoEPrepareAndFinalize,
-            )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
             )
 
             config = self.get_fused_moe_quant_config(layer)
             assert config is not None
             self.moe_quant_config = config
 
-            if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-                self.kernel = mk.FusedMoEModularKernel(
-                    FlashInferAllGatherMoEPrepareAndFinalize(
-                        use_dp=(self.moe.dp_size > 1),
-                        use_deepseek_fp8_block_scale=self.block_quant,
-                    ),
-                    FlashInferExperts(
-                        out_dtype=torch.get_default_dtype(),
-                        quant_config=self.moe_quant_config,
-                        ep_rank=self.moe.ep_rank,
-                        ep_size=self.moe.ep_size,
-                        tp_rank=self.moe.tp_rank,
-                        tp_size=self.moe.tp_size,
-                        use_dp=(self.moe.dp_size > 1),
-                        use_deepseek_fp8_block_scale=self.block_quant,
-                    ),
-                )
-                self.use_inplace = False
+            self.kernel = mk.FusedMoEModularKernel(
+                FlashInferAllGatherMoEPrepareAndFinalize(
+                    use_dp=(self.moe.dp_size > 1),
+                    use_deepseek_fp8_block_scale=self.block_quant,
+                ),
+                FlashInferExperts(
+                    out_dtype=torch.get_default_dtype(),
+                    quant_config=self.moe_quant_config,
+                    ep_rank=self.moe.ep_rank,
+                    ep_size=self.moe.ep_size,
+                    tp_rank=self.moe.tp_rank,
+                    tp_size=self.moe.tp_size,
+                    use_dp=(self.moe.dp_size > 1),
+                    use_deepseek_fp8_block_scale=self.block_quant,
+                ),
+            )
+            self.use_inplace = False
 
-            elif self.fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.TRITON]:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonOrDeepGemmExperts(
-                        quant_config=self.moe_quant_config,
-                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                    ),
-                )
-                self.use_inplace = True
+        elif self.fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.TRITON]:
+            from vllm.model_executor.layers.fused_moe import (
+                TritonOrDeepGemmExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonOrDeepGemmExperts(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                ),
+            )
+            self.use_inplace = True
 
     def maybe_make_prepare_finalize(
         self,
