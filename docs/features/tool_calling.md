@@ -355,7 +355,7 @@ Supported models:
 
 Flags: `--tool-call-parser glm45`
 
-### GLM-4.5 Models (`glm45`)
+### GLM-4.7 Models (`glm47`)
 
 Supported models:
 
