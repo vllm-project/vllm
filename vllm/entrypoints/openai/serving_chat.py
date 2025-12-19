@@ -350,8 +350,13 @@ class OpenAIServingChat(OpenAIServing):
                     # Handle enforced_tokens/enforced_str for validation/testing
                     # enforced_tokens takes precedence if both are provided
                     if request.enforced_tokens:
+                        tokens = request.enforced_tokens
+                        # Handle string input (JSON array)
+                        if isinstance(tokens, str):
+                            import json
+                            tokens = json.loads(tokens)
                         sampling_params.enforce_sequence = (
-                            list(request.enforced_tokens) + [tokenizer.eos_token_id]
+                            list(tokens) + [tokenizer.eos_token_id]
                         )
                     elif request.enforced_str:
                         toks = tokenizer(

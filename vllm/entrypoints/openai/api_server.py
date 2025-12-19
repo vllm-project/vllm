@@ -912,6 +912,10 @@ def build_app(args: Namespace) -> FastAPI:
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
+        # Log validation errors for debugging
+        logger.error("Request validation error: %s", exc_str)
+        logger.error("Validation error details: %s", errors_str)
+
         if exc.errors() and errors_str and errors_str != exc_str:
             message = f"{exc_str} {errors_str}"
         else:

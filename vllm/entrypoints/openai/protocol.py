@@ -584,12 +584,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "bypassing normal sampling. Used for validation/testing purposes."
         ),
     )
-    enforced_tokens: list[int] | None = Field(
+    enforced_tokens: list[int] | str | None = Field(
         default=None,
         description=(
             "If provided, the model will output this exact sequence of token IDs, "
             "bypassing normal sampling. Used for validation/testing purposes. "
-            "Takes precedence over enforced_str if both are provided."
+            "Takes precedence over enforced_str if both are provided. "
+            "Can be a list of integers or a JSON string of integers."
         ),
     )
     # --8<-- [end:chat-completion-sampling-params]
