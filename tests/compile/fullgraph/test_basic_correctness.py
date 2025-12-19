@@ -89,7 +89,6 @@ class TestSetting:
     ],
 )
 def test_compile_correctness(
-    monkeypatch: pytest.MonkeyPatch,
     test_setting: TestSetting,
 ):
     # this test is run under multiple suits, with different GPUs.
@@ -107,49 +106,48 @@ def test_compile_correctness(
             f"{cuda_device_count_stateless()}"
         )
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-        final_args = [
-            *model_args,
-            "-pp",
-            str(pp_size),
-            "-tp",
-            str(tp_size),
-            "-cc.cudagraph_mode=none",
-        ]
+    final_args = [
+        *model_args,
+        "-pp",
+        str(pp_size),
+        "-tp",
+        str(tp_size),
+        "-cc.cudagraph_mode=none",
+        f"--attention-backend={attn_backend}",
+    ]
 
-        all_args: list[list[str]] = []
-        all_envs: list[dict[str, str] | None] = []
+    all_args: list[list[str]] = []
+    all_envs: list[dict[str, str] | None] = []
 
-        for comp_mode in [
-            CompilationMode.STOCK_TORCH_COMPILE,
-            CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.VLLM_COMPILE,
-        ]:
-            for mode in [CompilationMode.NONE, comp_mode]:
-                all_args.append(
-                    final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
-                )
-
-            # inductor will change the output, so we only compare if the output
-            # is close, not exactly the same.
-            compare_all_settings(
-                model,
-                all_args,
-                all_envs,
-                method=method if method != "generate" else "generate_close",
+    for comp_mode in [
+        CompilationMode.STOCK_TORCH_COMPILE,
+        CompilationMode.DYNAMO_TRACE_ONCE,
+        CompilationMode.VLLM_COMPILE,
+    ]:
+        for mode in [CompilationMode.NONE, comp_mode]:
+            all_args.append(
+                final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
             )
-            all_envs.clear()
-            all_args.clear()
 
-        for mode in [
-            CompilationMode.NONE,
-            CompilationMode.STOCK_TORCH_COMPILE,
-            CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.VLLM_COMPILE,
-        ]:
-            all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
-            all_envs.append({})
-            all_envs.append({})
+        # inductor will change the output, so we only compare if the output
+        # is close, not exactly the same.
+        compare_all_settings(
+            model,
+            all_args,
+            all_envs,
+            method=method if method != "generate" else "generate_close",
+        )
+        all_envs.clear()
+        all_args.clear()
 
-        compare_all_settings(model, all_args * 3, all_envs, method=method)
+    for mode in [
+        CompilationMode.NONE,
+        CompilationMode.STOCK_TORCH_COMPILE,
+        CompilationMode.DYNAMO_TRACE_ONCE,
+        CompilationMode.VLLM_COMPILE,
+    ]:
+        all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
+        all_envs.append({})
+        all_envs.append({})
+
+    compare_all_settings(model, all_args * 3, all_envs, method=method)
