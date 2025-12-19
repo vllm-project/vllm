@@ -722,8 +722,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
@@ -773,13 +773,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
-
-        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-
-        num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -794,6 +788,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
+            num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
+
             reqs_start = num_decodes  # prefill_start
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
@@ -989,13 +985,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens_cpu = dcp_local_seq_lens_cpu
                 seq_lens = dcp_local_seq_lens
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
-                seq_lens_cpu=seq_lens_cpu[:num_decodes],
                 seq_lens_device=seq_lens[:num_decodes],
+                max_seq_len=max_seq_len,
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
