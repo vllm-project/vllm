@@ -1671,8 +1671,8 @@ class GPUModelRunner(
                     common_attn_metadata
                 )
             elif (
-                builder.supports_update_block_table
-                and cache_key in cached_attn_metadata
+                cache_key in cached_attn_metadata
+                and builder.supports_update_block_table
             ):
                 attn_metadata_i = builder.update_block_table(
                     cached_attn_metadata[cache_key],
