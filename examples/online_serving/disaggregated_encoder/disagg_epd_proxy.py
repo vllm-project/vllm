@@ -291,7 +291,7 @@ async def log_requests(request: Request, call_next):
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
     timeout = aiohttp.ClientTimeout(total=100_000)
-    connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    connector = aiohttp.TCPConnector(limit=0, force_close=False, keepalive_timeout=0)
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:
         # only setup if prefill instance(s) exist
@@ -320,21 +320,30 @@ async def forward_non_stream(
 ) -> dict:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        async def run_encoder():
+            await fanout_encoder_primer(req_data, e_urls, req_id)
+
+        await non_stream_retry_wrap(run_encoder)
 
         # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
+        async def run_prefill():
+            return await maybe_prefill(req_data, p_url, req_id)
 
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
+        req_data = await non_stream_retry_wrap(run_prefill)
 
-        # Non-streaming response
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions", json=req_data, headers=headers
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        async def run_decode_non_stream():
+            # Step 3: Process through Decode instance
+            logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
+
+            # Non-streaming response
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions", json=req_data, headers=headers
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+        return await non_stream_retry_wrap(run_decode_non_stream)
 
     except HTTPException:
         raise
@@ -343,32 +352,92 @@ async def forward_non_stream(
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
+async def stream_retry_wrap(
+    forward_func, max_retries: int = 3, delay: float = 0.1
+):
+    last_exc = None
+    first_chunk_sent = False
+    for attempt in range(max_retries):
+        try:
+            async for chunk in forward_func():
+                first_chunk_sent = True
+                yield chunk
+            return
+        except Exception as e:
+            if first_chunk_sent:
+                raise
+            if isinstance(e, HTTPException) and e.status_code < 500:
+                raise
+            last_exc = e
+            logger.warning(
+                "attempt %s / %s failed retrying... ",
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(delay * (attempt + 1))
+
+    raise RuntimeError(
+        f"all {max_retries} retries failed."
+    ) from last_exc
+
+
+async def non_stream_retry_wrap(
+    forward_func, max_retries: int = 3, delay: float = 0.001
+):
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            result = await forward_func()
+            return result
+        except Exception as e:
+            if isinstance(e, HTTPException) and e.status_code < 500:
+                raise
+            last_exc = e
+            logger.warning(
+                "attempt %s / %s failed retrying... ",
+                attempt + 1,
+                max_retries,
+            )
+            await asyncio.sleep(delay * (attempt + 1))
+    raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
+
+
 async def forward_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        async def run_encoder():
+            await fanout_encoder_primer(req_data, e_urls, req_id)
+
+        await non_stream_retry_wrap(run_encoder)
 
         # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
+        async def run_prefill():
+            return await maybe_prefill(req_data, p_url, req_id)
 
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
+        req_data = await non_stream_retry_wrap(run_prefill)
 
-        # Streaming response
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions",
-            json=req_data,
-            headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(1024):
-                if chunk:
-                    yield chunk.decode("utf-8", errors="ignore")
+        async def run_decode_stream():
+            # Step 3: Process through Decode instance
+            logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
 
-        logger.info("[%s] Streaming completed", req_id)
+            # Streaming response
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions",
+                json=req_data,
+                headers=headers,
+            ) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.content.iter_chunked(1024):
+                    if chunk:
+                        yield chunk.decode("utf-8", errors="ignore")
+
+            logger.info("[%s] Streaming completed", req_id)
+
+        async for chunk in stream_retry_wrap(run_decode_stream):
+            yield chunk
 
     except HTTPException:
         logger.exception("[%s] HTTPException in forward_stream", req_id)
