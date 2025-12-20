@@ -13,7 +13,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import CacheConfig
+    from vllm.config import OffloadConfig
 
 logger = init_logger(__name__)
 
@@ -101,26 +101,26 @@ def set_offloader(instance: BaseOffloader) -> None:
     _instance = instance
 
 
-def create_offloader(cache_config: "CacheConfig") -> BaseOffloader:
-    """Create an offloader based on the cache configuration.
+def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
+    """Create an offloader based on the offload configuration.
 
     Priority: V2 offloading if configured, else UVA, else noop.
     """
     from vllm.model_executor.offloader.uva import UVAOffloader
     from vllm.model_executor.offloader.v2 import OffloaderV2
 
-    if cache_config.offload_group_size > 0:
+    if offload_config.offload_group_size > 0:
         # Use V2 offloading
         return OffloaderV2(
-            group_size=cache_config.offload_group_size,
-            num_in_group=cache_config.offload_num_in_group,
-            prefetch_step=cache_config.offload_prefetch_step,
+            group_size=offload_config.offload_group_size,
+            num_in_group=offload_config.offload_num_in_group,
+            prefetch_step=offload_config.offload_prefetch_step,
             mode="cpu",
         )
-    elif cache_config.cpu_offload_gb > 0:
+    elif offload_config.cpu_offload_gb > 0:
         # Use UVA offloading (legacy)
         return UVAOffloader(
-            cpu_offload_max_bytes=int(cache_config.cpu_offload_gb * 1024**3)
+            cpu_offload_max_bytes=int(offload_config.cpu_offload_gb * 1024**3)
         )
     else:
         # No offloading
