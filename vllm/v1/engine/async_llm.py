@@ -641,8 +641,9 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
-                if truncate_prompt_tokens is None:
-                    truncate_prompt_tokens = pooling_params.truncate_prompt_tokens
+
+            if truncate_prompt_tokens is None:
+                truncate_prompt_tokens = pooling_params.truncate_prompt_tokens
 
             _validate_truncation_size(
                 self.model_config.max_model_len,
