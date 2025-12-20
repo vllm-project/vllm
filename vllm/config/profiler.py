@@ -82,7 +82,7 @@ class ProfilerConfig:
     Higher values capture more allocations but use more memory.
     Default: 100000"""
 
-    memory_profiler_profile_init: bool = False
+    memory_profiler_profile_init: bool = True
     """If `True`, automatically profile memory during model loading and
     initialization. Saves snapshots with stage-specific filenames."""
 
