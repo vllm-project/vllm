@@ -11,9 +11,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
-    marlin_quant_input,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def is_fp8_marlin_supported():
-    return current_platform.has_device_capability(80)
+    return current_platform.has_device_capability(75)
 
 
 def fp8_fused_exponent_bias_into_scales(scales):
@@ -62,13 +62,11 @@ def apply_fp8_marlin_linear(
     inputs = reshaped_x
     a_scales = None
     if input_dtype is not None and input_dtype.itemsize == 1:
-        if input_dtype != torch.float8_e4m3fn:
-            raise RuntimeError("FP8 weight + INT8 activation is not supported.")
-
-        inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
+        # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     output = ops.gptq_marlin_gemm(
-        a=reshaped_x,
+        a=inputs,
         c=None,
         b_q_weight=weight,
         b_bias=bias,
@@ -130,7 +128,7 @@ def prepare_fp8_layer_for_marlin(
         size_n=part_size_n,
         num_bits=8,
     )
-    layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
+    replace_parameter(layer, "weight", marlin_qweight)
 
     # WEIGHT SCALES
     # Permute scales
@@ -138,7 +136,6 @@ def prepare_fp8_layer_for_marlin(
         scales = layer.weight_scale.to(layer.orig_dtype)
     elif "weight_scale_inv" in dir(layer):
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
-        del layer.weight_scale_inv
 
     group_size = -1 if weight_block_size is None else weight_block_size[1]
 
@@ -177,12 +174,15 @@ def prepare_fp8_layer_for_marlin(
     )
     if input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
-    layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
+    if hasattr(layer, "weight_scale"):
+        replace_parameter(layer, "weight_scale", marlin_scales)
+    elif hasattr(layer, "weight_scale_inv"):
+        replace_parameter(layer, "weight_scale_inv", marlin_scales)
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
         bias = marlin_permute_bias(layer.bias)
-        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+        replace_parameter(layer, "bias", bias)
 
 
 def prepare_moe_fp8_layer_for_marlin(

@@ -143,6 +143,7 @@ class FusedMoEQuantDesc:
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
     # Quantization alphas or gscales, used for nvfp4 types.
+    # W4A8 FP8: used for per-channel scales
     # TODO(bnell): put some of these in subclasses
     alpha_or_gscale: torch.Tensor | None = None
 
@@ -346,6 +347,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "mxfp4"
 
     @property
+    def use_mxfp4_w4a4(self) -> bool:
+        return self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4"
+
+    @property
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
@@ -438,7 +443,9 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+            per-channel scales for w1 (for W4A8 FP8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
+            per-channel scales for w2 (for W4A8 FP8).
         - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
         - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
@@ -457,6 +464,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "int4",
         }
 
         if weight_dtype is None:
@@ -532,6 +540,42 @@ def int8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
+    )
+
+
+def gptq_marlin_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    weight_bits: int,
+    group_size: int,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+):
+    """
+    Construct a quant config for gptq marlin quantization.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
+
+    # Activations are NOT quantized for GPTQ (fp16/bf16)
+    a_shape = w_shape  # Same as weight shape for alignment
+
+    # Determine weight dtype
+    if weight_bits == 4:
+        weight_dtype = "int4"
+    elif weight_bits == 8:
+        weight_dtype = torch.int8
+    else:
+        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
+
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -664,6 +708,67 @@ def int8_w8a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(shape=group_shape),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
+    )
+
+
+def int4_w4afp8_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for fp8 activations and int4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        torch.float8_e4m3fn,  # quant dtype for activations
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+        block_shape=block_shape,
+        weight_dtype="int4",  # weight dtype for weights
+    )
+
+
+def awq_marlin_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w1_zp: torch.Tensor | None,
+    w2_zp: torch.Tensor | None,
+    weight_bits: int,
+    group_size: int,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for awq marlin quantization.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
+
+    # Activations are NOT quantized for AWQ (fp16/bf16)
+    a_shape = w_shape  # Same as weight shape for alignment
+
+    # Determine weight dtype
+    if weight_bits == 4:
+        weight_dtype = "int4"
+    elif weight_bits == 8:
+        weight_dtype = torch.int8
+    else:
+        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
+
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 

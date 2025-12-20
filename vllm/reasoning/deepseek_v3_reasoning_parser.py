@@ -26,6 +26,8 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
         chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
         thinking = bool(chat_kwargs.pop("thinking", False))
+        enable_thinking = bool(chat_kwargs.pop("enable_thinking", False))
+        thinking = thinking or enable_thinking
 
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
@@ -34,6 +36,11 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
+
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)

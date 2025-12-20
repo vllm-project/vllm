@@ -16,6 +16,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -23,15 +24,28 @@ def flash_attn_maxseqlen_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int | None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    kwargs = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+
+        if not current_platform.is_rocm() and fa_version is not None:
+            kwargs["fa_version"] = fa_version
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
@@ -39,14 +53,13 @@ def flash_attn_maxseqlen_wrapper(
         v,
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen.item(),
-        max_seqlen_k=max_seqlen.item(),
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
         dropout_p=0.0,
         causal=False,
+        **kwargs,
     )
-    context_layer = einops.rearrange(
-        output, "(b s) h d -> s b (h d)", b=batch_size
-    ).contiguous()
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
 
@@ -58,9 +71,9 @@ def flash_attn_maxseqlen_wrapper_fake(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int | None,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -74,14 +87,33 @@ def vit_flash_attn_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int | None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter
+        q,
+        k,
+        v,
+        batch_size,
+        is_rocm_aiter,
+        fa_version,
+        cu_seqlens,
+        max_seqlen,
     )
+
+
+def apply_sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    Input shape:
+    (batch_size x seq_len x num_heads x head_size)
+    """
+    q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
+    output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+    output = einops.rearrange(output, "b h s d -> b s h d ")
+    return output
 
 
 # TODO: Once we have a torch 2.10, we can use tensor slices
@@ -90,23 +122,28 @@ def torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # Never remove the contiguous logic for ROCm
+    # Without it, hallucinations occur with the backend
+    if current_platform.is_rocm():
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+    if cu_seqlens is None:
+        return apply_sdpa(q, k, v)
+
     outputs = []
-    for i in range(1, len(cu_seqlens)):
-        start_idx = cu_seqlens[i - 1]
-        end_idx = cu_seqlens[i]
-        q_i = q[:, start_idx:end_idx]
-        k_i = k[:, start_idx:end_idx]
-        v_i = v[:, start_idx:end_idx]
-        q_i, k_i, v_i = (
-            einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-        )
-        output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-        output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
+
+    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    q_chunks = torch.split(q, lens, dim=1)
+    k_chunks = torch.split(k, lens, dim=1)
+    v_chunks = torch.split(v, lens, dim=1)
+    for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
+        output_i = apply_sdpa(q_i, k_i, v_i)
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
-    context_layer = einops.rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
     return context_layer
 
 
@@ -116,8 +153,7 @@ def torch_sdpa_wrapper_fake(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -131,6 +167,6 @@ def vit_torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, cu_seqlens)
