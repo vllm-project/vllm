@@ -585,6 +585,18 @@ class Scheduler(SchedulerInterface):
                     else 0
                 )
 
+                # Determine if we need to allocate cross-attention blocks.
+                num_encoder_tokens = 0
+                if (
+                    self.is_encoder_decoder
+                    and request.has_encoder_inputs
+                    and encoder_inputs_to_schedule
+                ):
+                    num_encoder_tokens = sum(
+                        request.get_num_encoder_embeds(i)
+                        for i in encoder_inputs_to_schedule
+                    )
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
