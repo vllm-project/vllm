@@ -40,10 +40,7 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Automatically slice router's e_score_correction_bias to only include
         # real experts (not zero_experts) for the base FusedMoE.
         # The full bias will be used temporarily in forward() for routing.
-        if (
-            hasattr(router, "e_score_correction_bias")
-            and "num_experts" in kwargs
-        ):
+        if hasattr(router, "e_score_correction_bias") and "num_experts" in kwargs:
             num_real_experts = kwargs["num_experts"]
             router_bias = router.e_score_correction_bias
             user_bias = kwargs.get("e_score_correction_bias")
