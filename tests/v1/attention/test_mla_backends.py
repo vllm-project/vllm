@@ -33,14 +33,14 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
     AttentionBackendEnum.FLASHMLA,
     AttentionBackendEnum.FLASH_ATTN_MLA,
-    AttentionBackendEnum.FLASHINFER_MLA,
+    AttentionBackendEnum.TRTLLM_MLA,
     AttentionBackendEnum.TRITON_MLA,
 ]
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
-    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.TRTLLM_MLA)
 
 # Remove FLASH_ATTN_MLA from the list if not supported
 if not flash_attn_supports_mla():

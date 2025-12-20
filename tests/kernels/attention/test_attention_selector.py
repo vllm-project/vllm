@@ -26,7 +26,7 @@ DEVICE_MLA_BACKENDS = {
     "cuda": [
         "TRITON_MLA",
         "FLASHMLA",
-        "FLASHINFER_MLA",
+        "TRTLLM_MLA",
         "FLASH_ATTN_MLA",
         "CUTLASS_MLA",
     ],
@@ -129,7 +129,7 @@ def test_backend_selection(
                     # CUDA MLA backend logic:
                     # - CUTLASS_MLA: only supported with block_size == 128
                     #   and Blackwell GPUs (SM 10.x), V1 only
-                    # - FLASHINFER_MLA: only supported on Blackwell GPUs
+                    # - TRTLLM_MLA: only supported on Blackwell GPUs
                     #   (SM 10.x), V1 only
                     # - FLASHMLA: only supported with block_size == 64
                     # - FLASH_ATTN_MLA: V1 only
@@ -146,7 +146,7 @@ def test_backend_selection(
                         )
                         expected = "CUTLASS_MLA"
                         assert backend.get_name() == expected
-                    elif name == "FLASHINFER_MLA":
+                    elif name == "TRTLLM_MLA":
                         if capability[0] != 10:
                             pytest.skip(
                                 "FlashInfer MLA is not supported on this platform"
@@ -159,7 +159,7 @@ def test_backend_selection(
                         backend = get_attn_backend(
                             576, torch.float16, None, block_size, use_mla=use_mla
                         )
-                        expected = "FLASHINFER_MLA"
+                        expected = "TRTLLM_MLA"
                         assert backend.get_name() == expected
                     elif name == "FLASHMLA":
                         if block_size != 64:

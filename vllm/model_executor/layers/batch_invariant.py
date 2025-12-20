@@ -1011,7 +1011,7 @@ def override_envs_for_invariance(
         # Not yet supported MLA backends
         # AttentionBackendEnum.FLASHMLA,
         # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
-        # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
+        # AttentionBackendEnum.TRTLLM_MLA,  # PR #28967
     ]
     if attention_backend not in supported_backends:
         supported_names = [b.name for b in supported_backends]
