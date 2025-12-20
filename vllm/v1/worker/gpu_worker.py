@@ -44,8 +44,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemorySnapshot,
+    MemorySnapshotProfiler,
     memory_profiling,
-    memory_snapshot_profiling,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
@@ -115,6 +115,17 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
+        # Memory snapshot profiler. Enabled when memory_profiler_dir is set.
+        if profiler_config.memory_profiler_enabled:
+            self.mem_profiler: MemorySnapshotProfiler | None = MemorySnapshotProfiler(
+                output_dir=profiler_config.memory_profiler_dir,
+                max_entries=profiler_config.memory_profiler_max_entries,
+                dump_on_exception=profiler_config.memory_profiler_dump_on_exception,
+            )
+            self.mem_profiler.set_rank(rank)
+        else:
+            self.mem_profiler = None
+
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
@@ -178,16 +189,25 @@ class Worker(WorkerBase):
         else:
             return nullcontext()
 
-    def _maybe_get_memory_snapshot_context(self) -> AbstractContextManager:
-        # Optional memory snapshot profiling for debugging OOM during loading
-        memory_snapshot_ctx: AbstractContextManager = nullcontext()
-        if envs.VLLM_MEMORY_SNAPSHOT_DIR:
-            memory_snapshot_ctx = memory_snapshot_profiling(
-                output_dir=envs.VLLM_MEMORY_SNAPSHOT_DIR,
-                filename_prefix=f"load_model_rank{self.rank}",
-                max_entries=envs.VLLM_MEMORY_SNAPSHOT_MAX_ENTRIES,
+    def _maybe_get_memory_snapshot_context(
+        self, stage: str = "load_model"
+    ) -> AbstractContextManager:
+        """Get memory snapshot context for init stage profiling.
+
+        Args:
+            stage: Name of the stage being profiled (e.g., "load_model", "init").
+        """
+        profiler_config = self.vllm_config.profiler_config
+        if profiler_config.memory_profiler_profile_init:
+            profiler = MemorySnapshotProfiler(
+                output_dir=profiler_config.memory_profiler_dir,
+                filename_prefix=stage,
+                max_entries=profiler_config.memory_profiler_max_entries,
+                dump_on_exception=profiler_config.memory_profiler_dump_on_exception,
             )
-        return memory_snapshot_ctx
+            profiler.set_rank(self.rank)
+            return profiler
+        return nullcontext()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -657,6 +677,22 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+
+    def mem_profile(self, is_start: bool = True):
+        """Start or stop memory snapshot profiling.
+
+        Args:
+            is_start: If True, start profiling. If False, stop and save snapshot.
+        """
+        if self.mem_profiler is None:
+            raise RuntimeError(
+                "Memory profiling is not enabled. "
+                "Set --profiler-config.memory_profiler_dir to enable."
+            )
+        if is_start:
+            self.mem_profiler.start()
+        else:
+            self.mem_profiler.stop()
 
     def execute_dummy_batch(self) -> None:
         if self.use_v2_model_runner:
