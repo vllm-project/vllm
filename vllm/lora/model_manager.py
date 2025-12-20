@@ -82,8 +82,9 @@ class LoRAModelManager:
         """
         self.model: SupportsLoRA = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
-        assert self.supported_lora_modules, "No supported LoRA modules found in"
-        f" {self.model.__class__.__name__}."
+        assert self.supported_lora_modules, (
+            f"No supported LoRA modules found in {self.model.__class__.__name__}."
+        )
 
         self._registered_adapters: dict[int, LoRAModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
@@ -559,7 +560,7 @@ class LoRAModelManager:
         """
         Determine whether this module supports LoRA and which wrapper to use.
         """
-        # For language Model (early return)
+        # For language model (early return)
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
