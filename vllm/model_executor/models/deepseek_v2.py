@@ -1286,12 +1286,6 @@ class DeepseekV2Model(nn.Module):
                         # Core MoE expert weights
                         "w13_weight",
                         "w2_weight",
-                        # NVFP4 quantization scales (if present)
-                        *(
-                            ["w13_blockscale_swizzled", "w2_blockscale_swizzled"]
-                            if hasattr(module, "w13_blockscale_swizzled")
-                            else []
-                        ),
                     ]
                     # Only offload from MoE experts (SharedFusedMoE/FusedMoE)
                     if hasattr(module, "w13_weight")
