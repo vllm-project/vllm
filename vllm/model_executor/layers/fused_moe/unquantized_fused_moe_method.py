@@ -269,6 +269,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+        else:
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonExperts(self.moe_quant_config),
+                shared_experts=None,
+            )
 
     def apply(
         self,
@@ -326,12 +333,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                TritonExperts(self.moe_quant_config),
-                shared_experts=None,
-            )
-
             result = self.kernel(
                 hidden_states=x,
                 w1=layer.w13_weight,
