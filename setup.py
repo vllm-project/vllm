@@ -203,6 +203,11 @@ class cmake_build_ext(build_ext):
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
         elif _is_hip():
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+            # Propagate PYTORCH_ROCM_ARCH to GPU_TARGETS for ROCm builds
+            # This allows Docker build args to specify target architectures
+            pytorch_rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH")
+            if pytorch_rocm_arch:
+                cmake_args += [f"-DGPU_TARGETS={pytorch_rocm_arch}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
