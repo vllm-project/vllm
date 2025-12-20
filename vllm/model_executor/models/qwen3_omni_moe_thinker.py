@@ -48,8 +48,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import ModelConfig, MultiModalConfig, SpeechToTextConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
