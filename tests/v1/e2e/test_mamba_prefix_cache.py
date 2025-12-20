@@ -452,12 +452,12 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
         get_fake_process_mamba_fn(
             mamba_utils.preprocess_mamba,
             mamba_utils.postprocess_mamba,
-            mamba_utils.mamba_copy_block_for_qwen_next,
+            mamba_utils.mamba_copy_block,
         )
     )
     monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
     monkeypatch.setattr(mamba_utils, "postprocess_mamba", fake_post_process_mamba_fn)
-    monkeypatch.setattr(mamba_utils, "mamba_copy_block_for_qwen_next", fake_copy_fn)
+    monkeypatch.setattr(mamba_utils, "mamba_copy_block", fake_copy_fn)
 
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
