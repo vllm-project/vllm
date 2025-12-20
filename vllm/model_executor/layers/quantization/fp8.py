@@ -1113,7 +1113,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 else TritonOrDeepGemmExperts(
                     quant_config=self.moe_quant_config,
                     allow_deep_gemm=allow_deep_gemm,
-                ),
+                )
             )
 
             self.kernel = mk.FusedMoEModularKernel(
