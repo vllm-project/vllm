@@ -205,6 +205,8 @@ class Glm4MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
+        if self.experts.use_dp_chunking:
+            router_logits = router_logits.to(dtype=hidden_states.dtype)
 
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
