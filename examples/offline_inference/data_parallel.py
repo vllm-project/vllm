@@ -5,28 +5,28 @@ Usage:
 Single node:
     python examples/offline_inference/data_parallel.py \
             --model="ibm-research/PowerMoE-3b" \
-            -dp 2 \
-            -tp 2
+            -dp=2 \
+            -tp=2
 
 Multi-node:
     Node 0 (assume the node has ip of 10.99.48.128):
             python examples/offline_inference/data_parallel.py \
                     --model="ibm-research/PowerMoE-3b" \
-                    -dp 2 \
-                    -tp 2 \
-                    --nnodes 2 \
-                    --node-rank 0 \
-                    --master-addr 10.99.48.128 \
-                    --master-port 13345
+                    -dp=2 \
+                    -tp=2 \
+                    --nnodes=2 \
+                    --node-rank=0 \
+                    --master-addr=10.99.48.128 \
+                    --master-port=13345
     Node 1:
             python examples/offline_inference/data_parallel.py \
                     --model="ibm-research/PowerMoE-3b" \
-                    -dp 2 \
-                    -tp 2 \
-                    --nnodes 2 \
-                    --node-rank 1 \
-                    --master-addr 10.99.48.128 \
-                    --master-port 13345
+                    -dp=2 \
+                    -tp=2 \
+                    --nnodes=2 \
+                    --node-rank=1 \
+                    --master-addr=10.99.48.128 \
+                    --master-port=13345
 """
 
 import os
