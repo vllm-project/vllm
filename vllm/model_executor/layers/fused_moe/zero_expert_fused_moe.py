@@ -23,9 +23,9 @@ class ZeroExpertFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        zero_expert_num: int = 0,
-        zero_expert_type: str | None = None,
-        router: nn.Module | None = None,
+        zero_expert_num: int,
+        zero_expert_type: str,
+        router: nn.Module,
         **kwargs,
     ):
         # ZeroExpertFusedMoE manages its own custom_routing_function for memoization
@@ -41,8 +41,7 @@ class ZeroExpertFusedMoE(FusedMoE):
         # real experts (not zero_experts) for the base FusedMoE.
         # The full bias will be used temporarily in forward() for routing.
         if (
-            router is not None
-            and hasattr(router, "e_score_correction_bias")
+            hasattr(router, "e_score_correction_bias")
             and "num_experts" in kwargs
         ):
             num_real_experts = kwargs["num_experts"]
