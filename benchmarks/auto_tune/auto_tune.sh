@@ -3,7 +3,7 @@
 # This script aims to tune the best server parameter combinations to maximize throughput for given requirement.
 # See details in README (benchmarks/auto_tune/README.md).
 
-TAG=$(date +"%Y_%m_%d_%H_%M")
+TAG=${TAG:-$(date +"%Y_%m_%d_%H_%M")}
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 BASE=${BASE:-"$SCRIPT_DIR/../../.."}
