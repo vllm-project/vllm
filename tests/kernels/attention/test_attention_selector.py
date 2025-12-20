@@ -148,14 +148,10 @@ def test_backend_selection(
                         assert backend.get_name() == expected
                     elif name == "TRTLLM_MLA":
                         if capability[0] != 10:
-                            pytest.skip(
-                                "FlashInfer MLA is not supported on this platform"
-                            )
+                            pytest.skip("TRTLLM MLA is not supported on this platform")
                         if block_size not in [32, 64]:
-                            # FlashInfer MLA only supports block_size 32 or 64
-                            pytest.skip(
-                                "FlashInfer MLA only supports block_size 32 or 64"
-                            )
+                            # TRTLLM MLA only supports block_size 32 or 64
+                            pytest.skip("TRTLLM MLA only supports block_size 32 or 64")
                         backend = get_attn_backend(
                             576, torch.float16, None, block_size, use_mla=use_mla
                         )

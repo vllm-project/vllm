@@ -287,7 +287,7 @@ full_cg_backend_configs = {
         },
         specific_gpu_arch=(10, 0),
     ),
-    # FlashInfer MLA on Blackwell
+    # TRTLLM MLA on Blackwell
     "TrtllmMLA": BackendConfig(
         name="TrtllmMLA",
         attention_config={"backend": "TRTLLM_MLA"},

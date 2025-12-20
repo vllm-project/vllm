@@ -66,7 +66,7 @@ class TrtllmMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
+g_workspace = torch.zeros(
     TRTLLM_MLA_WORKSPACE_BUFFER_SIZE,
     dtype=torch.uint8,
     device="cuda",
@@ -118,7 +118,7 @@ class TrtllmMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TrtllmMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
+        self._workspace_buffer = g_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
