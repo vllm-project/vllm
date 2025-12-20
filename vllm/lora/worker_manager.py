@@ -163,6 +163,12 @@ class WorkerLoRAManager:
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
+    def supports_tower_connector_lora(self) -> bool:
+        return (
+            self._adapter_manager.supports_mm
+            and self._adapter_manager.supports_tower_connector_lora
+        )
+
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
         models_map = {
