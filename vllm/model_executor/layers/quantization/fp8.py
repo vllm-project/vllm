@@ -1096,8 +1096,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             config = self.get_fused_moe_quant_config(layer)
             self.moe_quant_config = config
-
-            kernel = (
+            moe_kernel = (
                 MarlinExperts(quant_config=self.moe_quant_config)
                 if self.fp8_backend == Fp8MoeBackend.MARLIN
                 else TritonOrDeepGemmExperts(
@@ -1106,7 +1105,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 ),
             )
 
-            self.kernel = mk.FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), kernel)
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(), moe_kernel
+            )
             self.use_inplace = True
 
     def maybe_make_prepare_finalize(
