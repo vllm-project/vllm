@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -149,6 +150,14 @@ class CudaGraphManager:
     def run(self, num_tokens: int) -> torch.Tensor:
         assert num_tokens in self.graphs
         self.graphs[num_tokens].replay()
+
+        # IMPORTANT: On ROCm/HIP, graph replay is asynchronous.
+        # We must synchronize before accessing the replayed tensors
+        # to prevent reading uninitialized/stale data.
+        # See: https://github.com/pytorch/pytorch/issues/155684
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
+
         assert self.hidden_states is not None
         return self.hidden_states[:num_tokens]
 
