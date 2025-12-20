@@ -1599,7 +1599,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             x_routing, _ = x
         else:
             x_routing = x
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x_routing,
             router_logits=router_logits,
         )
