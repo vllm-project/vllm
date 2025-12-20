@@ -27,6 +27,10 @@ DEFAULT_INFO_COLS = [
     "qps",
 ]
 
+# Safety net: if any DataFrame leaks into to_html(), keep precision at 2.
+pd.set_option("display.precision", 2)
+pd.set_option("display.float_format", lambda x: f"{x:.2f}")
+
 
 # -----------------------------
 # Core data compare
@@ -54,7 +58,6 @@ def compare_data_columns(
     raw_data_cols: List[str] = []
     compare_frames = []
 
-    # 1) choose a canonical key list from info_cols that exists in ALL files
     cols_per_file: List[set] = []
     for f in files:
         try:
@@ -65,24 +68,20 @@ def compare_data_columns(
 
     key_cols = [c for c in info_cols if all(c in cset for cset in cols_per_file)]
     if not key_cols:
-        # soft fallback: use any info_cols present in the first file
         key_cols = [c for c in info_cols if c in list(cols_per_file[0])]
     if not key_cols:
         raise ValueError(
             "No common key columns found from info_cols across the input files."
         )
 
-    # 2) build a single "meta" block (keys as columns) once, aligned by the key index
     meta_added = False
 
     for file in files:
         df = pd.read_json(file, orient="records")
 
-        # Keep rows that actually have the compared metric (same as original behavior)
         if drop_column in df.columns:
             df = df.dropna(subset=[drop_column], ignore_index=True)
 
-        # Stabilize numeric key columns (harmless if missing)
         for c in (
             "Input Len",
             "Output Len",
@@ -94,32 +93,26 @@ def compare_data_columns(
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        # Ensure all key columns exist
         for c in key_cols:
             if c not in df.columns:
                 df[c] = pd.NA
 
-        # Set index = key_cols and aggregate duplicates → unique MultiIndex
         df_idx = df.set_index(key_cols, drop=False)
 
-        # meta (key columns), unique per key
         meta = df_idx[key_cols]
         if not meta.index.is_unique:
             meta = meta.groupby(level=key_cols, dropna=False).first()
 
-        # metric series for this file, aggregated to one row per key
         file_label = "/".join(file.split("/")[:-1]) or os.path.basename(file)
         s = df_idx[data_column]
         if not s.index.is_unique:
             s = s.groupby(level=key_cols, dropna=False).mean()
-        s.name = file_label  # column label like original
+        s.name = file_label
 
-        # add meta once (from first file) so keys are the leftmost columns
         if not meta_added:
             frames.append(meta)
             meta_added = True
 
-        # debug: aligned test-name column per file
         if debug and name_column in df_idx.columns:
             name_s = df_idx[name_column]
             if not name_s.index.is_unique:
@@ -131,21 +124,19 @@ def compare_data_columns(
         raw_data_cols.append(file_label)
         compare_frames.append(s)
 
-        # ratio columns: fileN / file1 (throughput) or file1 / fileN (latency)
         if len(compare_frames) >= 2:
             base = compare_frames[0]
             current = compare_frames[-1]
             if "P99" in data_column or "Median" in data_column:
-                ratio = base / current  # for latency: larger means better
+                ratio = base / current
             else:
-                ratio = current / base  # for throughput: larger means better
+                ratio = current / base
             ratio = ratio.mask(base == 0)
             ratio.name = f"Ratio 1 vs {len(compare_frames)}"
             frames.append(ratio)
 
     concat_df = pd.concat(frames, axis=1).reset_index(drop=True)
 
-    # Ensure key/info columns appear first (in your info_cols order)
     front = [c for c in info_cols if c in concat_df.columns]
     rest = [c for c in concat_df.columns if c not in front]
     concat_df = concat_df[front + rest]
@@ -160,16 +151,9 @@ def compare_data_columns(
 def split_json_by_tp_pp(
     input_file: str = "benchmark_results.json", output_root: str = "."
 ) -> List[str]:
-    """
-    Split a benchmark JSON into separate folders by (TP Size, PP Size).
-
-    Creates: <output_root>/tp{TP}_pp{PP}/benchmark_results.json
-    Returns: list of file paths written.
-    """
     with open(input_file, encoding="utf-8") as f:
         data = json.load(f)
 
-    # If the JSON is a dict with a list under common keys, use that list
     if isinstance(data, dict):
         for key in ("results", "serving_results", "benchmarks", "data"):
             if isinstance(data.get(key), list):
@@ -178,14 +162,12 @@ def split_json_by_tp_pp(
 
     df = pd.DataFrame(data)
 
-    # Keep only "serving" tests
     name_col = next(
         (c for c in ["Test name", "test_name", "Test Name"] if c in df.columns), None
     )
     if name_col:
         df = df[df[name_col].astype(str).str.contains(r"serving", case=False, na=False)].copy()
 
-    # Handle alias column names
     rename_map = {
         "tp_size": "TP Size",
         "tensor_parallel_size": "TP Size",
@@ -194,7 +176,6 @@ def split_json_by_tp_pp(
     }
     df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
 
-    # Ensure TP/PP columns exist (default to 1 if missing)
     if "TP Size" not in df.columns:
         df["TP Size"] = 1
     if "PP Size" not in df.columns:
@@ -228,7 +209,6 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
     ]:
         if c in df.columns:
             return c
-    # Fallback: guess an integer-like column (harmless if unused)
     for c in df.columns:
         if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
             return c
@@ -236,7 +216,6 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
 
 
 def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
-    """Highlight numeric per-configuration columns with value <= threshold."""
     conc_col = _find_concurrency_col(df)
     key_cols = [
         c
@@ -257,19 +236,16 @@ def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.s
 
 
 def highlight_ratio_columns(styler: "pd.io.formats.style.Styler"):
-    """Highlight entire columns whose header contains 'Ratio'."""
     ratio_cols = [c for c in styler.data.columns if "ratio" in str(c).lower()]
     if not ratio_cols:
         return styler
 
-    # Highlight entire column (cells)
     styler = styler.apply(
         lambda _: ["background-color: #fff3b0"] * len(styler.data),
         subset=ratio_cols,
         axis=0,
     )
 
-    # Highlight column headers
     styler = styler.set_table_styles(
         [
             {
@@ -284,6 +260,152 @@ def highlight_ratio_columns(styler: "pd.io.formats.style.Styler"):
     return styler
 
 
+def _apply_two_decimals(styler: "pd.io.formats.style.Styler") -> "pd.io.formats.style.Styler":
+    df = styler.data
+    num_cols = df.select_dtypes("number").columns
+    if len(num_cols) == 0:
+        return styler
+    return styler.format({c: "{:.2f}" for c in num_cols}, na_rep="—")
+
+
+# -----------------------------
+# Valid max concurrency summary helpers
+# -----------------------------
+def _config_value_columns(df: pd.DataFrame, conc_col: str) -> List[str]:
+    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len"] if c in df.columns]
+    exclude = set(key_cols + [conc_col, "qps", "QPS"])
+
+    cols: List[str] = []
+    for c in df.columns:
+        if c in exclude:
+            continue
+        lc = str(c).lower()
+        if lc.startswith("ratio"):
+            continue
+        if lc.endswith("_name") or lc == "test name" or lc == "test_name":
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            cols.append(c)
+    return cols
+
+
+def _max_concurrency_ok(df: pd.DataFrame, conc_col: str, cfg_col: str, threshold: float):
+    if df is None or conc_col not in df.columns or cfg_col not in df.columns:
+        return pd.NA
+
+    d = df[[conc_col, cfg_col]].copy()
+    d[conc_col] = pd.to_numeric(d[conc_col], errors="coerce")
+    d[cfg_col] = pd.to_numeric(d[cfg_col], errors="coerce")
+    d = d.dropna(subset=[conc_col, cfg_col])
+
+    if d.empty:
+        return pd.NA
+
+    ok = d[d[cfg_col] <= threshold]
+    if ok.empty:
+        return pd.NA
+
+    return ok[conc_col].max()
+
+
+def _value_at_concurrency(df: pd.DataFrame, conc_col: str, cfg_col: str, conc_value):
+    if df is None or conc_col not in df.columns or cfg_col not in df.columns or pd.isna(conc_value):
+        return pd.NA
+
+    d = df[[conc_col, cfg_col]].copy()
+    d[conc_col] = pd.to_numeric(d[conc_col], errors="coerce")
+    d[cfg_col] = pd.to_numeric(d[cfg_col], errors="coerce")
+
+    conc_value = pd.to_numeric(conc_value, errors="coerce")
+    if pd.isna(conc_value):
+        return pd.NA
+
+    hit = d[d[conc_col] == conc_value]
+    if hit.empty:
+        return pd.NA
+    return hit[cfg_col].iloc[0]
+
+
+def build_valid_max_concurrency_summary_html(
+    tput_group_df: pd.DataFrame | None,
+    ttft_group_df: pd.DataFrame | None,
+    tpot_group_df: pd.DataFrame | None,
+    conc_col: str,
+    args,
+) -> str:
+    if ttft_group_df is None and tpot_group_df is None:
+        return ""
+
+    ttft_cols = _config_value_columns(ttft_group_df, conc_col) if ttft_group_df is not None else []
+    tpot_cols = _config_value_columns(tpot_group_df, conc_col) if tpot_group_df is not None else []
+    tput_cols = _config_value_columns(tput_group_df, conc_col) if tput_group_df is not None else []
+
+    if ttft_group_df is not None and tpot_group_df is not None:
+        cfg_cols = [c for c in ttft_cols if c in tpot_cols]
+        if tput_group_df is not None:
+            cfg_cols = [c for c in cfg_cols if c in tput_cols] or cfg_cols
+    else:
+        cfg_cols = ttft_cols or tpot_cols
+
+    if not cfg_cols:
+        cfg_cols = sorted(set(ttft_cols) | set(tpot_cols) | set(tput_cols), key=str)
+
+    rows = []
+    for cfg in cfg_cols:
+        ttft_max = _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms) if ttft_group_df is not None else pd.NA
+        tpot_max = _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms) if tpot_group_df is not None else pd.NA
+        both = pd.NA if (pd.isna(ttft_max) or pd.isna(tpot_max)) else min(ttft_max, tpot_max)
+
+        tput_at_both = _value_at_concurrency(tput_group_df, conc_col, cfg, both) if tput_group_df is not None else pd.NA
+        ttft_at_both = _value_at_concurrency(ttft_group_df, conc_col, cfg, both) if ttft_group_df is not None else pd.NA
+        tpot_at_both = _value_at_concurrency(tpot_group_df, conc_col, cfg, both) if tpot_group_df is not None else pd.NA
+
+        rows.append(
+            {
+                "Configuration": cfg,
+                f"Max {conc_col} (TTFT ≤ {args.ttft_max_ms:g} ms)": ttft_max,
+                f"Max {conc_col} (TPOT ≤ {args.tpot_max_ms:g} ms)": tpot_max,
+                f"Max {conc_col} (Both)": both,
+                "Output Tput @ Both (tok/s)": tput_at_both,
+                "TTFT @ Both (ms)": ttft_at_both,
+                "TPOT @ Both (ms)": tpot_at_both,
+            }
+        )
+
+    summary_df = pd.DataFrame(rows)
+
+    # --- Coerce numeric columns so Styler doesn't miss them due to object dtype ---
+    for c in summary_df.columns:
+        if c == "Configuration":
+            continue
+        summary_df[c] = pd.to_numeric(summary_df[c], errors="coerce")
+
+    both_col = f"Max {conc_col} (Both)"
+
+    # --- Strict 2-decimal formatting for ALL non-Configuration columns ---
+    formatters = {}
+    for c in summary_df.columns:
+        if c == "Configuration":
+            continue
+        # default argument binds per-column formatter correctly
+        formatters[c] = (lambda v: "—" if pd.isna(v) else f"{float(v):.2f}")
+
+    styler = summary_df.style.format(formatters)
+
+    def _green(v):
+        return "background-color:#e6ffe6;font-weight:bold;" if pd.notna(v) else ""
+
+    if both_col in summary_df.columns:
+        styler = styler.map(_green, subset=[both_col])
+
+    title = (
+        f'<div style="font-size: 1.15em; font-weight: 700; margin: 12px 0 6px 0;">'
+        f'Valid Max Concurrency Summary'
+        f"</div>\n"
+    )
+    return title + styler.to_html(table_attributes='border="1" class="dataframe"')
+
+
 # -----------------------------
 # Plot helper
 # -----------------------------
@@ -295,7 +417,6 @@ def _add_limit_line(fig, y_value: float, label: str):
         annotation_text=f"{label}: {y_value} ms",
         annotation_position="top left",
     )
-    # If plotly is available, add a legend entry
     if plotly_found:
         import plotly.graph_objects as go
 
@@ -361,7 +482,6 @@ def choose_metrics(latency: str) -> MetricPlan:
             drop_column=drop_column,
         )
 
-    # default: p99
     return MetricPlan(
         data_cols=["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"],
         drop_column=drop_column,
@@ -387,7 +507,6 @@ def get_y_axis_col(info_cols: List[str], xaxis: str) -> str:
 
 
 def get_group_cols(output_df: pd.DataFrame, info_cols: List[str]) -> List[str]:
-    # Your current grouping rule: first 4 info columns
     filtered_info_cols = info_cols[:4]
     group_cols = [c for c in filtered_info_cols if c in output_df.columns]
     if not group_cols:
@@ -399,7 +518,6 @@ def get_group_cols(output_df: pd.DataFrame, info_cols: List[str]) -> List[str]:
 
 
 def normalize_group_key(name):
-    """Pandas group key can be scalar (1 col) or tuple (N cols). Normalize to tuple."""
     return name if isinstance(name, tuple) else (name,)
 
 
@@ -437,16 +555,13 @@ def render_metric_table_html(
     else:
         styler = display_group.style
 
-    styler = styler.format(
-        {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
-        na_rep="—",
-    )
+    styler = _apply_two_decimals(styler)
     styler = highlight_ratio_columns(styler)
 
     return title + styler.to_html(table_attributes='border="1" class="dataframe"')
 
 
-def write_plot(
+def maybe_write_plot(
     main_fh,
     sub_fh,
     group_df: pd.DataFrame,
@@ -476,6 +591,10 @@ def write_plot(
         markers=True,
     )
 
+    # Ensure plot hover + y tick labels are also 2 decimals.
+    fig.update_traces(hovertemplate="%{y:.2f}<extra></extra>")
+    fig.update_yaxes(tickformat=".2f")
+
     metric_name = metric_label.lower()
     if "ttft" in metric_name:
         _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
@@ -488,7 +607,6 @@ def write_plot(
 
 
 def build_group_keys(df: pd.DataFrame, group_cols: List[str], sort_cols: List[str] | None = None):
-    """Return a stable list of group keys from df."""
     if sort_cols:
         df = df.sort_values(by=sort_cols)
     gb = df.groupby(group_cols, dropna=False)
@@ -496,16 +614,11 @@ def build_group_keys(df: pd.DataFrame, group_cols: List[str], sort_cols: List[st
 
 
 def write_report_group_first(files: List[str], info_cols: List[str], plan: MetricPlan, args):
-    """
-    Group-first layout:
-      For each group, emit tok/s then TTFT then TPOT (or Median variants) together.
-    """
     name_column = "Test name"
     y_axis_col = get_y_axis_col(info_cols, args.xaxis)
 
     print("comparing : " + ", ".join(files))
 
-    # Precompute per-metric dataframes once
     metric_cache: Dict[str, Tuple[pd.DataFrame, List[str]]] = {}
     group_cols_canonical: List[str] | None = None
 
@@ -519,7 +632,6 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
             debug=args.debug,
         )
 
-        # plot expects y-axis column at the front
         raw_data_cols = list(raw_data_cols)
         raw_data_cols.insert(0, y_axis_col)
 
@@ -527,7 +639,6 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
         if group_cols_canonical is None:
             group_cols_canonical = group_cols
         else:
-            # keep intersection (stable order)
             group_cols_canonical = [c for c in group_cols_canonical if c in group_cols]
 
         metric_cache[metric_label] = (output_df.sort_values(by=args.xaxis), raw_data_cols)
@@ -535,12 +646,10 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
     if not group_cols_canonical:
         raise ValueError("No canonical group columns found across metrics.")
 
-    # Canonical group keys from first metric (typically tok/s)
     first_metric = plan.data_cols[0]
     first_df_sorted, _ = metric_cache[first_metric]
     group_keys = build_group_keys(first_df_sorted, group_cols_canonical, sort_cols=[args.xaxis])
 
-    # Pre-build groupby objects per metric
     metric_groupbys = {
         metric_label: df.groupby(group_cols_canonical, dropna=False)
         for metric_label, (df, _) in metric_cache.items()
@@ -552,7 +661,6 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
             suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
             sub_path = group_filename(gkey_tuple)
 
-            # Optional group header (separates each group visually)
             group_header = (
                 f'<div style="font-size: 1.4em; font-weight: 700; margin: 18px 0 10px 0;">'
                 f'{_html.escape(suffix)}'
@@ -562,6 +670,11 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
             main_fh.write(group_header)
             with open(sub_path, "w") as sub_fh:
                 sub_fh.write(group_header)
+
+                tput_group_df = None
+                ttft_group_df = None
+                tpot_group_df = None
+                conc_col = args.xaxis
 
                 for metric_label in plan.data_cols:
                     gb = metric_groupbys[metric_label]
@@ -579,15 +692,24 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
                         sub_fh.write(missing)
                         continue
 
-                    # Display-only: drop group columns
+                    if conc_col not in group_df.columns:
+                        conc_col = _find_concurrency_col(group_df)
+
+                    mn = metric_label.lower().strip()
+                    if "tok/s" in mn:
+                        tput_group_df = group_df
+                    elif "ttft" in mn:
+                        ttft_group_df = group_df
+                    elif mn in ("p99", "median") or "tpot" in mn:
+                        tpot_group_df = group_df
+
                     display_group = group_df.drop(columns=group_cols_canonical, errors="ignore")
 
                     html = render_metric_table_html(display_group, metric_label, suffix, args)
-
                     main_fh.write(html)
                     sub_fh.write(html)
 
-                    write_plot(
+                    maybe_write_plot(
                         main_fh,
                         sub_fh,
                         group_df=group_df,
@@ -597,16 +719,23 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
                         args=args,
                     )
 
+                summary_html = build_valid_max_concurrency_summary_html(
+                    tput_group_df=tput_group_df,
+                    ttft_group_df=ttft_group_df,
+                    tpot_group_df=tpot_group_df,
+                    conc_col=conc_col,
+                    args=args,
+                )
+                if summary_html:
+                    main_fh.write(summary_html)
+                    sub_fh.write(summary_html)
+
 
 def main():
     args = build_parser().parse_args()
-
     info_cols = list(DEFAULT_INFO_COLS)
     plan = choose_metrics(args.latency)
-
     files, info_cols = prepare_input_files(args, info_cols)
-
-    # Group-first report layout
     write_report_group_first(files, info_cols, plan, args)
 
 
