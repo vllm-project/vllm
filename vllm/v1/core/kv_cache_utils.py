@@ -455,12 +455,12 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
+        Return LoRA ID of the request if it is a LoRA request. Return empty
         list otherwise.
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [str(request.lora_request.lora_int_id)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
