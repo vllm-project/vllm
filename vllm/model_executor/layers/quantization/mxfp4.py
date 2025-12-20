@@ -896,7 +896,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -990,7 +990,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
