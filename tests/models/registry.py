@@ -295,6 +295,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm3-8b-instruct", trust_remote_code=True
     ),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
+    "Jais2ForCausalLM": _HfExamplesInfo(
+        "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
+    ),
     "JambaForCausalLM": _HfExamplesInfo(
         "ai21labs/AI21-Jamba-1.5-Mini",
         extras={
@@ -456,6 +459,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
+    "MiMoV2FlashForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
+    ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 

@@ -18,6 +18,12 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
+## Technical Discussions
+
+The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).
+
+When open a Github issue about the CPU backend, please add `[CPU Backend]` in the title and it will be labeled with `cpu` for better awareness.
+
 ## Requirements
 
 - Python: 3.10 -- 3.13
@@ -257,11 +263,6 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
     - AWQ (x86 only)
     - GPTQ (x86 only)
     - compressed-tensor INT8 W8A8 (x86, s390x)
-
-### (x86 only) What is the purpose of `VLLM_CPU_SGL_KERNEL`?
-
-- Both of them require `amx` CPU flag.
-    - `VLLM_CPU_SGL_KERNEL` can provide better performance for MoE models and small-batch scenarios.
 
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 
