@@ -18,6 +18,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
+    str_dtype_to_torch_dtype,
     try_match_architecture_defaults,
 )
 from vllm.config.multimodal import MultiModalConfig
@@ -72,6 +73,7 @@ __all__ = [
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",
+    "str_dtype_to_torch_dtype",
     "try_match_architecture_defaults",
     # From vllm.config.multimodal
     "MultiModalConfig",
