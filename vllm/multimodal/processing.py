@@ -1672,6 +1672,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
+        lora_kwargs: dict[str, Any] | None = None,
     ) -> MultiModalHashes:
         """Create MM hashes to be returned.
 
@@ -1683,6 +1684,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         hashes: MultiModalHashes = {}
         mm_uuids = mm_uuids or {}
+        lora_kwargs = lora_kwargs or {}
 
         for modality, items in mm_items.items():
             if modality in mm_uuids:
@@ -1703,6 +1705,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         item_uuid is None
                         or hf_processor_mm_kwargs
                         or tokenization_kwargs
+                        or lora_kwargs
                     ):
                         # NOTE: use provided hash string to hash with kwargs
                         # if available for better performance.
@@ -1713,6 +1716,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                 **{modality: item},
                                 **hf_processor_mm_kwargs,
                                 **tokenization_kwargs,
+                                **lora_kwargs,
                             )
                         )
                     else:
@@ -1725,6 +1729,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         **{modality: item},
                         **hf_processor_mm_kwargs,
                         **tokenization_kwargs,
+                        **lora_kwargs,
                     )
                     for item in items
                 ]
@@ -1883,6 +1888,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
+        lora_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1905,6 +1911,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
+            lora_kwargs=lora_kwargs,
         )
 
         mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
@@ -2115,6 +2122,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
+        lora_kwargs: dict[str, Any] | None = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -2144,6 +2152,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
+            lora_kwargs=lora_kwargs,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
@@ -2224,6 +2233,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
+        lora_kwargs: dict[str, Any] | None = None,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -2239,6 +2249,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
+            lora_kwargs=lora_kwargs,
         )
 
         return self._get_enc_dec_inputs(

@@ -5,6 +5,8 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
+import msgspec
+
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
@@ -458,6 +460,16 @@ class InputProcessor:
             else:
                 mm_uuids = None
 
+        # When enable_tower_connector_lora is True, multi-modal embeddings
+        # vary depending on the LoRA request. Therefore, the mm_hash must be
+        # generated based on the LoRA request to prevent incorrect cache hits.
+        lora_kwargs = (
+            msgspec.structs.asdict(lora_request)
+            if lora_request and self.lora_config.enable_tower_connector_lora
+            else {}
+        )
+        lora_kwargs = {k: v for k, v in lora_kwargs.items() if v is not None}
+
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
@@ -466,6 +478,7 @@ class InputProcessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
+            lora_kwargs=lora_kwargs,
         )
         from vllm.platforms import current_platform
 
