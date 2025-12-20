@@ -1292,12 +1292,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
 
-        select_result = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
-
-        topk_weights, topk_ids, zero_expert_result = select_result
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1353,13 +1351,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
-            assert not isinstance(result, tuple), (
-                "Shared + zero experts are mutually exclusive not yet supported"
-            )
-            return result, zero_expert_result
-        else:
-            return result
+        return result
 
 
 class Fp8OnlineMoEMethod(Fp8MoEMethod):
