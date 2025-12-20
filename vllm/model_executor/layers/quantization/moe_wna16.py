@@ -370,7 +370,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         assert layer.activation == "silu", "Only SiLU activation is supported."
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
