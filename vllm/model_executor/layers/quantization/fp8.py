@@ -1096,12 +1096,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             config = self.get_fused_moe_quant_config(layer)
             self.moe_quant_config = config
+            use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
+            allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
             moe_kernel = (
                 MarlinExperts(quant_config=self.moe_quant_config)
-                if self.fp8_backend == Fp8MoeBackend.MARLIN
+                if use_marlin
                 else TritonOrDeepGemmExperts(
                     quant_config=self.moe_quant_config,
-                    allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                    allow_deep_gemm=allow_deep_gemm,
                 ),
             )
 
