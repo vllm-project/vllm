@@ -275,8 +275,8 @@ results between the query token and all context key tokens.
 
 $$
 \begin{gather*}
-m(x):=\max _i \quad x_i \\ \quad f(x):=\left[\begin{array}{lll}e^{x_1-m(x)} & \ldots & e^{x_B-m(x)}\end{array}\right]\\ \quad \ell(x):=\sum_i f(x)_i \\
-\quad \operatorname{softmax}(x):=\frac{f(x)}{\ell(x)}
+m(x):=\max _i \quad x_i \ \quad f(x):=\left[\begin{array}{lll}e^{x_1-m(x)} & \ldots & e^{x_B-m(x)}\end{array}\right]\ \quad \ell(x):=\sum_i f(x)_i \\
+\quad \text{softmax}(x):=\frac{f(x)}{\ell(x)}
 \end{gather*}
 $$
 
