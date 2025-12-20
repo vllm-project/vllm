@@ -1068,6 +1068,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
             self.moe_quant_config = config
 
             self.kernel = mk.FusedMoEModularKernel(
@@ -1104,6 +1105,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
             self.moe_quant_config = config
             use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
             allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
@@ -1215,7 +1217,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
             )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
             return fp8_w8a16_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
