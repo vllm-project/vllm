@@ -2175,3 +2175,28 @@ direct_register_custom_op(
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
 # to avoid expensive runtime reflection in model loading code
 FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+
+
+def find_fused_moe_submodule(module: torch.nn.Module) -> torch.nn.Module:
+    """Find a FusedMoE submodule for offloading, or return the module itself.
+
+    Searches module attributes for instances of FusedMoE (or subclasses like
+    SharedFusedMoE).
+
+    Args:
+        module: The module to search within (typically layer.mlp).
+
+    Returns:
+        The first FusedMoE instance found, or the original module if none found.
+    """
+    for attr_name in dir(module):
+        if attr_name.startswith("_"):
+            continue
+        try:
+            attr = getattr(module, attr_name, None)
+        except Exception:
+            continue
+        if isinstance(attr, FusedMoE):
+            return attr
+
+    return module
