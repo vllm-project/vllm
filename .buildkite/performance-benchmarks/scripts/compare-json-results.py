@@ -364,7 +364,7 @@ if __name__ == "__main__":
             # For Plot feature, insert y axis from one of info_cols
             raw_data_cols.insert(0, info_cols[y_axis_index])
 
-            filtered_info_cols = info_cols[:-2]
+            filtered_info_cols = info_cols[:-4]
             existing_group_cols = [
                 c for c in filtered_info_cols if c in output_df.columns
             ]
@@ -382,30 +382,56 @@ if __name__ == "__main__":
                     ",".join(map(str, name)).replace(",", "_").replace("/", "-")
                 )
                 group_html_name = "perf_comparison_" + group_name + ".html"
+                import html as _html
+                name_vals = name if isinstance(name, tuple) else (name,)
+                group_title_suffix = ", ".join(
+                    f"{col}={val}" for col, val in zip(existing_group_cols, name_vals)
+                )
+
+                # ---------------------------------------------
+                # DROP group columns from DISPLAY ONLY
+                # ---------------------------------------------
+                display_group = group.drop(columns=existing_group_cols, errors="ignore")
 
                 metric_name = str(data_cols_to_compare[i]).lower()
                 if "tok/s" in metric_name:
-                    html = group.to_html()
+                    html = (
+                        f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
+                        f'{_html.escape(data_cols_to_compare[i])}'
+                        f' — {_html.escape(group_title_suffix)}'
+                        f'</div>\n'
+                        + display_group.to_html(index=False)
+                    )
                 elif "ttft" in metric_name:
-                    styler = _highlight_threshold(group, args.ttft_max_ms).format(
-                        {c: "{:.2f}" for c in group.select_dtypes("number").columns},
+                    styler = _highlight_threshold(display_group, args.ttft_max_ms).format(
+                        {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
                         na_rep="—",
                     )
-                    html = styler.to_html(
-                        table_attributes='border="1" class="dataframe"'
+                    html = (
+                        f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
+                        f'{_html.escape(data_cols_to_compare[i])}'
+                        f' — {_html.escape(group_title_suffix)}'
+                        f'</div>\n'
+                        + styler.to_html(table_attributes='border="1" class="dataframe"')
                     )
+
                 elif (
                     "tpot" in metric_name
                     or "median" in metric_name
                     or "p99" in metric_name
                 ):
-                    styler = _highlight_threshold(group, args.tpot_max_ms).format(
-                        {c: "{:.2f}" for c in group.select_dtypes("number").columns},
+                    styler = _highlight_threshold(display_group, args.tpot_max_ms).format(
+                        {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
                         na_rep="—",
                     )
-                    html = styler.to_html(
-                        table_attributes='border="1" class="dataframe"'
+                    html = (
+                        f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
+                        f'{_html.escape(data_cols_to_compare[i])}'
+                        f' — {_html.escape(group_title_suffix)}'
+                        f'</div>\n'
+                        + styler.to_html(table_attributes='border="1" class="dataframe"')
                     )
+                    
 
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
