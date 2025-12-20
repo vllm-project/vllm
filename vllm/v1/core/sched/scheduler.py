@@ -188,12 +188,6 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
-        # For encoder-decoder models, allocate the maximum number of tokens for Cross
-        # Attn blocks, as for Whisper its input is always padded to the maximum length.
-        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
-        self._num_encoder_max_input_tokens = (
-            MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(vllm_config.model_config)
-        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -577,12 +571,6 @@ class Scheduler(SchedulerInterface):
                 # of local and remote blocks.
                 effective_lookahead_tokens = (
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
-                )
-
-                num_encoder_tokens = (
-                    self._num_encoder_max_input_tokens
-                    if self.is_encoder_decoder and request.has_encoder_inputs
-                    else 0
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
