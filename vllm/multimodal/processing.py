@@ -1412,6 +1412,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         raise NotImplementedError
 
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        """
+        Implement this function to enable LoRA support 
+        for the tower module of the multi-modal model
+        Given the number of image tokens, output the number of multi-modal encoder tokens
+        """
+        raise NotImplementedError
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model
+        Given the number of vision tokens, output the number of multi-modal connector tokens
+        """
+        raise NotImplementedError
+
     def _bind_and_group_updates(
         self,
         prompt_updates: Sequence[PromptUpdate],

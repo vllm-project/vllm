@@ -820,34 +820,7 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-class QwenVLSeriesProcessingInfoMixin:
-    """
-    Mixin that provides get_num_mm_encoder_tokens()
-    and get_num_mm_connector_tokens() methods for
-    QwenVL series models without affecting other multi-modal models.
-    """
-
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-
-        return num_image_tokens * merge_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_vision_tokens // merge_size**2
-
-
-class Qwen2VLProcessingInfo(QwenVLSeriesProcessingInfoMixin, BaseProcessingInfo):
+class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2VLConfig)
 
@@ -1130,6 +1103,25 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             )
             for modality in ("image", "video")
         ]
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
 
     def _get_mm_fields_config(
         self,
