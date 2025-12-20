@@ -121,7 +121,7 @@ class LoRAModelManager:
         )
         self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {}
         if self.supports_mm:
-            self._maybe_init_mm(vllm_config,max_num_batched_tokens)
+            self._maybe_init_mm(vllm_config, max_num_batched_tokens)
         else:
             llm_punica_wrapper = get_punica_wrapper(
                 max_num_batched_tokens,
@@ -350,7 +350,7 @@ class LoRAModelManager:
         punica_wrapper = self._get_punica_wrapper(target_prefix)
         assert punica_wrapper is not None
 
-        punica_wrapper.wrapper.update_metadata(
+        punica_wrapper.update_metadata(
             mapping,
             self.lora_index_to_id,
             self.lora_slots + 1,
@@ -563,16 +563,12 @@ class LoRAModelManager:
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
-        
-
         # For multimodal model
-        # for prefix, wrapper in self.punica_wrapper_mapping.items():
-        #     is_language_model = (
-        #         prefix == DEFAULT_LANGUAGE_WRAPPER_KEY
-        #         and module_name.startswith(self.mm_mapping.language_model[0])
-        #     )
-        #     if is_language_model or module_name.startswith(prefix):
-        #         return LoRATarget(wrapper=wrapper, prefix=prefix)
+        # NOTE Sort by prefix length (descending) to match the longest prefix first
+        # e.g., 'visual.merger' should match 'visual.merger' instead of 'visual.'
+        for prefix in sorted(self.punica_wrapper_mapping.keys(), key=len, reverse=True):
+            if module_name.startswith(prefix):
+                return self.punica_wrapper_mapping[prefix]
 
         return None
 
