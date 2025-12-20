@@ -463,9 +463,10 @@ class InputProcessor:
         # When enable_tower_connector_lora is True, multi-modal embeddings
         # vary depending on the LoRA request. Therefore, the mm_hash must be
         # generated based on the LoRA request to prevent incorrect cache hits.
+        lora_config = self.lora_config
         lora_kwargs = (
             msgspec.structs.asdict(lora_request)
-            if lora_request and self.lora_config.enable_tower_connector_lora
+            if lora_request and lora_config and lora_config.enable_tower_connector_lora
             else {}
         )
         lora_kwargs = {k: v for k, v in lora_kwargs.items() if v is not None}
