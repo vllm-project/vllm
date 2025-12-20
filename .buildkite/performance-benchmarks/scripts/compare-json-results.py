@@ -9,7 +9,7 @@ import json
 import os
 from dataclasses import dataclass
 from importlib import util
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -51,11 +51,11 @@ def compare_data_columns(
     print("\ncompare_data_column:", data_column)
 
     frames = []
-    raw_data_cols = []
+    raw_data_cols: List[str] = []
     compare_frames = []
 
     # 1) choose a canonical key list from info_cols that exists in ALL files
-    cols_per_file = []
+    cols_per_file: List[set] = []
     for f in files:
         try:
             df_tmp = pd.read_json(f, orient="records")
@@ -143,10 +143,7 @@ def compare_data_columns(
             ratio.name = f"Ratio 1 vs {len(compare_frames)}"
             frames.append(ratio)
 
-    concat_df = pd.concat(frames, axis=1)
-
-    # NOTE: meta already contains key columns as normal columns, so we can drop the index cleanly.
-    concat_df = concat_df.reset_index(drop=True)
+    concat_df = pd.concat(frames, axis=1).reset_index(drop=True)
 
     # Ensure key/info columns appear first (in your info_cols order)
     front = [c for c in info_cols if c in concat_df.columns]
@@ -158,7 +155,7 @@ def compare_data_columns(
 
 
 # -----------------------------
-# Split helper (restored)
+# Split helper
 # -----------------------------
 def split_json_by_tp_pp(
     input_file: str = "benchmark_results.json", output_root: str = "."
@@ -231,6 +228,7 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
     ]:
         if c in df.columns:
             return c
+    # Fallback: guess an integer-like column (harmless if unused)
     for c in df.columns:
         if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
             return c
@@ -240,9 +238,16 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
 def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
     """Highlight numeric per-configuration columns with value <= threshold."""
     conc_col = _find_concurrency_col(df)
-    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col] if c in df.columns]
-    conf_cols = [c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")]
+    key_cols = [
+        c
+        for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col]
+        if c in df.columns
+    ]
+    conf_cols = [
+        c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")
+    ]
     conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
+
     return df.style.map(
         lambda v: "background-color:#e6ffe6;font-weight:bold;"
         if pd.notna(v) and v <= threshold
@@ -257,17 +262,20 @@ def highlight_ratio_columns(styler: "pd.io.formats.style.Styler"):
     if not ratio_cols:
         return styler
 
-    # highlight cells
+    # Highlight entire column (cells)
     styler = styler.apply(
         lambda _: ["background-color: #fff3b0"] * len(styler.data),
         subset=ratio_cols,
         axis=0,
     )
 
-    # highlight headers
+    # Highlight column headers
     styler = styler.set_table_styles(
         [
-            {"selector": f"th.col_heading.level0.col{i}", "props": [("background-color", "#fff3b0")]}
+            {
+                "selector": f"th.col_heading.level0.col{i}",
+                "props": [("background-color", "#fff3b0")],
+            }
             for i, col in enumerate(styler.data.columns)
             if col in ratio_cols
         ],
@@ -296,14 +304,17 @@ def _add_limit_line(fig, y_value: float, label: str):
                 x=[None],
                 y=[None],
                 mode="lines",
-                line=dict(dash="dash", color="red" if "ttft" in label.lower() else "blue"),
+                line=dict(
+                    dash="dash",
+                    color="red" if "ttft" in label.lower() else "blue",
+                ),
                 name=label,
             )
         )
 
 
 # -----------------------------
-# Refactored "main"
+# Refactored main + group-first report
 # -----------------------------
 @dataclass(frozen=True)
 class MetricPlan:
@@ -343,11 +354,14 @@ def build_parser() -> argparse.ArgumentParser:
 def choose_metrics(latency: str) -> MetricPlan:
     latency = (latency or "").lower()
     drop_column = "P99"
+
     if "median" in latency:
         return MetricPlan(
             data_cols=["Output Tput (tok/s)", "Median TTFT (ms)", "Median"],
             drop_column=drop_column,
         )
+
+    # default: p99
     return MetricPlan(
         data_cols=["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"],
         drop_column=drop_column,
@@ -357,11 +371,13 @@ def choose_metrics(latency: str) -> MetricPlan:
 def prepare_input_files(args, info_cols: List[str]) -> Tuple[List[str], List[str]]:
     if not args.file:
         raise ValueError("No input files provided. Use -f/--file.")
+
     if len(args.file) == 1:
         files = split_json_by_tp_pp(args.file[0], output_root="splits")
         info_cols = [c for c in info_cols if c not in ("TP Size", "PP Size")]
     else:
         files = args.file
+
     return files, info_cols
 
 
@@ -371,6 +387,7 @@ def get_y_axis_col(info_cols: List[str], xaxis: str) -> str:
 
 
 def get_group_cols(output_df: pd.DataFrame, info_cols: List[str]) -> List[str]:
+    # Your current grouping rule: first 4 info columns
     filtered_info_cols = info_cols[:4]
     group_cols = [c for c in filtered_info_cols if c in output_df.columns]
     if not group_cols:
@@ -381,27 +398,38 @@ def get_group_cols(output_df: pd.DataFrame, info_cols: List[str]) -> List[str]:
     return group_cols
 
 
-def group_suffix(group_cols: List[str], name) -> str:
-    name_vals = name if isinstance(name, tuple) else (name,)
-    return " , ".join(f"{col} : [ {val} ] " for col, val in zip(group_cols, name_vals))
+def normalize_group_key(name):
+    """Pandas group key can be scalar (1 col) or tuple (N cols). Normalize to tuple."""
+    return name if isinstance(name, tuple) else (name,)
 
 
 def group_filename(name, prefix: str = "perf_comparison_") -> str:
-    name_vals = name if isinstance(name, tuple) else (name,)
+    name_vals = normalize_group_key(name)
     safe = ",".join(map(str, name_vals)).replace(",", "_").replace("/", "-")
     return f"{prefix}{safe}.html"
 
 
-def render_metric_table_html(display_group: pd.DataFrame, metric_label: str, suffix: str, args) -> str:
+def build_group_suffix(group_cols: List[str], name) -> str:
+    name_vals = normalize_group_key(name)
+    return " , ".join(
+        f"{col} : [ {val} ] " for col, val in zip(group_cols, name_vals)
+    )
+
+
+def render_metric_table_html(
+    display_group: pd.DataFrame,
+    metric_label: str,
+    group_suffix: str,
+    args,
+) -> str:
     title = (
         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
         f'{_html.escape(metric_label)}'
-        f' — {_html.escape(suffix)}'
+        f' — {_html.escape(group_suffix)}'
         f"</div>\n"
     )
 
     metric_name = metric_label.lower()
-
     if "ttft" in metric_name:
         styler = _highlight_threshold(display_group, args.ttft_max_ms)
     elif ("tpot" in metric_name) or ("median" in metric_name) or ("p99" in metric_name):
@@ -409,7 +437,6 @@ def render_metric_table_html(display_group: pd.DataFrame, metric_label: str, suf
     else:
         styler = display_group.style
 
-    # format numbers + highlight ratios
     styler = styler.format(
         {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
         na_rep="—",
@@ -460,41 +487,106 @@ def maybe_write_plot(
     sub_fh.write(html)
 
 
-def write_report(files: List[str], info_cols: List[str], plan: MetricPlan, args):
+def build_group_keys(df: pd.DataFrame, group_cols: List[str], sort_cols: List[str] | None = None):
+    """Return a stable list of group keys from df."""
+    if sort_cols:
+        df = df.sort_values(by=sort_cols)
+    gb = df.groupby(group_cols, dropna=False)
+    return [k for k, _ in gb]
+
+
+def write_report_group_first(files: List[str], info_cols: List[str], plan: MetricPlan, args):
+    """
+    Group-first layout:
+      For each group, emit tok/s then TTFT then TPOT (or Median variants) together.
+    """
     name_column = "Test name"
     y_axis_col = get_y_axis_col(info_cols, args.xaxis)
 
     print("comparing : " + ", ".join(files))
 
+    # Precompute per-metric dataframes once
+    metric_cache: Dict[str, Tuple[pd.DataFrame, List[str]]] = {}
+    group_cols_canonical: List[str] | None = None
+
+    for metric_label in plan.data_cols:
+        output_df, raw_data_cols = compare_data_columns(
+            files,
+            name_column,
+            metric_label,
+            info_cols,
+            plan.drop_column,
+            debug=args.debug,
+        )
+
+        # plot expects y-axis column at the front
+        raw_data_cols = list(raw_data_cols)
+        raw_data_cols.insert(0, y_axis_col)
+
+        group_cols = get_group_cols(output_df, info_cols)
+        if group_cols_canonical is None:
+            group_cols_canonical = group_cols
+        else:
+            # keep intersection (stable order)
+            group_cols_canonical = [c for c in group_cols_canonical if c in group_cols]
+
+        metric_cache[metric_label] = (output_df.sort_values(by=args.xaxis), raw_data_cols)
+
+    if not group_cols_canonical:
+        raise ValueError("No canonical group columns found across metrics.")
+
+    # Canonical group keys from first metric (typically tok/s)
+    first_metric = plan.data_cols[0]
+    first_df_sorted, _ = metric_cache[first_metric]
+    group_keys = build_group_keys(first_df_sorted, group_cols_canonical, sort_cols=[args.xaxis])
+
+    # Pre-build groupby objects per metric
+    metric_groupbys = {
+        metric_label: df.groupby(group_cols_canonical, dropna=False)
+        for metric_label, (df, _) in metric_cache.items()
+    }
+
     with open("perf_comparison.html", "w") as main_fh:
-        for metric_label in plan.data_cols:
-            output_df, raw_data_cols = compare_data_columns(
-                files,
-                name_column,
-                metric_label,
-                info_cols,
-                plan.drop_column,
-                debug=args.debug,
+        for gkey in group_keys:
+            gkey_tuple = normalize_group_key(gkey)
+            suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
+            sub_path = group_filename(gkey_tuple)
+
+            # Optional group header (separates each group visually)
+            group_header = (
+                f'<div style="font-size: 1.4em; font-weight: 700; margin: 18px 0 10px 0;">'
+                f'{_html.escape(suffix)}'
+                f"</div>\n"
             )
 
-            raw_data_cols = list(raw_data_cols)
-            raw_data_cols.insert(0, y_axis_col)
+            main_fh.write(group_header)
+            with open(sub_path, "w") as sub_fh:
+                sub_fh.write(group_header)
 
-            group_cols = get_group_cols(output_df, info_cols)
+                for metric_label in plan.data_cols:
+                    gb = metric_groupbys[metric_label]
+                    df_sorted, raw_data_cols = metric_cache[metric_label]
 
-            output_df_sorted = output_df.sort_values(by=args.xaxis)
-            for name, group_df in output_df_sorted.groupby(group_cols, dropna=False):
-                suffix = group_suffix(group_cols, name)
-                sub_path = group_filename(name)
+                    try:
+                        group_df = gb.get_group(gkey)
+                    except KeyError:
+                        missing = (
+                            f'<div style="font-size: 1.1em; font-weight: 600; margin: 10px 0;">'
+                            f'{_html.escape(metric_label)} — missing for this group'
+                            f"</div>\n"
+                        )
+                        main_fh.write(missing)
+                        sub_fh.write(missing)
+                        continue
 
-                # drop group columns from display only
-                display_group = group_df.drop(columns=group_cols, errors="ignore")
+                    # Display-only: drop group columns
+                    display_group = group_df.drop(columns=group_cols_canonical, errors="ignore")
 
-                html = render_metric_table_html(display_group, metric_label, suffix, args)
+                    html = render_metric_table_html(display_group, metric_label, suffix, args)
 
-                main_fh.write(html)
-                with open(sub_path, "a+") as sub_fh:
+                    main_fh.write(html)
                     sub_fh.write(html)
+
                     maybe_write_plot(
                         main_fh,
                         sub_fh,
@@ -513,7 +605,9 @@ def main():
     plan = choose_metrics(args.latency)
 
     files, info_cols = prepare_input_files(args, info_cols)
-    write_report(files, info_cols, plan, args)
+
+    # Group-first report layout
+    write_report_group_first(files, info_cols, plan, args)
 
 
 if __name__ == "__main__":
