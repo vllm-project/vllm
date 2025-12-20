@@ -706,6 +706,10 @@ def invoke_fused_moe_triton_kernel(
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
 ):
+    assert topk_weights is not None or not mul_routed_weight
+    assert topk_weights is None or topk_weights.stride(1) == 1
+    assert sorted_token_ids.stride(0) == 1
+
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None or triton.cdiv(
@@ -2335,13 +2339,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
         )
 
-        dispatch_fused_moe_kernel(
+        invoke_fused_moe_triton_kernel(
             hidden_states,
             w1,
             intermediate_cache1,
             a1q_scale,
             self.w1_scale,
-            self.w1_zp,
             None,  # topk_weights
             sorted_token_ids,
             expert_ids,
@@ -2373,13 +2376,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.block_shape,
         )
 
-        dispatch_fused_moe_kernel(
+        invoke_fused_moe_triton_kernel(
             qintermediate_cache2,
             w2,
             intermediate_cache3,
             a2q_scale,
             self.w2_scale,
-            self.w2_zp,
             topk_weights,
             sorted_token_ids,
             expert_ids,
