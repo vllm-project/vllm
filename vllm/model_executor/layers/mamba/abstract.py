@@ -43,7 +43,7 @@ class MambaBase(AttentionLayerBase):
         pass
 
     def get_copy_spec(self) -> tuple[type[MambaCopySpec], ...]:
-        return (MambaFullCopySpec, ) * len(self.get_state_dtype())
+        return (MambaFullCopySpec,) * len(self.get_state_dtype())
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         if (

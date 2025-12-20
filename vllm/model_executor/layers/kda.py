@@ -32,8 +32,8 @@ from .linear import (
 )
 from .mamba.abstract import MambaBase
 from .mamba.mamba_utils import (
-    MambaCopySpecCalculator, 
-    MambaStateDtypeCalculator, 
+    MambaCopySpecCalculator,
+    MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
 from .mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update

@@ -450,9 +450,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 attn_block_size,
             )
 
-        # By default, mamba block size will be set to max_model_len. 
-        # When enabling prefix caching and using align mamba cache 
-        # mode, we align mamba block size to the block size as the 
+        # By default, mamba block size will be set to max_model_len.
+        # When enabling prefix caching and using align mamba cache
+        # mode, we align mamba block size to the block size as the
         # basic granularity for prefix caching.
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size

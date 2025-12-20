@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+
 import torch
 
 from vllm.config.cache import MambaDType
@@ -236,7 +237,7 @@ class MambaCopySpec(ABC):
         pass
 
     @staticmethod
-    @abstractmethod 
+    @abstractmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
         """
         Return the offset of the data in the source block which needs to be copied.
@@ -244,12 +245,13 @@ class MambaCopySpec(ABC):
         pass
 
     @staticmethod
-    @abstractmethod 
+    @abstractmethod
     def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
         """
         Return the number of elements to be copied.
         """
         pass
+
 
 class MambaTemporalCopySpec(MambaCopySpec):
     @staticmethod
@@ -259,32 +261,35 @@ class MambaTemporalCopySpec(MambaCopySpec):
     @staticmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
         return 0
-    
+
     @staticmethod
     def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
         return state.numel()
+
 
 class MambaConvCopySpec(MambaCopySpec):
     @staticmethod
     def block_idx_offset_func(accept_token_bias: int) -> int:
         return 0
-    
+
     @staticmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
         # TODO: check contiguous!
         return accept_token_bias * state.stride(0)
-    
+
     @staticmethod
     def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
         return state.numel() - accept_token_bias * state.stride(0)
 
+
 MambaFullCopySpec = MambaTemporalCopySpec
+
 
 class MambaCopySpecCalculator:
     @classmethod
     def linear_attention_copy_spec(cls):
         return (MambaTemporalCopySpec,)
-    
+
     @classmethod
     def mamba1_state_copy_spec(cls):
         return MambaConvCopySpec, MambaTemporalCopySpec
@@ -300,7 +305,12 @@ class MambaCopySpecCalculator:
     @classmethod
     def gated_delta_net_copy_spec(cls):
         return MambaConvCopySpec, MambaTemporalCopySpec
-    
+
     @classmethod
     def kda_state_copy_spec(cls):
-        return MambaConvCopySpec, MambaConvCopySpec, MambaConvCopySpec, MambaTemporalCopySpec
+        return (
+            MambaConvCopySpec,
+            MambaConvCopySpec,
+            MambaConvCopySpec,
+            MambaTemporalCopySpec,
+        )

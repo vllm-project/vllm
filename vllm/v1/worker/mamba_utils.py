@@ -18,12 +18,7 @@ from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
 
 @triton.jit
-def batch_memcpy_kernel(
-    src_ptrs,
-    dst_ptrs,
-    sizes,
-    BLOCK_SIZE: tl.constexpr
-):
+def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
 
     src_ptr = tl.load(src_ptrs + pid)
@@ -40,6 +35,7 @@ def batch_memcpy_kernel(
         data = tl.load(curr_src_ptr, mask=mask)
         tl.store(curr_dst_ptr, data, mask=mask)
 
+
 def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch = src_ptrs.shape[0]
     assert dst_ptrs.shape[0] == batch
@@ -47,12 +43,8 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
 
     grid = (batch,)
     BLOCK_SIZE = 1024
-    batch_memcpy_kernel[grid](
-        src_ptrs,
-        dst_ptrs,
-        sizes,
-        BLOCK_SIZE=BLOCK_SIZE
-    )
+    batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
+
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
     mamba_group_ids: list[int] = []
@@ -79,7 +71,7 @@ def mamba_copy_block(
 ):
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
-    
+
     src_state_list = []
     dest_state_list = []
     num_elements_list = []
@@ -92,16 +84,20 @@ def mamba_copy_block(
             attention = forward_context[layer_name]
             kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
             for state, copy_spec in zip(kv_caches, copy_specs):
-                src_block_id = block_ids[src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)]
+                src_block_id = block_ids[
+                    src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)
+                ]
                 data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
                 num_elements = copy_spec.num_elements_func(state[0], accept_token_bias)
-                src_state_list.append(state[src_block_id].data_ptr() + data_offset * state.element_size())
+                src_state_list.append(
+                    state[src_block_id].data_ptr() + data_offset * state.element_size()
+                )
                 dest_state_list.append(state[dest_block_id].data_ptr())
                 num_elements_list.append(num_elements * state.element_size())
 
-    src_state_ptrs = torch.tensor(src_state_list, device='cuda', dtype=torch.int64)
-    dst_state_ptrs = torch.tensor(dest_state_list, device='cuda', dtype=torch.int64)
-    num_elements = torch.tensor(num_elements_list, device='cuda', dtype=torch.int32)
+    src_state_ptrs = torch.tensor(src_state_list, device="cuda", dtype=torch.int64)
+    dst_state_ptrs = torch.tensor(dest_state_list, device="cuda", dtype=torch.int64)
+    num_elements = torch.tensor(num_elements_list, device="cuda", dtype=torch.int32)
 
     batch_memcpy(src_state_ptrs, dst_state_ptrs, num_elements)
 

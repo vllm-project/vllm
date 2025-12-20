@@ -235,7 +235,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             self.conv_kernel_size,
             self.num_spec,
         )
-    
+
     def get_copy_spec(self):
         return MambaCopySpecCalculator.gated_delta_net_copy_spec()
 
