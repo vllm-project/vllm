@@ -38,6 +38,7 @@ def _run_test(
     *,
     dtype: str,
     tokenization_kwargs: dict[str, Any] | None = None,
+    attention_config: dict[str, Any] | None = None,
 ) -> None:
     if tokenization_kwargs is None:
         tokenization_kwargs = {}
@@ -49,6 +50,7 @@ def _run_test(
         enforce_eager=True,
         max_model_len=64,
         gpu_memory_utilization=0.7,
+        attention_config=attention_config,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(
             input_texts, images=input_images, tokenization_kwargs=tokenization_kwargs
@@ -90,6 +92,7 @@ def test_models_text(
     hf_runner,
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -108,6 +111,7 @@ def test_models_text(
             "padding": "max_length",
             "max_length": 64,
         },  # siglip2 was trained with this padding setting.
+        attention_config=siglip_attention_config,
     )
 
 
@@ -117,6 +121,7 @@ def test_models_image(
     hf_runner,
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -133,6 +138,7 @@ def test_models_image(
         input_images,
         model,
         dtype=dtype,
+        attention_config=siglip_attention_config,
     )
 
 
@@ -141,6 +147,7 @@ def test_models_image(
 def test_models_text_image_no_crash(
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -154,6 +161,7 @@ def test_models_text_image_no_crash(
         enforce_eager=True,
         max_model_len=64,
         gpu_memory_utilization=0.7,
+        attention_config=siglip_attention_config,
     ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)

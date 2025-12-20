@@ -42,7 +42,7 @@ from vllm.v1.worker.utils import MultiModalBudget
 logger = init_logger(__name__)
 
 T = TypeVar("T")
-DEFAULT_WRAPPER_KEY = "__default__"
+DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -82,8 +82,9 @@ class LoRAModelManager:
         """
         self.model: SupportsLoRA = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
-        assert self.supported_lora_modules, "No supported LoRA modules found in"
-        f" {self.model.__class__.__name__}."
+        assert self.supported_lora_modules, (
+            f"No supported LoRA modules found in {self.model.__class__.__name__}."
+        )
 
         self._registered_adapters: dict[int, LoRAModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
@@ -112,20 +113,6 @@ class LoRAModelManager:
     def _init_punica_wrapper(
         self, max_num_batched_tokens: int, vllm_config: VllmConfig
     ) -> None:
-        self.punica_wrapper = get_punica_wrapper(
-            max_num_batched_tokens,
-            max_batches=self.max_num_seqs,
-            device=self.device,
-            max_loras=self.lora_config.max_loras,
-        )
-
-        self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {
-            DEFAULT_WRAPPER_KEY: self.punica_wrapper
-        }
-
-        self._maybe_init_mm(vllm_config)
-
-    def _maybe_init_mm(self, vllm_config: VllmConfig) -> None:
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -133,12 +120,38 @@ class LoRAModelManager:
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping")
         )
-        if not self.supports_mm:
-            return
+        self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {}
+        if self.supports_mm:
+            self._maybe_init_mm(vllm_config, max_num_batched_tokens)
+        else:
+            llm_punica_wrapper = get_punica_wrapper(
+                max_num_batched_tokens,
+                max_batches=self.max_num_seqs,
+                device=self.device,
+                max_loras=self.lora_config.max_loras,
+            )
 
+            self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
+                llm_punica_wrapper
+            )
+
+    def _maybe_init_mm(self, vllm_config: VllmConfig, max_num_batched_tokens) -> None:
         self.supports_tower_connector_lora = False
         model_config: ModelConfig = vllm_config.model_config
         self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
+
+        # Only one language model can be included in the model.
+        assert len(self.mm_mapping.language_model) == 1
+
+        # Language model punica wrapper
+        llm_punica_wrapper = get_punica_wrapper(
+            max_num_batched_tokens,
+            max_batches=self.max_num_seqs,
+            device=self.device,
+            max_loras=self.lora_config.max_loras,
+        )
+        lm_prefix = self.mm_mapping.language_model[0]
+        self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         if self.lora_config.enable_tower_connector_lora:
             self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
@@ -147,6 +160,7 @@ class LoRAModelManager:
             )
         if not self.supports_tower_connector_lora:
             return
+
         logger.warning(
             "LoRA for the tower and connector of multimodal models is "
             "experimental and may contain bugs. Please report any related issues on "
@@ -163,21 +177,15 @@ class LoRAModelManager:
             mm_budget.get_encoder_budget()
         )
 
-        self.punica_wrapper_mapping = {}
-
         # Tower wrappers
-        for name in self.mm_mapping.tower_model:
-            self.punica_wrapper_mapping[name] = get_punica_wrapper(
-                num_encoder_tokens,
-                max_batches=self.max_num_seqs * limit_per_prompt,
-                device=self.device,
-                max_loras=self.lora_config.max_loras,
-            )
-
-        # Language wrapper
-        self.punica_wrapper_mapping[self.mm_mapping.language_model[0]] = (
-            self.punica_wrapper
+        tower_punica_wrapper = get_punica_wrapper(
+            num_encoder_tokens,
+            max_batches=self.max_num_seqs * limit_per_prompt,
+            device=self.device,
+            max_loras=self.lora_config.max_loras,
         )
+        for prefix in self.mm_mapping.tower_model:
+            self.punica_wrapper_mapping[prefix] = tower_punica_wrapper
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
@@ -191,12 +199,8 @@ class LoRAModelManager:
                     device=self.device,
                     max_loras=self.lora_config.max_loras,
                 )
-                self.punica_wrapper_mapping.update(
-                    {
-                        name: connector_punica_wrapper
-                        for name in self.mm_mapping.connector
-                    }
-                )
+                for prefix in self.mm_mapping.connector:
+                    self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
             else:
                 logger.warning_once(
                     "Connector LoRA support disabled: model does not implement "
@@ -332,20 +336,22 @@ class LoRAModelManager:
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # Default to the main language model wrapper
         if not (self.supports_mm and self.supports_tower_connector_lora):
-            target_wrapper = self.punica_wrapper_mapping[DEFAULT_WRAPPER_KEY]
+            target_prefix = (
+                self.mm_mapping.language_model[0]
+                if self.supports_mm
+                else DEFAULT_LANGUAGE_WRAPPER_KEY
+            )
+        elif mapping.type == LoRAMappingType.TOWER and self.mm_mapping.tower_model:
+            target_prefix = self.mm_mapping.tower_model[0]
+        elif mapping.type == LoRAMappingType.CONNECTOR and self.mm_mapping.connector:
+            target_prefix = self.mm_mapping.connector[0]
         else:
-            if mapping.type == LoRAMappingType.TOWER and self.mm_mapping.tower_model:
-                target_prefix = self.mm_mapping.tower_model[0]
-            elif (
-                mapping.type == LoRAMappingType.CONNECTOR and self.mm_mapping.connector
-            ):
-                target_prefix = self.mm_mapping.connector[0]
-            else:
-                target_prefix = self.mm_mapping.language_model[0]
+            target_prefix = self.mm_mapping.language_model[0]
 
-            target_wrapper = self.punica_wrapper_mapping[target_prefix]
+        punica_wrapper = self._get_punica_wrapper(target_prefix)
+        assert punica_wrapper is not None
 
-        target_wrapper.update_metadata(
+        punica_wrapper.update_metadata(
             mapping,
             self.lora_index_to_id,
             self.lora_slots + 1,
@@ -373,7 +379,8 @@ class LoRAModelManager:
             if not self._match_target_modules(module_name):
                 continue
 
-            if self._filter_unsupported_mm_module(module_name):
+            punica_wrapper = self._get_punica_wrapper(module_name)
+            if punica_wrapper is None:
                 logger.warning(
                     "Regarding %s, vLLM currently only supports adding LoRA to"
                     " language model, %s will be ignored.",
@@ -439,10 +446,7 @@ class LoRAModelManager:
 
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
-            wrapper = self._get_punica_wrapper_for_module(module_name)
-            if wrapper is None:
-                continue
-            new_module.set_mapping(wrapper)
+            new_module.set_mapping(punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (
@@ -463,7 +467,7 @@ class LoRAModelManager:
             if (
                 not self._match_target_modules(module_name)
                 or not isinstance(module, BaseLayerWithLoRA)
-                or self._filter_unsupported_mm_module(module_name)
+                or self._get_punica_wrapper(module_name) is None
             ):
                 continue
             parts = module_name.split(".")
@@ -552,42 +556,22 @@ class LoRAModelManager:
             for target_module in self.supported_lora_modules
         )
 
-    def _filter_unsupported_mm_module(self, module_name: str) -> bool:
+    def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
-        Regarding multimodal models, vLLM currently only supports adding LoRA to
-        language model. LoRA for other modules, such as the vision tower, will
-        be filtered out.
+        Determine whether this module supports LoRA and which wrapper to use.
         """
+        # For language model (early return)
         if not self.supports_mm:
-            return False
+            return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
 
-        if self.supports_tower_connector_lora:
-            return self._get_punica_wrapper_for_module(module_name) is None
+        # For multimodal model
+        # NOTE Sort by prefix length (descending) to match the longest prefix first
+        # e.g., 'visual.merger' should match 'visual.merger' instead of 'visual.'
+        for prefix in sorted(self.punica_wrapper_mapping.keys(), key=len, reverse=True):
+            if module_name.startswith(prefix):
+                return self.punica_wrapper_mapping[prefix]
 
-        prefix_lst = self.mm_mapping.connector + self.mm_mapping.tower_model
-        return any(module_name.startswith(prefix) for prefix in prefix_lst)
-
-    def _get_punica_wrapper_for_module(
-        self, module_name: str
-    ) -> PunicaWrapperBase | None:
-        """
-        Match the corresponding punica_wrapper based on module_name,
-        and return None if lora is not supported for this module.
-        """
-        best_prefix = None
-        for prefix in self.punica_wrapper_mapping:
-            if prefix == DEFAULT_WRAPPER_KEY:
-                continue
-            # Ensure matching by the longest prefix.
-            if module_name.startswith(prefix) and (
-                best_prefix is None or len(prefix) > len(best_prefix)
-            ):
-                best_prefix = prefix
-
-        if best_prefix is not None:
-            return self.punica_wrapper_mapping[best_prefix]
-
-        return self.punica_wrapper_mapping.get(DEFAULT_WRAPPER_KEY)
+        return None
 
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
