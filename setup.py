@@ -204,6 +204,14 @@ class cmake_build_ext(build_ext):
         elif _is_hip():
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
+            # Pass GPU_TARGETS from PYTORCH_ROCM_ARCH if set
+            # This ensures the build uses the specified architecture
+            # instead of falling back to defaults when amdgpu-arch fails
+            # See: https://github.com/vllm-project/vllm/issues/22590
+            pytorch_rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH")
+            if pytorch_rocm_arch:
+                cmake_args += [f"-DGPU_TARGETS={pytorch_rocm_arch}"]
+
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
