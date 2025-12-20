@@ -99,6 +99,8 @@ def prepare_fp8_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
@@ -206,6 +208,8 @@ def prepare_moe_fp8_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     e = layer.num_experts
     k = layer.hidden_size
