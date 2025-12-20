@@ -82,7 +82,7 @@ def mamba_copy_block(
         layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
-            kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
+            kv_caches: list[torch.Tensor] = attention.kv_cache[0]
             for state, copy_spec in zip(kv_caches, copy_specs):
                 src_block_id = block_ids[
                     src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)

@@ -274,7 +274,6 @@ class MambaConvCopySpec(MambaCopySpec):
 
     @staticmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        # TODO: check contiguous!
         return accept_token_bias * state.stride(0)
 
     @staticmethod

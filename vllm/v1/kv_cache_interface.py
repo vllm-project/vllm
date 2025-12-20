@@ -248,7 +248,7 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: int | None = None
     mamba_type: str = "mamba2"
     num_speculative_blocks: int = 0
-    copy_specs: tuple[type[MambaCopySpec], ...] | None = None
+    copy_specs: tuple[type[MambaCopySpec], ...] = ()
 
     @property
     def page_size_bytes(self) -> int:

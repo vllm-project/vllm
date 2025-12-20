@@ -245,7 +245,8 @@ class CacheConfig:
             if self.mamba_cache_mode == "none":
                 self.mamba_cache_mode = "align"
                 logger.warning(
-                    "mamba_cache_mode set to 'align' defaultly when prefix caching is enabled"
+                    "mamba_cache_mode set to 'align' defaultly when prefix "
+                    "caching is enabled"
                 )
         else:
             if self.mamba_cache_mode != "none":
