@@ -311,7 +311,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 )
             else:
                 raise ValueError(
-                    "unknown mamba cache mode: %s", cache_config.mamba_cache_mode
+                    f"unknown mamba cache mode: {cache_config.mamba_cache_mode}"
                 )
         elif cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
