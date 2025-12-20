@@ -210,7 +210,8 @@ class cmake_build_ext(build_ext):
                 # Validate to prevent command injection
                 # Only allow alphanumeric, semicolons, dots, and underscores
                 import re
-                if not re.match(r'^[a-zA-Z0-9;._]+$', pytorch_rocm_arch):
+
+                if not re.match(r"^[a-zA-Z0-9;._]+$", pytorch_rocm_arch):
                     raise ValueError(
                         f"Invalid PYTORCH_ROCM_ARCH: {pytorch_rocm_arch}. "
                         "Only alphanumeric characters, semicolons, dots, and "
