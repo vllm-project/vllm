@@ -124,11 +124,13 @@ def get_fp8_moe_backend(
     block_quant: bool,
     moe_parallel_config: FusedMoEParallelConfig,
     with_lora_support: bool,
-) -> Fp8MoeBackend:
+) -> Fp8MoeBackend | None:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    if current_platform.is_xpu():
+        return None
     if with_lora_support:
         return Fp8MoeBackend.TRITON
     # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
@@ -722,12 +724,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
-        self.fp8_backend = (
-            get_fp8_moe_backend(
-                self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
-            )
-            if not current_platform.is_xpu()
-            else None
+        self.fp8_backend = get_fp8_moe_backend(
+            self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
 
         self.marlin_input_dtype = None
@@ -1117,10 +1115,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if current_platform.is_xpu():
-            return None
         if (
-            self.rocm_aiter_moe_enabled
+            current_platform.is_xpu()
+            or self.rocm_aiter_moe_enabled
             or self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
