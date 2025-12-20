@@ -1568,3 +1568,39 @@ class Qwen2_5_VLForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
+    
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
+
+    def get_allowed_mm_limits(self) -> Mapping[str, int]:
+        """Return the maximum allowed number of items for each modality."""
+        supported_mm_limits = self.get_supported_mm_limits()
+        mm_config = self.ctx.get_mm_config()
+
+        allowed_limits = dict[str, int]()
+        for modality, supported_limit in supported_mm_limits.items():
+            user_limit = mm_config.get_limit_per_prompt(modality)
+
+            allowed_limits[modality] = (
+                user_limit
+                if supported_limit is None
+                else min(user_limit, supported_limit)
+            )
+
+        return allowed_limits

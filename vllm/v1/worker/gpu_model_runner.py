@@ -593,9 +593,9 @@ class GPUModelRunner(
         # Multimodal LoRA support
         self.enable_tower_connector_lora = False
         if self.supports_mm_inputs and self.lora_config:
-            self.info = self.mm_registry.create_processor(self.model_config).info
+            self.mm_model_cls = self.mm_registry._get_model_cls(model_config)
             self.enable_tower_connector_lora = (
-                hasattr(self.info, "get_num_mm_encoder_tokens")
+                hasattr(self.mm_model_cls, "get_num_mm_encoder_tokens")
                 and self.lora_config.enable_tower_connector_lora
             )
 
@@ -2183,7 +2183,7 @@ class GPUModelRunner(
                 # Prefer pos_info.is_embed to count actual MM embedding tokens.
                 # pos_info.length may overcount (e.g., special tokens in Qwen-VL).
                 # Fall back to length if is_embed is None.
-                num_tokens = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                num_tokens = model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                     pos_info.get_num_embeds
                 )
                 prompt_lora_mapping.append(lora_id)
@@ -2202,13 +2202,13 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
-            if hasattr(self.info, "get_num_mm_connector_tokens"):
+            if hasattr(model, "get_num_mm_connector_tokens"):
                 num_post_op_tokens = []
                 for _, pos_info in mm_hashes_pos:
-                    mm_token_count = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                    mm_token_count = model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                         pos_info.length
                     )
-                    post_op_count = self.info.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
+                    post_op_count = model.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
                         mm_token_count
                     )
                     num_post_op_tokens.append(post_op_count)

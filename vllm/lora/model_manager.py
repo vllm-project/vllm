@@ -154,9 +154,8 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         if self.lora_config.enable_tower_connector_lora:
-            self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
             self.supports_tower_connector_lora = self.supports_mm and hasattr(
-                self.info, "get_num_mm_encoder_tokens"
+                self.model, "get_num_mm_encoder_tokens"
             )
         if not self.supports_tower_connector_lora:
             return
@@ -172,8 +171,8 @@ class LoRAModelManager:
             vllm_config.scheduler_config,
             MULTIMODAL_REGISTRY,
         )
-        limit_per_prompt: int = max(self.info.get_allowed_mm_limits().values())
-        num_encoder_tokens = self.info.get_num_mm_encoder_tokens(
+        limit_per_prompt: int = max(self.model.get_allowed_mm_limits().values())
+        num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
             mm_budget.get_encoder_budget()
         )
 
@@ -189,8 +188,8 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            if hasattr(self.info, "get_num_mm_connector_tokens"):
-                connector_tokens = self.info.get_num_mm_connector_tokens(
+            if hasattr(self.model, "get_num_mm_connector_tokens"):
+                connector_tokens = self.model.get_num_mm_connector_tokens(
                     num_encoder_tokens
                 )
                 connector_punica_wrapper = get_punica_wrapper(
