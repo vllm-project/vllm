@@ -1126,9 +1126,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            current_platform.is_xpu()
-            or self.rocm_aiter_moe_enabled
-            or self.fp8_backend == Fp8MoeBackend.MARLIN
+            self.rocm_aiter_moe_enabled
+            or self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
