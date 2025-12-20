@@ -542,7 +542,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.kv_cache_spec = kv_cache_spec
         self.q_data_type = (
             current_platform.fp8_dtype()
-            if "fp8" in self.kv_cache_spec.cache_dtype_str
+            if (kv_cache_spec is not None and "fp8" in kv_cache_spec.cache_dtype_str)
             else vllm_config.model_config.dtype
         )
         scheduler_config = vllm_config.scheduler_config
