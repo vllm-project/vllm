@@ -207,6 +207,15 @@ class cmake_build_ext(build_ext):
             # This allows Docker build args to specify target architectures
             pytorch_rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH")
             if pytorch_rocm_arch:
+                # Validate to prevent command injection
+                # Only allow alphanumeric, semicolons, dots, and underscores
+                import re
+                if not re.match(r'^[a-zA-Z0-9;._]+$', pytorch_rocm_arch):
+                    raise ValueError(
+                        f"Invalid PYTORCH_ROCM_ARCH: {pytorch_rocm_arch}. "
+                        "Only alphanumeric characters, semicolons, dots, and "
+                        "underscores are allowed."
+                    )
                 cmake_args += [f"-DGPU_TARGETS={pytorch_rocm_arch}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
