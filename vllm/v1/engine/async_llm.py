@@ -654,10 +654,13 @@ class AsyncLLM(EngineClient):
                     DeprecationWarning,
                     stacklevel=2,
                 )
+            else:
+                # Fall back to pooling_params if parameter not provided
+                truncate_prompt_tokens = pooling_params.truncate_prompt_tokens
 
             _validate_truncation_size(
                 self.model_config.max_model_len,
-                pooling_params.truncate_prompt_tokens,
+                truncate_prompt_tokens,
                 tokenization_kwargs,
             )
 
