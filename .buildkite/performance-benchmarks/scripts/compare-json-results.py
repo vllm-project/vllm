@@ -446,7 +446,7 @@ def render_metric_table_html(
     return title + styler.to_html(table_attributes='border="1" class="dataframe"')
 
 
-def maybe_write_plot(
+def write_plot(
     main_fh,
     sub_fh,
     group_df: pd.DataFrame,
@@ -587,7 +587,7 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
                     main_fh.write(html)
                     sub_fh.write(html)
 
-                    maybe_write_plot(
+                    write_plot(
                         main_fh,
                         sub_fh,
                         group_df=group_df,
