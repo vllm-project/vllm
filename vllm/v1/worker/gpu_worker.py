@@ -439,10 +439,14 @@ class Worker(WorkerBase):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="kv_cache"):
+            with (
+                allocator.use_memory_pool(tag="kv_cache"),
+                self._maybe_get_memory_snapshot_context(stage="kv_cache"),
+            ):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            with self._maybe_get_memory_snapshot_context(stage="kv_cache"):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         warmup_sizes = []
@@ -482,7 +486,8 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._maybe_get_memory_snapshot_context(stage="cuda_graph"):
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
