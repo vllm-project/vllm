@@ -1127,7 +1127,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
             self.rocm_aiter_moe_enabled
-            or self.use_marlin
+            or self.fp8_backend == Fp8MoeBackend.MARLIN
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
