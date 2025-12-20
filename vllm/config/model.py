@@ -952,7 +952,12 @@ class ModelConfig:
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
-        unsupported_rocm = self.is_encoder_decoder
+        # Check for models that don't support CUDA graphs on ROCm
+        is_distilgpt2 = (
+            self.hf_config.model_type == "gpt2" and "distilgpt2" in self.model.lower()
+        )
+        unsupported_rocm = self.is_encoder_decoder or is_distilgpt2
+
         if unsupported_rocm and not self.enforce_eager and current_platform.is_rocm():
             logger.warning(
                 "CUDA graph is not supported for %s on ROCm yet, fallback "
