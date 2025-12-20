@@ -414,8 +414,8 @@ if __name__ == "__main__":
                 group_html_name = "perf_comparison_" + group_name + ".html"
                 import html as _html
                 name_vals = name if isinstance(name, tuple) else (name,)
-                group_title_suffix = ", ".join(
-                    f"{col}={val}" for col, val in zip(existing_group_cols, name_vals)
+                group_title_suffix = " , ".join(
+                    f"{col} : [ {val} ] " for col, val in zip(existing_group_cols, name_vals)
                 )
 
                 # ---------------------------------------------
@@ -425,12 +425,14 @@ if __name__ == "__main__":
 
                 metric_name = str(data_cols_to_compare[i]).lower()
                 if "tok/s" in metric_name:
+                    styler = display_group.style
+                    styler = highlight_ratio_columns(styler)
                     html = (
                         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
                         f'{_html.escape(data_cols_to_compare[i])}'
                         f' — {_html.escape(group_title_suffix)}'
                         f'</div>\n'
-                        + display_group.to_html(index=False)
+                        + styler.to_html(table_attributes='border="1" class="dataframe"')
                     )
                 elif "ttft" in metric_name:
                     styler = _highlight_threshold(display_group, args.ttft_max_ms).format(
@@ -464,11 +466,8 @@ if __name__ == "__main__":
                         + styler.to_html(table_attributes='border="1" class="dataframe"')
                     )
                     
-
-                text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
                 with open(group_html_name, "a+") as sub_text_file:
-                    sub_text_file.write(html_msgs_for_data_cols[i])
                     sub_text_file.write(html)
 
                     if plot and plotly_found:
