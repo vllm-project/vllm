@@ -188,3 +188,6 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 ## Media Kit
 
 - If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+## Profiling Note
+
+If you are profiling vLLM on **WSL2 (Windows Subsystem for Linux)**, you might not see GPU/CUDA traces in the profiler output due to virtualization limitations. For accurate GPU profiling (e.g., viewing kernels in `torch.profiler`), it is recommended to use a native Linux environment.
