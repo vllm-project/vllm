@@ -267,6 +267,36 @@ def _highlight_threshold(
         subset=conf_cols,
     )
 
+def highlight_ratio_columns(styler):
+    ratio_cols = [
+        c for c in styler.data.columns
+        if "ratio" in str(c).lower()
+    ]
+
+    if not ratio_cols:
+        return styler
+
+    # Highlight entire column (cells)
+    styler = styler.apply(
+        lambda _: ["background-color: #fff3b0"] * len(styler.data),
+        subset=ratio_cols,
+        axis=0,
+    )
+
+    # Highlight column headers
+    styler = styler.set_table_styles(
+        [
+            {
+                "selector": f"th.col_heading.level0.col{i}",
+                "props": [("background-color", "#fff3b0")],
+            }
+            for i, col in enumerate(styler.data.columns)
+            if col in ratio_cols
+        ],
+        overwrite=False,
+    )
+
+    return styler
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -364,7 +394,7 @@ if __name__ == "__main__":
             # For Plot feature, insert y axis from one of info_cols
             raw_data_cols.insert(0, info_cols[y_axis_index])
 
-            filtered_info_cols = info_cols[:-4]
+            filtered_info_cols = info_cols[:4]
             existing_group_cols = [
                 c for c in filtered_info_cols if c in output_df.columns
             ]
@@ -407,6 +437,7 @@ if __name__ == "__main__":
                         {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
                         na_rep="—",
                     )
+                    styler = highlight_ratio_columns(styler)
                     html = (
                         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
                         f'{_html.escape(data_cols_to_compare[i])}'
@@ -424,6 +455,7 @@ if __name__ == "__main__":
                         {c: "{:.2f}" for c in display_group.select_dtypes("number").columns},
                         na_rep="—",
                     )
+                    styler = highlight_ratio_columns(styler)
                     html = (
                         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
                         f'{_html.escape(data_cols_to_compare[i])}'
