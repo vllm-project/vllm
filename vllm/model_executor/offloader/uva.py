@@ -6,7 +6,6 @@ from collections.abc import Callable, Generator
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
 
 from vllm.model_executor.offloader.base import BaseOffloader
 from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
@@ -57,14 +56,9 @@ class UVAOffloader(BaseOffloader):
             return module
 
         pin_memory = is_pin_memory_available()
-        uva_available = is_uva_available()
-
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
 
         # offload parameters to CPU
         # use pin_memory if possible, which helps cudagraph capture speed
-        offloaded_parameters = False
         for p in module.parameters():
             if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
                 # we use per-parameter offloading
@@ -81,30 +75,9 @@ class UVAOffloader(BaseOffloader):
                 pin_memory=pin_memory,
             )
             cpu_data.copy_(p.data)
-            if not uva_offloading:
-                p.data = cpu_data
-            else:
-                # keep the cpu data alive
-                p._vllm_offloaded_cpu_data = cpu_data
-                p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+            # keep the cpu data alive
+            p._vllm_offloaded_cpu_data = cpu_data
+            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
-            offloaded_parameters = True
-
-        if offloaded_parameters and not uva_offloading:
-            original_forward = module.forward
-
-            def forward(*args, **kwargs):
-                module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device, it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
-                }
-                output = functional_call(module, device_state, args=args, kwargs=kwargs)
-                module.forward = forward
-                return output
-
-            module.forward = forward
 
         return module
