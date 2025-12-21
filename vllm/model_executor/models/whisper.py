@@ -75,6 +75,11 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+import enum
+from functools import partial
+
+import torch.nn.functional as F
+
 
 logger = init_logger(__name__)
 
@@ -139,11 +144,6 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh",
 }
-
-import enum
-from functools import partial
-
-import torch.nn.functional as F
 
 
 class PosEmbedType(enum.Enum):
