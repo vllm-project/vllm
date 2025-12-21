@@ -47,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     register_moe_scaling_factors,
@@ -705,6 +704,61 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
         register_moe_scaling_factors(layer)
 
+        # NOTE(rob): this is a WIP refactor. We are first migrating
+        # all of the kernels in the TP case to use mk. Once this is
+        # done, then we will initialzie the TP case and DP/EP case
+        # via the same code path (i.e. via maybe_init_modular_kernel).
+        # NOTE(rob): in progress migrating all into this format.
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+                FlashInferExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+                FlashInferAllGatherMoEPrepareAndFinalize,
+            )
+
+            config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
+            self.moe_quant_config = config
+
+            self.kernel = mk.FusedMoEModularKernel(
+                FlashInferAllGatherMoEPrepareAndFinalize(
+                    use_dp=(self.moe.dp_size > 1),
+                    use_deepseek_fp8_block_scale=False,
+                ),
+                FlashInferExperts(
+                    out_dtype=torch.get_default_dtype(),
+                    quant_config=self.moe_quant_config,
+                    ep_rank=self.moe.ep_rank,
+                    ep_size=self.moe.ep_size,
+                    tp_rank=self.moe.tp_rank,
+                    tp_size=self.moe.tp_size,
+                    use_dp=(self.moe.dp_size > 1),
+                    use_deepseek_fp8_block_scale=False,
+                ),
+            )
+            self.use_inplace = False
+        elif self.flashinfer_moe_backend != FlashinferMoeBackend.TENSORRT_LLM:
+            # Default path uses Triton or DeepGemm
+            from vllm.model_executor.layers.fused_moe import (
+                TritonOrDeepGemmExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+
+            config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
+            self.moe_quant_config = config
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonOrDeepGemmExperts(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=False,
+                ),
+            )
+            self.use_inplace = True
+
     def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
         """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
 
@@ -774,6 +828,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            # TODO(rob): convert this to MK.
             if layer.enable_eplb:
                 raise NotImplementedError(
                     "EPLB not supported for `ModelOptFp8MoEMethod` yet."
@@ -801,40 +856,19 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             router_logits=router_logits,
         )
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert layer.activation in ("silu", "relu2_no_mul"), (
-                "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                f"but got {layer.activation}"
-            )
-            return flashinfer_cutlass_moe_fp8(
-                x,
-                layer,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-
-            assert self.moe_quant_config is not None
-
-            return fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                quant_config=self.moe_quant_config,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
+        # Use unified modular kernel interface
+        return self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
