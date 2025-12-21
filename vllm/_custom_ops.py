@@ -788,20 +788,6 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
-def cutlass_blockwise_scaled_grouped_mm(
-    output: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scales_a: torch.Tensor,
-    scales_b: torch.Tensor,
-    problem_sizes: torch.Tensor,
-    expert_offsets: torch.Tensor,
-):
-    torch.ops._C.cutlass_blockwise_scaled_grouped_mm(
-        output, a, b, scales_a, scales_b, problem_sizes, expert_offsets
-    )
-
-
 def cutlass_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -2915,6 +2901,42 @@ def cpu_gemm_wna16(
         bias,
         pack_factor,
         isa_hint,
+    )
+    return output
+
+
+def cpu_prepack_moe_weight(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight(weight, output, isa)
+    return output
+
+
+def cpu_fused_moe(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe(
+        output,
+        input,
+        w13,
+        w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act,
+        isa,
     )
     return output
 
