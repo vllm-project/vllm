@@ -189,9 +189,9 @@ def get_fp8_moe_backend(
         elif is_deep_gemm_supported():
             logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
-    
+
     # if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-    if rocm_aiter_ops.is_fused_moe_enabled()
+    if rocm_aiter_ops.is_fused_moe_enabled():
         logger.info_once("Using ROCm AITER backend for FP8 MoE", scope="local")
         return Fp8MoeBackend.AITER
 
@@ -900,7 +900,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Lazy import to avoid importing triton too early.
 
-
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -1104,11 +1103,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
                 MarlinExperts,
             )
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                AiterExperts,
-            )
             from vllm.model_executor.layers.fused_moe.prepare_finalize import (
                 MoEPrepareAndFinalizeNoEP,
+            )
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                AiterExperts,
             )
 
             config = self.get_fused_moe_quant_config(layer)
@@ -1134,9 +1133,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.fp8_backend == Fp8MoeBackend.AITER or
-            self.fp8_backend == Fp8MoeBackend.MARLIN or
-            self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+            self.fp8_backend == Fp8MoeBackend.AITER
+            or self.fp8_backend == Fp8MoeBackend.MARLIN
+            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
@@ -1167,10 +1166,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        if (self.fp8_backend != Fp8MoeBackend.MARLIN or 
-            self.fp8_backend != Fp8MoeBackend.AITER):
+        if (
+            self.fp8_backend != Fp8MoeBackend.MARLIN
+            or self.fp8_backend != Fp8MoeBackend.AITER
+        ):
             raise NotImplementedError(
-                "Marlin and ROCm AITER are not supported with all2all yet.")
+                "Marlin and ROCm AITER are not supported with all2all yet."
+            )
 
         assert self.moe_quant_config is not None
 
@@ -1332,6 +1334,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         return result
+
 
 class Fp8OnlineMoEMethod(Fp8MoEMethod):
     """MoE method for online FP8 quantization.

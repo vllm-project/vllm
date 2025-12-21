@@ -75,8 +75,9 @@ def _rocm_aiter_fused_moe_impl(
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
+
+    from aiter import ActivationType, QuantType
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
@@ -131,8 +132,9 @@ def _rocm_aiter_asm_moe_tkw1_impl(
     expert_mask: torch.Tensor | None = None,
     activation_method: int = 0,
 ) -> torch.Tensor:
-    from aiter import ActivationType
     from aiter.fused_moe_bf16_asm import asm_moe_tkw1
+
+    from aiter import ActivationType
 
     activation = ActivationType(activation_method)
 

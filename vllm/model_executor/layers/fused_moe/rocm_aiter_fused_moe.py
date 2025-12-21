@@ -5,13 +5,15 @@ from functools import lru_cache
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
 )
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import TopKWeightAndReduceNoOP
+from vllm.vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 
 
 class QuantMethod(IntEnum):
@@ -270,9 +272,11 @@ def rocm_aiter_fused_experts(
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config):
         super().__init__(quant_config)
-    
+
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (
             mk.FusedMoEActivationFormat.Standard,
             mk.FusedMoEActivationFormat.Standard,
@@ -280,22 +284,23 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self):
         return True
-    
+
     def supports_chunking(self):
         return False
-    
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    def workspace_shapes(self, M: int,
+    def workspace_shapes(
+        self,
+        M: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)

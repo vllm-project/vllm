@@ -33,7 +33,6 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
