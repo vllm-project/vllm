@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
+    Fp8MoeBackend,
     Fp8MoEMethod,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -324,7 +325,10 @@ def test_fp8_reloading(
                 weight_loader=default_weight_loader,
             )
 
+        # Fp8LinearMethod uses use_marlin
+        # Fp8MoEMethod uses fp8_backend
         method.use_marlin = use_marlin
+        method.fp8_backend = Fp8MoeBackend.MARLIN if use_marlin else None
 
     # capture weights format during loading
     original_metadata = [
