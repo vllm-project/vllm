@@ -1074,6 +1074,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             self.kernel = mk.FusedMoEModularKernel(
+                # TODO: this is no longer needed with the defer input quant change
                 FlashInferAllGatherMoEPrepareAndFinalize(
                     use_dp=(self.moe.dp_size > 1),
                     use_deepseek_fp8_block_scale=self.block_quant,
@@ -1115,17 +1116,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             if self.fp8_backend == Fp8MoeBackend.AITER:
-                moe_kernel = AiterExperts(quant_config=self.moe_quant_config)
-            elif self.fp8_backend == Fp8MoeBackend.MARLIN:
-                moe_kernel = MarlinExperts(quant_config=self.moe_quant_config)
-            else:
-                moe_kernel = TritonOrDeepGemmExperts(
-                    quant_config=self.moe_quant_config,
-                    allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                self.kernel = mk.FusedMoEModularKernel(
+                    # TODO: make defer_input_quant an attr of the AiterExperts
+                    MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+                    AiterExperts(quant_config=self.moe_quant_config),
                 )
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(), moe_kernel
-            )
+            elif self.fp8_backend == Fp8MoeBackend.MARLIN:
+                self.kernel = mk.FusedMoEModularKernel(
+                    MoEPrepareAndFinalizeNoEP(),
+                    MarlinExperts(quant_config=self.moe_quant_config),
+                )
+            else:
+                self.kernel = mk.FusedMoEModularKernel(
+                    MoEPrepareAndFinalizeNoEP(),
+                    TritonOrDeepGemmExperts(
+                        quant_config=self.moe_quant_config,
+                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                    ),
+                )
             self.use_inplace = True
 
     def maybe_make_prepare_finalize(

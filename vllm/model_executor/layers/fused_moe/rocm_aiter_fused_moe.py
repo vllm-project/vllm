@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
 )
-from vllm.vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 
@@ -325,6 +325,9 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        print(f"{hidden_states.dtype=}")
+        print(f"{a1q_scale=}")
+        print(f"{a2_scale=}")
         assert a1q_scale is None
         assert a2_scale is None
         assert global_num_experts == -1
