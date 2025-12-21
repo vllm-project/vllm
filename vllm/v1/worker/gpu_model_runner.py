@@ -1048,7 +1048,6 @@ class GPUModelRunner(
             .cpu()
             .numpy()
         )
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
@@ -3604,12 +3603,6 @@ class GPUModelRunner(
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
             )
-
-            draft_token_ids = draft_token_ids.tolist()
-            for i in range(common_attn_metadata.num_reqs):
-                req_id = self.input_batch.req_ids[i]
-                if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                    draft_token_ids[i] = []
 
         return draft_token_ids
 

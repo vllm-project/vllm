@@ -213,11 +213,14 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
-        
-        if hf_config.model_type == "nemotron_h":
+
+        if (
+            hf_config.model_type == "nemotron_h"
+            and hasattr(hf_config, "num_nextn_predict_layers")
+            and hf_config.num_nextn_predict_layers > 0
+        ):
             # Check if this is an MTP variant
-            if hasattr(hf_config, "num_nextn_predict_layers") and hf_config.num_nextn_predict_layers > 0:
-                hf_config.model_type = "nemotron_h_mtp"
+            hf_config.model_type = "nemotron_h_mtp"
         if hf_config.model_type == "nemotron_h_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
@@ -629,7 +632,7 @@ class SpeculativeConfig:
                 f"{self.disable_by_batch_size=}"
             )
 
-        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
+        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss", "nemotron_h"]
         if (
             self.method == "eagle3"
             and self.target_model_config
