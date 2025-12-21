@@ -64,6 +64,7 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
@@ -254,6 +255,13 @@ def create_whisper_attention_backend_with_block_pooling(
             return super().build(
                 common_prefix_len, new_common_attn_metadata, fast_build
             )
+
+    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+        raise NotImplementedError(
+            f"{underlying_attn_backend} is not yet supported."
+            "Contributions to support more backends are much "
+            "appreciated."
+        )
 
     attn_backend = subclass_attention_backend_with_overrides(
         name_prefix=prefix,
