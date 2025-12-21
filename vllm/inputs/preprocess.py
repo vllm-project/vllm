@@ -246,7 +246,6 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -263,7 +262,6 @@ class InputPreprocessor:
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
-            lora_kwargs=lora_kwargs,
         )
         mm_hashes = mm_input["mm_hashes"]
 
@@ -361,7 +359,6 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> TokenInputs | MultiModalInputs:
         prompt_text = parsed_content["prompt"]
 
@@ -373,7 +370,6 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
-                lora_kwargs=lora_kwargs,
             )
         else:
             prompt_token_ids = self._tokenize_prompt(
@@ -393,7 +389,6 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -420,7 +415,6 @@ class InputPreprocessor:
                 parsed["content"],
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
-                lora_kwargs=lora_kwargs,
             )
         if parsed["type"] == "str":
             return self._process_text(
@@ -632,7 +626,6 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -652,7 +645,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
-            lora_kwargs=lora_kwargs,
         )
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
@@ -663,7 +655,6 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> ProcessorInputs:
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
@@ -685,7 +676,6 @@ class InputPreprocessor:
             cast(SingletonPrompt, prompt),
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
-            lora_kwargs=lora_kwargs,
         )
 
     def preprocess(
@@ -694,14 +684,12 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-        lora_kwargs: dict[str, Any] | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         res = self._preprocess(
             prompt,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
-            lora_kwargs=lora_kwargs,
         )
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
