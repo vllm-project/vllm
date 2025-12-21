@@ -763,8 +763,25 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
         if output_dim is not None:
-            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
-            shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+            if isinstance(param, BlockQuantScaleParameter):
+                assert self.quant_method is not None
+                # Assume the weight block size has been set by quant method
+                assert hasattr(self, "weight_block_size")
+                weight_block_size = self.weight_block_size
+                assert weight_block_size is not None
+                block_n, _ = weight_block_size[0], weight_block_size[1]
+                shard_offset = (
+                    (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) // block_n
+                ) // self.tp_size
+                shard_size = (
+                    (self.output_sizes[loaded_shard_id] + block_n - 1)
+                    // block_n
+                    // self.tp_size
+                )
+            else:
+                shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+                shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
@@ -1208,6 +1225,17 @@ class QKVParallelLinear(ColumnParallelLinear):
             elif loaded_shard_id == "v":
                 shard_offset = (self.num_heads + self.num_kv_heads) * self.head_size
                 shard_size = self.num_kv_heads * self.v_head_size
+
+            if isinstance(param, BlockQuantScaleParameter):
+                assert self.quant_method is not None
+                # Assume the weight block size has been set by quant method
+                assert hasattr(self, "weight_block_size")
+                weight_block_size = self.weight_block_size
+                assert weight_block_size is not None
+                block_n, _ = weight_block_size[0], weight_block_size[1]
+                shard_offset = (shard_offset + block_n - 1) // block_n
+                shard_size = (shard_size + block_n - 1) // block_n
+
             # Special case for Quantized Weights.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
