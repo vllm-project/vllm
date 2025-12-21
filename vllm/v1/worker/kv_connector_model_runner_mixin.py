@@ -22,7 +22,6 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
@@ -138,16 +137,10 @@ class KVConnectorModelRunnerMixin:
             )
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
 
-            output.kv_connector_stats = (
-                KVConnectorModelRunnerMixin.get_kv_connector_stats()
-            )
-            kv_connector.clear_connector_metadata()
+            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
-    @staticmethod
-    def get_kv_connector_stats() -> KVConnectorStats | None:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_kv_connector_stats()
-        return None
+            kv_connector.clear_connector_metadata()
 
     @staticmethod
     def use_uniform_kv_cache(

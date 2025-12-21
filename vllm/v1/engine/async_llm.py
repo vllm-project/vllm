@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
@@ -26,7 +27,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -111,7 +112,7 @@ class AsyncLLM(EngineClient):
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_config(self.model_config)
+            tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -166,32 +167,24 @@ class AsyncLLM(EngineClient):
             pass
 
         if (
-            envs.VLLM_TORCH_PROFILER_DIR
-            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+            vllm_config.profiler_config.profiler == "torch"
+            and not vllm_config.profiler_config.ignore_frontend
         ):
+            profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                envs.VLLM_TORCH_PROFILER_DIR,
+                profiler_dir,
             )
-            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
-                logger.warning_once(
-                    "Torch profiler received max_iters or delay_iters setting. These "
-                    "are not compatible with the AsyncLLM profiler and will be ignored "
-                    "for the AsyncLLM process. Engine process profiling will still "
-                    "respect these settings. Consider setting "
-                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
-                    "AsyncLLM profiling."
-                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR,
+                    profiler_dir,
                     worker_name=worker_name,
-                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
+                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
                 ),
             )
         else:
@@ -200,7 +193,7 @@ class AsyncLLM(EngineClient):
     @property
     @deprecated(
         "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
@@ -635,6 +628,9 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         try:
@@ -649,9 +645,19 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
+
+            if truncate_prompt_tokens is not None:
+                warnings.warn(
+                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
+                    "is deprecated and will be removed in v0.15. "
+                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
             _validate_truncation_size(
                 self.model_config.max_model_len,
-                truncate_prompt_tokens,
+                pooling_params.truncate_prompt_tokens,
                 tokenization_kwargs,
             )
 
@@ -708,10 +714,6 @@ class AsyncLLM(EngineClient):
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:

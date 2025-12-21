@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -98,10 +98,10 @@ class TPUWorker:
         # MP runtime is initialized.
         self.profiler = None
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if vllm_config.profiler_config.profiler == "torch" and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
-            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            self.profile_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s", self.profile_dir
             )
@@ -207,7 +207,8 @@ class TPUWorker:
         # one compiled bytecode. Having one FX graph/cached bytecode per
         # compiled model is required for `support_torch_compile` decorator to
         # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.

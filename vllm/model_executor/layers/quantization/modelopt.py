@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -39,6 +38,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
+    flashinfer_trtllm_fp4_routed_moe,
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
@@ -81,6 +81,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     has_flashinfer_moe,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -187,7 +188,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
+            # This is a workaround for the weights remapping issue:
+            # https://github.com/vllm-project/vllm/issues/28072
+            # Right now, the Nvidia ModelOpt library use just one wildcard pattern:
+            #        module_path*
+            # It gets applied if the whole tree of modules rooted at module_path
+            # is not quantized. Here we replace such pattern by 2 patterns that are
+            # collectively equivalent to the original pattern:
+            #        module_path
+            #        module_path.*
+            new_exclude_modules = []
+            for exclude in self.exclude_modules:
+                if len(exclude) >= 2 and exclude[-1] == "*" and exclude[-2] != ".":
+                    new_exclude_modules.append(exclude[:-1])
+                    new_exclude_modules.append(exclude[:-1] + ".*")
+                else:
+                    new_exclude_modules.append(exclude)
+
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -607,6 +625,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         Only supports pre-quantized checkpoints with FP8 weights and scales.
         """
 
+        if self.flashinfer_moe_backend is not None:
+            self._maybe_pad_intermediate_for_flashinfer(layer)
+
         layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
@@ -684,6 +705,50 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
         register_moe_scaling_factors(layer)
 
+    def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
+        """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
+
+        Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+        used for GEMM to be divisible by a small alignment value. When this is
+        not satisfied (e.g. with certain tensor-parallel sizes), we pad the
+        gate/up and down projection weights along the intermediate dim.
+        """
+        if not hasattr(layer, "w13_weight") or not hasattr(layer, "w2_weight"):
+            return
+
+        # Current local intermediate size (per partition) is the K dimension of
+        # the down projection.
+        num_experts, hidden_size, intermediate = layer.w2_weight.shape
+
+        min_alignment = 16
+        padded_intermediate = round_up(intermediate, min_alignment)
+
+        if padded_intermediate == intermediate:
+            return
+
+        logger.info(
+            "Padding intermediate size from %d to %d for up/down projection weights.",
+            intermediate,
+            padded_intermediate,
+        )
+
+        up_mult = 2 if self.moe.is_act_and_mul else 1
+        padded_gate_up_dim = up_mult * padded_intermediate
+
+        # Pad w13 and w12 along its intermediate dimension.
+        w13 = layer.w13_weight.data
+        padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
+        padded_w13[:, : w13.shape[1], :] = w13
+        layer.w13_weight.data = padded_w13
+
+        w2 = layer.w2_weight.data
+        padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
+        padded_w2[:, :, :intermediate] = w2
+        layer.w2_weight.data = padded_w2
+
+        if hasattr(layer, "intermediate_size_per_partition"):
+            layer.intermediate_size_per_partition = padded_intermediate
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -707,55 +772,39 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             if layer.enable_eplb:
                 raise NotImplementedError(
                     "EPLB not supported for `ModelOptFp8MoEMethod` yet."
                 )
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
+            assert layer.activation == "silu", (
+                f"Expected 'silu' activation but got {layer.activation}"
             )
-            assert not renormalize
+
+            assert not layer.renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
                 layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,
-                routing_bias=e_score_correction_bias,
-                global_num_experts=global_num_experts,
-                top_k=top_k,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                routing_bias=layer.e_score_correction_bias,
+                global_num_experts=layer.global_num_experts,
+                top_k=layer.top_k,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert activation in ("silu", "relu2_no_mul"), (
+            assert layer.activation in ("silu", "relu2_no_mul"), (
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                f"but got {activation}"
+                f"but got {layer.activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
@@ -763,10 +812,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 topk_weights,
                 topk_ids,
                 inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -780,11 +829,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
+                activation=layer.activation,
                 quant_config=self.moe_quant_config,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
 
@@ -822,7 +871,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def override_quantization_method(
@@ -1342,7 +1391,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "Accuracy may be affected."
             )
 
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
@@ -1409,16 +1458,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
-            layer.gemm1_weights_fp4_shuffled = Parameter(
+            layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
+            layer.w2_weight_scale = Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
 
@@ -1427,12 +1474,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
-
-            # Clean up weights that won't be used by TRT-LLM
-            del layer.w2_weight
-            del layer.w2_weight_scale
-            del layer.w13_weight
-            del layer.w13_weight_scale
         elif self.use_marlin:
             # Marlin processing
             prepare_moe_fp4_layer_for_marlin(layer)
@@ -1481,6 +1522,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_blockscale_swizzled, requires_grad=False
             )
 
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: FusedMoE,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        import flashinfer
+
+        a1_gscale = layer.w13_input_scale_quant
+        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
+            hidden_states,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
+        extra_tensors: list[torch.Tensor] = [hidden_states_sf]
+        return hidden_states_fp4, extra_tensors
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -1499,28 +1558,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_gscale=layer.w2_input_scale_quant,
         )
 
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.moe.is_act_and_mul:
             assert (
@@ -1534,27 +1580,43 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+            and not layer.enable_eplb
         ):
-            if enable_eplb:
-                raise NotImplementedError(
-                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
                 router_logits=router_logits,
-                top_k=top_k,
-                global_num_experts=global_num_experts,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                custom_routing_function=custom_routing_function,
-                e_score_correction_bias=e_score_correction_bias,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                custom_routing_function=layer.custom_routing_function,
+                e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
+        # Hidden_states in select_experts is only used to extract metadata
+        if isinstance(x, tuple):
+            x_routing, _ = x
+        else:
+            x_routing = x
+        topk_weights, topk_ids = layer.select_experts(
+            hidden_states=x_routing,
             router_logits=router_logits,
         )
+
+        # EPLB path
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            return flashinfer_trtllm_fp4_routed_moe(
+                layer=layer,
+                x=x,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
+            )
 
         if self.use_marlin:
             return fused_marlin_moe(
@@ -1571,9 +1633,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_scale1=layer.w13_weight_scale_2,
                 global_scale2=layer.w2_weight_scale_2,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 input_dtype=self.marlin_input_dtype,
             )
 
@@ -1604,10 +1666,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
                 inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
@@ -1622,8 +1684,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 # TODO: derive from arguments
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,

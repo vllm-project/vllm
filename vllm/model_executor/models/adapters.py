@@ -175,9 +175,14 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             self.vllm_config = vllm_config
 
             # These are not used in pooling models
-            for attr in ("lm_head", "logits_processor"):
-                if hasattr(self, attr):
-                    delattr(self, attr)
+            objects_to_clean = [self]
+            if language_model := getattr(self, "language_model", None):
+                objects_to_clean.append(language_model)
+
+            for obj in objects_to_clean:
+                for attr in ("lm_head", "logits_processor"):
+                    if hasattr(obj, attr):
+                        delattr(obj, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
@@ -332,6 +337,18 @@ def as_seq_cls_model(cls: _T) -> _T:
             tokens = getattr(text_config, "classifier_from_token", None)
             method = getattr(text_config, "method", None)
 
+            def auto_set_score_bias(weights):
+                for name, weight in weights:
+                    if name == "score.bias":
+                        device = self.score.weight.device
+                        dtype = self.score.weight.dtype
+                        bias = weight.to(device).to(dtype)
+                        self.score.bias = torch.nn.Parameter(bias)
+                        self.score.skip_bias_add = False
+                    else:
+                        yield name, weight
+
+            weights = auto_set_score_bias(weights)
             if tokens is None and method is None:
                 return super().load_weights(weights)
             else:
@@ -344,44 +361,6 @@ def as_seq_cls_model(cls: _T) -> _T:
     )
 
     return ModelForSequenceClassification  # type: ignore
-
-
-def as_reward_model(cls: _T) -> _T:
-    """
-    Subclass an existing vLLM model to support reward modeling.
-
-    By default, we return the hidden states of each token directly.
-
-    Note:
-        We assume that no extra layers are added to the original model;
-        please implement your own model if this is not the case.
-    """
-    # Avoid modifying existing reward models
-    if is_pooling_model(cls):
-        return cls
-
-    # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
-
-    from .interfaces_base import default_pooling_type
-
-    @default_pooling_type("ALL")
-    class ModelForReward(_create_pooling_model_cls(cls)):
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self.pooler = DispatchPooler(
-                {
-                    "token_classify": Pooler.for_token_classify(
-                        pooler_config=pooler_config
-                    )
-                }
-            )
-
-    ModelForReward.__name__ = _get_pooling_model_name(cls.__name__, "ForReward")
-
-    return ModelForReward  # type: ignore
 
 
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
