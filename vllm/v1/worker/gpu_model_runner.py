@@ -2912,24 +2912,6 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
-    def _mamba_copy_block(
-        self,
-        kv_cache_group_spec: KVCacheGroupSpec,
-        src_block_id: int,
-        dest_block_id: int,
-    ):
-        if src_block_id == dest_block_id:
-            return
-        forward_context = self.compilation_config.static_forward_context
-        for layer_name in kv_cache_group_spec.layer_names:
-            kv_caches: list[list[torch.Tensor]] = forward_context[layer_name].kv_cache
-            for kv_cache in kv_caches:
-                if isinstance(kv_cache, torch.Tensor):
-                    kv_cache[dest_block_id].copy_(kv_cache[src_block_id])
-                elif isinstance(kv_cache, list):
-                    for kv_cache_part in kv_cache:
-                        kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
-
     @torch.inference_mode()
     def execute_model(
         self,
