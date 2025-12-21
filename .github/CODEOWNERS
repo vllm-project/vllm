@@ -15,6 +15,7 @@
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
+/vllm/tool_parsers @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 /vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
