@@ -205,7 +205,11 @@ from vllm.attention.backends.abstract import (
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
+from vllm.attention.ops.common import (
+    cp_lse_ag_out_ar,
+    cp_lse_ag_out_rs,
+    fused_pcp_qkv_select,
+)
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -230,7 +234,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     get_cp_local_seq_lens,
-    get_pcp_kv_indices,
     get_pcp_query_indices,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -360,11 +363,10 @@ class MLACommonPrefillMetadata:
     @dataclass
     class PCPMetadata:
         # For PCP
-        kv_head_indices: torch.Tensor | None = None
-        kv_tail_indices: torch.Tensor | None = None
-        query_head_indices: torch.Tensor | None = None
-        query_tail_indices: torch.Tensor | None = None
         output_restore_idx: torch.Tensor | None = None
+        query_start_loc: torch.Tensor | None = None
+        kv_head_start_loc: torch.Tensor | None = None
+        kv_tail_start_loc: torch.Tensor | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -1005,35 +1007,22 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             pcp_metadata = None
             if self.pcp_world_size > 1:
                 # NOTE(yyj): We need to get the indices here for
-                # split the query, key and value in prefill forward.
+                # restoring the output.
                 q_head_idx, q_tail_idx = get_pcp_query_indices(
                     prefill_query_start_loc_cpu
                 )
                 output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
-                prefill_kv_start_loc_cpu = (
-                    prefill_query_start_loc_cpu * self.pcp_world_size
-                )
-                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
-                    prefill_kv_start_loc_cpu,
-                    self.pcp_rank,
-                    self.pcp_world_size,
-                )
                 pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
-                    kv_head_indices=kv_head_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    kv_tail_indices=kv_tail_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    query_head_indices=q_head_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
-                    query_tail_indices=q_tail_idx.to(
-                        device, dtype=torch.int32, non_blocking=True
-                    ),
                     output_restore_idx=output_res_idx.to(
                         device, dtype=torch.int32, non_blocking=True
                     ),
+                    query_start_loc=prefill_query_start_loc // 2,
+                    kv_head_start_loc=prefill_query_start_loc
+                    // 2
+                    * (self.pcp_rank + 1),
+                    kv_tail_start_loc=prefill_query_start_loc
+                    // 2
+                    * (self.pcp_world_size * 2 - self.pcp_rank),
                 )
 
             prefill_metadata = self.prefill_metadata_cls(
@@ -1482,14 +1471,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             #      -----------
             # tail 2   1 1 1 0
 
+            q_head, k_head, v_head, q_tail, k_tail, v_tail = fused_pcp_qkv_select(
+                q=q,
+                k=k,
+                v=v,
+                query_start_loc=prefill.query_start_loc,
+                pcp_rank=self.pcp_rank,
+                pcp_world_size=self.pcp_world_size,
+            )
+
             pcp_metadata = prefill.pcp_metadata
             assert pcp_metadata is not None
             output_head, lse_head = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, pcp_metadata.query_head_indices),
-                k=torch.index_select(k, 0, pcp_metadata.kv_head_indices),
-                v=torch.index_select(v, 0, pcp_metadata.kv_head_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc // 2 * (self.pcp_rank + 1),
+                q=q_head,
+                k=k_head,
+                v=v_head,
+                cu_seqlens_q=pcp_metadata.query_start_loc,
+                cu_seqlens_k=pcp_metadata.kv_head_start_loc,
                 max_seqlen_q=prefill.max_query_len // 2,
                 max_seqlen_k=prefill.max_query_len // 2 * (self.pcp_rank + 1),
                 softmax_scale=self.scale,
@@ -1498,13 +1496,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, pcp_metadata.query_tail_indices),
-                k=torch.index_select(k, 0, pcp_metadata.kv_tail_indices),
-                v=torch.index_select(v, 0, pcp_metadata.kv_tail_indices),
-                cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc
-                // 2
-                * (self.pcp_world_size * 2 - self.pcp_rank),
+                q=q_tail,
+                k=k_tail,
+                v=v_tail,
+                cu_seqlens_q=pcp_metadata.query_start_loc,
+                cu_seqlens_k=pcp_metadata.kv_tail_start_loc,
                 max_seqlen_q=prefill.max_query_len // 2,
                 max_seqlen_k=prefill.max_query_len
                 // 2

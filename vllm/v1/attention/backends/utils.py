@@ -1333,23 +1333,3 @@ def get_pcp_query_indices(cu_num_tokens: torch.Tensor):
         return_tail=True,
     )
     return torch.from_numpy(head_indices), torch.from_numpy(tail_indices)
-
-
-def get_pcp_kv_indices(
-    cu_num_tokens: torch.Tensor,
-    pcp_rank: int,
-    pcp_size: int,
-):
-    kv_head_indices, _ = get_pcp_part_indices(
-        cu_num_tokens,
-        pcp_rank + 1,
-        2 * pcp_size,
-        return_head=True,
-    )
-    kv_tail_indices, _ = get_pcp_part_indices(
-        cu_num_tokens,
-        2 * pcp_size - pcp_rank,
-        2 * pcp_size,
-        return_head=True,
-    )
-    return torch.from_numpy(kv_head_indices), torch.from_numpy(kv_tail_indices)
