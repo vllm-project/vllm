@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+import functools
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
@@ -16,11 +18,15 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention.layer import Attention, AttentionType
+from dataclasses import replace
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata, AttentionType
+from vllm.attention.layer import Attention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.vllm import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -52,6 +58,8 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata, subclass_attention_backend, subclass_attention_backend_with_overrides
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -126,6 +134,16 @@ ISO639_1_SUPPORTED_LANGS = {
     "cy": "Welsh",
 }
 
+import enum
+import torch.nn.functional as F
+from functools import partial
+
+
+class PosEmbedType(enum.Enum):
+    SINUSOIDAL = "sinusoidal"
+    NOPE = "nope"
+    LEARNED = "learned"
+
 
 class WhisperAudioInputs(TensorSchema):
     """
@@ -177,6 +195,137 @@ class WhisperPositionalEmbedding(nn.Embedding):
         return self.weight[position_ids]
 
 
+@functools.lru_cache
+def create_whisper_attention_backend_with_block_pooling(
+        underlying_attn_backend: AttentionBackend,
+        block_pool_size: int) -> type[AttentionBackend]:
+    prefix = "WhisperAttentionWithBlockPooling_"
+    underlying_builder = underlying_attn_backend.get_builder_cls()
+
+    class WhisperAttentionWithBlockPoolingBuilder(underlying_builder
+                                                  ):  # type: ignore
+
+        def __init__(self, kv_cache_spec: AttentionSpec,
+                     layer_names: list[str],
+                     vllm_config: VllmConfig,
+                     device: torch.device):
+            assert kv_cache_spec.num_kv_heads % block_pool_size == 0
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                block_size=kv_cache_spec.block_size * block_pool_size,
+                num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size)
+            super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        def build(
+            self,
+            common_prefix_len: int,
+            common_attn_metadata: CommonAttentionMetadata,
+            fast_build: bool = False,
+        ) -> AttentionMetadata:
+            new_common_attn_metadata = copy.deepcopy(common_attn_metadata)
+            new_common_attn_metadata.query_start_loc *= block_pool_size
+            new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
+            new_common_attn_metadata.seq_lens *= block_pool_size
+            new_common_attn_metadata._seq_lens_cpu *= block_pool_size
+            new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
+            new_common_attn_metadata.num_actual_tokens *= block_pool_size
+            new_common_attn_metadata.max_query_len *= block_pool_size
+            new_common_attn_metadata.max_seq_len *= block_pool_size
+            original_slot_mapping = common_attn_metadata.slot_mapping
+            common_prefix_len *= block_pool_size
+            new_common_attn_metadata.slot_mapping = torch.tensor(
+                [
+                    i for n in original_slot_mapping.tolist() for i in range(
+                        n * block_pool_size,
+                        n * block_pool_size + block_pool_size,
+                    )
+                ],
+                device=original_slot_mapping.device,
+            )
+            return super().build(common_prefix_len, new_common_attn_metadata,
+                                 fast_build)
+
+    attn_backend = subclass_attention_backend_with_overrides(
+        name_prefix=prefix,
+        attention_backend_cls=underlying_attn_backend,
+        overrides={
+            "get_builder_cls":
+            lambda: WhisperAttentionWithBlockPoolingBuilder,
+            "get_kv_cache_shape":
+            lambda num_blocks, block_size, num_kv_heads, head_size,
+            cache_dtype_str: (
+                2,
+                num_blocks,
+                block_size * block_pool_size,
+                num_kv_heads // block_pool_size,
+                head_size,
+            ),  # TODO: generalize to other backends
+        },
+    )
+
+    return attn_backend
+
+
+class WhisperAttentionWithBlockPooling(Attention):
+    """Attention layer with block pooling."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        per_layer_sliding_window: int | None = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+        block_pool_size: int = 1,
+        **kwargs,
+    ):
+        self.block_pool_size = block_pool_size
+        dtype = torch.get_default_dtype()
+
+        if cache_config is not None:
+            kv_cache_dtype = cache_config.cache_dtype
+            block_size = cache_config.block_size
+        else:
+            kv_cache_dtype = "auto"
+            block_size = 16
+
+        underlying_attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            attn_type=attn_type,
+        )
+        attn_backend = create_whisper_attention_backend_with_block_pooling(
+            underlying_attn_backend, block_pool_size)
+
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            attn_type=attn_type,
+            attn_backend=attn_backend,
+            per_layer_sliding_window=per_layer_sliding_window,
+            **kwargs,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+        kv_cache_spec = super().get_kv_cache_spec(vllm_config)
+        assert isinstance(kv_cache_spec, AttentionSpec)
+        kv_cache_spec = replace(kv_cache_spec,
+                                num_kv_heads=self.block_pool_size *
+                                kv_cache_spec.num_kv_heads)
+        return kv_cache_spec
+
+
 class WhisperAttention(nn.Module):
     def __init__(
         self,
@@ -184,6 +333,8 @@ class WhisperAttention(nn.Module):
         num_heads: int,
         bias: bool = True,
         attn_type: AttentionType = AttentionType.DECODER,
+        per_layer_sliding_window: int | None = None,
+        block_pool_size: int = 1,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -242,16 +393,31 @@ class WhisperAttention(nn.Module):
                 attn_type=self.attn_type,
             )
         else:  # AttentionType.DECODER (regular decoder self-attention)
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                attn_type=self.attn_type,
-            )
+            if block_pool_size > 1:
+                self.attn = WhisperAttentionWithBlockPooling(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                    per_layer_sliding_window=per_layer_sliding_window,
+                    block_pool_size=block_pool_size,
+                )
+            else:
+                self.attn = Attention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                    per_layer_sliding_window=per_layer_sliding_window,
+                )
 
     def _init_qkv(
         self,
@@ -386,6 +552,9 @@ class WhisperEncoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        is_causal = getattr(config, "is_causal", False)
+        sliding_window = getattr(config, "sliding_window", None)
+        block_pool_size = getattr(config, "block_pool_size", 1)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -393,7 +562,9 @@ class WhisperEncoderLayer(nn.Module):
         self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
-            attn_type=AttentionType.ENCODER,
+            attn_type=AttentionType.DECODER if is_causal else AttentionType.ENCODER,
+            block_pool_size=block_pool_size,
+            per_layer_sliding_window=sliding_window,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -485,6 +656,67 @@ class WhisperDecoderLayer(nn.Module):
         return hidden_states
 
 
+def pad1d(
+    x: torch.Tensor,
+    paddings: tuple[int, int],
+    mode: str = "constant",
+    value: float = 0.0,
+) -> torch.Tensor:
+    """Tiny wrapper around F.pad, just to allow for
+    reflect padding on small input.
+    If this is the case, we insert extra 0 padding
+    to the right before the reflection happen.
+    """
+    length = x.shape[-1]
+    padding_left, padding_right = paddings
+    assert padding_left >= 0 and padding_right >= 0, (padding_left, padding_right)
+    if mode == "reflect":
+        max_pad = max(padding_left, padding_right)
+        extra_pad = 0
+        if length <= max_pad:
+            extra_pad = max_pad - length + 1
+            x = F.pad(x, (0, extra_pad))
+        padded = F.pad(x, paddings, mode, value)
+        end = padded.shape[-1] - extra_pad
+        return padded[..., :end]
+    else:
+        return F.pad(x, paddings, mode, value)
+
+
+class CausalConv1d(nn.Conv1d):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        bias: bool = True,
+    ) -> None:
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
+        self._stride = self.stride[0]
+        self._effective_kernel_size = (kernel_size - 1) * self.dilation[0] + 1
+        self._padding_total = self._effective_kernel_size - self._stride
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        n_frames = (
+            x.shape[-1] - self._effective_kernel_size + self._padding_total
+        ) / self._stride + 1
+        target_length = (math.ceil(n_frames) - 1) * self._stride + (
+            self._effective_kernel_size - self._padding_total
+        )
+        extra_padding = target_length - x.shape[-1]
+        x = pad1d(x, (self._padding_total, extra_padding), mode="constant")
+        return super().forward(x)
+
+
 class WhisperEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -492,12 +724,21 @@ class WhisperEncoder(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
+
+        self.pos_embed_type = PosEmbedType(getattr(config, "pos_embed", "sinusoidal"))
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
         self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+
+        is_causal = getattr(config, "is_causal", False)
+        Conv1d = CausalConv1d if is_causal else partial(nn.Conv1d, padding=1)
+
+        self.conv1 = Conv1d(self.num_mel_bins, embed_dim, kernel_size=3)
+        self.conv2 = Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3)
+        self.total_stride = self.conv1.stride[0] * self.conv2.stride[0]
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(
@@ -507,29 +748,49 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        maybe_fp32_init_ctx = (
-            set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
-        )
+        if self.pos_embed_type in [PosEmbedType.SINUSOIDAL, PosEmbedType.LEARNED]:
+            if is_causal:
+                raise ValueError(
+                    "Only NOPE position embeddings are supported "
+                    f"for causal models, but got {self.pos_embed_type}"
+                )
 
-        with (
-            torch.no_grad(),
-            maybe_fp32_init_ctx,
-        ):
-            self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
-            self.embed_positions.weight.copy_(
-                sinusoids(*self.embed_positions.weight.shape)
+            maybe_fp32_init_ctx = (
+                set_default_torch_dtype(torch.float32)
+                if init_in_fp32
+                else nullcontext()
             )
 
-    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
+            with (
+                torch.no_grad(),
+                maybe_fp32_init_ctx,
+            ):
+                self.embed_positions = nn.Embedding(
+                    self.max_source_positions, embed_dim
+                )
+                self.embed_positions.weight.copy_(
+                    sinusoids(*self.embed_positions.weight.shape)
+                )
+
+    def forward_conv(
+        self, input_features: torch.Tensor | list[torch.Tensor]
+    ) -> torch.Tensor:
         hidden_states = []
         input_is_batched = False
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
+
+            if self.pos_embed_type in [PosEmbedType.SINUSOIDAL, PosEmbedType.LEARNED]:
+                embeds = embeds.transpose(-1, -2)
+                embeds = (
+                    embeds + self.embed_positions.weight[: embeds.size(-2), :]
+                ).to(embeds.dtype)
+            elif self.pos_embed_type == PosEmbedType.NOPE:
+                embeds = embeds.transpose(-1, -2).to(embeds.dtype)
+            else:
+                raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
+
             hidden_states.append(embeds)
             input_is_batched = embeds.ndim > 2
         # Input to MHA must be B x T x D
@@ -538,12 +799,19 @@ class WhisperEncoder(nn.Module):
             hidden_states = torch.cat(hidden_states)
         else:
             hidden_states = torch.stack(hidden_states, dim=0)
+            
+        return hidden_states
 
+    def forward_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
+
+    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
+        hidden_states = self.forward_conv(input_features)
+        return self.forward_layers(hidden_states)
 
 
 class WhisperDecoder(nn.Module):
