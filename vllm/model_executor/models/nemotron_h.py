@@ -67,6 +67,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -632,9 +633,7 @@ class NemotronHModel(nn.Module):
         return hidden_states
 
     def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        if weight_name.startswith("mtp."):
-            return True
-        return False
+        return weight_name.startswith("mtp.")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [

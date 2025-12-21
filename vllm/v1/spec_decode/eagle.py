@@ -97,6 +97,7 @@ class EagleProposer:
         )
 
         self.use_cuda_graph = False
+        self.pass_spec_step_idx = False
 
         self.compilation_config = self.vllm_config.compilation_config
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -330,11 +331,16 @@ class EagleProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
+            model_kwargs = {}
+            if self.pass_spec_step_idx:
+                model_kwargs["spec_step_idx"] = 0
+
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
             if self.method == "mtp":
                 last_hidden_states = ret_hidden_states
@@ -414,7 +420,7 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
-        
+
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -511,11 +517,16 @@ class EagleProposer:
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
+                model_kwargs = {}
+                if self.pass_spec_step_idx:
+                    model_kwargs["spec_step_idx"] = token_index + 1
+
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(input_batch_size),
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
+                    **model_kwargs,
                 )
                 if self.method == "mtp":
                     last_hidden_states = ret_hidden_states
@@ -1139,6 +1150,15 @@ class EagleProposer:
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
 
+        # Check if the model expects spec_step_idx in forward
+        if (
+            hasattr(self.model, "should_use_spec_step_idx")
+            and self.model.should_use_spec_step_idx()
+        ):
+            self.pass_spec_step_idx = True
+        else:
+            self.pass_spec_step_idx = False
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -1188,11 +1208,16 @@ class EagleProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
+                model_kwargs = {}
+                if self.pass_spec_step_idx:
+                    model_kwargs["spec_step_idx"] = 0
+
                 self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(num_input_tokens),
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=inputs_embeds,
+                    **model_kwargs,
                 )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:

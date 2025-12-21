@@ -595,7 +595,6 @@ class MambaMixer2(MambaBase, CustomOp):
             num_accepted_tokens = attn_metadata.num_accepted_tokens
             spec_sequence_masks = attn_metadata.spec_sequence_masks
             spec_query_start_loc = attn_metadata.spec_query_start_loc
-            non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
             num_spec_decodes = attn_metadata.num_spec_decodes
             # token count (non-spec only!)
             num_decodes = attn_metadata.num_decode_tokens
@@ -679,14 +678,18 @@ class MambaMixer2(MambaBase, CustomOp):
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
                 torch.split(
-                    attn_metadata.block_idx_last_computed_token,
+                    attn_metadata.block_idx_last_computed_token[
+                        : num_decodes + num_prefills
+                    ],
                     [num_decodes, num_prefills],
                     dim=0,
                 )
             )
             block_idx_last_scheduled_token_d, block_idx_last_scheduled_token_p = (
                 torch.split(
-                    attn_metadata.block_idx_last_scheduled_token,
+                    attn_metadata.block_idx_last_scheduled_token[
+                        : num_decodes + num_prefills
+                    ],
                     [num_decodes, num_prefills],
                     dim=0,
                 )
@@ -789,6 +792,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 )
 
             # NOTE: final output is an in-place update of out tensor
+            assert preallocated_ssm_out_p is not None
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -949,6 +953,7 @@ class MambaMixer2(MambaBase, CustomOp):
                     -1, self.num_heads // self.tp_size, self.head_dim
                 )
 
+                assert preallocated_ssm_out_d_spec is not None
                 selective_state_update(
                     ssm_state,
                     hidden_states_d_spec,
@@ -964,7 +969,6 @@ class MambaMixer2(MambaBase, CustomOp):
                     out=preallocated_ssm_out_d_spec.view(
                         num_spec_decode_tokens, -1, self.head_dim
                     ),
-                    inplace_final_state=True,
                     num_accepted_tokens=num_accepted_tokens,
                     cu_seqlens=spec_query_start_loc,
                 )
@@ -997,6 +1001,7 @@ class MambaMixer2(MambaBase, CustomOp):
                     -1, self.num_heads // self.tp_size, self.head_dim
                 )
 
+                assert preallocated_ssm_out_d_non_spec is not None
                 selective_state_update(
                     ssm_state,
                     hidden_states_d_non_spec,

@@ -3603,14 +3603,12 @@ class GPUModelRunner(
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
             )
-            
-            # TODO smor - a patch, need  to solve in a more robust way
+
             draft_token_ids = draft_token_ids.tolist()
             for i in range(common_attn_metadata.num_reqs):
                 req_id = self.input_batch.req_ids[i]
                 if req_id in self.input_batch.spec_decode_unsupported_reqs:
                     draft_token_ids[i] = []
-            
 
         return draft_token_ids
 

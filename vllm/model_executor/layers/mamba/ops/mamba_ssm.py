@@ -464,7 +464,6 @@ def selective_state_update(
             dt_softplus,
             tie_hdim,
             BLOCK_SIZE_M,
-            INPLACE_FINAL_STATE=inplace_final_state,
             num_warps=num_warps,
         )
 

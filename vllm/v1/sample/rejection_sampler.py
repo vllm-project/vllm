@@ -649,8 +649,6 @@ def rejection_greedy_sample_kernel(
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
-    # TODO smor - FOR DEBUGGING: Reject ALL drafts (not just after position 0)
-    # rejected = True  # Start as rejected to reject all drafts
     rejected = False
     for pos in range(num_draft_tokens):
         if not rejected:
@@ -663,9 +661,7 @@ def rejection_greedy_sample_kernel(
             if draft_token_id != target_argmax_id:
                 # Reject.
                 rejected = True
-    
-    # TODO smor- remove
-    # return
+
     if not rejected:
         # If all tokens are accepted, append the bonus token.
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
@@ -701,8 +697,6 @@ def rejection_random_sample_kernel(
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
-    # TODO smor - FOR DEBUGGING: Reject ALL drafts
-    # rejected = True  # Start as rejected to reject all drafts
     rejected = False
     for pos in range(num_draft_tokens):
         if not rejected:

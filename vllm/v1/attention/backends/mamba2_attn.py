@@ -377,17 +377,27 @@ class Mamba2AttentionMetadataBuilder(
                     device=common_attn_metadata.query_start_loc.device,
                 )
 
-                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                    :, : self.num_spec + 1
-                ]
+                if self.vllm_config.cache_config.enable_prefix_caching:
+                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
+                    block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
+                        self.num_spec + 1, device=self.device
+                    ).unsqueeze(0)
+                    batch_indices = torch.arange(
+                        common_attn_metadata.block_table_tensor.size(0),
+                        device=self.device,
+                    ).unsqueeze(1)
+                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                        batch_indices, block_indices
+                    ]
+                else:
+                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                        :, : self.num_spec + 1
+                    ]
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
             else:
                 if self.vllm_config.cache_config.enable_prefix_caching:
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token[
-                        ~spec_sequence_masks
-                    ]
                     block_idx_last_scheduled_token = block_idx_last_scheduled_token[
                         ~spec_sequence_masks
                     ]
@@ -403,14 +413,24 @@ class Mamba2AttentionMetadataBuilder(
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
-                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
-                ]
                 if self.vllm_config.cache_config.enable_prefix_caching:
+                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
+                    block_indices = num_cacheable_blocks[spec_sequence_masks].unsqueeze(
+                        1
+                    ) + torch.arange(self.num_spec + 1, device=self.device).unsqueeze(0)
+                    batch_indices = torch.arange(
+                        spec_sequence_masks.sum().item(), device=self.device
+                    ).unsqueeze(1)
+                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                        spec_sequence_masks
+                    ][batch_indices, block_indices]
                     non_spec_state_indices_tensor = (
                         common_attn_metadata.block_table_tensor[~spec_sequence_masks]
                     )
                 else:
+                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                        spec_sequence_masks, : self.num_spec + 1
+                    ]
                     non_spec_state_indices_tensor = (
                         common_attn_metadata.block_table_tensor[~spec_sequence_masks, 0]
                     )
@@ -452,7 +472,8 @@ class Mamba2AttentionMetadataBuilder(
                 common_attn_metadata.query_start_loc.device
             )
 
-            # Subtract ALL decode tokens (spec + non-spec) to get prefill-only coordinates
+            # Subtract ALL decode tokens (spec + non-spec)
+            # to get prefill-only coordinates
             total_decode_tokens = num_decode_tokens + num_spec_decode_tokens
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
