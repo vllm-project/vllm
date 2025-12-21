@@ -537,6 +537,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         start_non_spec_prefill = num_decodes
         end_non_spec_prefill = start_non_spec_prefill + num_prefills
 
+        __import__("fpdb").ForkedPdb().set_trace()
+
         # APC is enabled if pointers are available to the blocks, the last
         # computed token (the cache position), and the block to which the state
         # for each request should be written after the forward.
@@ -578,6 +580,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         state_indices_decode = None
         state_indices_prefill = None
         ssm_state_indices_decode = None
+        __import__("fpdb").ForkedPdb().set_trace()
 
         # Extract the cache and destination block indices
         if prefix_caching_enabled:
@@ -958,6 +961,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
+        __import__("fpdb").ForkedPdb().set_trace()
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(

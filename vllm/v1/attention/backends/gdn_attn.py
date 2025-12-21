@@ -174,9 +174,8 @@ class GDNAttentionMetadataBuilder(
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        # TODO: Check if this works
-        # context_lens = m.num_computed_tokens_cpu
-        # context_lens_tensor = context_lens.to(query_start_loc.device)
+        context_lens_cpu = m.num_computed_tokens_cpu
+        context_lens = context_lens_cpu.to(query_start_loc.device)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         enable_apc = self.vllm_config.cache_config.enable_prefix_caching
@@ -326,11 +325,9 @@ class GDNAttentionMetadataBuilder(
             block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                 prefill_start:prefill_end
             ]
-            num_computed_tokens_p = m.seq_lens[prefill_start:prefill_end]
+            num_computed_tokens_p = context_lens[prefill_start:prefill_end]
+            num_computed_tokens_p_cpu = context_lens_cpu[prefill_start:prefill_end]
 
-            num_computed_tokens_p_cpu = m.num_computed_tokens_cpu[
-                prefill_start:prefill_end
-            ]
             assert non_spec_query_start_loc_cpu is not None
             query_start_loc_p_cpu = (
                 non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
@@ -382,9 +379,7 @@ class GDNAttentionMetadataBuilder(
             )
 
         if num_prefills > 0:
-            # TODO: Check if this works or if we should use
-            # context_lens_tensor as before
-            has_initial_state = m.seq_lens > 0
+            has_initial_state = context_lens > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
@@ -519,6 +514,7 @@ class GDNAttentionMetadataBuilder(
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        __import__("fpdb").ForkedPdb().set_trace()
         return attn_metadata
 
     def build_for_cudagraph_capture(
