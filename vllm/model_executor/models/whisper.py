@@ -253,9 +253,13 @@ def create_whisper_attention_backend_with_block_pooling(
                 device=original_slot_mapping.device,
             )
             new_common_attn_metadata.slot_mapping = (
-                (original_slot_mapping.unsqueeze(1) * block_pool_size
-                + torch.arange(block_pool_size, device=original_slot_mapping.device)
-            ).flatten().clamp(min=-1))
+                (
+                    original_slot_mapping.unsqueeze(1) * block_pool_size
+                    + torch.arange(block_pool_size, device=original_slot_mapping.device)
+                )
+                .flatten()
+                .clamp(min=-1)
+            )
             return super().build(
                 common_prefix_len, new_common_attn_metadata, fast_build
             )
