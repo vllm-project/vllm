@@ -1166,10 +1166,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        if (
-            self.fp8_backend != Fp8MoeBackend.MARLIN
-            or self.fp8_backend != Fp8MoeBackend.AITER
-        ):
+        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
