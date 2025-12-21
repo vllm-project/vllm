@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NemotronH-MTP model with attention layers."""
 
-import copy
 import typing
 from collections.abc import Callable, Iterable
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -47,6 +45,8 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        has_start_projections: bool = False,
+        has_end_norm: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -57,45 +57,67 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
             parallel_config=parallel_config,
             prefix=prefix,
         )
+        self.has_start_projections = has_start_projections
+        self.has_end_norm = has_end_norm
 
-        self.enorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.hnorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        if has_start_projections:
+            self.enorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+            self.hnorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-        # Fusion layer to combine embeddings with target hidden states
-        self.eh_proj = ColumnParallelLinear(
-            input_size=config.hidden_size * 2,
-            output_size=config.hidden_size,
-            bias=False,
-            gather_output=True,
-            params_dtype=config.dtype if hasattr(config, "dtype") else torch.bfloat16,
-            quant_config=quant_config,
-            prefix=f"{prefix}.eh_proj",
-        )
+            # Fusion layer to combine embeddings with target hidden states
+            self.eh_proj = ColumnParallelLinear(
+                input_size=config.hidden_size * 2,
+                output_size=config.hidden_size,
+                bias=False,
+                gather_output=True,
+                params_dtype=config.dtype
+                if hasattr(config, "dtype")
+                else torch.bfloat16,
+                quant_config=quant_config,
+                prefix=f"{prefix}.eh_proj",
+            )
+
+        if has_end_norm:
+            self.final_layernorm = RMSNorm(
+                config.hidden_size,
+                eps=getattr(config, "layer_norm_epsilon", 1e-5),
+            )
 
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
-        previous_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # Normalize both inputs before fusion
-        inputs_embeds_normed = self.enorm(inputs_embeds)
-        previous_hidden_states_normed = self.hnorm(previous_hidden_states)
+        # Start projections (Fusion)
+        if self.has_start_projections:
+            # Normalize both inputs before fusion
+            inputs_embeds_normed = self.enorm(inputs_embeds)
+            previous_hidden_states_normed = self.hnorm(hidden_states)
 
-        # Fuse via concatenation and linear projection
-        fused = torch.cat([inputs_embeds_normed, previous_hidden_states_normed], dim=-1)
-        hidden_states, _ = self.eh_proj(fused)
+            # Fuse via concatenation and linear projection
+            fused = torch.cat(
+                [inputs_embeds_normed, previous_hidden_states_normed], dim=-1
+            )
+            hidden_states, _ = self.eh_proj(fused)
 
         # Call parent forward (Attention)
         # Parent forward expects: hidden_states, residual
-        # It applies self.norm(hidden_states) then self.mixer(hidden_states)
-        # We pass our fused hidden_states as input.
         hidden_states, residual = super().forward(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
         )
+
+        # End norm
+        if self.has_end_norm:
+            if residual is not None:
+                hidden_states = hidden_states + residual
+                residual = None  # Consumed residual
+
+            hidden_states = self.final_layernorm(hidden_states)
+
         return hidden_states, residual
 
 
@@ -109,6 +131,8 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        has_start_projections: bool = False,
+        has_end_norm: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -119,19 +143,56 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
             parallel_config=parallel_config,
             prefix=prefix,
         )
+        self.has_start_projections = has_start_projections
+        self.has_end_norm = has_end_norm
 
-        self.final_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=getattr(config, "layer_norm_epsilon", 1e-5),
-        )
+        if has_start_projections:
+            self.enorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+            self.hnorm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+
+            # Fusion layer to combine embeddings with target hidden states
+            self.eh_proj = ColumnParallelLinear(
+                input_size=config.hidden_size * 2,
+                output_size=config.hidden_size,
+                bias=False,
+                gather_output=True,
+                params_dtype=config.dtype
+                if hasattr(config, "dtype")
+                else torch.bfloat16,
+                quant_config=quant_config,
+                prefix=f"{prefix}.eh_proj",
+            )
+
+        if has_end_norm:
+            self.final_layernorm = RMSNorm(
+                config.hidden_size,
+                eps=getattr(config, "layer_norm_epsilon", 1e-5),
+            )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None = None,  # Needed for start projections
         positions: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # Start projections (Fusion)
+        if self.has_start_projections:
+            # Normalize both inputs before fusion
+            if inputs_embeds is None:
+                raise ValueError(
+                    "inputs_embeds required for layer with start projections"
+                )
+            inputs_embeds_normed = self.enorm(inputs_embeds)
+            previous_hidden_states_normed = self.hnorm(hidden_states)
+
+            # Fuse via concatenation and linear projection
+            fused = torch.cat(
+                [inputs_embeds_normed, previous_hidden_states_normed], dim=-1
+            )
+            hidden_states, _ = self.eh_proj(fused)
+
         # Call parent forward (MoE)
         hidden_states, residual = super().forward(
             hidden_states=hidden_states,
@@ -139,72 +200,15 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
             **kwargs,
         )
 
-        # Collapse residual before final norm if necessary
-        if residual is not None:
-            hidden_states = hidden_states + residual
+        # End norm
+        if self.has_end_norm:
+            if residual is not None:
+                hidden_states = hidden_states + residual
+                residual = None  # Consumed residual
 
-        hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states
+            hidden_states = self.final_layernorm(hidden_states)
 
-
-class NemotronHMTPLayer(nn.Module):
-    """
-    Container layer for one MTP step.
-    Contains an Attention layer (with fusion) and an MoE layer (with final norm).
-    """
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        layer_idx: int,
-        prefix: str,
-    ) -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.config = cast(NemotronHConfig, config)
-        self.config_mtp = copy.deepcopy(self.config)
-
-        self.attn = NemotronHMTPAttentionDecoderLayer(
-            config=self.config_mtp,
-            layer_idx=layer_idx,
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
-            parallel_config=vllm_config.parallel_config,
-            prefix=f"{prefix}.attn",
-        )
-
-        self.moe = NemotronHMTPMoEDecoderLayer(
-            config=self.config_mtp,
-            layer_idx=layer_idx,
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
-            parallel_config=vllm_config.parallel_config,
-            prefix=f"{prefix}.moe",
-        )
-
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        positions: torch.Tensor,
-        previous_hidden_states: torch.Tensor,
-        spec_step_index: int = 0,
-    ) -> torch.Tensor:
-        hidden_states, residual = self.attn(
-            inputs_embeds=inputs_embeds,
-            positions=positions,
-            previous_hidden_states=previous_hidden_states,
-            residual=None,
-        )
-
-        hidden_states = self.moe(
-            hidden_states=hidden_states,
-            residual=residual,
-            positions=positions,
-        )
-
-        return hidden_states
+        return hidden_states, residual
 
 
 @support_torch_compile
@@ -222,22 +226,52 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        self.pattern_str = config.mtp_hybrid_override_pattern
+        self.pattern_len = len(self.pattern_str)
+        assert self.pattern_len > 0
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
         )
 
-        self.layers = torch.nn.ModuleDict(
-            {
-                str(idx): NemotronHMTPLayer(
-                    vllm_config=vllm_config,
-                    layer_idx=idx,
-                    prefix=f"{prefix}.layers.{idx}",
+        # Build flat list of layers
+        self.layers = torch.nn.ModuleDict()
+
+        # Total number of physical layers = num_steps * pattern_len
+        total_layers = self.num_mtp_layers * self.pattern_len
+
+        for i in range(total_layers):
+            step_rel_idx = i % self.pattern_len
+
+            char = self.pattern_str[step_rel_idx]
+
+            is_start_of_step = step_rel_idx == 0
+            is_end_of_step = step_rel_idx == self.pattern_len - 1
+
+            layer_prefix = f"{prefix}.layers.{i}"
+
+            # TODO smor- remove double layers formation
+            common_kwargs = dict(
+                config=config,
+                layer_idx=self.mtp_start_layer_idx + i,
+                model_config=vllm_config.model_config,
+                cache_config=vllm_config.cache_config,
+                quant_config=vllm_config.quant_config,
+                parallel_config=vllm_config.parallel_config,
+                prefix=layer_prefix,
+                has_start_projections=is_start_of_step,
+                has_end_norm=is_end_of_step,
+            )
+
+            if char == "*":
+                self.layers[str(i)] = NemotronHMTPAttentionDecoderLayer(**common_kwargs)
+            elif char == "E":
+                self.layers[str(i)] = NemotronHMTPMoEDecoderLayer(**common_kwargs)
+            else:
+                raise NotImplementedError(
+                    f"Pattern char '{char}' in {self.pattern_str} not implemented"
                 )
-                for idx in range(self.num_mtp_layers)
-            }
-        )
 
         self.make_empty_intermediate_tensors: Callable[..., IntermediateTensors] = (
             make_empty_intermediate_tensors_factory(
@@ -263,15 +297,30 @@ class NemotronHMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
 
-        # Use the MTP layer (cycling for multi-step)
-        layer_idx_str = "0" if spec_step_idx == 0 else "1"
+        # Determine range of layers for this step
+        start_idx = spec_step_idx * self.pattern_len
+        end_idx = start_idx + self.pattern_len
 
-        hidden_states = self.layers[layer_idx_str](
-            inputs_embeds,
-            positions,
-            hidden_states,
-            spec_step_idx,
-        )
+        residual = None
+
+        # TODO smor- verify this
+        for i in range(start_idx, end_idx):
+            layer = self.layers[str(i)]
+
+            if isinstance(layer, NemotronHMTPAttentionDecoderLayer):
+                hidden_states, residual = layer(
+                    inputs_embeds=inputs_embeds,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
+            elif isinstance(layer, NemotronHMTPMoEDecoderLayer):
+                hidden_states, residual = layer(
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,  # needed for fusion
+                )
 
         return hidden_states
 
@@ -307,7 +356,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         # MTP predictor
         self.model = NemotronHMultiTokenPredictor(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
         # LM head for generating logits
@@ -359,7 +408,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         return self.logits_processor(self.lm_head, hidden_states)
 
     def should_use_spec_step_idx(self) -> bool:
-        return len(self.model.layers) > 1
+        return self.model.num_mtp_layers > 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -369,23 +418,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-
-        if self.config.mtp_hybrid_override_pattern == "*E":
-            layers_unravel_mapping = {
-                ".eh_proj": ".attn.eh_proj",
-                ".enorm": ".attn.enorm",
-                ".hnorm": ".attn.hnorm",
-                ".final_layernorm": ".moe.final_layernorm",
-                "layers.0.layers.0": "layers.0.attn",
-                "layers.0.layers.1": "layers.0.moe",
-                "layers.1.layers.0": "layers.1.attn",
-                "layers.1.layers.1": "layers.1.moe",
-            }
-        else:
-            raise RuntimeError(
-                "SMOR: unsupported mtp_hybrid_override_pattern: "
-                f"{self.config.mtp_hybrid_override_pattern}"
-            )
 
         expert_params_mapping = []
         if hasattr(self.config, "n_routed_experts") and self.config.n_routed_experts:
@@ -412,16 +444,23 @@ class NemotronHMTP(nn.Module, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if name.startswith("mtp."):
-                name = (
-                    "model." + name[4:]
-                )  # Remove "mtp." prefix, now "model.layers.X..."
+            if "mtp.layers." in name:
+                # TODO SMOR remove once checkpoint is updated
+                name = name.replace("layers.0.layers.0", "layers.0")
+                name = name.replace("layers.0.layers.1", "layers.1")
+                name = name.replace("layers.1.layers.0", "layers.2")
+                name = name.replace("layers.1.layers.1", "layers.3")
+                name = name.replace(
+                    "layers.1.final_layernorm", "layers.3.final_layernorm"
+                )
+                name = name.replace(
+                    "layers.0.final_layernorm", "layers.1.final_layernorm"
+                )
+                name = name.replace("layers.1.hnorm", "layers.2.hnorm")
+                name = name.replace("layers.1.enorm", "layers.2.enorm")
+                name = name.replace("layers.1.eh_proj", "layers.2.eh_proj")
 
-            # TODO smor- a truly ugly solution, replace it
-            for k, v in layers_unravel_mapping.items():
-                if k in name:
-                    name = name.replace(k, v)
-                    break
+            name = name.replace("mtp.layers.", "model.layers.")
 
             if "embeddings" in name:
                 name = name.replace("embeddings", "embed_tokens")
@@ -434,7 +473,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 if weight_name not in name:
                     continue
                 # Must be in a mixer (attention layer)
-                # Now it is inside attn.mixer
                 if ".mixer." not in name:
                     continue
 
