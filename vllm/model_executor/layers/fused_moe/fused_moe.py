@@ -16,6 +16,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -23,10 +24,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
-)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    _valid_cutlass_block_scaled_grouped_gemm,
-    run_cutlass_block_scaled_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
@@ -1286,6 +1283,57 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+@CustomOp.register("grouped_topk")
+class GroupedTopk(CustomOp):
+    """GroupedTopk used by the Deepseek-V2 and Deepseek-V3 model."""
+
+    def __init__(
+        self,
+        topk: int,
+        renormalize: bool,
+        num_expert_group: int = 0,
+        topk_group: int = 0,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.native_impl = grouped_topk
+        self.topk = topk
+        self.renormalize = renormalize
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
+        self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
+
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.native_impl(
+            hidden_states,
+            gating_output,
+            self.topk,
+            self.renormalize,
+            self.num_expert_group,
+            self.topk_group,
+            self.scoring_func,
+            self.routed_scaling_factor,
+            e_score_correction_bias,
+        )
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_native(
+            hidden_states, gating_output, e_score_correction_bias
+        )
+
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def eplb_map_to_physical_and_record(
     topk_ids: torch.Tensor,
@@ -1626,11 +1674,9 @@ def fused_experts(
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
-    allow_cutlass_block_scaled_grouped_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-    use_fp8_w8a8 = quant_config.use_fp8_w8a8
 
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
@@ -1644,7 +1690,6 @@ def fused_experts(
         and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
     ):
         assert quant_config is not None
-        assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1660,23 +1705,6 @@ def fused_experts(
             a1_scale=quant_config.a1_scale,
             a2_scale=quant_config.a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    elif (
-        allow_cutlass_block_scaled_grouped_gemm
-        and use_fp8_w8a8
-        and _valid_cutlass_block_scaled_grouped_gemm(
-            w1, w2, inplace, activation, apply_router_weight_on_input, expert_map
-        )
-    ):
-        assert quant_config is not None
-        return run_cutlass_block_scaled_fused_experts(
-            a=hidden_states,
-            w1=w1,
-            w2=w2,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
         )
     else:
         return dispatch_fused_experts_func(inplace)(

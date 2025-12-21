@@ -3,7 +3,7 @@
 import copy
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, ClassVar
@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,

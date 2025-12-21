@@ -142,16 +142,17 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    with monkeypatch.context() as m:
-        # avoid precision errors
-        if current_platform.is_rocm():
-            if is_testing_with_spec_decoding:
-                # Use TRITON_ATTN for spec decoding test for consistency
-                m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-            else:
-                m.setenv("VLLM_ATTENTION_BACKEND", "ROCM_AITER_FA")
+    # Determine attention config based on platform
+    if current_platform.is_rocm():
+        if is_testing_with_spec_decoding:
+            # Use TRITON_ATTN for spec decoding test for consistency
+            attention_config = {"backend": "TRITON_ATTN"}
         else:
-            m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+            attention_config = {"backend": "ROCM_ATTN"}
+    else:
+        attention_config = {"backend": "FLEX_ATTENTION"}
+
+    with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
         m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -174,6 +175,7 @@ def run_tests(
                 spec_config,
                 test_prefill_chunking=test_prefill_chunking,
                 is_testing_with_spec_decoding=is_testing_with_spec_decoding,
+                attention_config=attention_config,
             )
             outputs.append(test_results)
 
@@ -262,6 +264,7 @@ def run_test(
     spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
     is_testing_with_spec_decoding: bool = False,
+    attention_config: dict[str, Any] | None = None,
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
@@ -281,14 +284,6 @@ def run_test(
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
 
-    # On ROCm: use float16 for first test (ROCM_AITER_FA), but float32 for
-    # spec decoding test (TRITON_ATTN) for better precision.
-    # On others: always use float32.
-    if current_platform.is_rocm() and not is_testing_with_spec_decoding:
-        dtype = "float16"
-    else:
-        dtype = "float32"
-
     with VllmRunner(
         model,
         max_model_len=512,
@@ -298,9 +293,10 @@ def run_test(
         # enforce_eager=True,
         async_scheduling=async_scheduling,
         distributed_executor_backend=executor,
-        dtype=dtype,
+        dtype="float32",
         speculative_config=spec_config,
         disable_log_stats=False,
+        attention_config=attention_config,
         **cache_arg,
     ) as vllm_model:
         results = []

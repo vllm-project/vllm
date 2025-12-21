@@ -24,6 +24,7 @@ from openai.types.chat import (
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -269,6 +270,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -299,6 +303,9 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
 
 
 # Passed in by user
@@ -1619,6 +1626,8 @@ def _parse_chat_message_content(
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
 
+        if role == "developer":
+            result_msg["tools"] = message.get("tools", None)
     return result
 
 
@@ -1629,12 +1638,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # so, for messages that have tool_calls, parse the string (which we get
     # from openAI format) to dict
     for message in messages:
-        if (
-            message["role"] == "assistant"
-            and "tool_calls" in message
-            and isinstance(message["tool_calls"], list)
-        ):
-            for item in message["tool_calls"]:
+        if message["role"] == "assistant" and "tool_calls" in message:
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+
+            if len(tool_calls) == 0:
+                # Drop empty tool_calls to keep templates on the normal assistant path.
+                message.pop("tool_calls", None)
+                continue
+
+            for item in tool_calls:
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):

@@ -188,7 +188,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
+            # This is a workaround for the weights remapping issue:
+            # https://github.com/vllm-project/vllm/issues/28072
+            # Right now, the Nvidia ModelOpt library use just one wildcard pattern:
+            #        module_path*
+            # It gets applied if the whole tree of modules rooted at module_path
+            # is not quantized. Here we replace such pattern by 2 patterns that are
+            # collectively equivalent to the original pattern:
+            #        module_path
+            #        module_path.*
+            new_exclude_modules = []
+            for exclude in self.exclude_modules:
+                if len(exclude) >= 2 and exclude[-1] == "*" and exclude[-2] != ".":
+                    new_exclude_modules.append(exclude[:-1])
+                    new_exclude_modules.append(exclude[:-1] + ".*")
+                else:
+                    new_exclude_modules.append(exclude)
+
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -779,7 +796,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -854,7 +871,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def override_quantization_method(
@@ -1441,16 +1458,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
-            layer.gemm1_weights_fp4_shuffled = Parameter(
+            layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
+            layer.w2_weight_scale = Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
 
@@ -1459,12 +1474,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
-
-            # Clean up weights that won't be used by TRT-LLM
-            del layer.w2_weight
-            del layer.w2_weight_scale
-            del layer.w13_weight
-            del layer.w13_weight_scale
         elif self.use_marlin:
             # Marlin processing
             prepare_moe_fp4_layer_for_marlin(layer)
@@ -1512,6 +1521,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w2_weight_scale = Parameter(
                 w2_blockscale_swizzled, requires_grad=False
             )
+
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: FusedMoE,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        import flashinfer
+
+        a1_gscale = layer.w13_input_scale_quant
+        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
+            hidden_states,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
+        extra_tensors: list[torch.Tensor] = [hidden_states_sf]
+        return hidden_states_fp4, extra_tensors
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1567,8 +1594,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
+        # Hidden_states in select_experts is only used to extract metadata
+        if isinstance(x, tuple):
+            x_routing, _ = x
+        else:
+            x_routing = x
+        topk_weights, topk_ids = layer.select_experts(
+            hidden_states=x_routing,
             router_logits=router_logits,
         )
 
