@@ -303,7 +303,7 @@ class ArceeModel(nn.Module):
                 loaded_params.add(scale_name)
                 continue
 
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is None:
                     continue
