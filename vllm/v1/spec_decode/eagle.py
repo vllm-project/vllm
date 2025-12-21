@@ -238,7 +238,6 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
-
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         num_mtp_layers = self.model.model.num_mtp_layers if self.method == "mtp" else -1
@@ -450,6 +449,49 @@ class EagleProposer:
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
+            if self.uses_mrope:
+                # all dimensions of positions are the same
+                block_numbers = clamped_positions[0] // self.block_size
+            else:
+                block_numbers = clamped_positions // self.block_size
+
+            if block_numbers.size(0) != common_attn_metadata.num_reqs:
+                query_start_loc = common_attn_metadata.query_start_loc
+                # Calculate number of tokens per request
+                num_tokens_per_req = query_start_loc[1:] - query_start_loc[:-1]
+                # Create request indices for each token
+                request_indices = torch.repeat_interleave(
+                    torch.arange(
+                        common_attn_metadata.num_reqs,
+                        device=query_start_loc.device,
+                        dtype=torch.int32,
+                    ),
+                    num_tokens_per_req,
+                )
+                block_ids = common_attn_metadata.block_table_tensor[
+                    request_indices.long(), block_numbers.long()
+                ]
+            else:
+                block_ids = common_attn_metadata.block_table_tensor.gather(
+                    dim=1, index=block_numbers.view(-1, 1)
+                )
+
+            block_ids = block_ids.view(-1)
+            if self.uses_mrope:
+                common_attn_metadata.slot_mapping = (
+                    block_ids * self.block_size + clamped_positions[0] % self.block_size
+                )
+            else:
+                common_attn_metadata.slot_mapping = (
+                    block_ids * self.block_size + clamped_positions % self.block_size
+                )
+            # Mask out the slot mappings that exceed the max model length.
+            # Otherwise, the KV cache will be inadvertently updated with the
+            # padding tokens.
+            common_attn_metadata.slot_mapping.masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID
+            )
+
             if token_index < num_mtp_layers - 1:
                 self.hidden_states[:num_input_tokens] = (
                     hidden_states  # last mtp layer hs
@@ -505,50 +547,6 @@ class EagleProposer:
                     common_attn_metadata._seq_lens_cpu += 1
                 if common_attn_metadata._num_computed_tokens_cpu is not None:
                     common_attn_metadata._num_computed_tokens_cpu += 1
-
-            # Compute the slot mapping.
-            if self.uses_mrope:
-                # all dimensions of positions are the same
-                block_numbers = clamped_positions[0] // self.block_size
-            else:
-                block_numbers = clamped_positions // self.block_size
-
-            if block_numbers.size(0) != common_attn_metadata.num_reqs:
-                query_start_loc = common_attn_metadata.query_start_loc
-                # Calculate number of tokens per request
-                num_tokens_per_req = query_start_loc[1:] - query_start_loc[:-1]
-                # Create request indices for each token
-                request_indices = torch.repeat_interleave(
-                    torch.arange(
-                        common_attn_metadata.num_reqs,
-                        device=query_start_loc.device,
-                        dtype=torch.int32,
-                    ),
-                    num_tokens_per_req,
-                )
-                block_ids = common_attn_metadata.block_table_tensor[
-                    request_indices.long(), block_numbers.long()
-                ]
-            else:
-                block_ids = common_attn_metadata.block_table_tensor.gather(
-                    dim=1, index=block_numbers.view(-1, 1)
-                )
-
-            block_ids = block_ids.view(-1)
-            if self.uses_mrope:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size + clamped_positions[0] % self.block_size
-                )
-            else:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size + clamped_positions % self.block_size
-                )
-            # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadvertently updated with the
-            # padding tokens.
-            common_attn_metadata.slot_mapping.masked_fill_(
-                exceeds_max_model_len, PADDING_SLOT_ID
-            )
 
             # Run the model.
             with set_forward_context(
