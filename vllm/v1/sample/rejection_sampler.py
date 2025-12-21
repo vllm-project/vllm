@@ -119,8 +119,14 @@ class RejectionSampler(nn.Module):
         raw_target_logits = logits[target_logits_indices]
         # Use float32 for the target_logits.
         raw_target_logits = raw_target_logits.to(torch.float32)
+        target_logits = raw_target_logits
+        if not self.is_processed_logprobs_mode:
+            # Clone raw_target_logits before applying processors to preserve
+            # the original raw logits for logprobs computation, since
+            # apply_logits_processors modifies the tensor in-place.
+            target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(
-            raw_target_logits, sampling_metadata, metadata
+            target_logits, sampling_metadata, metadata
         )
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the

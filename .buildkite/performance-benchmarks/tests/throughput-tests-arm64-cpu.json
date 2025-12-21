@@ -1,0 +1,27 @@
+[
+    {
+        "test_name": "throughput_llama8B_tp1",
+        "environment_variables": {
+            "VLLM_RPC_TIMEOUT": 100000,
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+            "VLLM_CPU_KVCACHE_SPACE": 40
+        },
+        "parameters": {
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "dtype": "bfloat16",
+            "distributed_executor_backend": "mp",
+            "block_size": 128,
+            "trust_remote_code": "",
+            "disable_log_stats": "",
+            "enforce_eager": "",
+            "max_num_batched_tokens": 2048,
+            "max_num_seqs": 256,
+            "dataset": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "backend": "vllm"
+        }
+    }
+]
