@@ -955,7 +955,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
             ],
         )
@@ -983,7 +982,6 @@ class TestServingChatWithHarmony:
             input_messages_2,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user"},
                 # The analysis message should be dropped on subsequent inputs because
                 # of the subsequent assistant message to the final channel.
@@ -1043,7 +1041,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1124,7 +1122,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1205,7 +1203,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1255,7 +1253,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the third turn's input
-        req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_3, _ = serving_chat._make_request_with_harmony(req_3)
         verify_harmony_messages(
             input_messages_3,
@@ -1318,7 +1316,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the fourth turn's input
-        req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_4, _ = serving_chat._make_request_with_harmony(req_4)
         verify_harmony_messages(
             input_messages_4,
@@ -1374,7 +1372,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 # The reasoning that would have resulted in an analysis message is
                 # dropped because of a later assistant message to the final channel.
@@ -1406,7 +1403,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 {
                     "role": "assistant",
@@ -1436,7 +1432,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 {
                     "role": "assistant",

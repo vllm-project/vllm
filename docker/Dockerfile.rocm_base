@@ -1,15 +1,15 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.1-complete
-ARG TRITON_BRANCH="57c693b6"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG TRITON_BRANCH="a272dfa8"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="1c57644d"
-ARG PYTORCH_VISION_BRANCH="v0.23.0"
+ARG PYTORCH_BRANCH="89075173"
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="59bd8ff2"
+ARG AITER_BRANCH="6af8b687"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
