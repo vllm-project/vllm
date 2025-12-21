@@ -9,7 +9,6 @@ import json
 import os
 from dataclasses import dataclass
 from importlib import util
-from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -36,10 +35,10 @@ pd.set_option("display.float_format", lambda x: f"{x:.2f}")
 # Core data compare
 # -----------------------------
 def compare_data_columns(
-    files: List[str],
+    files: list[str],
     name_column: str,
     data_column: str,
-    info_cols: List[str],
+    info_cols: list[str],
     drop_column: str,
     debug: bool = False,
 ):
@@ -55,10 +54,10 @@ def compare_data_columns(
     print("\ncompare_data_column:", data_column)
 
     frames = []
-    raw_data_cols: List[str] = []
+    raw_data_cols: list[str] = []
     compare_frames = []
 
-    cols_per_file: List[set] = []
+    cols_per_file: list[set] = []
     for f in files:
         try:
             df_tmp = pd.read_json(f, orient="records")
@@ -150,7 +149,7 @@ def compare_data_columns(
 # -----------------------------
 def split_json_by_tp_pp(
     input_file: str = "benchmark_results.json", output_root: str = "."
-) -> List[str]:
+) -> list[str]:
     with open(input_file, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -166,7 +165,9 @@ def split_json_by_tp_pp(
         (c for c in ["Test name", "test_name", "Test Name"] if c in df.columns), None
     )
     if name_col:
-        df = df[df[name_col].astype(str).str.contains(r"serving", case=False, na=False)].copy()
+        df = df[
+            df[name_col].astype(str).str.contains(r"serving", case=False, na=False)
+        ].copy()
 
     rename_map = {
         "tp_size": "TP Size",
@@ -174,7 +175,9 @@ def split_json_by_tp_pp(
         "pp_size": "PP Size",
         "pipeline_parallel_size": "PP Size",
     }
-    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+    df.rename(
+        columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True
+    )
 
     if "TP Size" not in df.columns:
         df["TP Size"] = 1
@@ -184,7 +187,7 @@ def split_json_by_tp_pp(
     df["TP Size"] = pd.to_numeric(df["TP Size"], errors="coerce").fillna(1).astype(int)
     df["PP Size"] = pd.to_numeric(df["PP Size"], errors="coerce").fillna(1).astype(int)
 
-    saved_paths: List[str] = []
+    saved_paths: list[str] = []
     for (tp, pp), group_df in df.groupby(["TP Size", "PP Size"], dropna=False):
         folder_name = os.path.join(output_root, f"tp{int(tp)}_pp{int(pp)}")
         os.makedirs(folder_name, exist_ok=True)
@@ -215,7 +218,9 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
     return "# of max concurrency."
 
 
-def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
+def _highlight_threshold(
+    df: pd.DataFrame, threshold: float
+) -> pd.io.formats.style.Styler:
     conc_col = _find_concurrency_col(df)
     key_cols = [
         c
@@ -235,7 +240,7 @@ def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.s
     )
 
 
-def highlight_ratio_columns(styler: "pd.io.formats.style.Styler"):
+def highlight_ratio_columns(styler: pd.io.formats.style.Styler):
     ratio_cols = [c for c in styler.data.columns if "ratio" in str(c).lower()]
     if not ratio_cols:
         return styler
@@ -260,7 +265,9 @@ def highlight_ratio_columns(styler: "pd.io.formats.style.Styler"):
     return styler
 
 
-def _apply_two_decimals(styler: "pd.io.formats.style.Styler") -> "pd.io.formats.style.Styler":
+def _apply_two_decimals(
+    styler: pd.io.formats.style.Styler,
+) -> pd.io.formats.style.Styler:
     df = styler.data
     num_cols = df.select_dtypes("number").columns
     if len(num_cols) == 0:
@@ -271,11 +278,15 @@ def _apply_two_decimals(styler: "pd.io.formats.style.Styler") -> "pd.io.formats.
 # -----------------------------
 # Valid max concurrency summary helpers
 # -----------------------------
-def _config_value_columns(df: pd.DataFrame, conc_col: str) -> List[str]:
-    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len"] if c in df.columns]
+def _config_value_columns(df: pd.DataFrame, conc_col: str) -> list[str]:
+    key_cols = [
+        c
+        for c in ["Model", "Dataset Name", "Input Len", "Output Len"]
+        if c in df.columns
+    ]
     exclude = set(key_cols + [conc_col, "qps", "QPS"])
 
-    cols: List[str] = []
+    cols: list[str] = []
     for c in df.columns:
         if c in exclude:
             continue
@@ -289,7 +300,9 @@ def _config_value_columns(df: pd.DataFrame, conc_col: str) -> List[str]:
     return cols
 
 
-def _max_concurrency_ok(df: pd.DataFrame, conc_col: str, cfg_col: str, threshold: float):
+def _max_concurrency_ok(
+    df: pd.DataFrame, conc_col: str, cfg_col: str, threshold: float
+):
     if df is None or conc_col not in df.columns or cfg_col not in df.columns:
         return pd.NA
 
@@ -309,7 +322,12 @@ def _max_concurrency_ok(df: pd.DataFrame, conc_col: str, cfg_col: str, threshold
 
 
 def _value_at_concurrency(df: pd.DataFrame, conc_col: str, cfg_col: str, conc_value):
-    if df is None or conc_col not in df.columns or cfg_col not in df.columns or pd.isna(conc_value):
+    if (
+        df is None
+        or conc_col not in df.columns
+        or cfg_col not in df.columns
+        or pd.isna(conc_value)
+    ):
         return pd.NA
 
     d = df[[conc_col, cfg_col]].copy()
@@ -336,9 +354,21 @@ def build_valid_max_concurrency_summary_html(
     if ttft_group_df is None and tpot_group_df is None:
         return ""
 
-    ttft_cols = _config_value_columns(ttft_group_df, conc_col) if ttft_group_df is not None else []
-    tpot_cols = _config_value_columns(tpot_group_df, conc_col) if tpot_group_df is not None else []
-    tput_cols = _config_value_columns(tput_group_df, conc_col) if tput_group_df is not None else []
+    ttft_cols = (
+        _config_value_columns(ttft_group_df, conc_col)
+        if ttft_group_df is not None
+        else []
+    )
+    tpot_cols = (
+        _config_value_columns(tpot_group_df, conc_col)
+        if tpot_group_df is not None
+        else []
+    )
+    tput_cols = (
+        _config_value_columns(tput_group_df, conc_col)
+        if tput_group_df is not None
+        else []
+    )
 
     if ttft_group_df is not None and tpot_group_df is not None:
         cfg_cols = [c for c in ttft_cols if c in tpot_cols]
@@ -352,13 +382,37 @@ def build_valid_max_concurrency_summary_html(
 
     rows = []
     for cfg in cfg_cols:
-        ttft_max = _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms) if ttft_group_df is not None else pd.NA
-        tpot_max = _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms) if tpot_group_df is not None else pd.NA
-        both = pd.NA if (pd.isna(ttft_max) or pd.isna(tpot_max)) else min(ttft_max, tpot_max)
+        ttft_max = (
+            _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms)
+            if ttft_group_df is not None
+            else pd.NA
+        )
+        tpot_max = (
+            _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms)
+            if tpot_group_df is not None
+            else pd.NA
+        )
+        both = (
+            pd.NA
+            if (pd.isna(ttft_max) or pd.isna(tpot_max))
+            else min(ttft_max, tpot_max)
+        )
 
-        tput_at_both = _value_at_concurrency(tput_group_df, conc_col, cfg, both) if tput_group_df is not None else pd.NA
-        ttft_at_both = _value_at_concurrency(ttft_group_df, conc_col, cfg, both) if ttft_group_df is not None else pd.NA
-        tpot_at_both = _value_at_concurrency(tpot_group_df, conc_col, cfg, both) if tpot_group_df is not None else pd.NA
+        tput_at_both = (
+            _value_at_concurrency(tput_group_df, conc_col, cfg, both)
+            if tput_group_df is not None
+            else pd.NA
+        )
+        ttft_at_both = (
+            _value_at_concurrency(ttft_group_df, conc_col, cfg, both)
+            if ttft_group_df is not None
+            else pd.NA
+        )
+        tpot_at_both = (
+            _value_at_concurrency(tpot_group_df, conc_col, cfg, both)
+            if tpot_group_df is not None
+            else pd.NA
+        )
 
         rows.append(
             {
@@ -388,7 +442,7 @@ def build_valid_max_concurrency_summary_html(
         if c == "Configuration":
             continue
         # default argument binds per-column formatter correctly
-        formatters[c] = (lambda v: "—" if pd.isna(v) else f"{float(v):.2f}")
+        formatters[c] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
 
     styler = summary_df.style.format(formatters)
 
@@ -399,9 +453,9 @@ def build_valid_max_concurrency_summary_html(
         styler = styler.map(_green, subset=[both_col])
 
     title = (
-        f'<div style="font-size: 1.15em; font-weight: 700; margin: 12px 0 6px 0;">'
-        f'Valid Max Concurrency Summary'
-        f"</div>\n"
+        '<div style="font-size: 1.15em; font-weight: 700; margin: 12px 0 6px 0;">'
+        "Valid Max Concurrency Summary"
+        "</div>\n"
     )
     return title + styler.to_html(table_attributes='border="1" class="dataframe"')
 
@@ -439,14 +493,18 @@ def _add_limit_line(fig, y_value: float, label: str):
 # -----------------------------
 @dataclass(frozen=True)
 class MetricPlan:
-    data_cols: List[str]
+    data_cols: list[str]
     drop_column: str
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("-f", "--file", action="append", type=str, help="input file name")
-    parser.add_argument("--debug", action="store_true", help="show all information for debugging")
+    parser.add_argument(
+        "-f", "--file", action="append", type=str, help="input file name"
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="show all information for debugging"
+    )
     parser.add_argument(
         "--plot",
         action=argparse.BooleanOptionalAction,
@@ -467,8 +525,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="p99",
         help="take median|p99 for latency like TTFT/TPOT",
     )
-    parser.add_argument("--ttft-max-ms", type=float, default=3000.0, help="Reference limit for TTFT plots (ms)")
-    parser.add_argument("--tpot-max-ms", type=float, default=100.0, help="Reference limit for TPOT plots (ms)")
+    parser.add_argument(
+        "--ttft-max-ms",
+        type=float,
+        default=3000.0,
+        help="Reference limit for TTFT plots (ms)",
+    )
+    parser.add_argument(
+        "--tpot-max-ms",
+        type=float,
+        default=100.0,
+        help="Reference limit for TPOT plots (ms)",
+    )
     return parser
 
 
@@ -488,7 +556,7 @@ def choose_metrics(latency: str) -> MetricPlan:
     )
 
 
-def prepare_input_files(args, info_cols: List[str]) -> Tuple[List[str], List[str]]:
+def prepare_input_files(args, info_cols: list[str]) -> tuple[list[str], list[str]]:
     if not args.file:
         raise ValueError("No input files provided. Use -f/--file.")
 
@@ -501,12 +569,12 @@ def prepare_input_files(args, info_cols: List[str]) -> Tuple[List[str], List[str
     return files, info_cols
 
 
-def get_y_axis_col(info_cols: List[str], xaxis: str) -> str:
+def get_y_axis_col(info_cols: list[str], xaxis: str) -> str:
     y_axis_index = info_cols.index(xaxis) if xaxis in info_cols else 6
     return info_cols[y_axis_index]
 
 
-def get_group_cols(output_df: pd.DataFrame, info_cols: List[str]) -> List[str]:
+def get_group_cols(output_df: pd.DataFrame, info_cols: list[str]) -> list[str]:
     filtered_info_cols = info_cols[:4]
     group_cols = [c for c in filtered_info_cols if c in output_df.columns]
     if not group_cols:
@@ -527,11 +595,9 @@ def group_filename(name, prefix: str = "perf_comparison_") -> str:
     return f"{prefix}{safe}.html"
 
 
-def build_group_suffix(group_cols: List[str], name) -> str:
+def build_group_suffix(group_cols: list[str], name) -> str:
     name_vals = normalize_group_key(name)
-    return " , ".join(
-        f"{col} : [ {val} ] " for col, val in zip(group_cols, name_vals)
-    )
+    return " , ".join(f"{col} : [ {val} ] " for col, val in zip(group_cols, name_vals))
 
 
 def render_metric_table_html(
@@ -542,8 +608,8 @@ def render_metric_table_html(
 ) -> str:
     title = (
         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
-        f'{_html.escape(metric_label)}'
-        f' — {_html.escape(group_suffix)}'
+        f"{_html.escape(metric_label)}"
+        f" — {_html.escape(group_suffix)}"
         f"</div>\n"
     )
 
@@ -565,7 +631,7 @@ def maybe_write_plot(
     main_fh,
     sub_fh,
     group_df: pd.DataFrame,
-    raw_data_cols: List[str],
+    raw_data_cols: list[str],
     metric_label: str,
     y_axis_col: str,
     args,
@@ -606,21 +672,25 @@ def maybe_write_plot(
     sub_fh.write(html)
 
 
-def build_group_keys(df: pd.DataFrame, group_cols: List[str], sort_cols: List[str] | None = None):
+def build_group_keys(
+    df: pd.DataFrame, group_cols: list[str], sort_cols: list[str] | None = None
+):
     if sort_cols:
         df = df.sort_values(by=sort_cols)
     gb = df.groupby(group_cols, dropna=False)
     return [k for k, _ in gb]
 
 
-def write_report_group_first(files: List[str], info_cols: List[str], plan: MetricPlan, args):
+def write_report_group_first(
+    files: list[str], info_cols: list[str], plan: MetricPlan, args
+):
     name_column = "Test name"
     y_axis_col = get_y_axis_col(info_cols, args.xaxis)
 
     print("comparing : " + ", ".join(files))
 
-    metric_cache: Dict[str, Tuple[pd.DataFrame, List[str]]] = {}
-    group_cols_canonical: List[str] | None = None
+    metric_cache: dict[str, tuple[pd.DataFrame, list[str]]] = {}
+    group_cols_canonical: list[str] | None = None
 
     for metric_label in plan.data_cols:
         output_df, raw_data_cols = compare_data_columns(
@@ -641,14 +711,19 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
         else:
             group_cols_canonical = [c for c in group_cols_canonical if c in group_cols]
 
-        metric_cache[metric_label] = (output_df.sort_values(by=args.xaxis), raw_data_cols)
+        metric_cache[metric_label] = (
+            output_df.sort_values(by=args.xaxis),
+            raw_data_cols,
+        )
 
     if not group_cols_canonical:
         raise ValueError("No canonical group columns found across metrics.")
 
     first_metric = plan.data_cols[0]
     first_df_sorted, _ = metric_cache[first_metric]
-    group_keys = build_group_keys(first_df_sorted, group_cols_canonical, sort_cols=[args.xaxis])
+    group_keys = build_group_keys(
+        first_df_sorted, group_cols_canonical, sort_cols=[args.xaxis]
+    )
 
     metric_groupbys = {
         metric_label: df.groupby(group_cols_canonical, dropna=False)
@@ -660,11 +735,11 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
             gkey_tuple = normalize_group_key(gkey)
             suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
             sub_path = group_filename(gkey_tuple)
-
             group_header = (
-                f'<div style="font-size: 1.4em; font-weight: 700; margin: 18px 0 10px 0;">'
-                f'{_html.escape(suffix)}'
-                f"</div>\n"
+                '<div style="font-size: 1.4em; font-weight: 700; '
+                'margin: 18px 0 10px 0;">'
+                f"{_html.escape(suffix)}"
+                "</div>\n"
             )
 
             main_fh.write(group_header)
@@ -684,10 +759,12 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
                         group_df = gb.get_group(gkey)
                     except KeyError:
                         missing = (
-                            f'<div style="font-size: 1.1em; font-weight: 600; margin: 10px 0;">'
-                            f'{_html.escape(metric_label)} — missing for this group'
-                            f"</div>\n"
+                            '<div style="font-size: 1.1em; font-weight: 600; '
+                            'margin: 10px 0;">'
+                            f"{_html.escape(metric_label)} — missing for this group"
+                            "</div>\n"
                         )
+
                         main_fh.write(missing)
                         sub_fh.write(missing)
                         continue
@@ -703,9 +780,13 @@ def write_report_group_first(files: List[str], info_cols: List[str], plan: Metri
                     elif mn in ("p99", "median") or "tpot" in mn:
                         tpot_group_df = group_df
 
-                    display_group = group_df.drop(columns=group_cols_canonical, errors="ignore")
+                    display_group = group_df.drop(
+                        columns=group_cols_canonical, errors="ignore"
+                    )
 
-                    html = render_metric_table_html(display_group, metric_label, suffix, args)
+                    html = render_metric_table_html(
+                        display_group, metric_label, suffix, args
+                    )
                     main_fh.write(html)
                     sub_fh.write(html)
 
@@ -741,4 +822,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
