@@ -92,7 +92,7 @@ class TimeEmbedding(torch.nn.Module):
             / (self.dim // 2)
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        
+
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
         inv_freq = self.inv_freq.to(device=t.device, dtype=t.dtype)
