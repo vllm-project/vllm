@@ -497,6 +497,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> M:
         """
         Central method that builds attention metadata.

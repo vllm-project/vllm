@@ -131,6 +131,7 @@ class MambaStateShapeCalculator:
         head_dim: int,
         state_size: int,
         conv_kernel: int,
+        num_spec: int = 0,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
@@ -139,7 +140,7 @@ class MambaStateShapeCalculator:
         conv_dim = intermediate_size + 2 * n_groups * state_size
 
         # contiguous along 'dim' axis
-        conv_state_shape = (conv_kernel - 1, divide(conv_dim, tp_world_size))
+        conv_state_shape = (conv_kernel - 1 + num_spec, divide(conv_dim, tp_world_size))
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small

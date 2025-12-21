@@ -220,6 +220,12 @@ class Mamba2ForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.expand * hf_config.hidden_size
 
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
@@ -228,6 +234,7 @@ class Mamba2ForCausalLM(
             head_dim=hf_config.head_dim,
             state_size=hf_config.state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=num_spec
         )
 
     @classmethod
