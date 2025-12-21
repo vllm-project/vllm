@@ -9,10 +9,9 @@ from vllm.triton_utils.importing import (
 )
 
 if TYPE_CHECKING or HAS_TRITON:
+    import triton
     import triton.language as tl
     import triton.language.extra.libdevice as tldevice
-
-    import triton
 else:
     triton = TritonPlaceholder()
     tl = TritonLanguagePlaceholder()
