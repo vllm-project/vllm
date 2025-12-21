@@ -3,7 +3,6 @@
 
 from collections.abc import Mapping
 import math
-from typing import Optional, Union
 
 import torch
 
@@ -43,10 +42,10 @@ class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
         info: _I,
         dummy_inputs: BaseDummyInputsBuilder[_I],
         *,
-        cache: Optional[BaseMultiModalProcessorCache] = None,
+        cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
 
-        # streaming can't make user of a cache yet
+        # streaming can't make use of a cache yet
         super().__init__(info, dummy_inputs, cache=None)
 
     def _maybe_apply_prompt_updates(
@@ -92,7 +91,7 @@ class TimeEmbedding(torch.nn.Module):
         self.theta = theta
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        # TODO(Patrick) - Make sure to optimize this before release
+        # TODO(Patrick) - Make sure to optimize this
         t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
         inv_freq = torch.exp(
             -math.log(self.theta)
@@ -156,10 +155,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         assert inputs_embeds is not None
         assert input_ids is not None
 

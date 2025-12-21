@@ -256,6 +256,7 @@ def create_whisper_attention_backend_with_block_pooling(
             cache_dtype_str: (
                 2,
                 num_blocks,
+                # we stretch each block by `block_pool_size`
                 block_size * block_pool_size,
                 num_kv_heads // block_pool_size,
                 head_size,
@@ -275,14 +276,18 @@ class WhisperAttentionWithBlockPooling(Attention):
         head_size: int,
         scale: float,
         num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
         block_pool_size: int = 1,
-        **kwargs,
-    ):
+        attn_backend: type[AttentionBackend] | None = None,
+        **extra_impl_args,
+    ) -> None:
         self.block_pool_size = block_pool_size
         dtype = torch.get_default_dtype()
 
@@ -308,13 +313,16 @@ class WhisperAttentionWithBlockPooling(Attention):
             head_size=head_size,
             scale=scale,
             num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
             cache_config=cache_config,
             quant_config=quant_config,
+            logits_soft_cap=logits_soft_cap,
+            per_layer_sliding_window=per_layer_sliding_window,
             prefix=prefix,
             attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             attn_backend=attn_backend,
-            per_layer_sliding_window=per_layer_sliding_window,
-            **kwargs,
+            **extra_impl_args,
         )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
@@ -394,30 +402,21 @@ class WhisperAttention(nn.Module):
             )
         else:  # AttentionType.DECODER (regular decoder self-attention)
             if block_pool_size > 1:
-                self.attn = WhisperAttentionWithBlockPooling(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    num_kv_heads=self.num_kv_heads,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.attn",
-                    attn_type=self.attn_type,
-                    per_layer_sliding_window=per_layer_sliding_window,
-                    block_pool_size=block_pool_size,
-                )
+                attn_cls = partial(WhisperAttentionWithBlockPooling, block_pool_size=block_pool_size)
             else:
-                self.attn = Attention(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    num_kv_heads=self.num_kv_heads,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.attn",
-                    attn_type=self.attn_type,
-                    per_layer_sliding_window=per_layer_sliding_window,
-                )
+                attn_cls = Attention
+
+            self.attn = attn_cls(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                attn_type=self.attn_type,
+                per_layer_sliding_window=per_layer_sliding_window,
+            )
 
     def _init_qkv(
         self,
