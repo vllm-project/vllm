@@ -124,11 +124,13 @@ def get_fp8_moe_backend(
     block_quant: bool,
     moe_parallel_config: FusedMoEParallelConfig,
     with_lora_support: bool,
-) -> Fp8MoeBackend:
+) -> Fp8MoeBackend | None:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    if current_platform.is_xpu():
+        return None
     if with_lora_support:
         return Fp8MoeBackend.TRITON
     # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
@@ -292,6 +294,13 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return XPUFp8LinearMethod(fp8_config)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
             return XPUFp8MoEMethod(fp8_config, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -1107,7 +1116,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.rocm_aiter_moe_enabled
+            current_platform.is_xpu()
+            or self.rocm_aiter_moe_enabled
             or self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
@@ -1282,12 +1292,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
 
-        select_result = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
-
-        topk_weights, topk_ids, zero_expert_result = select_result
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1343,13 +1351,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
-            assert not isinstance(result, tuple), (
-                "Shared + zero experts are mutually exclusive not yet supported"
-            )
-            return result, zero_expert_result
-        else:
-            return result
+        return result
 
 
 class Fp8OnlineMoEMethod(Fp8MoEMethod):
