@@ -1359,6 +1359,7 @@ steps:
   - vllm/
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
+    - nvidia-smi
     - bash .buildkite/scripts/run-prime-rl-test.sh
 
 - label: DeepSeek V2-Lite Accuracy
