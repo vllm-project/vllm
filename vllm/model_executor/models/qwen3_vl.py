@@ -2096,7 +2096,7 @@ class Qwen3VLForConditionalGeneration(
         self,
         num_image_tokens: int,
     ) -> int:
-        hf_config = self.get_hf_config()
+        hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
 
@@ -2106,7 +2106,7 @@ class Qwen3VLForConditionalGeneration(
         self,
         num_vision_tokens: int,
     ) -> int:
-        hf_config = self.get_hf_config()
+        hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2

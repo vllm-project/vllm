@@ -2160,15 +2160,12 @@ class GPUModelRunner(
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
-        if self.lora_manager.supports_tower_connector_lora():
+        if self.lora_config and self.lora_manager.supports_tower_connector_lora():
             # Build LoRA mappings independently for encoder inputs
             # (encoder batch structure is different from main batch)
             prompt_lora_mapping = []
             token_lora_mapping = []
             lora_requests = set()
-            # This implementation is a bit hacky, but it's mainly to retrieve
-            # the get_num_mm_*_tokens helper functions from ProcessingInfo.
-            mm_processor_info = self.lora_manager._adapter_manager.mm_processor_info
 
             for req_id, (_, pos_info) in zip(encoder_req_ids, mm_hashes_pos):
                 req_idx = self.input_batch.req_id_to_index[req_id]
@@ -2177,7 +2174,7 @@ class GPUModelRunner(
                 # Prefer pos_info.is_embed to count actual MM embedding tokens.
                 # pos_info.length may overcount (e.g., special tokens in Qwen-VL).
                 # Fall back to length if is_embed is None.
-                num_tokens = mm_processor_info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                     pos_info.get_num_embeds
                 )
                 prompt_lora_mapping.append(lora_id)
@@ -2196,13 +2193,13 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
-            if hasattr(mm_processor_info, "get_num_mm_connector_tokens"):
+            if hasattr(self.model, "get_num_mm_connector_tokens"):
                 num_post_op_tokens = []
                 for _, pos_info in mm_hashes_pos:
-                    mm_token_count = mm_processor_info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                    mm_token_count = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                         pos_info.length
                     )
-                    post_op_count = mm_processor_info.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
+                    post_op_count = self.model.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
                         mm_token_count
                     )
                     num_post_op_tokens.append(post_op_count)
