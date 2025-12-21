@@ -291,15 +291,6 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             height=image_processor.size["longest_edge"],
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        scale_factor = hf_config.scale_factor
-
-        return num_image_tokens * scale_factor**2
-
 
 class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -723,3 +714,21 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             connector="model.connector",
             tower_model="model.vision_model",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        scale_factor = hf_config.scale_factor
+
+        return num_image_tokens * scale_factor**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        scale_factor = hf_config.scale_factor
+
+        return num_vision_tokens // scale_factor**2
