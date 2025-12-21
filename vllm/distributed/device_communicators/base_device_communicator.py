@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -68,7 +69,11 @@ class All2AllManagerBase:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ):
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> Any:
+        # Subclasses should either:
+        # - implement handling for extra_tensors, or
+        # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):

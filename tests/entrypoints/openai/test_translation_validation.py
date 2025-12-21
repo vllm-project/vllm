@@ -227,3 +227,36 @@ async def test_long_audio_request(foscolo, client_and_model):
     )
     out = json.loads(translation)["text"].strip().lower()
     assert out.count("greek sea") == 2
+
+
+@pytest.mark.asyncio
+async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
+    transcription = await client.audio.translations.create(
+        model=model_name,
+        file=mary_had_lamb,
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": 1},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    print(out_text)
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_name)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1
+    # max_completion_tokens > max_model_len
+    transcription = await client.audio.transcriptions.create(
+        model=model_name,
+        file=mary_had_lamb,
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": int(1e6)},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    print(out_text)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) < 450  # ~Whisper max output len

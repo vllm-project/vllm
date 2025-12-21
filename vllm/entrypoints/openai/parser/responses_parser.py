@@ -3,7 +3,11 @@
 import logging
 from collections.abc import Callable
 
-from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
@@ -11,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
     ResponseReasoningItem,
 )
 
+from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
@@ -110,6 +115,37 @@ class ResponsesParser:
             self.response_messages.extend(function_calls)
 
         return self
+
+    def make_response_output_items_from_parsable_context(
+        self,
+    ) -> list[ResponseOutputItem]:
+        """Given a list of sentences, construct ResponseOutput Items."""
+        response_messages = self.response_messages[self.num_init_messages :]
+        output_messages: list[ResponseOutputItem] = []
+        for message in response_messages:
+            if not isinstance(message, ResponseFunctionToolCallOutputItem):
+                output_messages.append(message)
+            else:
+                if len(output_messages) == 0:
+                    raise ValueError(
+                        "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                    )
+                if isinstance(output_messages[-1], ResponseFunctionToolCall):
+                    mcp_message = McpCall(
+                        id=f"{MCP_PREFIX}{random_uuid()}",
+                        arguments=output_messages[-1].arguments,
+                        name=output_messages[-1].name,
+                        server_label=output_messages[
+                            -1
+                        ].name,  # TODO: store the server label
+                        type="mcp_call",
+                        status="completed",
+                        output=message.output,
+                        # TODO: support error output
+                    )
+                    output_messages[-1] = mcp_message
+
+        return output_messages
 
 
 def get_responses_parser_for_simple_context(
