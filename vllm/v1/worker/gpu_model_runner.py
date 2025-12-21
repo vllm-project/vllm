@@ -102,6 +102,7 @@ from vllm.utils.torch_utils import (
     supports_dynamo,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -1697,7 +1698,9 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+            if use_spec_decode and isinstance(
+                builder, (GDNAttentionMetadataBuilder, Mamba2AttentionMetadataBuilder)
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -1718,6 +1721,7 @@ class GPUModelRunner(
                     cached_attn_metadata[cache_key],
                     common_attn_metadata.block_table_tensor,
                     common_attn_metadata.slot_mapping,
+                    **extra_attn_metadata_args,
                 )
             else:
                 attn_metadata_i = builder.build(
