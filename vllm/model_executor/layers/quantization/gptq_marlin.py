@@ -900,7 +900,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert layer.activation == "silu", "Only SiLU activation is supported."
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
