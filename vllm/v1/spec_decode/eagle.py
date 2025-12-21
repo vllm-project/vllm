@@ -238,8 +238,11 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
+
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
+        num_mtp_layers = self.model.model.num_mtp_layers if self.method == "mtp" else -1
+        metadata_decode_mode = True if num_mtp_layers <= 1 else False
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -324,6 +327,7 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        model_kwargs = {}
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -331,10 +335,8 @@ class EagleProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
-            model_kwargs = {}
             if self.pass_spec_step_idx:
                 model_kwargs["spec_step_idx"] = 0
-
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
@@ -355,34 +357,37 @@ class EagleProposer:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
-        if self.uses_mrope:
-            positions = target_positions[:, last_token_indices]
-        else:
-            positions = target_positions[last_token_indices]
-        if self.method in (
-            "deepseek_mtp",
-            "ernie_mtp",
-            "longcat_flash_mtp",
-            "pangu_ultra_moe_mtp",
-        ):
-            hidden_states = self.hidden_states[last_token_indices]
-        else:
-            hidden_states = hidden_states[last_token_indices]
+        if not num_mtp_layers > 1:
+            if self.uses_mrope:
+                positions = target_positions[:, last_token_indices]
+            else:
+                positions = target_positions[last_token_indices]
 
-        if isinstance(attn_metadata, TreeAttentionMetadata):
-            # Draft using tree attention.
-            draft_token_ids_list = self.propose_tree(
-                batch_size=batch_size,
-                logits=logits,
-                positions=positions,
-                hidden_states=hidden_states,
-                common_attn_metadata=common_attn_metadata,
-            )
-            # [batch_size, num_tree_tokens]
-            return torch.cat(draft_token_ids_list, dim=1)
+            if self.method in (
+                "deepseek_mtp",
+                "ernie_mtp",
+                "longcat_flash_mtp",
+                "pangu_ultra_moe_mtp",
+            ):
+                hidden_states = self.hidden_states[last_token_indices]
+            else:
+                hidden_states = hidden_states[last_token_indices]
+
+            if isinstance(attn_metadata, TreeAttentionMetadata):
+                # Draft using tree attention.
+                draft_token_ids_list = self.propose_tree(
+                    batch_size=batch_size,
+                    logits=logits,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+                # [batch_size, num_tree_tokens]
+                return torch.cat(draft_token_ids_list, dim=1)
+        else:
+            positions = target_positions
 
         draft_token_ids = logits.argmax(dim=-1)
-
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
         ):
@@ -414,20 +419,17 @@ class EagleProposer:
         if batch_size_across_dp is not None:
             batch_size_across_dp[self.dp_rank] = input_batch_size
 
-        common_attn_metadata.num_actual_tokens = batch_size
-        common_attn_metadata.max_query_len = 1
-        common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
-        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
-            self.token_arange_np[: batch_size + 1]
-        ).clone()
+        if metadata_decode_mode:
+            common_attn_metadata.num_actual_tokens = batch_size
+            common_attn_metadata.max_query_len = 1
+            common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
+            common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+                self.token_arange_np[: batch_size + 1]
+            ).clone()
 
         for token_index in range(self.num_speculative_tokens - 1):
-            # Update the inputs.
-            # cast to int32 is crucial when eagle model is compiled.
-            # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_list[-1].int()
+            positions += 1
             if self.uses_mrope:
-                positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
                 # generates tokens beyond the max model length.
                 # Since it is complex to remove such requests from the batch,
@@ -445,24 +447,64 @@ class EagleProposer:
                     positions,
                 )
             else:
-                positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-            # For data integrity when async scheduling, we shouldn't use in place
-            # operations in case they are modified in next step's `prepare_input`
-            # of main model.
-            # Increment the sequence lengths.
-            common_attn_metadata.seq_lens += 1
-            # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize their overheads in attention.
-            common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
-            # Also update the CPU-side shadow; NOTE: this is hacky and should be
-            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
-            if common_attn_metadata._seq_lens_cpu is not None:
-                common_attn_metadata._seq_lens_cpu += 1
-            if common_attn_metadata._num_computed_tokens_cpu is not None:
-                common_attn_metadata._num_computed_tokens_cpu += 1
+            if token_index < num_mtp_layers - 1:
+                self.hidden_states[:num_input_tokens] = (
+                    hidden_states  # last mtp layer hs
+                )
+                self.input_ids[: num_input_tokens - 1] = self.input_ids[
+                    1:num_input_tokens
+                ].clone()
+                self.input_ids[last_token_indices] = draft_token_ids_list[-1].int()
+                input_ids = self.input_ids[:num_input_tokens]
+                context_num_tokens = num_input_tokens
+                context_num_tokens_across_dp = num_tokens_across_dp
+                self._set_positions(context_num_tokens, clamped_positions)
+                # common_attn_metadata remain unchanged during prefill for next mtp layer
+            else:
+                # Update the inputs.
+                # cast to int32 is crucial when eagle model is compiled.
+                # tensor.argmax() returns int64 by default.
+                input_ids = draft_token_ids_list[-1].int()
+                # Rebuild attention metadata
+                attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=token_index + 1,
+                )
+                for layer_name in self.attn_layer_names:
+                    per_layer_attn_metadata[layer_name] = attn_metadata
+
+                # copy inputs to buffer for cudagraph
+                self.input_ids[:batch_size] = input_ids
+                self._set_positions(batch_size, clamped_positions)
+                self.hidden_states[:batch_size] = hidden_states
+                if self.supports_mm_inputs:
+                    self.inputs_embeds[:batch_size] = self.model.embed_input_ids(
+                        input_ids
+                    )
+
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:input_batch_size]
+                else:
+                    input_ids = self.input_ids[:input_batch_size]
+                    inputs_embeds = None
+
+                context_num_tokens = input_batch_size
+                context_num_tokens_across_dp = batch_size_across_dp
+
+                common_attn_metadata.seq_lens += 1
+                # For the requests that exceed the max model length, we set the
+                # sequence length to 1 to minimize their overheads in attention.
+                common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+
+                # Also update the CPU-side shadow; NOTE: this is hacky and should be
+                # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu += 1
+                if common_attn_metadata._num_computed_tokens_cpu is not None:
+                    common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
             if self.uses_mrope:
@@ -470,9 +512,28 @@ class EagleProposer:
                 block_numbers = clamped_positions[0] // self.block_size
             else:
                 block_numbers = clamped_positions // self.block_size
-            block_ids = common_attn_metadata.block_table_tensor.gather(
-                dim=1, index=block_numbers.view(-1, 1)
-            )
+
+            if block_numbers.size(0) != common_attn_metadata.num_reqs:
+                query_start_loc = common_attn_metadata.query_start_loc
+                # Calculate number of tokens per request
+                num_tokens_per_req = query_start_loc[1:] - query_start_loc[:-1]
+                # Create request indices for each token
+                request_indices = torch.repeat_interleave(
+                    torch.arange(
+                        common_attn_metadata.num_reqs,
+                        device=query_start_loc.device,
+                        dtype=torch.int32,
+                    ),
+                    num_tokens_per_req,
+                )
+                block_ids = common_attn_metadata.block_table_tensor[
+                    request_indices.long(), block_numbers.long()
+                ]
+            else:
+                block_ids = common_attn_metadata.block_table_tensor.gather(
+                    dim=1, index=block_numbers.view(-1, 1)
+                )
+
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 common_attn_metadata.slot_mapping = (
@@ -489,42 +550,21 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID
             )
 
-            # Rebuild attention metadata
-            attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
-                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
-            )
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
-
-            # copy inputs to buffer for cudagraph
-            self.input_ids[:batch_size] = input_ids
-            self._set_positions(batch_size, clamped_positions)
-            self.hidden_states[:batch_size] = hidden_states
-            if self.supports_mm_inputs:
-                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
-
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:input_batch_size]
-            else:
-                input_ids = self.input_ids[:input_batch_size]
-                inputs_embeds = None
-
             # Run the model.
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
-                num_tokens=input_batch_size,
-                num_tokens_across_dp=batch_size_across_dp,
+                num_tokens=context_num_tokens,
+                num_tokens_across_dp=context_num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
-                model_kwargs = {}
                 if self.pass_spec_step_idx:
-                    model_kwargs["spec_step_idx"] = token_index + 1
+                    model_kwargs["spec_step_idx"] += 1
 
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
-                    positions=self._get_positions(input_batch_size),
-                    hidden_states=self.hidden_states[:input_batch_size],
+                    positions=self._get_positions(context_num_tokens),
+                    hidden_states=self.hidden_states[:context_num_tokens],
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
@@ -533,8 +573,28 @@ class EagleProposer:
                     hidden_states = ret_hidden_states
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
-            hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size])
+
+            if (
+                token_index + 1 == num_mtp_layers - 1
+            ):  # last mtp layer that requires prefill
+                hidden_states = hidden_states[last_token_indices]
+                sample_hidden_states = hidden_states
+
+                # transitioning to decode mode, need to reset common_attn_metadata
+                common_attn_metadata.num_actual_tokens = batch_size
+                common_attn_metadata.max_query_len = 1
+                common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
+                common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+                    self.token_arange_np[: batch_size + 1]
+                ).clone()
+                positions = self._get_positions(context_num_tokens)[last_token_indices]
+            elif token_index + 1 > num_mtp_layers - 1:
+                hidden_states = hidden_states[:batch_size]
+                sample_hidden_states = hidden_states
+            else:  # more mtp layers that needs prefill to come
+                sample_hidden_states = hidden_states[last_token_indices]
+
+            logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 

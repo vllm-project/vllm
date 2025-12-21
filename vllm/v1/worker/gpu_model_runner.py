@@ -1048,6 +1048,7 @@ class GPUModelRunner(
             .cpu()
             .numpy()
         )
+        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 

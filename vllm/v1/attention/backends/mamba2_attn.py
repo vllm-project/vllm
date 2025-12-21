@@ -256,7 +256,6 @@ class Mamba2AttentionMetadataBuilder(
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> Mamba2AttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
 
         query_start_loc_p = None
@@ -397,7 +396,11 @@ class Mamba2AttentionMetadataBuilder(
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
             else:
+                assert block_idx_first_scheduled_token is not None
                 if self.vllm_config.cache_config.enable_prefix_caching:
+                    block_idx_first_scheduled_token = block_idx_first_scheduled_token[
+                        ~spec_sequence_masks
+                    ]
                     block_idx_last_scheduled_token = block_idx_last_scheduled_token[
                         ~spec_sequence_masks
                     ]
@@ -461,12 +464,18 @@ class Mamba2AttentionMetadataBuilder(
         # Compute seq_idx for prefill only
         if num_prefills > 0:
             # [batch,]
-            has_initial_states_cpu = (
-                common_attn_metadata.num_computed_tokens_cpu[
-                    num_reqs - num_prefills : num_reqs
-                ]
-                > 0
-            )
+            if spec_sequence_masks is not None:
+                assert num_decode_draft_tokens_cpu is not None
+                num_computed_tokens_cpu_non_spec = (
+                    common_attn_metadata.num_computed_tokens_cpu[
+                        ~(num_decode_draft_tokens_cpu >= 0)
+                    ]
+                )
+            else:
+                num_computed_tokens_cpu_non_spec = (
+                    common_attn_metadata.num_computed_tokens_cpu
+                )
+            has_initial_states_cpu = num_computed_tokens_cpu_non_spec[num_decodes:] > 0
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states_p = has_initial_states_cpu.to(
                 common_attn_metadata.query_start_loc.device
@@ -475,27 +484,61 @@ class Mamba2AttentionMetadataBuilder(
             # Subtract ALL decode tokens (spec + non-spec)
             # to get prefill-only coordinates
             total_decode_tokens = num_decode_tokens + num_spec_decode_tokens
-            query_start_loc_p = (
-                common_attn_metadata.query_start_loc[-num_prefills - 1 :]
-                - total_decode_tokens
-            )
+
+            if spec_sequence_masks is not None:
+                query_lens_all = (
+                    common_attn_metadata.query_start_loc[1:]
+                    - common_attn_metadata.query_start_loc[:-1]
+                )
+                query_lens_non_spec = query_lens_all[~spec_sequence_masks]
+                query_lens_prefills = query_lens_non_spec[num_decodes:]
+                query_start_loc_p = torch.zeros(
+                    num_prefills + 1,
+                    dtype=common_attn_metadata.query_start_loc.dtype,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                torch.cumsum(query_lens_prefills, dim=0, out=query_start_loc_p[1:])
+
+                query_lens_cpu_all = (
+                    common_attn_metadata.query_start_loc_cpu[1:]
+                    - common_attn_metadata.query_start_loc_cpu[:-1]
+                )
+                assert num_decode_draft_tokens_cpu is not None
+                query_lens_cpu_non_spec = query_lens_cpu_all[
+                    ~(num_decode_draft_tokens_cpu >= 0)
+                ]
+                query_lens_cpu_prefills = query_lens_cpu_non_spec[num_decodes:]
+                query_start_loc_p_cpu = torch.zeros(
+                    num_prefills + 1,
+                    dtype=common_attn_metadata.query_start_loc_cpu.dtype,
+                )
+                torch.cumsum(
+                    query_lens_cpu_prefills, dim=0, out=query_start_loc_p_cpu[1:]
+                )
+            else:
+                query_start_loc_p = (
+                    common_attn_metadata.query_start_loc[-num_prefills - 1 :]
+                    - total_decode_tokens
+                )
+                query_start_loc_p_cpu = (
+                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                    - total_decode_tokens
+                )
 
             if self.vllm_config.cache_config.enable_prefix_caching:
                 assert num_computed_tokens is not None
-                num_computed_tokens_p = num_computed_tokens[
-                    num_reqs - num_prefills : num_reqs
-                ]
+                if spec_sequence_masks is not None:
+                    num_computed_tokens_non_spec = num_computed_tokens[
+                        ~spec_sequence_masks
+                    ]
+                else:
+                    num_computed_tokens_non_spec = num_computed_tokens
+                num_computed_tokens_p = num_computed_tokens_non_spec[num_decodes:]
                 assert block_idx_first_scheduled_token is not None
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
-                    num_reqs - num_prefills : num_reqs
+                    num_decodes:
                 ]
-            num_computed_tokens_p_cpu = common_attn_metadata.num_computed_tokens_cpu[
-                num_reqs - num_prefills : num_reqs
-            ]
-            query_start_loc_p_cpu = (
-                common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - total_decode_tokens
-            )
+            num_computed_tokens_p_cpu = num_computed_tokens_cpu_non_spec[num_decodes:]
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
@@ -593,6 +636,7 @@ class Mamba2AttentionMetadataBuilder(
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             # Copy and pad spec_query_start_loc
+            assert spec_query_start_loc is not None
             self.spec_query_start_loc_buffer[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
             )
@@ -698,7 +742,7 @@ class Mamba2AttentionMetadataBuilder(
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-        m.num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
+        m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
 

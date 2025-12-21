@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -93,6 +94,7 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
         # Start projections (Fusion)
         if self.has_start_projections:
             # Normalize both inputs before fusion
+            assert inputs_embeds is not None
             inputs_embeds_normed = self.enorm(inputs_embeds)
             previous_hidden_states_normed = self.hnorm(hidden_states)
 
@@ -171,19 +173,15 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 
     def forward(
         self,
+        inputs_embeds: torch.Tensor,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None = None,  # Needed for start projections
-        positions: torch.Tensor | None = None,
-        **kwargs,
+        residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Start projections (Fusion)
         if self.has_start_projections:
             # Normalize both inputs before fusion
-            if inputs_embeds is None:
-                raise ValueError(
-                    "inputs_embeds required for layer with start projections"
-                )
+            assert inputs_embeds is not None
             inputs_embeds_normed = self.enorm(inputs_embeds)
             previous_hidden_states_normed = self.hnorm(hidden_states)
 
@@ -197,7 +195,6 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
         hidden_states, residual = super().forward(
             hidden_states=hidden_states,
             residual=residual,
-            **kwargs,
         )
 
         # End norm
@@ -240,7 +237,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         # Total number of physical layers = num_steps * pattern_len
         total_layers = self.num_mtp_layers * self.pattern_len
-
         for i in range(total_layers):
             step_rel_idx = i % self.pattern_len
 
@@ -296,32 +292,21 @@ class NemotronHMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
+        if spec_step_idx >= self.num_mtp_layers:
+            spec_step_idx = self.num_mtp_layers - 1
 
-        # Determine range of layers for this step
         start_idx = spec_step_idx * self.pattern_len
         end_idx = start_idx + self.pattern_len
 
         residual = None
 
-        # TODO smor- verify this
         for i in range(start_idx, end_idx):
-            layer = self.layers[str(i)]
-
-            if isinstance(layer, NemotronHMTPAttentionDecoderLayer):
-                hidden_states, residual = layer(
-                    inputs_embeds=inputs_embeds,
-                    positions=positions,
-                    hidden_states=hidden_states,
-                    residual=residual,
-                )
-            elif isinstance(layer, NemotronHMTPMoEDecoderLayer):
-                hidden_states, residual = layer(
-                    hidden_states=hidden_states,
-                    residual=residual,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,  # needed for fusion
-                )
-
+            hidden_states, residual = self.layers[str(i)](
+                inputs_embeds=inputs_embeds,
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+            )
         return hidden_states
 
 
@@ -540,4 +525,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        if get_tensor_model_parallel_rank() == 0:
+            torch.save(
+                self.state_dict(),
+                f"/tmp/nemotron_h_mtp_weights_tp_rank_{get_tensor_model_parallel_rank()}.pt",
+            )
         return loaded_params
