@@ -10,8 +10,10 @@ On the client side, run:
     vllm bench serve \
         --backend <backend or endpoint type. Default 'openai'> \
         --label <benchmark result label. Default using backend> \
-        --model <your_model> \
+        --model <your_model. Optional, defaults to first model from server> \
         --dataset-name <dataset_name. Default 'random'> \
+        --input-len <general input length. Optional, maps to dataset-specific args> \
+        --output-len <general output length. Optional, maps to dataset-specific args> \
         --request-rate <request_rate. Default inf> \
         --num-prompts <num_prompts. Default 1000>
 """
@@ -55,6 +57,33 @@ MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
+
+
+async def get_first_model_from_server(
+    base_url: str, headers: dict | None = None
+) -> str:
+    """Fetch the first model from the server's /v1/models endpoint."""
+    models_url = f"{base_url}/v1/models"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(models_url, headers=headers) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if "data" in data and len(data["data"]) > 0:
+                    return data["data"][0]["id"]
+                else:
+                    raise ValueError(
+                        f"No models found on the server at {base_url}. "
+                        "Make sure the server is running and has models loaded."
+                    )
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to fetch models from server at {models_url}. "
+                "Check that:\n"
+                "1. The server is running\n"
+                "2. The server URL is correct\n"
+                f"Error: {e}"
+            ) from e
 
 
 class TaskType(Enum):
@@ -1025,8 +1054,26 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
-        help="Name of the model.",
+        required=False,
+        default=None,
+        help="Name of the model. If not specified, will fetch the first model "
+        "from the server's /v1/models endpoint.",
+    )
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None,
+        help="General input length for datasets. Maps to dataset-specific "
+        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        "If not specified, uses dataset defaults.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="General output length for datasets. Maps to dataset-specific "
+        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
         "--tokenizer",
@@ -1332,10 +1379,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
 
     label = args.label
-    model_id = args.model
-    model_name = args.served_model_name
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
-    tokenizer_mode = args.tokenizer_mode
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -1356,6 +1399,18 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
+    # Fetch model from server if not specified
+    if args.model is None:
+        print("Model not specified, fetching first model from server...")
+        model_id = await get_first_model_from_server(base_url, headers)
+        print(f"Using model: {model_id}")
+    else:
+        model_id = args.model
+
+    model_name = args.served_model_name
+    tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
+    tokenizer_mode = args.tokenizer_mode
+
     tokenizer = get_tokenizer(
         tokenizer_id,
         tokenizer_mode=tokenizer_mode,
@@ -1367,6 +1422,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # Map general --input-len and --output-len to all dataset-specific arguments
+    if args.input_len is not None:
+        args.random_input_len = args.input_len
+        args.sonnet_input_len = args.input_len
+
+    if args.output_len is not None:
+        args.random_output_len = args.output_len
+        args.sonnet_output_len = args.output_len
+        args.sharegpt_output_len = args.output_len
+        args.custom_output_len = args.output_len
+        args.hf_output_len = args.output_len
+        args.spec_bench_output_len = args.output_len
+        args.prefix_repetition_output_len = args.output_len
 
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length

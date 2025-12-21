@@ -713,17 +713,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
-        video_soft_tokens = self.get_num_video_tokens(
+        num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
             image_processor=None,
         )
-
-        # NOTE: By default in Qwen3-VL, one video token is converted to
-        # "<{timestamp} seconds>" (on average 9.5 tokens) + vision_start_token + video_token + vision_end_token # noqa: E501
-        formatted_video_soft_tokens = video_soft_tokens * 12.5
-        return int(formatted_video_soft_tokens)
+        return num_video_soft_tokens
 
     def _calculate_timestamps(
         self, indices: list[int] | torch.Tensor, video_fps: float, merge_size: int
