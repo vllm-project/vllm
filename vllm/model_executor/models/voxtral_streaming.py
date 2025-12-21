@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
 import math
+from collections.abc import Mapping
 
 import torch
 
@@ -15,7 +15,6 @@ from vllm.model_executor.models.voxtral import (
     VoxtralMultiModalProcessor,
     VoxtralProcessingInfo,
 )
-
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
@@ -44,7 +43,6 @@ class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
-
         # streaming can't make use of a cache yet
         super().__init__(info, dummy_inputs, cache=None)
 
@@ -79,7 +77,6 @@ class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
             is_embed=None,
         )
         return prompt_ids, {"audio": [features_info]}
-
 
 
 class TimeEmbedding(torch.nn.Module):

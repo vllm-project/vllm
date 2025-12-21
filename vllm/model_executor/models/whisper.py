@@ -6,6 +6,7 @@ import functools
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal, cast
 
 import numpy as np
@@ -18,15 +19,17 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from dataclasses import replace
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata, AttentionType
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionMetadata,
+    AttentionType,
+)
 from vllm.attention.layer import Attention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.vllm import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -58,7 +61,10 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata, subclass_attention_backend, subclass_attention_backend_with_overrides
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata,
+    subclass_attention_backend_with_overrides,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
@@ -135,8 +141,9 @@ ISO639_1_SUPPORTED_LANGS = {
 }
 
 import enum
-import torch.nn.functional as F
 from functools import partial
+
+import torch.nn.functional as F
 
 
 class PosEmbedType(enum.Enum):
@@ -197,23 +204,25 @@ class WhisperPositionalEmbedding(nn.Embedding):
 
 @functools.lru_cache
 def create_whisper_attention_backend_with_block_pooling(
-        underlying_attn_backend: AttentionBackend,
-        block_pool_size: int) -> type[AttentionBackend]:
+    underlying_attn_backend: AttentionBackend, block_pool_size: int
+) -> type[AttentionBackend]:
     prefix = "WhisperAttentionWithBlockPooling_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    class WhisperAttentionWithBlockPoolingBuilder(underlying_builder
-                                                  ):  # type: ignore
-
-        def __init__(self, kv_cache_spec: AttentionSpec,
-                     layer_names: list[str],
-                     vllm_config: VllmConfig,
-                     device: torch.device):
+    class WhisperAttentionWithBlockPoolingBuilder(underlying_builder):  # type: ignore
+        def __init__(
+            self,
+            kv_cache_spec: AttentionSpec,
+            layer_names: list[str],
+            vllm_config: VllmConfig,
+            device: torch.device,
+        ):
             assert kv_cache_spec.num_kv_heads % block_pool_size == 0
             kv_cache_spec = replace(
                 kv_cache_spec,
                 block_size=kv_cache_spec.block_size * block_pool_size,
-                num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size)
+                num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size,
+            )
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         def build(
@@ -235,24 +244,28 @@ def create_whisper_attention_backend_with_block_pooling(
             common_prefix_len *= block_pool_size
             new_common_attn_metadata.slot_mapping = torch.tensor(
                 [
-                    i for n in original_slot_mapping.tolist() for i in range(
+                    i
+                    for n in original_slot_mapping.tolist()
+                    for i in range(
                         n * block_pool_size,
                         n * block_pool_size + block_pool_size,
                     )
                 ],
                 device=original_slot_mapping.device,
             )
-            return super().build(common_prefix_len, new_common_attn_metadata,
-                                 fast_build)
+            return super().build(
+                common_prefix_len, new_common_attn_metadata, fast_build
+            )
 
     attn_backend = subclass_attention_backend_with_overrides(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
         overrides={
-            "get_builder_cls":
-            lambda: WhisperAttentionWithBlockPoolingBuilder,
-            "get_kv_cache_shape":
-            lambda num_blocks, block_size, num_kv_heads, head_size,
+            "get_builder_cls": lambda: WhisperAttentionWithBlockPoolingBuilder,
+            "get_kv_cache_shape": lambda num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
             cache_dtype_str: (
                 2,
                 num_blocks,
@@ -306,7 +319,8 @@ class WhisperAttentionWithBlockPooling(Attention):
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
-            underlying_attn_backend, block_pool_size)
+            underlying_attn_backend, block_pool_size
+        )
 
         super().__init__(
             num_heads=num_heads,
@@ -328,9 +342,10 @@ class WhisperAttentionWithBlockPooling(Attention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         kv_cache_spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(kv_cache_spec, AttentionSpec)
-        kv_cache_spec = replace(kv_cache_spec,
-                                num_kv_heads=self.block_pool_size *
-                                kv_cache_spec.num_kv_heads)
+        kv_cache_spec = replace(
+            kv_cache_spec,
+            num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
+        )
         return kv_cache_spec
 
 
@@ -402,7 +417,9 @@ class WhisperAttention(nn.Module):
             )
         else:  # AttentionType.DECODER (regular decoder self-attention)
             if block_pool_size > 1:
-                attn_cls = partial(WhisperAttentionWithBlockPooling, block_pool_size=block_pool_size)
+                attn_cls = partial(
+                    WhisperAttentionWithBlockPooling, block_pool_size=block_pool_size
+                )
             else:
                 attn_cls = Attention
 
@@ -798,7 +815,7 @@ class WhisperEncoder(nn.Module):
             hidden_states = torch.cat(hidden_states)
         else:
             hidden_states = torch.stack(hidden_states, dim=0)
-            
+
         return hidden_states
 
     def forward_layers(self, hidden_states: torch.Tensor) -> torch.Tensor:

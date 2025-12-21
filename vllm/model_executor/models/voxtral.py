@@ -158,8 +158,10 @@ class VoxtralProcessorAdapter:
             # pad if necessary
             # TODO(Patrick) - remove once mistral-common is bumped
             sig = inspect.signature(self._audio_processor.pad)
-            if 'is_online_streaming' in sig.parameters:
-                audio = self._audio_processor.pad(audio, self.sampling_rate, is_online_streaming=False)
+            if "is_online_streaming" in sig.parameters:
+                audio = self._audio_processor.pad(
+                    audio, self.sampling_rate, is_online_streaming=False
+                )
             else:
                 audio = self._audio_processor.pad(audio, self.sampling_rate)
 
@@ -692,8 +694,14 @@ class VoxtralEncoderModel(nn.Module):
             r"whisper_encoder\.conv_layers\.1\.(weight|bias)",
             r"whisper_encoder.conv2.\1",
         ),
-        (r"whisper_encoder\.conv_layers\.0\.conv\.(weight|bias)", r"whisper_encoder.conv1.\1"), # noqa: E501
-        (r"whisper_encoder\.conv_layers\.1\.conv\.(weight|bias)", r"whisper_encoder.conv2.\1"), # noqa: E501
+        (
+            r"whisper_encoder\.conv_layers\.0\.conv\.(weight|bias)",
+            r"whisper_encoder.conv1.\1",
+        ),  # noqa: E501
+        (
+            r"whisper_encoder\.conv_layers\.1\.conv\.(weight|bias)",
+            r"whisper_encoder.conv2.\1",
+        ),  # noqa: E501
         (
             r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.w([qkv])\.(weight|bias)",  # noqa: E501
             r"whisper_encoder.layers.\1.self_attn.\2_proj.\3",

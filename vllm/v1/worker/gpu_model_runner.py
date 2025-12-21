@@ -2456,7 +2456,9 @@ class GPUModelRunner(
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    def _prepare_mm_inputs(self, num_tokens: int) -> tuple[torch.Tensor | None, torch.Tensor]:
+    def _prepare_mm_inputs(
+        self, num_tokens: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
         if self.model.requires_raw_input_tokens:
             input_ids = self.input_ids.gpu[:num_tokens]
         else:

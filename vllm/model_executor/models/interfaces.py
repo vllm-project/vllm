@@ -303,8 +303,10 @@ def supports_multimodal(
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
 
+
 def requires_raw_input_tokens(model: type[object] | object) -> bool:
     return getattr(model, "requires_raw_input_tokens", False)
+
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)

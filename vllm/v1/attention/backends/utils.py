@@ -841,7 +841,7 @@ def subclass_attention_backend_with_overrides(
     overrides: dict[str, Any],
 ) -> type[AttentionBackend]:
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-    return type(name, (attention_backend_cls, ), overrides)
+    return type(name, (attention_backend_cls,), overrides)
 
 
 def split_decodes_prefills_and_extends(
