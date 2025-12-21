@@ -685,25 +685,12 @@ class MambaManager(SingleTypeKVCacheManager):
         return super().allocate_new_blocks(request_id, num_tokens)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        # Get the number of tokens for which the cache blocks can be freed.
-
-        # A running request needs the previous block for computing the 1st token
-        # of the subsequent block, and then the previous block can be freed.
-        # Example:
-        # block_size = 512
-        # blocks 0:[1,512] 1:[513,1024] 2:[1025, 1536] ...
-        # num_computed_tokens == 1023 -> keep from 1
-        # num_computed_tokens == 1024 -> keep from 1
-        # num_computed_tokens == 1025 -> keep from 2
-
-        # Current vLLM block freeing logic operates with num_computed_tokens:
-        # last_useful_block = self.get_num_skipped_tokens(num_computed_tokens)
-        #                     // self.block_size
-        # Solution:
+        """
+        Get the number of tokens whose mamba state are not needed anymore. Mamba only
+        need to keep the state of the last computed token, so we return
+        num_computed_tokens - 1.
+        """
         return num_computed_tokens - 1
-        # num_computed_tokens == 1023 -> (1022//512=1) --> keep from 1
-        # num_computed_tokens == 1024 -> (1023//512=1) --> keep from 1
-        # num_computed_tokens == 1025 -> (1024//512=2) --> keep from 2
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
