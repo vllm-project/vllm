@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
-from vllm.lora.request import LoRARequest
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
