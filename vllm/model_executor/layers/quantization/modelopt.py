@@ -47,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     register_moe_scaling_factors,
@@ -773,6 +772,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # TENSORRT_LLM is the only path that doesn't use modular kernel
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             if layer.enable_eplb:
                 raise NotImplementedError(
@@ -795,46 +795,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        # Expert selection
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
+        # All other paths use modular kernel - this code should never be reached
+        raise RuntimeError(
+            "ModelOptFp8MoEMethod.apply() should only be called for "
+            "TENSORRT_LLM backend. Other backends should use "
+            "FusedMoEModularMethod via modular kernel dispatch."
         )
-
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert layer.activation in ("silu", "relu2_no_mul"), (
-                "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                f"but got {layer.activation}"
-            )
-            return flashinfer_cutlass_moe_fp8(
-                x,
-                layer,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-
-            assert self.moe_quant_config is not None
-
-            return fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                quant_config=self.moe_quant_config,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
 
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
