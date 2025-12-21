@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
-    marlin_quant_input,
     should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -22,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def is_fp8_marlin_supported():
-    return current_platform.has_device_capability(80)
+    return current_platform.has_device_capability(75)
 
 
 def fp8_fused_exponent_bias_into_scales(scales):
@@ -63,13 +62,11 @@ def apply_fp8_marlin_linear(
     inputs = reshaped_x
     a_scales = None
     if input_dtype is not None and input_dtype.itemsize == 1:
-        if input_dtype != torch.float8_e4m3fn:
-            raise RuntimeError("FP8 weight + INT8 activation is not supported.")
-
-        inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
+        # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     output = ops.gptq_marlin_gemm(
-        a=reshaped_x,
+        a=inputs,
         c=None,
         b_q_weight=weight,
         b_bias=bias,
@@ -102,6 +99,8 @@ def prepare_fp8_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
@@ -145,10 +144,20 @@ def prepare_fp8_layer_for_marlin(
     # marlin kernel only support channel-wise and group-wise quantization
     # we need to convert the scales
     if weight_block_size is None:
+        logical_widths = getattr(layer, "logical_widths", [])
         if scales.nelement() == 1:
             # tensor-wise quantization -> channel-wise quantization
             # (1, 1) =>(repeat)=> (1, size_n)
             scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
+        elif scales.nelement() == len(logical_widths):
+            # tensor-wise quantization with logical_widths ->
+            #    channel-wise quantization
+            assert sum(logical_widths) == part_size_n, (
+                f"Sum of logical_widths ({sum(logical_widths)}) must be equal "
+                f"to part_size_n ({part_size_n})"
+            )
+            lw_tensor = scales.new_tensor(logical_widths, dtype=torch.int64)
+            scales = scales.view(1, -1).repeat_interleave(lw_tensor, dim=1)
         elif scales.nelement() > 1 and scales.nelement() != part_size_n:
             assert part_size_n % scales.nelement() == 0
             s_size = scales.nelement()
@@ -199,6 +208,8 @@ def prepare_moe_fp8_layer_for_marlin(
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        raise RuntimeError("Marlin W8A8 is not supported.")
 
     e = layer.num_experts
     k = layer.hidden_size
