@@ -86,15 +86,16 @@ class TimeEmbedding(torch.nn.Module):
         super().__init__()
         self.dim = dim
         self.theta = theta
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        # TODO(Patrick) - Make sure to optimize this
-        t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
         inv_freq = torch.exp(
             -math.log(self.theta)
             * torch.arange(self.dim // 2).float()
             / (self.dim // 2)
-        ).to(device=t.device, dtype=t.dtype)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        t = t[..., None]  # (B,) -> (B, 1) or (B, T) -> (B, T, 1)
+        inv_freq = self.inv_freq.to(device=t.device, dtype=t.dtype)
         emb = (
             t * inv_freq
         )  # (B, 1) x (D/2,) -> (B, D/2) or (B, T, 1) x (D/2,) -> (B, T, D/2)
