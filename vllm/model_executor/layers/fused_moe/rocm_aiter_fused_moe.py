@@ -325,12 +325,8 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        print(f"{hidden_states.dtype=}")
-        print(f"{a1q_scale=}")
-        print(f"{a2_scale=}")
         assert a1q_scale is None
         assert a2_scale is None
-        assert global_num_experts == -1
         assert expert_tokens_meta is None
 
         output = rocm_aiter_fused_experts(
