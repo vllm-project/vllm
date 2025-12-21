@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -26,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 
@@ -542,9 +540,11 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
-            "Supports only mxfp4_w4a16 or int4_w4a16"
-        )
+        assert (
+            quant_config.use_mxfp4_w4a16
+            or quant_config.use_int4_w4a16
+            or quant_config.use_fp8_w8a16
+        ), "Supports only mxfp4_w4a16, int4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -555,11 +555,17 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     @property
     def quant_type_id(self) -> int:
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
-        return (
-            scalar_types.uint4b8.id
-            if self.quant_config.use_int4_w4a16
-            else scalar_types.float4_e2m1f.id
-        )
+        if self.quant_config.use_int4_w4a16:
+            return scalar_types.uint4b8.id
+        elif self.quant_config.use_mxfp4_w4a16:
+            return scalar_types.float4_e2m1f.id
+        elif (
+            self.quant_config.use_fp8_w8a16
+            and current_platform.fp8_dtype() == torch.float8_e4m3fn
+        ):
+            return scalar_types.float8_e4m3fn.id
+        else:
+            raise NotImplementedError("Unsupported quantization type.")
 
     def moe_problem_size(
         self,
@@ -709,16 +715,6 @@ class MarlinExperts(MarlinExpertsBase):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
-
-
-def modular_marlin_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        MarlinExperts(quant_config),
-        shared_experts,
-    )
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):

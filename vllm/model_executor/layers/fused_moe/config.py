@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
@@ -39,6 +40,7 @@ if has_triton_kernels():
 def _get_config_dtype_str(
     dtype: torch.dtype,
     use_fp8_w8a8: bool = False,
+    use_fp8_w8a16: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
@@ -50,6 +52,8 @@ def _get_config_dtype_str(
     """
     if use_fp8_w8a8:
         return "fp8_w8a8"
+    elif use_fp8_w8a16:
+        return "fp8_w8a16"
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif use_int4_w4a16:
@@ -320,6 +324,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == torch.int8
 
     @property
+    def use_fp8_w8a16(self) -> bool:
+        return self._a1.dtype is None and self._w1.dtype == current_platform.fp8_dtype()
+
+    @property
     def use_int4_w4a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
@@ -362,6 +370,7 @@ class FusedMoEQuantConfig:
         """
         return _get_config_dtype_str(
             use_fp8_w8a8=self.use_fp8_w8a8,
+            use_fp8_w8a16=self.use_fp8_w8a16,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
             ocp_mx_scheme=self.ocp_mx_scheme,
@@ -680,7 +689,6 @@ def int4_w4a16_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int4 weights.
-    Note: Activations are pre-quantized.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
@@ -688,6 +696,27 @@ def int4_w4a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(shape=group_shape),
         _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
         _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
+    )
+
+
+def fp8_w8a16_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for 16-bit float activations and fp8 weights.
+    """
+    group_shape = GroupShape(*block_shape) if block_shape is not None else None
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc(
+            current_platform.fp8_dtype(), group_shape, w1_scale, None, None
+        ),
+        _w2=FusedMoEQuantDesc(
+            current_platform.fp8_dtype(), group_shape, w2_scale, None, None
+        ),
     )
 
 
@@ -700,7 +729,6 @@ def int8_w8a16_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int8 weights.
-    Note: Activations are pre-quantized.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
