@@ -79,6 +79,15 @@ class OpenAIToolParser(ToolParser):
                 elif msg.channel == "commentary" and not msg.recipient:
                     commentary_content = msg_text
 
+        # Extract partial content from the parser state if the generation was truncated
+        if parser.current_content:
+            if parser.current_channel == "final":
+                final_content = parser.current_content
+            elif (
+                parser.current_channel == "commentary" and not parser.current_recipient
+            ):
+                commentary_content = parser.current_content
+
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,

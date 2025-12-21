@@ -1828,10 +1828,11 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message(
-            tools=request.tools if should_include_tools else None
-        )
-        messages.append(dev_msg)
+        if request.tools:
+            dev_msg = get_developer_message(
+                tools=request.tools if should_include_tools else None
+            )
+            messages.append(dev_msg)
 
         # Add user message.
         messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+import importlib.util
 import json
 import time
 
@@ -986,3 +987,23 @@ async def test_function_call_with_previous_input_messages(
     assert (
         "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str):
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": "What is the role of AI in medicine?"}],
+        temperature=0.0,
+        max_tokens=250,
+    )
+
+    choice = response.choices[0]
+    assert choice.finish_reason == "length", (
+        f"Expected finish_reason='length', got {choice.finish_reason}"
+    )
+    assert choice.message.content is not None, (
+        "Content should not be None when truncated"
+    )
+    assert len(choice.message.content) > 0, "Content should not be empty"
