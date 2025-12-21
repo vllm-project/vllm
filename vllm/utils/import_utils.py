@@ -429,13 +429,14 @@ def has_deep_gemm() -> bool:
 
 
 def has_triton_kernels() -> bool:
-    """Whether the optional `triton_kernels` package is available."""
-    is_available = _has_module("triton_kernels") or _has_module(
-        "vllm.third_party.triton_kernels"
-    )
-    if is_available:
-        import_triton_kernels()
-    return is_available
+    return False
+    # """Whether the optional `triton_kernels` package is available."""
+    # is_available = _has_module("triton_kernels") or _has_module(
+    #     "vllm.third_party.triton_kernels"
+    # )
+    # if is_available:
+    #     import_triton_kernels()
+    # return is_available
 
 
 def has_tilelang() -> bool:
