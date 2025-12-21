@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import enum
 import functools
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import replace
+from functools import partial
 from typing import Annotated, Literal, cast
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import (
     BatchFeature,
@@ -75,11 +78,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-import enum
-from functools import partial
-
-import torch.nn.functional as F
-
 
 logger = init_logger(__name__)
 
