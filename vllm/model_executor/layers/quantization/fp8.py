@@ -894,8 +894,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-        self.rocm_aiter_moe_enabled = False
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -1031,7 +1029,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     )
                     start += shard_size
 
-            if self.rocm_aiter_moe_enabled:
+            if self.fp8_backend == Fp8MoeBackend.AITER:
                 shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight, layer.w2_weight
                 )
