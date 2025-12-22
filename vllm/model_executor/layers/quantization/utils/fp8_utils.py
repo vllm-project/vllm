@@ -756,7 +756,7 @@ def per_token_group_quant_fp8_col_scales_impl(
         eps,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
-        scale_ue8m0=scale_ue8m0,
+        use_ue8m0=scale_ue8m0,
         BLOCK=BLOCK,
         num_warps=num_warps,
         num_stages=num_stages,
