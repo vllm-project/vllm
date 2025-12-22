@@ -1155,40 +1155,33 @@ class FusedMoE(CustomOp):
         loaded_weight: torch.Tensor,
         weight_name: str,
         shard_id: str,
-        expert_id: int,
+        expert_id: int | None = None,
         return_success: bool = False,
+        mxfp4_or_bias: bool | None = False,
     ) -> bool | None:
-        if self.quant_config:
-
-            # TODO (xuebwang-amd): combine below if-elif as one 
-            # and possibly unify deeply with existed loading utils
-            if self.quant_config.get_name() == "mxfp4":
-                # (FIXME) for gpt-oss all experts are combined
-                if "bias" in weight_name:
-                    dim1 = loaded_weight.shape[1]
-                    param.data[:, :dim1].copy_(loaded_weight)
-                else:
-                    dim1 = loaded_weight.shape[1]
-                    dim2 = loaded_weight.shape[2]
-                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
-                return True if return_success else None
-
-            elif (
-                self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss"
+        # TODO (xuebwang-amd): Can we achieve further unification without specifying the model type?
+        if self.model_type == "gpt_oss" and mxfp4_or_bias:
+            if any(
+                self.quant_config.get_name() == quant_name
+                for quant_name in ["mxfp4", "quark"]
             ):
-                expert_data = param.data[expert_id]
-                if "input_scale" in weight_name:
-                    assert loaded_weight.numel() == 1
-                    expert_data.data.copy_(loaded_weight)
-                    return True if return_success else None
-
-                dim1 = loaded_weight.shape[0]
-                if "bias" in weight_name:
-                    expert_data.data[:dim1].copy_(loaded_weight)
+                if expert_id is None:
+                    dim1 = loaded_weight.shape[1]
+                    if "bias" in weight_name:
+                        param.data[:, :dim1].copy_(loaded_weight)
+                    else:
+                        dim2 = loaded_weight.shape[2]
+                        param.data[:, :dim1, :dim2].copy_(loaded_weight)
                 else:
-                    dim2 = loaded_weight.shape[1]
-                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                    expert_data = param.data[expert_id]
+                    dim1 = loaded_weight.shape[0]
+                    if "bias" in weight_name:
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
+            return False
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id

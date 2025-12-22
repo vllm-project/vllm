@@ -237,6 +237,7 @@ class Mxfp4Config(QuantizationConfig):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+        self.weight_dtype = "mxfp4"
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
         self.marlin_input_dtype = None
