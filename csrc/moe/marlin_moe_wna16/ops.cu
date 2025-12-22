@@ -667,7 +667,7 @@ torch::Tensor moe_wna16_marlin_gemm(
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const c10::DeviceGuard device_guard(a.device());
   torch::Tensor c;
   if (c_or_none.has_value()) {
     c = c_or_none.value();

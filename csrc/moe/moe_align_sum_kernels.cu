@@ -1,6 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <cub/cub.cuh>
 
 #include <ATen/ATen.h>
@@ -604,7 +604,7 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
+  const c10::DeviceGuard device_guard(output.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   switch (topk) {

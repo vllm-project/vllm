@@ -1,6 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -248,7 +248,7 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 
   int NUM_BLOCKS = M / rows_per_block;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
+  const c10::DeviceGuard device_guard(in_b.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // call the kernel function...
@@ -1279,7 +1279,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 
   dim3 grid(CuCount);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const c10::DeviceGuard device_guard(in_a.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
@@ -1753,7 +1753,7 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
               out_c.dtype() == torch::kBFloat16);
 
   dim3 grid(CuCount);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const c10::DeviceGuard device_guard(in_a.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size();
 

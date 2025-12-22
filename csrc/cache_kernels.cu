@@ -1,6 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/util/Optional.h>
 
@@ -53,7 +53,7 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
   // alignment reasons, we assume the blocks data (inclusive of any padding)
   // is contiguous in memory
   const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
-  const at::cuda::OptionalCUDAGuard device_guard(
+  const c10::DeviceGuard device_guard(
       src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
@@ -160,7 +160,7 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
   const int numel_per_block = key_caches[0][0].numel();
   dim3 grid(num_layers, num_pairs);
   dim3 block(std::min(1024, numel_per_block));
-  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const c10::DeviceGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
       key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
@@ -197,7 +197,7 @@ void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
   int mem_footprint_per_block = kv_caches[0].stride(0);
   dim3 grid(num_layers, num_pairs);
   dim3 block(std::min(1024, mem_footprint_per_block));
-  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const c10::DeviceGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
       kv_caches[0].scalar_type(), "copy_blocks_mla_kernel", ([&] {
@@ -681,7 +681,7 @@ void reshape_and_cache(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_div_x, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const c10::DeviceGuard device_guard(key.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
@@ -736,7 +736,7 @@ void reshape_and_cache_flash(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const c10::DeviceGuard device_guard(key.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
@@ -808,7 +808,7 @@ void concat_and_cache_mla(
   int block_stride = kv_cache.stride(0);
   int entry_stride = kv_cache.stride(1);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_c));
+  const c10::DeviceGuard device_guard(kv_c.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (kv_cache_dtype == "fp8_ds_mla") {
@@ -860,7 +860,7 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
   TORCH_CHECK(dst_device.is_cuda(), "dst must be on a GPU")
   TORCH_CHECK(src_device.index() == dst_device.index(),
               "src and dst must be on the same GPU");
-  at::cuda::OptionalCUDAGuard device_guard(src_device);
+  c10::DeviceGuard device_guard(src_device);
 
   int64_t num_blocks = src_cache.size(0);
   int64_t block_stride = src_cache.stride(0);
@@ -1018,7 +1018,7 @@ void gather_and_maybe_dequant_cache(
     int64_t num_tokens, const std::string& kv_cache_dtype,
     torch::Tensor const& scale,
     std::optional<torch::Tensor> seq_starts = std::nullopt) {
-  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  c10::DeviceGuard device_guard(src_cache.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   int32_t block_size = src_cache.size(1);
@@ -1226,7 +1226,7 @@ void cp_gather_cache(
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt) {
-  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  c10::DeviceGuard device_guard(src_cache.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   int32_t block_size = src_cache.size(1);
@@ -1363,7 +1363,7 @@ void indexer_k_quant_and_cache(
   dim3 grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) /
                             (quant_block_size * vec_size));
   dim3 block(32, vec_size);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
+  const c10::DeviceGuard device_guard(k.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
@@ -1408,7 +1408,7 @@ void cp_gather_indexer_k_quant_cache(
               "head_dim must be divisible by quant_block_size");
 
   constexpr int vec_size = 16;
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_cache));
+  const c10::DeviceGuard device_guard(kv_cache.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (num_tokens < 32) {

@@ -1,7 +1,8 @@
 #include "dispatch_utils.h"
 
 #include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
+#include <c10/cuda/CUDAStream.h>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -627,7 +628,7 @@ void apply_repetition_penalties_(
   // Each block handles one sequence and a tile of vocab
   dim3 grid(num_seqs, tile_num);
   dim3 block(std::min(tile_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(logits));
+  const c10::DeviceGuard device_guard(logits.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       logits.scalar_type(), "apply_repetition_penalties_kernel", [&] {

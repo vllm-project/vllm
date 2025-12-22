@@ -1,6 +1,6 @@
 #include <cudaTypedefs.h>
 
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <torch/all.h>
 
 #include "cutlass_extensions/common.hpp"
@@ -193,7 +193,7 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                 bias->dim() == 1);
   }
 
-  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
+  c10::DeviceGuard const device_guard(a.device());
   int32_t version_num = get_sm_version_num();
 
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
@@ -384,7 +384,7 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(!bias || bias->dtype() == c.dtype(),
               "currently bias dtype must match output dtype ", c.dtype());
 
-  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
+  c10::DeviceGuard const device_guard(a.device());
 
   int32_t version_num = get_sm_version_num();
 

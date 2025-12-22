@@ -20,7 +20,7 @@
 #include <cuda_runtime.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cuda_fp8.h>
 #include "dispatch_utils.h"
@@ -132,7 +132,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
   int const numBlocksPerSM =

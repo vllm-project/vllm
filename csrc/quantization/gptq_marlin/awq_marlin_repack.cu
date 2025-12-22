@@ -245,7 +245,7 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
   TORCH_CHECK(b_q_weight.dtype() == at::kInt, "b_q_weight type is not kInt");
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
+  const c10::DeviceGuard device_guard(b_q_weight.device());
   auto options = torch::TensorOptions()
                      .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());

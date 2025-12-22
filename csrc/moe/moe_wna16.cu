@@ -1,6 +1,6 @@
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 
@@ -280,7 +280,7 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              torch::Tensor num_tokens_post_pad, int64_t top_k,
                              int64_t BLOCK_SIZE_M, int64_t BLOCK_SIZE_N,
                              int64_t BLOCK_SIZE_K, int64_t bit) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   output.zero_();
 
   const int num_experts = b_qweight.size(0);

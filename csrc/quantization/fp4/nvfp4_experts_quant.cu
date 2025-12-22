@@ -20,7 +20,7 @@
 #include <cuda_runtime.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cuda_fp8.h>
 #include "dispatch_utils.h"
@@ -349,7 +349,7 @@ void scaled_fp4_experts_quant_sm1xxa(
   // 4 means 4 fp8 values are packed into one int32
   TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(input.get_device());
 
