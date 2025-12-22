@@ -526,7 +526,10 @@ class RocmPlatform(Platform):
     @classmethod
     def supports_fp8(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
+        # gfx94/gfx95 = MI300/MI350 series (CDNA)
+        # gfx11 = RDNA 3/3.5 including Strix Halo (gfx1151)
+        # gfx12 = RDNA 4
+        return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx11", "gfx12"])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
