@@ -258,16 +258,16 @@ class Config:
                     f"{self.fe_supported_types()}."
                 )
 
-        # Check block quanization support
-        is_block_quatized = self.quant_block_shape is not None
-        if is_block_quatized and self.quant_dtype is None:
+        # Check block quantization support
+        is_block_quantized = self.quant_block_shape is not None
+        if is_block_quantized and self.quant_dtype is None:
             return False, "No block quantization support."
 
-        if is_block_quatized and not self.is_block_quant_supported():
+        if is_block_quantized and not self.is_block_quant_supported():
             return False, "Mismatched block quantization support."
 
         # deep_gemm only works with block-quantized
-        if self.needs_deep_gemm() and not is_block_quatized:
+        if self.needs_deep_gemm() and not is_block_quantized:
             return False, "Needs DeepGEMM but not block quantized."
 
         # Check dependencies (turn into asserts?)
