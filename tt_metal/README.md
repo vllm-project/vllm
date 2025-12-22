@@ -23,7 +23,7 @@ vLLM requires Python 3.9+ (Python 3.10.12 is the default `python3` on Ubuntu 22.
 
 **To create the vLLM+tt-metal environment (first time):**
 1. Install tt-metal following the instructions in [INSTALLING.md](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md) (build and create the virtual environment if [installing tt-metal from source](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md#source)). Ensure that the necessary environment variables for running tt-metal tests were set.  
-2. Enter the environment which has tt-metal installed (e.g. `source $PYTHON_ENV_DIR/bin/activate` if using python virtual environment), and then from the main vLLM directory install vLLM:
+2. Enter the environment which has tt-metal installed (e.g. `source $PYTHON_ENV_DIR/bin/activate` if using python virtual environment), and then from the root vLLM directory install vLLM (Note: `dev` is the main vLLM branch):
 
     ```sh
     source tt_metal/install-vllm-tt.sh
