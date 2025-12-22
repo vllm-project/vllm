@@ -280,7 +280,7 @@ class MistralTokenizer(TokenizerLike):
         self._special_tokens_set = set(self._special_tokens)
 
     def _get_special_token_ids(self) -> list[int]:
-        return sorted(self.tokenizer.is_special(i) for i in range(len(self._vocab)))
+        return [i for i in range(len(self._vocab)) if self.tokenizer.is_special(i)]
 
     def _get_special_tokens(self, all_special_ids: list[int]) -> list[str]:
         return [
