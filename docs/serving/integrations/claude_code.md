@@ -8,6 +8,12 @@ By pointing Claude Code at a vLLM server, you can use your own models as the bac
 - Using open-weight models with tool calling capabilities
 - Testing and developing with custom models
 
+## How It Works
+
+vLLM implements the Anthropic Messages API, which is the same API that Claude Code uses to communicate with Anthropic's servers. By setting `ANTHROPIC_BASE_URL` to point at your vLLM server, Claude Code sends its requests to vLLM instead of Anthropic. vLLM then translates these requests to work with your local model and returns responses in the format Claude Code expects.
+
+This means any model served by vLLM with proper tool calling support can act as a drop-in replacement for Claude models in Claude Code.
+
 ## Requirements
 
 Claude Code requires a model with strong tool calling capabilities. The model must support the OpenAI-compatible tool calling API. See [Tool Calling](../../features/tool_calling.md) for details on enabling tool calling for your model.
