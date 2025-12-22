@@ -416,13 +416,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                      Tensor alpha) -> ()");
   ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
 
-  // cutlass blockwise scaledgroup GEMM
-  ops.def(
-      "cutlass_blockwise_scaled_grouped_mm(Tensor! output, Tensor a, Tensor b, "
-      "Tensor scales_a, Tensor scales_b, "
-      "Tensor problem_sizes, Tensor expert_offsets) -> ()");
-  // conditionally compiled so impl registration is in source file
-
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
