@@ -3,6 +3,7 @@
 """Tests for attention backend selectors."""
 
 from unittest.mock import MagicMock, patch
+from vllm.attention.selector import AttentionSelectorConfig
 
 import pytest
 import torch
@@ -144,16 +145,21 @@ def test_standard_attention_backend_selection(
     # Get the backend class path
     from vllm.platforms.rocm import RocmPlatform
 
-    backend_path = RocmPlatform.get_attn_backend_cls(
-        selected_backend=backend_enum,
+    my_config = AttentionSelectorConfig(
         head_size=128,
         dtype=torch.float16,
         kv_cache_dtype="auto",
         block_size=16,
         use_mla=False,
         has_sink=False,
-        use_sparse=False,
+        use_sparse=False,    
     )
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=backend_enum,
+        attn_selector_config=my_config
+    )
+
     assert backend_path == expected_backend_path
 
 
@@ -267,8 +273,7 @@ def test_mla_backend_selection(
 
         if should_raise:
             with pytest.raises(ValueError):
-                RocmPlatform.get_attn_backend_cls(
-                    selected_backend=backend_enum,
+                my_config = AttentionSelectorConfig(
                     head_size=128,
                     dtype=torch.float16,
                     kv_cache_dtype="auto",
@@ -277,17 +282,36 @@ def test_mla_backend_selection(
                     has_sink=False,
                     use_sparse=False,
                 )
+                my_config = AttentionSelectorConfig(
+                    head_size=128,
+                    dtype=torch.float16,
+                    kv_cache_dtype="auto",
+                    block_size=block_size,
+                    use_mla=True,
+                    has_sink=False,
+                    use_sparse=False,
+                )
+                backend_path = RocmPlatform.get_attn_backend_cls(
+                    selected_backend=backend_enum,
+                    attn_selector_config=my_config
+                )                
+
         else:
-            backend_path = RocmPlatform.get_attn_backend_cls(
-                selected_backend=backend_enum,
+            my_config = AttentionSelectorConfig(
                 head_size=128,
                 dtype=torch.float16,
                 kv_cache_dtype="auto",
                 block_size=block_size,
                 use_mla=True,
                 has_sink=False,
-                use_sparse=False,
+                use_sparse=False,   
             )
+
+            backend_path = RocmPlatform.get_attn_backend_cls(
+                selected_backend=backend_enum,
+                attn_selector_config=my_config
+            )
+
             assert backend_path == expected_backend_path
 
 
@@ -303,17 +327,20 @@ def test_aiter_fa_requires_gfx9(mock_vllm_config):
             match="only supported on gfx9",
         ),
     ):
-        RocmPlatform.get_attn_backend_cls(
-            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+        my_config = AttentionSelectorConfig(
             head_size=128,
             dtype=torch.float16,
             kv_cache_dtype="auto",
             block_size=16,
             use_mla=False,
             has_sink=False,
-            use_sparse=False,
+            use_sparse=False, 
         )
 
+        RocmPlatform.get_attn_backend_cls(
+                selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+                attn_selector_config=my_config
+        )
 
 def test_sparse_not_supported(mock_vllm_config):
     """Test that sparse attention is not supported on ROCm."""
@@ -322,8 +349,7 @@ def test_sparse_not_supported(mock_vllm_config):
     with pytest.raises(
         AssertionError, match="Sparse MLA backend on ROCm only supports block size 1"
     ):
-        RocmPlatform.get_attn_backend_cls(
-            selected_backend=None,
+        my_config = AttentionSelectorConfig(
             head_size=128,
             dtype=torch.float16,
             kv_cache_dtype="auto",
@@ -331,4 +357,9 @@ def test_sparse_not_supported(mock_vllm_config):
             use_mla=False,
             has_sink=False,
             use_sparse=True,
+        )
+
+        RocmPlatform.get_attn_backend_cls(
+                selected_backend=None,
+                attn_selector_config=my_config
         )
