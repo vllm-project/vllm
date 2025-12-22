@@ -612,7 +612,7 @@ class OpenAIServingChat(OpenAIServing):
                         if enable_metrics and enable_metrics.get("encode", False):
                             if chunk.metrics is None:
                                 chunk.metrics = {}
-                            chunk.metrics["encode_time_ms"] = res.capture_metrics_result.get("encode_time_ms", None)
+                            chunk.metrics["encode_time_ms"] = int(res.capture_metrics_result.get("encode_time_ms", None))
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
@@ -1432,7 +1432,7 @@ class OpenAIServingChat(OpenAIServing):
         if enable_metrics and enable_metrics.get("encode", False):
             if response.metrics is None:
                 response.metrics = {}
-            response.metrics["encode_time_ms"] = final_res.metrics.get("encode_time_ms")
+            response.metrics["encode_time_ms"] = int(final_res.capture_metrics_result.get("encode_time_ms"))
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:

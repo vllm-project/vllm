@@ -1919,7 +1919,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: Optional[list[int]] = None
-    metrics: Optional[dict[str, float]] = None
+    metrics: Optional[dict[str, Any]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
