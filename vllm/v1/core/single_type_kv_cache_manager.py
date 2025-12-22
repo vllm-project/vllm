@@ -101,47 +101,30 @@ class SingleTypeKVCacheManager(ABC):
             return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
-        if num_skipped_tokens <= 0:
-            # Nothing is skipped.
-            num_new_blocks = (
-                num_required_blocks - len(new_computed_blocks) - num_req_blocks
-            )
-            num_evictable_blocks = sum(
-                blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
-            )
-            return num_new_blocks + num_evictable_blocks
-
-        # General case: some prefix tokens are skipped by the attention window.
-        num_skipped_blocks = num_skipped_tokens // self.block_size
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
+        # Number of whole blocks that are skipped by the attention window.
+        # If nothing is skipped, this is 0.
+        num_skipped_blocks = num_skipped_tokens // self.block_size
+        # We need blocks for the non-skipped suffix. If there are still
+        # local-computed blocks inside the window, they contribute to the
+        # required capacity; otherwise, skipped blocks dominate.
+        num_new_blocks = max(
+            num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
+            0,
+        )
 
-        if num_skipped_blocks >= num_local_computed_blocks:
-            # All local-computed blocks (both existing and newly computed) are
-            # outside the current window. In this case we only need blocks for
-            # the non-skipped suffix.
-            num_new_blocks = max(num_required_blocks - num_skipped_blocks, 0)
-            # All new computed blocks are skipped. This happens when the entire
-            # sliding window hits external KV cache via a KV connector.
-            num_evictable_blocks = 0
-        else:
-            # Some local-computed blocks remain inside the window.
-            num_new_blocks = max(num_required_blocks - num_local_computed_blocks, 0)
+        # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
+        # of blocks are skipped; `num_req_blocks` of those may already be in
+        # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
+        num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
 
-            # Among the new_computed_blocks, the first
-            # `num_skipped_new_computed_blocks` correspond to skipped tokens and
-            # therefore do not need to be "touched" / re-allocated.
-            num_skipped_new_computed_blocks = max(
-                0, num_skipped_blocks - num_req_blocks
-            )
-
-            # If a computed block of a request is an eviction candidate (in the
-            # free queue and ref_cnt == 0), it will be changed from a free block
-            # to a computed block when the request is allocated, so we also count
-            # it in the free-capacity check.
-            num_evictable_blocks = sum(
-                blk.ref_cnt == 0 and not blk.is_null
-                for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
-            )
+        # If a computed block is an eviction candidate (in the free queue and
+        # ref_cnt == 0), it will be removed from the free queue when touched by
+        # the allocated request, so we must count it in the free-capacity check.
+        num_evictable_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
+        )
         return num_new_blocks + num_evictable_blocks
 
     def allocate_new_computed_blocks(
