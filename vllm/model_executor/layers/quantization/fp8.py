@@ -414,7 +414,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
         self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size

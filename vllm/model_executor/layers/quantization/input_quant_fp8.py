@@ -51,7 +51,7 @@ class QuantFP8(CustomOp):
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
 
-        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enaled()
+        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
