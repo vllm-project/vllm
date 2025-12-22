@@ -18,25 +18,37 @@ for i in {1..5}; do
     echo "Checking metadata.json URL (attempt $i)..."
     if curl --fail "$meta_json_url" > metadata.json; then
         echo "INFO: metadata.json URL is valid."
-        # check whether it is valid json by python
+        # check whether it is valid json by python (printed to stdout)
         if python3 -m json.tool metadata.json; then
-            echo "INFO: metadata.json is valid JSON. Proceeding with the test."
+            echo "INFO: metadata.json is valid JSON. Proceeding with the check."
+            # check whether there is an object in the json matching:
+            # "package_name": "vllm", and "platform_tag" matches the current architecture
+            # see `determine_wheel_url` in setup.py for more details
+            if python3 -c "import platform as p,json as j,sys as s; d = j.load(open('metadata.json')); \
+             s.exit(int(not any(o.get('package_name') == 'vllm' and p.machine() in o.get('platform_tag') \
+             for o in d)))" 2>/dev/null; then
+                echo "INFO: metadata.json contains a pre-compiled wheel for the current architecture."
+                break
+            else
+                echo "WARN: metadata.json does not have a pre-compiled wheel for the current architecture."
+            fi
         else
             echo "CRITICAL: metadata.json exists but is not valid JSON, please do report in #sig-ci channel!"
+            echo "INFO: metadata.json content:"
+            cat metadata.json
             exit 1
         fi
-        break
     fi
-    # failure handling
+    # failure handling & retry logic
     if [ $i -eq 5 ]; then
-        echo "ERROR: metadata.json URL is still not valid after 5 attempts."
-        echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit exists."
+        echo "ERROR: metadata is still not available after 5 attempts."
+        echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit is available."
         echo " NOTE: If $merge_base_commit is a new commit on main, maybe try again after its release pipeline finishes."
         echo " NOTE: If it fails, please report in #sig-ci channel."
         exit 1
     else
-        echo "WARNING: metadata.json URL is not valid. Retrying in 3 minutes..."
-        sleep 180
+        echo "WARNING: metadata is not available. Retrying after 5 minutes..."
+        sleep 300
     fi
 done
 
