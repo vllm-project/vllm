@@ -263,7 +263,7 @@ _CROSS_ENCODER_MODELS = {
     "XLMRobertaForSequenceClassification": (
         "roberta",
         "RobertaForSequenceClassification",
-    )
+    ),
 }
 
 _MULTIMODAL_MODELS = {
