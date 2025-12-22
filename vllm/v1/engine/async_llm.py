@@ -944,11 +944,16 @@ class AsyncLLM(EngineClient):
                     stacklevel=2,
                 )
 
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                pooling_params.truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+            for params in (
+                pooling_params
+                if isinstance(pooling_params, Sequence)
+                else [pooling_params]
+            ):
+                _validate_truncation_size(
+                    self.model_config.max_model_len,
+                    params.truncate_prompt_tokens,
+                    tokenization_kwargs,
+                )
 
             q = await self.add_requests(
                 request_id,  # type: ignore[arg-type]
