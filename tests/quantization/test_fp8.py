@@ -217,7 +217,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
     ref_y = per_tensor_dequantize(ref_y, inv_scale, dtype)
 
-    # Reference dynamic quantizaton
+    # Reference dynamic quantization
     y = quantize_ref(x, inv_scale)
     torch.testing.assert_close(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
