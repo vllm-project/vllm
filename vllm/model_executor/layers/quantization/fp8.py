@@ -894,6 +894,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return
 
         # Lazy import to avoid importing triton too early.
+
         self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # Allow for accessing weights and scales in standard way.
