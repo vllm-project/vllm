@@ -1115,6 +1115,9 @@ class Qwen3NextModel(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     if name not in params_dict:
+                        logger.warning_once(
+                            f"Parameter {name} not found in params_dict, skip loading"
+                        )
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(

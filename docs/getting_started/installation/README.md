@@ -27,3 +27,4 @@ The backends below live **outside** the main `vllm` repository and follow the
 | IBM Spyre AIU | `vllm-spyre` | <https://github.com/vllm-project/vllm-spyre> |
 | Cambricon MLU | `vllm-mlu` | <https://github.com/Cambricon/vllm-mlu> |
 | Baidu Kunlun XPU | N/A, install from source | <https://github.com/baidu/vLLM-Kunlun> |
+| Sophgo TPU | N/A, install from source | <https://github.com/sophgo/vllm-tpu> |
