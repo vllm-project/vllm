@@ -213,6 +213,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: str | None = None
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
+    VLLM_FLASHINFER_FP8_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
@@ -1402,6 +1403,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, when we use fp8 kv, we do not quantize Q to fp8
     "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION", "0"))
+    ),
+    # Override the backend used for FlashInfer FP8 BMM operations.
+    # Supported options: "auto", "cutlass", "cudnn", "trtllm"
+    # If not set, defaults to "auto" which lets FlashInfer choose.
+    "VLLM_FLASHINFER_FP8_BACKEND": lambda: os.getenv(
+        "VLLM_FLASHINFER_FP8_BACKEND", None
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
