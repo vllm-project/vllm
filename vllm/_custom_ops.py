@@ -20,7 +20,7 @@ current_platform.import_kernels()
 
 # Import dispatcher for CPU multi-ISA support
 # This routes torch.ops calls to _C or _C_avx512 depending on loaded extension
-from vllm._ops_dispatch import get_ops, get_cpu_ops, has_op
+from vllm._ops_dispatch import get_ops, get_cpu_ops, has_op, _detect_cpu_extension
 
 if TYPE_CHECKING:
 
@@ -594,7 +594,7 @@ def gptq_gemm(
 
 if has_op("gptq_gemm"):
 
-    @register_fake("_C::gptq_gemm")
+    @register_fake(f"{_detect_cpu_extension()}::gptq_gemm")
     def _gptq_gemm_fake(
         a: torch.Tensor,
         b_q_weight: torch.Tensor,
@@ -616,7 +616,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None
 
 if has_op("allspark_w8a16_gemm"):
 
-    @register_fake("_C::allspark_w8a16_gemm")
+    @register_fake(f"{_detect_cpu_extension()}::allspark_w8a16_gemm")
     def _allspark_w8a16_gemm_fake(
         a: torch.Tensor,
         b_qweight: torch.Tensor,
@@ -2818,7 +2818,7 @@ def dsv3_fused_a_gemm(
 
 if has_op("weight_packed_linear"):
 
-    @register_fake("_C::weight_packed_linear")
+    @register_fake(f"{_detect_cpu_extension()}::weight_packed_linear")
     def weight_packed_linear_fake(
         mat1: torch.Tensor,
         mat2: torch.Tensor,
@@ -2832,7 +2832,7 @@ if has_op("weight_packed_linear"):
 
 if has_op("fused_experts_cpu"):
 
-    @register_fake("_C::fused_experts_cpu")
+    @register_fake(f"{_detect_cpu_extension()}::fused_experts_cpu")
     def fused_experts_cpu_fake(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -2854,7 +2854,7 @@ if has_op("fused_experts_cpu"):
 
 if has_op("int8_scaled_mm_with_quant"):
 
-    @register_fake("_C::int8_scaled_mm_with_quant")
+    @register_fake(f"{_detect_cpu_extension()}::int8_scaled_mm_with_quant")
     def int8_scaled_mm_with_quant_fake(
         mat1: torch.Tensor,
         mat2: torch.Tensor,
@@ -2879,7 +2879,7 @@ class CPUDNNLGEMMHandler:
             get_ops().release_dnnl_matmul_handler(self.handler_tensor.item())
 
 
-_supports_onednn = bool(has_op("create_onednn_mm_handler"))
+_supports_onednn = bool(has_op("create_onednn_mm_handler")) # FIXME: could be cleaned up
 
 
 def is_onednn_acl_supported():
