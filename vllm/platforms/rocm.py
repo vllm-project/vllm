@@ -289,8 +289,15 @@ class RocmPlatform(Platform):
             "ROCm. Note that V0 attention backends have been removed."
         )
 
-    @property
-    def supported_quantization(self):
+    class classproperty:
+        def __init__(self, func):
+            self.func = func
+
+        def __get__(self, instance, owner):
+            return self.func(owner)
+
+    @classproperty
+    def supported_quantization(cls) -> list[str]:
         # Delay resolving supported_quantization in order to avoid "No
         # HIP GPUs are available" errors.
         _supported_quantization: list[str] = [
