@@ -130,12 +130,14 @@ def prefill_warmup(model,
     local_kwargs = {
         "kv_cache": kv_cache,
         "enable_trace": trace_prefill_mode,
-        "sampling_params": sampling_params,
+        "sampling_params": None,
     }
 
     # it is up to the model to handle the different sampling configurations
     logger.info("Warmup run for prefill started")
-    model.warmup_model_prefill(**local_kwargs)
+    for s in sampling_params:
+        local_kwargs["sampling_params"] = s
+        model.warmup_model_prefill(**local_kwargs)
     logger.info("Warmup run for prefill finished")
 
 
@@ -161,6 +163,7 @@ def decode_warmup(model,
         "enable_trace": trace_decode_mode,
         "read_from_device": True,
         "sampling_params": None,  #to be filled
+        #"reset_batch" : True
     }
 
     for s in sampling_params:
@@ -1469,3 +1472,4 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                       self.scheduler_config.max_num_seqs,
                       self.cache_config.num_gpu_blocks,
                       self.sample_on_device_mode)
+        return 
