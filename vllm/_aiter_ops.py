@@ -761,7 +761,7 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_linear_fp8_enaled(cls) -> bool:
+    def is_linear_fp8_enabled(cls) -> bool:
         return cls.is_linear_enabled()
 
     @classmethod
