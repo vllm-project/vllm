@@ -407,6 +407,13 @@ class P2pNcclEngine:
             if tensor_id not in self.recv_store:
                 return None
             tensor = self.recv_store.pop(tensor_id)
+            # Keep per-request bookkeeping consistent with recv_store.
+            request_id = tensor_id.split("#")[0]
+            tensor_ids = self.recv_request_id_to_tensor_ids.get(request_id)
+            if tensor_ids is not None:
+                tensor_ids.discard(tensor_id)
+                if not tensor_ids:
+                    self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
         if tensor is None:
             return None
