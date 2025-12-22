@@ -843,12 +843,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
