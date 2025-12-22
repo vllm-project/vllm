@@ -60,7 +60,7 @@ class P2PAFDConnector(AFDConnectorBase):
             self.num_hidden_layers: int = (
                 self.config.model_config.hf_config.num_hidden_layers
             )
-            
+
         self.recv_attn_output_counter: int = 0
         self.recv_ffn_output_counter: int = 0
         self.dp_metadata_list: dict[int, DPMetadata] = {}
@@ -139,11 +139,9 @@ class P2PAFDConnector(AFDConnectorBase):
         for idx in range(num_of_stages):
             if idx == 0:
                 tensor_metadata_list[0] = tensor_metadata
-                logger.info(f"build tensor metadata: stage_{idx=}, size={tensor_metadata.size}")
             else:
                 new_size = list(tensor_metadata.size)
                 new_size[0] = connector_metadata.afd_tokens_lens[idx]
-                logger.info(f"build tensor metadata: stage_{idx=}, {new_size=}, {connector_metadata.afd_tokens_lens=}")
                 tensor_metadata_list[idx] = TensorMetadata(
                     tensor_metadata.device,
                     tensor_metadata.dtype,
@@ -167,7 +165,6 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         metadata_tuple = (metadata, tensor_metadata)
         process_group.send_object(metadata_tuple, dst=dst)
-        logger.info(f"_send_metadata called build tensor metadata")
         self._tensor_metadata_list = self._build_tensor_metadata_list(
             tensor_metadata, metadata
         )
@@ -180,23 +177,32 @@ class P2PAFDConnector(AFDConnectorBase):
         (self._current_afd_connector_metadata, tensor_metadata) = (
             process_group.recv_object(src=src)
         )
-        logger.info(f"_recv_metadata called build tensor metadata")
         self._tensor_metadata_list = self._build_tensor_metadata_list(
             tensor_metadata, self._current_afd_connector_metadata
         )
-        logger.info(f"{self.config.parallel_config.data_parallel_size=}")
         if self.config.parallel_config.data_parallel_size > 1:
-            logger.info("jcz recv_metadata num_of_stages:{}".format(self._current_afd_connector_metadata.num_of_stages))
+            logger.info(
+                "jcz recv_metadata num_of_stages:{}".format(
+                    self._current_afd_connector_metadata.num_of_stages
+                )
+            )
             for stage_idx in range(self._current_afd_connector_metadata.num_of_stages):
                 num_tokens_per_ubatch = self._tensor_metadata_list[stage_idx].size[0]
-                logger.info(f"{stage_idx=}, {num_tokens_per_ubatch=}")
                 self.dp_metadata_list[stage_idx] = DPMetadata.make(
                     self.config.parallel_config,
                     num_tokens_per_ubatch,
-                    torch.tensor([num_tokens_per_ubatch] * self.config.parallel_config.data_parallel_size,
-                                device="cpu", dtype=torch.int32),
+                    torch.tensor(
+                        [num_tokens_per_ubatch]
+                        * self.config.parallel_config.data_parallel_size,
+                        device="cpu",
+                        dtype=torch.int32,
+                    ),
                 )
-            logger.info("jcz recv_metadata self.dp_metadata_list:{}".format(self.dp_metadata_list))
+            logger.info(
+                "jcz recv_metadata self.dp_metadata_list:{}".format(
+                    self.dp_metadata_list
+                )
+            )
 
     def _send_hidden_states(
         self,
@@ -229,7 +235,6 @@ class P2PAFDConnector(AFDConnectorBase):
             dtype=tensor_metadata.dtype,
             device=tensor_metadata.device,
         )
-        # logger.info(f"{__file__}: p2p recv hidden states: {hidden_states.shape=}, {tensor_metadata.size=}")
         torch.distributed.recv(
             hidden_states,
             src=process_group.ranks[src],
@@ -267,7 +272,6 @@ class P2PAFDConnector(AFDConnectorBase):
             self.recv_ffn_output_counter
             % self._current_afd_connector_metadata.num_of_stages
         )
-        logger.info(f"{stage_idx=}")
         hidden_states, work_list = self._recv_hidden_states(
             src,
             self.e2a_group,
