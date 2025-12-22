@@ -527,6 +527,14 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
+            # Fuse fused_add_rms_norm + static fp8 quant
+            FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns
+            )
+
+            # Fuse rms_norm + static fp8 quant
+            RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
+
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns
