@@ -755,8 +755,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "activation function, but got {layer.activation}."
                 )
 
-        self.rocm_aiter_moe_enabled = False
-
     def create_weights(
         self,
         layer: Module,
@@ -888,6 +886,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+        self.rocm_aiter_moe_enabled = False
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
