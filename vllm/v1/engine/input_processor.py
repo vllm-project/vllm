@@ -458,6 +458,28 @@ class InputProcessor:
             else:
                 mm_uuids = None
 
+        # When enable_tower_connector_lora is True, multi-modal embeddings
+        # vary depending on the LoRA request. Therefore, the mm_hash must be
+        # generated based on the LoRA request to prevent incorrect cache hits.
+        lora_config = self.lora_config
+        if (
+            mm_uuids
+            and lora_request
+            and lora_config
+            and lora_config.enable_tower_connector_lora
+        ):
+
+            def add_mm_lora_prefix(val):
+                if isinstance(val, list):
+                    return [
+                        f"{lora_request.lora_name}:{v}" if v is not None else None
+                        for v in val
+                    ]
+                else:
+                    return f"{lora_request.lora_name}:{val}"
+
+            mm_uuids = {k: add_mm_lora_prefix(v) for k, v in mm_uuids.items()}
+
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
