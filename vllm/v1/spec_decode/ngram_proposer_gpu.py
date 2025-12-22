@@ -289,8 +289,16 @@ class NgramProposerGPU:
             },
             cudagraph_mode=CUDAGraphMode.NONE,
         )
+        model_config = vllm_config.model_config
+        speculative_config = vllm_config.speculative_config
+        scheduler_config = vllm_config.scheduler_config
 
-        self.vllm_config = VllmConfig(compilation_config=compilation_config)
+        self.vllm_config = VllmConfig(
+            compilation_config=compilation_config,
+            model_config=model_config,
+            speculative_config=speculative_config,
+            scheduler_config=scheduler_config,
+        )
 
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         self.max_n = vllm_config.speculative_config.prompt_lookup_max
@@ -301,7 +309,7 @@ class NgramProposerGPU:
         self.device = device
 
         self.kernel = NgramGPUKernel(
-            vllm_config=vllm_config, prefix="ngram_gpu_kernel", device=device
+            vllm_config=self.vllm_config, prefix="ngram_gpu_kernel", device=device
         )
         self.device = device
         self.kernel.to(device)
