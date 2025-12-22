@@ -130,6 +130,22 @@ class CachedRequestData:
         return len(self.req_ids)
 
     @cached_property
+    def _req_id_to_num_output_tokens(self) -> dict[str, int]:
+        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
+
+        This cached property is safe because CachedRequestData instances
+        are created fresh each scheduling iteration and not mutated during
+        compuation of iteration details.
+        """
+        return dict(zip(self.req_ids, self.num_output_tokens))
+
+    def is_context_phase(self, req_id: str) -> bool:
+        num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
+        if num_output_tokens is not None:
+            return num_output_tokens == 0
+        return False
+
+    @cached_property
     @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
     def resumed_from_preemption(self) -> list[bool]:
         return [req_id in self.resumed_req_ids for req_id in self.req_ids]
