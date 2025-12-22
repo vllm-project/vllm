@@ -52,6 +52,7 @@ def init_aiter_topK_meta_data(
     shared_experts_score: float = 1.0,
     max_num_tokens: int = 32768,
     is_EP: bool = False,
+    device: int | str = "cuda",
 ):
     global aiter_topK_meta_data
     fake_expertid = n_routed_experts + n_shared_experts
@@ -64,7 +65,7 @@ def init_aiter_topK_meta_data(
     total_topk_ids = torch.empty(
         (max_num_tokens, top_k + n_shared_experts + is_EP),
         dtype=torch.int32,
-        device="cuda",
+        device=device,
     )
     ns_topk_ids, s_topk_ids = total_topk_ids.split(
         [top_k, n_shared_experts + is_EP], dim=1
@@ -80,12 +81,12 @@ def init_aiter_topK_meta_data(
         s_topk_ids_list = [
             list(range(n_routed_experts, fake_expertid))
         ] * max_num_tokens
-    s_topk_ids[:] = torch.tensor(s_topk_ids_list, dtype=torch.int32, device="cuda")
+    s_topk_ids[:] = torch.tensor(s_topk_ids_list, dtype=torch.int32, device=device)
 
     total_topk_weights = torch.empty(
         (max_num_tokens, top_k + n_shared_experts + is_EP),
         dtype=torch.float32,
-        device="cuda",
+        device=device,
     )
     ns_topk_weights, s_topk_weights = total_topk_weights.split(
         [top_k, n_shared_experts + is_EP], dim=1
