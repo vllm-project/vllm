@@ -303,11 +303,12 @@ class KVCacheManager:
         num_local_computed_tokens = (
             request.num_computed_tokens + num_new_computed_tokens
         )
+        total_computed_tokens = min(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self.max_model_len,
+        )
         num_tokens_need_slot = min(
-            num_local_computed_tokens
-            + num_external_computed_tokens
-            + num_new_tokens
-            + num_lookahead_tokens,
+            total_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len,
         )
 
@@ -317,7 +318,9 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(request.request_id, num_tokens_need_slot)
+        self.coordinator.remove_skipped_blocks(
+            request.request_id, total_computed_tokens
+        )
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
@@ -360,7 +363,7 @@ class KVCacheManager:
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
         num_tokens_to_cache = min(
-            num_local_computed_tokens + num_external_computed_tokens + num_new_tokens,
+            total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)

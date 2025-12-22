@@ -344,7 +344,9 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    def remove_skipped_blocks(self, request_id: str, num_tokens_need_slot: int) -> None:
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
         """
         Remove and free the blocks that are no longer needed for attention computation.
         The removed blocks should be replaced by null_block.
@@ -354,11 +356,11 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            num_tokens_need_slot: The number of tokens that need a slot, including
-                already computed tokens and to be computed tokens.
+            total_computed_tokens: The total number of computed tokens, including
+                local computed tokens and external computed tokens.
         """
         # Remove the blocks that will be skipped during attention computation.
-        num_skipped_tokens = self.get_num_skipped_tokens(num_tokens_need_slot)
+        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
