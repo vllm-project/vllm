@@ -3534,6 +3534,7 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+            num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
@@ -3564,12 +3565,14 @@ class GPUModelRunner(
                     else:
                         target_hidden_states = hidden_states[token_indices]
                 else:
-                    common_attn_metadata, token_indices_to_sample = (
-                        self.drafter.prepare_inputs_padded(
-                            common_attn_metadata,
-                            spec_decode_metadata,
-                            valid_sampled_tokens_count,
-                        )
+                    (
+                        common_attn_metadata,
+                        token_indices_to_sample,
+                        num_rejected_tokens_gpu,
+                    ) = self.drafter.prepare_inputs_padded(
+                        common_attn_metadata,
+                        spec_decode_metadata,
+                        valid_sampled_tokens_count,
                     )
                     total_num_tokens = common_attn_metadata.num_actual_tokens
                     # When padding the batch, token_indices is just a range
@@ -3600,6 +3603,7 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
 
         return draft_token_ids

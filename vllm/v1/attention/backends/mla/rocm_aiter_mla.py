@@ -106,8 +106,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,

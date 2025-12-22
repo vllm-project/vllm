@@ -169,8 +169,8 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
@@ -178,7 +178,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_cpu.max().item()
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0
@@ -193,7 +192,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             max_num_splits = 1
 
         scheduler_metadata = self._schedule_decode(
-            num_reqs=seq_lens_cpu.numel(),
+            num_reqs=seq_lens_device.shape[0],
             cu_query_lens=query_start_loc_device,
             max_query_len=max_query_len,
             seqlens=seq_lens_device,
