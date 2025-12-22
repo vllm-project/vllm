@@ -1229,7 +1229,7 @@ class NixlConnectorWorker:
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = (
                 cache_or_caches
-                if not self.kv_topo.cross_layers_blocks and self.kv_topo.split_k_and_v
+                if self.kv_topo.split_k_and_v
                 else [cache_or_caches]
             )
             for cache in cache_list:
