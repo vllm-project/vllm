@@ -13,10 +13,10 @@ from tests.models.language.pooling_mteb_test.mteb_utils import (
     VllmMtebCrossEncoder,
     mteb_test_rerank_models,
 )
-from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from tests.models.utils import RerankModelInfo
 
 RERANK_MODELS = [
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "BAAI/bge-reranker-v2-gemma",
         architecture="GemmaForSequenceClassification",
         mteb_score=0.33757,

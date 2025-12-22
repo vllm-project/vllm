@@ -513,6 +513,8 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        self.try_verify_and_update_model_config()
+
         # Init pooler config if needed
         if self.runner_type == "pooling":
             if self.pooler_config is None:
@@ -1783,6 +1785,19 @@ class ModelConfig:
 
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
+
+    def try_verify_and_update_model_config(self):
+        architecture = self.architecture
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+        )
+
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_model_config(self)
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

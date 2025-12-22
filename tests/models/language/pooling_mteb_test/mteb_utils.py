@@ -243,13 +243,6 @@ def mteb_test_embed_models(
         if model_info.architecture:
             assert model_info.architecture in model_config.architectures
 
-        # Confirm whether vllm uses the correct default_pooling_type, which
-        # relates to whether chunked prefill and prefix caching are enabled
-        assert (
-            model_config._model_info.default_pooling_type
-            == model_info.default_pooling_type
-        )
-
         vllm_main_score = run_mteb_embed_task(
             VllmMtebEncoder(vllm_model), MTEB_EMBED_TASKS
         )
@@ -379,13 +372,6 @@ def mteb_test_rerank_models(
 
         # Score API is only enabled for num_labels == 1
         assert model_config.hf_config.num_labels == 1
-
-        # Confirm whether vllm uses the correct default_pooling_type, which
-        # relates to whether chunked prefill and prefix caching are enabled
-        assert (
-            model_config._model_info.default_pooling_type
-            == model_info.default_pooling_type
-        )
 
         vllm_main_score = run_mteb_rerank(
             vllm_mteb_encoder(vllm_model),
