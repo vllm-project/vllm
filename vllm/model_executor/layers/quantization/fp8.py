@@ -1012,8 +1012,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             self.kernel = mk.FusedMoEModularKernel(
-                # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
-                # with the changes to defer input quantization
                 FlashInferAllGatherMoEPrepareAndFinalize(
                     use_dp=(self.moe.dp_size > 1),
                     use_deepseek_fp8_block_scale=self.block_quant,
@@ -1049,20 +1047,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             config = self.get_fused_moe_quant_config(layer)
             assert config is not None
             self.moe_quant_config = config
+            use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
+            allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
+            moe_kernel = (
+                MarlinExperts(quant_config=self.moe_quant_config)
+                if use_marlin
+                else TritonOrDeepGemmExperts(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=allow_deep_gemm,
+                )
+            )
 
-            if self.fp8_backend == Fp8MoeBackend.MARLIN:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    MarlinExperts(quant_config=self.moe_quant_config),
-                )
-            else:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonOrDeepGemmExperts(
-                        quant_config=self.moe_quant_config,
-                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                    ),
-                )
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(), moe_kernel
+            )
             self.use_inplace = True
 
     def maybe_make_prepare_finalize(
@@ -1103,10 +1101,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        if self.fp8_backend == Fp8MoeBackend.MARLIN or self.rocm_aiter_moe_enabled:
-            raise NotImplementedError(
-                "Marlin and ROCm AITER are not supported with all2all yet."
-            )
+        assert (
+            self.fp8_backend != Fp8MoeBackend.MARLIN
+        ) and not self.rocm_aiter_moe_enabled, (
+            "Marlin and ROCm AITER are not supported with all2all yet."
+        )
 
         assert self.moe_quant_config is not None
 
@@ -1254,18 +1253,36 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
-        result = self.kernel(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
-            inplace=self.use_inplace,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-        )
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+                rocm_aiter_fused_experts,
+            )
+
+            # TODO(rob): convert this to MK.
+            result = rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                quant_config=self.moe_quant_config,
+            )
+        else:
+            result = self.kernel(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=self.use_inplace,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
 
         return result
 
