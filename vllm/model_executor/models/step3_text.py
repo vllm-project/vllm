@@ -303,10 +303,6 @@ class Step3TextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        # query, key and positions must have the same number of tokens
-        # /model_executor/layers/rotary_embedding/base.py
-        # positions.shape=torch.Size([8192]), hidden_states.shape=torch.Size([4096, 3712]）
-        logger.info(f"{positions.shape=}, {hidden_states.shape=}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -342,7 +338,6 @@ class Step3TextDecoderLayer(nn.Module):
             hidden_states = share_output + moe_output
         else:
             hidden_states = self.mlp(hidden_states)
-        logger.info(f"{type(hidden_states)=}")
         return hidden_states
 
 
@@ -353,7 +348,6 @@ class Step3TextModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        logger.info(f"{quant_config=}")
         afd_config = vllm_config.afd_config
         self.vocab_size = config.vocab_size
         self.config = config
@@ -440,7 +434,6 @@ class Step3TextModel(nn.Module):
 
                 ubatch_hidden_states[stage_i] = hidden_states
                 ubatch_residual[stage_i] = residual
-                logger.info(f"create attn metadata:, {afd_metadata.afd_tokens_lens=}")
                 metadata = AFDConnectorMetadata.create_attention_metadata(
                     layer_idx=layer.layer_idx,
                     stage_idx=stage_i,
@@ -515,7 +508,6 @@ class Step3TextModel(nn.Module):
         hidden_states,
         layer_idx,
     ) -> torch.Tensor | IntermediateTensors:
-        logger.info(f"{type(self.layers)=}, {type(layer_idx)=}")
         hidden_states = self.layers[layer_idx].compute_ffn_output(hidden_states)
         return hidden_states
 
@@ -582,7 +574,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        logger.info(f"{__file__}: load_weights!")
         qkv_params_mapping = [
             # (param_name, shard_name, relative_start_idx, relative_end_idx)
             (
@@ -615,7 +606,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        # logger.info(f"{params_dict.keys()=}")
         loaded_params: set[str] = set()
 
         expert_params_mapping = [
@@ -627,10 +617,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
 
         for name, loaded_weight in weights:
-            # logger.info(
-            #     f"{self.afd_role=}, {name=}, is_moe: {self.is_moe_weight(name)}, "
-            #     f"is_common: {self.is_common_weight(name)}"
-            # )
             if self.afd_role == "attention" and self.is_moe_weight(name):
                 continue
 
@@ -695,7 +681,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                         start_idx,
                         end_idx,
                     ) in qkv_params_mapping:
-                        # logger.info(f"{weight_name=}, {name=}")
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
