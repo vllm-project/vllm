@@ -54,10 +54,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
+        from .naive_prepare_finalize import FusedMoENaivePrepareAndFinalize
 
-        return maybe_make_prepare_finalize(
+        prepare_finalize = maybe_make_prepare_finalize(
             self.moe, self.moe_quant_config, routing_tables
         )
+
+        if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
+            # EP+DP without a specialized all2all backend: use naive dispatch/combine
+            return FusedMoENaivePrepareAndFinalize()
+
+        return prepare_finalize
 
     def select_gemm_impl(
         self,

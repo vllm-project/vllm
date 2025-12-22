@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import Any, final
 
 import torch
 
@@ -166,6 +166,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
+    def preprocess_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Optional hook that can modify tensors prior to routing."""
+        return hidden_states, router_logits
+
     @abstractmethod
     def prepare(
         self,
@@ -199,6 +208,14 @@ class FusedMoEPrepareAndFinalize(ABC):
         - Optional dispatched expert topk weight
         """
         raise NotImplementedError
+
+    def postprocess_output(
+        self,
+        result: Any,
+        layer: torch.nn.Module,
+    ) -> Any:
+        """Optional hook that can modify tensors after finalize completes."""
+        return result
 
     def supports_async(self) -> bool:
         """
