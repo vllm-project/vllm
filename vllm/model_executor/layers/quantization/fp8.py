@@ -190,8 +190,7 @@ def get_fp8_moe_backend(
             logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
 
-    # if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-    if rocm_aiter_ops.is_fused_moe_enabled():
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
         logger.info_once("Using ROCm AITER backend for FP8 MoE", scope="local")
         return Fp8MoeBackend.AITER
 
@@ -1074,7 +1073,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             self.kernel = mk.FusedMoEModularKernel(
-                # TODO: this is no longer needed with the defer input quant change
+                # TODO(rob): in follow up, we can use the generic
+                # MoEPrepareAndFinalizeNoEP with the changes to
+                # defer input quantization
                 FlashInferAllGatherMoEPrepareAndFinalize(
                     use_dp=(self.moe.dp_size > 1),
                     use_deepseek_fp8_block_scale=self.block_quant,
