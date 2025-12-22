@@ -608,7 +608,8 @@ class OpenAIServingChat(OpenAIServing):
                             prompt_token_ids=(res.prompt_token_ids
                                               if request.return_token_ids else
                                               None))
-                        if request.enable_metrics is not None and request.enable_metrics.get("encode", False):
+                        enable_metrics = getattr(request, "enable_metrics", None)
+                        if enable_metrics and enable_metrics.get("encode", False):
                             if chunk.metrics is None:
                                 chunk.metrics = {}
                             chunk.metrics["encode_time_ms"] = res.capture_metrics_result.get("encode_time_ms", None)
@@ -1427,7 +1428,8 @@ class OpenAIServingChat(OpenAIServing):
                               if request.return_token_ids else None),
             kv_transfer_params=final_res.kv_transfer_params,
         )
-        if request.enable_metrics is not None and request.enable_metrics.get("encode", False):
+        enable_metrics = getattr(request, "enable_metrics", None)
+        if enable_metrics and enable_metrics.get("encode", False):
             if response.metrics is None:
                 response.metrics = {}
             response.metrics["encode_time_ms"] = final_res.metrics.get("encode_time_ms")
