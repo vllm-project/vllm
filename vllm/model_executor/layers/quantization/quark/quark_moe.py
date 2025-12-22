@@ -745,6 +745,9 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 "not implemented. Please open an issue."
             )
 
+        self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
+        self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
+
         self.emulate = not current_platform.supports_mx() or not (
             rocm_aiter_ops.is_mxfp4_aiter_moe()
         )
@@ -807,10 +810,10 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return mxfp4_w4a4_moe_quant_config(
-            w1_bias=layer.w13_bias,
-            w2_bias=layer.w2_bias,
-            w1_scale=layer.w1_weight_scale,
+        return FusedMoEQuantConfig.make(
+            quant_dtype=self.input_dtype,
+            weight_dtype=self.weight_dtype,
+            w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
         )
 
@@ -826,11 +829,10 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
             )
 
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
-
         if not self.emulate:
             from aiter import ActivationType, QuantType
             from aiter.fused_moe import fused_moe
