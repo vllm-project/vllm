@@ -241,17 +241,6 @@ def create_whisper_attention_backend_with_block_pooling(
             new_common_attn_metadata.max_seq_len *= block_pool_size
             original_slot_mapping = common_attn_metadata.slot_mapping
             common_prefix_len *= block_pool_size
-            new_common_attn_metadata.slot_mapping = torch.tensor(
-                [
-                    i
-                    for n in original_slot_mapping.tolist()
-                    for i in range(
-                        n * block_pool_size,
-                        n * block_pool_size + block_pool_size,
-                    )
-                ],
-                device=original_slot_mapping.device,
-            )
             new_common_attn_metadata.slot_mapping = (
                 (
                     original_slot_mapping.unsqueeze(1) * block_pool_size
