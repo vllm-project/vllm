@@ -1134,7 +1134,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
                     ),
                 )
-            self.use_inplace = False
+            self.use_inplace = True
 
     def maybe_make_prepare_finalize(
         self,
