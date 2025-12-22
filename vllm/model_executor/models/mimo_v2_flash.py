@@ -211,7 +211,7 @@ class MiMoV2Attention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         v_head_dim: int | None = None,
-        v_scale: float | None = None,
+        v_scale: float = 1.0,
         sliding_window_size: int = -1,
         attention_bias: bool = False,
         add_swa_attention_sink_bias: bool = False,
@@ -306,9 +306,8 @@ class MiMoV2Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
 
-        # Apply v_scale before attention (as in SGLang)
-        if self.v_scale is not None:
-            v = v * self.v_scale
+        # Apply v_scale before attention
+        v = v * self.v_scale
 
         v = v.view(-1, self.num_kv_heads, self.v_head_dim)
         v = torch.nn.functional.pad(v, [0, self.head_dim - self.v_head_dim], value=0)
@@ -339,6 +338,11 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         v_scale = getattr(config, "attention_value_scale", None)
+        if v_scale is None:
+            raise ValueError(
+                "attention_value_scale is required for MiMoV2Flash model. "
+                "If you encounter this error, please file a GitHub issue."
+            )
 
         if self.is_compressed_softmax_layer():
             self.self_attn = MiMoV2Attention(
