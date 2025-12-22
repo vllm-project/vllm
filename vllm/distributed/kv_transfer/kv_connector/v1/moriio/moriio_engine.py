@@ -34,9 +34,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_role,
     zmq_ctx,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
-    MoRIIOConnectorWorker,
-)
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+        MoRIIOConnectorWorker,
+    )
 
 logger = init_logger(__name__)
 try:
