@@ -347,7 +347,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = Llama4VisionAttention(
-            config=config,
+            config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             use_data_parallel=use_data_parallel,
@@ -399,7 +399,7 @@ class Llama4VisionEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 Llama4VisionEncoderLayer(
-                    config=config,
+                    config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     use_data_parallel=use_data_parallel,
@@ -459,7 +459,6 @@ class Llama4UnfoldConvolution(nn.Module):
         return hidden_states
 
 
-# TODO: test this
 @support_torch_compile(
     dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_vit
 )
@@ -497,16 +496,17 @@ class Llama4VisionModel(nn.Module):
         self.layernorm_pre = nn.LayerNorm(self.hidden_size, eps=1e-5)
         self.layernorm_post = nn.LayerNorm(self.hidden_size, eps=1e-5)
 
+        # encoders
         self.model = Llama4VisionEncoder(
-            config=config,
+            config,
             quant_config=quant_config,
             prefix=f"{prefix}.model",
             use_data_parallel=use_data_parallel,
         )
 
         self.vision_adapter = Llama4VisionPixelShuffleMLP(
-            config=config,
-            quant_config=quant_config,
+            config,
+            quant_config,
             prefix=f"{prefix}.vision_adapter",
             use_data_parallel=use_data_parallel,
         )
@@ -768,6 +768,7 @@ class Llama4ForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
@@ -785,11 +786,12 @@ class Llama4ForConditionalGeneration(
                     prefix=maybe_prefix(prefix, "vision_model"),
                     use_data_parallel=self.use_data_parallel,
                 )
-                self.multi_modal_projector = Llama4MultiModalProjector(
-                    config=self.config,
-                    quant_config=None,
-                    prefix=maybe_prefix(prefix, "multi_modal_projector"),
-                )
+
+            self.multi_modal_projector = Llama4MultiModalProjector(
+                config=self.config,
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
         else:
             self.vision_model = None
             self.multi_modal_projector = None
@@ -882,6 +884,7 @@ class Llama4ForConditionalGeneration(
             )
         else:
             vision_embeddings_flat = self.vision_model(pixel_values)
+
         vision_embeddings_flat = self.multi_modal_projector(vision_embeddings_flat)
 
         return [
@@ -896,8 +899,8 @@ class Llama4ForConditionalGeneration(
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
+
         with (
-            set_current_vllm_config(self.vllm_config),
             set_forward_context(None, self.vllm_config),
         ):
             return self._process_image_input(image_input)
