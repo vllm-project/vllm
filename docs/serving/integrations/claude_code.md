@@ -30,16 +30,7 @@ Start vLLM with a tool-calling capable model - here's an example using `openai/g
 vllm serve openai/gpt-oss-120b --served-model-name my-model
 ```
 
-For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. For example, with Qwen3:
-
-```bash
-vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
-    --served-model-name my-model \
-    --enable-auto-tool-choice \
-    --tool-call-parser hermes
-```
-
-Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
+For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
 
 ## Configuring Claude Code
 
@@ -56,13 +47,13 @@ claude
 
 The environment variables:
 
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_BASE_URL` | Points to your vLLM server (default port is 8000) |
-| `ANTHROPIC_API_KEY` | Can be any value since vLLM doesn't require authentication by default |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | Model name for Opus-tier requests |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Model name for Haiku-tier requests |
+| Variable                         | Description                                                           |
+| -------------------------------- | --------------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`             | Points to your vLLM server (default port is 8000)                     |
+| `ANTHROPIC_API_KEY`              | Can be any value since vLLM doesn't require authentication by default |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Model name for Opus-tier requests                                     |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests                                   |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Model name for Haiku-tier requests                                    |
 
 !!! tip
     You can add these environment variables to your shell profile (e.g., `.bashrc`, `.zshrc`), Claude Code configuration file (`~/.claude/settings.json`), or create a wrapper script for convenience.
