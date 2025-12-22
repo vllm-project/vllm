@@ -79,9 +79,6 @@ RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 # PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
 RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
 
-# decrease triton kernel compilation scratch space for speculative decoding
-ENV IGC_ForceOCLSIMDWidth=16
-
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall oneccl oneccl-devel -y
