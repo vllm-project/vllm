@@ -17,6 +17,16 @@ The E4M3 format offers higher precision compared to E5M2. However, due to its sm
 
 For now, only per-tensor (scalar) scaling factors are supported. Development is ongoing to support scaling factors of a finer granularity (e.g. per-channel).
 
+### How FP8 KV Cache Works
+
+The FP8 KV cache implementation follows this workflow:
+
+1. **Storage**: Key and Value tensors are quantized to FP8 format using scaling factors before being stored in the KV cache
+2. **Retrieval**: When needed for attention computation, cached KV tensors are dequantized back to higher precision (FP16/BF16)
+3. **Attention**: The attention-value multiplication (softmax output × V) is performed using the dequantized higher-precision V tensor
+
+This means the final attention computation operates on dequantized values, not FP8 tensors. The quantization reduces memory usage during storage but maintains computation accuracy by using higher precision during the actual attention operations.
+
 ### Performance Impact
 
 The current FP8 KV cache implementation primarily benefits throughput by allowing approximately double the amount of space for KV cache allocation. This enables either:
