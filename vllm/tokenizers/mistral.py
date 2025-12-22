@@ -1,47 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+from mistral_common.protocol.instruct.request import (
+    ChatCompletionRequest as MistralChatCompletionRequest,
+)
+from mistral_common.protocol.instruct.tool_calls import Function, Tool
+from mistral_common.protocol.instruct.validator import ValidationMode
+from mistral_common.tokens.tokenizers.base import (
+    SpecialTokenPolicy,
+    SpecialTokens,
+)
+from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+from mistral_common.tokens.tokenizers.sentencepiece import (
+    SentencePieceTokenizer,
+)
+from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
-
-
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from mistral_common.protocol.instruct.validator import ValidationMode
-from mistral_common.protocol.instruct.tool_calls import Function, Tool
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer,
-)
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from mistral_common.protocol.instruct.request import (
-    ChatCompletionRequest as MistralChatCompletionRequest,
-)
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
-from mistral_common.protocol.instruct.validator import ValidationMode
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer,
-)
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-
-from mistral_common.tokens.tokenizers.base import (
-    SpecialTokenPolicy,
-    SpecialTokens,
-)
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer,
-)
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from mistral_common.tokens.tokenizers.base import (
-    SpecialTokenPolicy,
-    SpecialTokens,
-)
-from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
-
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
@@ -298,9 +279,8 @@ class MistralTokenizer(TokenizerLike):
         self._special_tokens = self._get_special_tokens(self._special_token_ids)
         self._special_tokens_set = set(self._special_tokens)
 
-
     def _get_special_token_ids(self) -> list[int]:
-        return sorted(self.tokenizer.is_special(i) for i in len(self._vocab))
+        return sorted(self.tokenizer.is_special(i) for i in range(len(self._vocab)))
 
     def _get_special_tokens(self, all_special_ids: list[int]) -> list[str]:
         return [
@@ -462,7 +442,6 @@ class MistralTokenizer(TokenizerLike):
         )
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-
         to_decode_special_tokens = {SpecialTokens.tool_calls}
         if self.is_tekken:
             assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
