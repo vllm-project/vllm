@@ -39,7 +39,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.models.whisper_utils import (
+from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
     WhisperAttentionWithBlockPooling,
     WhisperCausalConv1d,
