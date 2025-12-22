@@ -851,7 +851,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "VoxtralStreamingGeneration": _HfExamplesInfo(
-        "mistralai/Voxtral-Mini-3B-2507",
+        "<place-holder>",
         # disable this temporarily until we support HF format
         is_available_online=False,
     ),
