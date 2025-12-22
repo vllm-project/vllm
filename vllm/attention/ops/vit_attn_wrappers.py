@@ -124,13 +124,6 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # Never remove the contiguous logic for ROCm
-    # Without it, hallucinations occur with the backend
-    if current_platform.is_rocm():
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-
     if cu_seqlens is None:
         return apply_sdpa(q, k, v)
 

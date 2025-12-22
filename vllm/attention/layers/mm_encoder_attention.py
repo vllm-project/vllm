@@ -205,6 +205,23 @@ class MMEncoderAttention(CustomOp):
                 f"{self.attn_backend}."
             )
 
+    def forward_hip(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+    ) -> torch.Tensor:
+        # Never remove the contiguous logic for ROCm.
+        # Without it, hallucinations will occur with TORCH_SDPA backend.
+        if self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            query = query.contiguous()
+            key = key.contiguous()
+            value = value.contiguous()
+
+        return self.forward_cuda(query, key, value, cu_seqlens, max_seqlen)
+
     def forward_cpu(
         self,
         query: torch.Tensor,
