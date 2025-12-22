@@ -320,67 +320,19 @@ class QuarkConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
-    def _is_w_ocp_mx_a_ocp_mx(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
-    ) -> bool:
-        # Confirm weights and input quantized.
-        if weight_quant is None or input_quant is None:
-            logger.debug(
-                "Quark model is not in OCP MX format: "
-                "weight_quant or input_quant not set"
-            )
-            return False
-
-        # Input and weight qscheme needs to be per group.
-        if (
-            weight_quant.get("qscheme") != "per_group"
-            or input_quant.get("qscheme") != "per_group"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not per_group")
-            return False
-
-        # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32 or input_quant.get("group_size") != 32:
-            logger.debug("Quark model is not in OCP MX format: not group_size=32")
-            return False
-
-        # Activations and weight scales need to be in e8m0 format.
-        if (
-            weight_quant.get("scale_format") != "e8m0"
-            or input_quant.get("scale_format") != "e8m0"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not scale_format e8m0")
-            return False
-
-        # Input and weight dtypes need to be any of fp4,
-        # fp6_e3m2 or fp6_e3m2, possibly mixed.
-        if weight_quant.get("dtype") not in {
-            "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
-        } or input_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}:
-            logger.debug(
-                "Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3"
-            )
-            return False
-
-        return True
-
-    def _is_w_ocp_mx_weight_only(
+    def _is_w_ocp_mx_a_x(
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
-        # Confirm weights and input quantized.
+        """
+        This check returns True only if it is an OCP-MX weight quantization. 
+        The activation can be any quantization data type (e.g., FP16/BF16, FP8, or any OCP-MX series). 
+        The rationale for checking only the weight type is that 
+        the model loading concept and process (create weights) primarily concerns the weights themselves.
+        """
+        # Confirm weights quantized.
         if weight_quant is None:
             logger.debug(
                 "Quark model's quantization is incompatible with the OCP_MX weight only: weight_quant is not set"
-            )
-            return False
-
-        if input_quant is not None:
-            logger.debug(
-                f"Quark model's quantization is incompatible with the OCP_MX weight only: input_quant is set as {input_quant}."
             )
             return False
 
@@ -414,60 +366,6 @@ class QuarkConfig(QuantizationConfig):
         }:
             logger.debug(
                 "Quark model's weight quantization is incompatible with the OCP MX format: dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
-            )
-            return False
-
-        return True
-
-    def _is_w_ocp_mx_a_fp8(
-        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
-    ) -> bool:
-        # Confirm weights and input quantized.
-        if weight_quant is None or input_quant is None:
-            logger.debug(
-                "Quark model's quantization is incompatible with the OCP_MX_FP8: weight_quant or input_quant not set"
-            )
-            return False
-
-        # Input and weight qscheme needs to be per group.
-        if (
-            weight_quant.get("qscheme") != "per_group"
-            or input_quant.get("qscheme") != "per_tensor"
-        ):
-            logger.debug(
-                "Quark model's weight quantization is incompatible with the OCP MX format: weight is not per_group or input is not per_tensor"
-            )
-            return False
-
-        # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32:
-            logger.debug(
-                "Quark model's weight quantization is incompatible with the OCP MX format: group_size of weight is not 32"
-            )
-            return False
-
-        # Activations and weight scales need to be in e8m0 format.
-        if weight_quant.get("scale_format") != "e8m0":
-            logger.debug(
-                "Quark model's weight quantization is incompatible with the OCP MX format: scale_format of weight is not e8m0"
-            )
-            return False
-
-        # Input and weight dtypes need to be any of fp4,
-        # fp6_e3m2 or fp6_e3m2, possibly mixed.
-        if weight_quant.get("dtype") not in {
-            "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
-        }:
-            logger.debug(
-                "Quark model's weight quantization is incompatible with the OCP MX format: dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
-            )
-            return False
-
-        if input_quant.get("dtype") not in {"fp8_e4m3"}:
-            logger.debug(
-                "Quark model's input quantization is incompatible with FP8: dtype is not fp8_e4m3."
             )
             return False
 
