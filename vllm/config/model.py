@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -11,7 +12,6 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -91,6 +91,32 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
 ]
+
+
+def _get_allowed_layer_types() -> tuple[str, ...]:
+    """Get allowed layer types with backwards compatibility for transformers."""
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+
+        return ALLOWED_LAYER_TYPES
+
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import (
+            ALLOWED_ATTENTION_LAYER_TYPES,
+            ALLOWED_MLP_LAYER_TYPES,
+        )
+
+        return ALLOWED_ATTENTION_LAYER_TYPES + ALLOWED_MLP_LAYER_TYPES
+
+    raise ImportError(
+        "Could not import layer type constants from transformers. "
+        "Please ensure you have a compatible version installed. "
+        "Expected 'ALLOWED_LAYER_TYPES' or 'ALLOWED_ATTENTION_LAYER_TYPES'/"
+        "'ALLOWED_MLP_LAYER_TYPES'."
+    )
+
+
+ALLOWED_LAYER_TYPES = _get_allowed_layer_types()
 
 
 @config
