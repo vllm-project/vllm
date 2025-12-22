@@ -158,6 +158,12 @@ class ECConnectorBase(ABC):
         """
         pass
 
+    @abstractmethod
+    def wait_for_load(self) -> None:
+        """
+        """
+        pass
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:

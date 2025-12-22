@@ -609,8 +609,8 @@ class GPUModelRunner(
         )
 
         if has_ec_transfer():
-            self.ec_main_cache = TensorMemoryPool()
-            get_ec_transfer().register_encoder_cache(self.ec_main_cache)
+            self.transfer_pool = TensorMemoryPool(max_block_size=1073741824, device_type="cuda", auto_evict=True)
+            get_ec_transfer().register_encoder_cache(self.transfer_pool)
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
@@ -2194,10 +2194,8 @@ class GPUModelRunner(
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
-            addr = self.ec_main_cache.store_tensor(output)
-            pooled_tensor = self.ec_main_cache.load_tensor(addr)
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                pooled_tensor,
+                output,
                 is_embed=pos_info.is_embed,
             )
             logger.debug("Finish execute for mm hash %s", mm_hash)
@@ -2219,6 +2217,8 @@ class GPUModelRunner(
         req_start_idx = 0
         should_sync_mrope_positions = False
         should_sync_xdrope_positions = False
+
+        self.maybe_wait_for_ec_load()
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []

@@ -71,7 +71,7 @@ class TensorMemoryPool:
         max_block_size: int,
         min_block_size: int = 512,
         device_type: str = "cpu",
-        auto_evict=False,
+        auto_evict: bool = False,
     ):
         if max_block_size <= 0 or min_block_size <= 0:
             raise ValueError("Block sizes must be positive")
@@ -87,8 +87,6 @@ class TensorMemoryPool:
 
         self.free_lists: dict[int, dict[int, MemoryBlock]] = {}
         self.allocated_blocks: OrderedDict[int, MemoryBlock] = {}
-        self.key_to_addr: dict[str, int] = {}
-        self.addr_to_key: dict[int, str] = {}
 
         self._initialize_free_lists()
         self._allocate_memory()
@@ -112,7 +110,7 @@ class TensorMemoryPool:
         else:  # cuda
             self.base_tensor = torch.empty(
                 self.max_block_size // 4, dtype=torch.float32, device="cuda"
-            )
+            ).contiguous()
 
         self.base_address = self.base_tensor.data_ptr()
         initial_block = MemoryBlock(size=self.max_block_size, addr=self.base_address)
@@ -195,8 +193,6 @@ class TensorMemoryPool:
             raise ValueError("Invalid address to free")
 
         block = self.allocated_blocks.pop(addr)
-        if addr in self.addr_to_key:
-            self.key_to_addr.pop(self.addr_to_key.pop(addr))
         self._merge_buddies(block)
 
     def _merge_buddies(self, block: MemoryBlock):
@@ -221,7 +217,7 @@ class TensorMemoryPool:
                 break
         self.free_lists[block.size][block.addr] = block
 
-    def store_tensor(self, tensor: torch.Tensor, key: str | None = None) -> int:
+    def store_tensor(self, tensor: torch.Tensor) -> int:
         """Stores a tensor in the memory pool.
 
         Args:
@@ -257,10 +253,6 @@ class TensorMemoryPool:
             raise ValueError(f"Failed to create tensor view: {err}") from err
 
         pool_tensor.copy_(tensor)
-
-        if key:
-            self.key_to_addr[key] = addr
-            self.addr_to_key[addr] = key
 
         return addr
 
@@ -313,11 +305,6 @@ class TensorMemoryPool:
         target_tensor.copy_(pool_tensor)
 
         return target_tensor
-
-    def get_addr_by_key(self, key: str) -> int | None:
-        if key in self.key_to_addr:
-            return self.key_to_addr[key]
-        return None
 
     def cleanup(self):
         """Cleans up all memory resources and resets the pool state."""
