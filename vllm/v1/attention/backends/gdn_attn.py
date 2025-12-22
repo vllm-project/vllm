@@ -58,7 +58,7 @@ class GDNAttentionMetadata:
     # APC metadata, similar definitions to Mamba2
     # state_indices_tensor is None when APC is disabled.
     # When APC is enabled, it takes the role of non_spec_state_indices_tensor
-    state_indices_tensor: torch.Tensor | None = None  # shape: [batch,]
+    state_indices_tensor: torch.Tensor | None = None  # shape: [batch, max_num_blocks]
     block_idx_last_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor | None = None  # shape: [batch,]
     block_idx_last_computed_token: torch.Tensor | None = None  # shape: [batch,]
@@ -514,7 +514,6 @@ class GDNAttentionMetadataBuilder(
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
-        __import__("fpdb").ForkedPdb().set_trace()
         return attn_metadata
 
     def build_for_cudagraph_capture(

@@ -537,8 +537,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         start_non_spec_prefill = num_decodes
         end_non_spec_prefill = start_non_spec_prefill + num_prefills
 
-        __import__("fpdb").ForkedPdb().set_trace()
-
         # APC is enabled if pointers are available to the blocks, the last
         # computed token (the cache position), and the block to which the state
         # for each request should be written after the forward.
@@ -560,7 +558,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         block_idx_last_scheduled_token_p: torch.Tensor | None = None
         if prefix_caching_enabled:
             state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                state_indices_tensor,
+                state_indices_tensor[:num_actual_tokens],
                 [num_decodes, num_prefills],
                 dim=0,
             )
@@ -580,7 +578,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         state_indices_decode = None
         state_indices_prefill = None
         ssm_state_indices_decode = None
-        __import__("fpdb").ForkedPdb().set_trace()
 
         # Extract the cache and destination block indices
         if prefix_caching_enabled:
@@ -667,6 +664,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             if prefix_caching_enabled:
                 assert state_indices_tensor_p is not None
                 # Use the block indices for all chunks in the sequence
+                # TODO: probably remove
                 cache_indices_prefill = state_indices_tensor_p
 
             # - "cache_indices" updates the conv_state cache in positions
@@ -683,6 +681,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                block_size_to_align=block_size or 0,
                 num_computed_tokens=num_computed_tokens_p,
                 metadata=attn_metadata,
             ).transpose(0, 1)
@@ -697,6 +696,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 # TODO: check if it suffices to pass in the decode states here rather
                 #   than all state. Previously this was
                 #   non_spec_state_indices_tensor[:m.num_actual_tokens]
+                # NOTE: should very likely be state_indices_tensor_d
                 conv_state_indices=state_indices_decode,
                 # TODO: check if we can use the full indices table, perhaps not
                 # conv_state_indices=conv_indices_decode,
@@ -798,6 +798,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
+                # TODO: rename to chunk_state_history
                 block_state_history,
             ) = chunk_gated_delta_rule(
                 q=query_non_spec,
@@ -812,6 +813,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 use_qk_l2norm_in_kernel=True,
                 return_intermediate_states=prefix_caching_enabled,
             )
+            # TODO: check if we can remove this data-dependent branching
             if chunk_state_indices.numel() > 0:
                 assert state_indices_prefill is not None
                 valid_chunk_slots = state_indices_prefill >= 0
@@ -914,6 +916,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             ),
                         )
                         ssm_state.index_copy_(0, final_slot_ids, final_states)
+
         elif num_decodes > 0:
             assert state_indices_decode is not None
             assert ssm_state_indices_decode is not None
@@ -961,7 +964,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
-        __import__("fpdb").ForkedPdb().set_trace()
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
