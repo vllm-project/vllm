@@ -109,8 +109,7 @@ async def transfer_run_periodically(
 
         assert state.is_async
         for model_state in state.model_states.values():
-            # Rebalance experts is done once, only when the async worker wakes up.
-            run_rebalance_experts(model_state, state)
+            rebalancing_algorithm_executed = False
             logger.info(
                 "Async worker computed new indices for model %s",
                 model_state.model_name,
@@ -121,28 +120,34 @@ async def transfer_run_periodically(
                 model_state.rebalanced
                 and model_state.layer_to_transfer < current_num_layers
             ):
-                if (
-                    not model_state.ep_buffer_ready
-                    and model_state.rebalanced
-                    and model_state.new_physical_to_logical_map is not None
-                ):
+                if not model_state.ep_buffer_ready and model_state.rebalanced:
                     await asyncio.to_thread(model_state.buffer_lock.acquire)
                     try:
                         if model_state.layer_to_transfer >= current_num_layers:
                             break
+                        if not rebalancing_algorithm_executed:
+                            run_rebalance_experts(model_state, state)
+                            rebalancing_algorithm_executed = True
+
+                        layer_idx = model_state.layer_to_transfer
+                        old_layer_indices = model_state.old_physical_to_logical_map[
+                            layer_idx
+                        ]
+                        new_layer_indices = model_state.new_physical_to_logical_map[
+                            layer_idx
+                        ]
 
                         (
                             model_state.is_unchanged,
                             model_state.is_received_locally,
                             model_state.recv_metadata,
                         ) = await transfer_layer(
-                            old_global_expert_indices=model_state.physical_to_logical_map,
-                            new_global_expert_indices=model_state.new_physical_to_logical_map,
-                            expert_weights=model_state.model.expert_weights,
+                            old_layer_indices=old_layer_indices,
+                            new_layer_indices=new_layer_indices,
+                            expert_weights=model_state.model.expert_weights[layer_idx],
                             expert_weights_buffer=model_state.expert_buffer,
                             ep_group=ep_group,
                             is_profile=is_profile,
-                            layer=model_state.layer_to_transfer,
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
                         )
