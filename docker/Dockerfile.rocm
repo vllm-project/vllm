@@ -130,6 +130,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system *.whl
 
 ARG COMMON_WORKDIR
+ARG BASE_IMAGE
 
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
@@ -143,5 +144,10 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
+# Workaround for ROCm profiler limits
+RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
+ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
+RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 
 CMD ["/bin/bash"]
