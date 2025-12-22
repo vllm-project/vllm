@@ -860,7 +860,7 @@ class MambaManager(SingleTypeKVCacheManager):
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
-    def save_new_computed_blocks(
+    def allocate_new_computed_blocks(
         self,
         request_id: str,
         new_computed_blocks: Sequence[KVCacheBlock],
