@@ -246,11 +246,11 @@ _CROSS_ENCODER_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
     ),
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -263,7 +263,7 @@ _CROSS_ENCODER_MODELS = {
     "XLMRobertaForSequenceClassification": (
         "roberta",
         "RobertaForSequenceClassification",
-    ),
+    )
 }
 
 _MULTIMODAL_MODELS = {
