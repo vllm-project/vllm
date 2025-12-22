@@ -83,8 +83,9 @@ class Worker(WorkerBase):
         )
 
         # configure float32 matmul precision according to vLLM env.
-        precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
-        torch.backends.cuda.matmul.fp32_precision = precision
+        # precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
+        # TODO SMOR restore once fixed
+        # torch.backends.cuda.matmul.fp32_precision = precision
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
