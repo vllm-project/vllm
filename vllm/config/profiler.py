@@ -183,7 +183,11 @@ class ProfilerConfig:
                 "torch_profiler_dir is only applicable when profiler is set to 'torch'"
             )
         if self.profiler == "torch" and not profiler_dir:
-            raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
+            raise ValueError(
+                "torch_profiler_dir must be set when profiler is 'torch'."
+                "Please set via --profiler-config.torch_profiler_dir or "
+                "VLLM_TORCH_PROFILER_DIR environment variable.",
+            )
 
         if profiler_dir:
             is_gs_path = (

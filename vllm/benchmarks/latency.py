@@ -81,7 +81,8 @@ def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
     if args.profile and not engine_args.profiler_config.profiler == "torch":
         raise ValueError(
-            "The torch profiler is not enabled. Please provide profiler_config."
+            "The torch profiler is not enabled. Please provide profiler_config, "
+            "or set VLLM_TORCH_PROFILER_DIR to enable the torch profiler."
         )
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
