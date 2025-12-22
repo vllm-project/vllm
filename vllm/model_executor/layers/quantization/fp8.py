@@ -741,25 +741,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "size [128, 128]."
                 )
             if not self.block_quant:
+                assert quant_config.is_checkpoint_fp8_serialized
                 # The CUTLASS FP8 per-tensor kernel was built for Llama4,
                 # so ensure we have a Llama-4 like layer.
-                from vllm.model_executor.models.llama4 import Llama4MoE
-
-                if (
-                    layer.renormalize
-                    or layer.custom_routing_function
-                    != Llama4MoE.custom_routing_function
-                ):
-                    raise NotImplementedError(
-                        "FlashInfer CUTLASS FP8 MoE backend does custom routing "
-                        f"function or renormalization, but got {layer.renormalize} and "
-                        f"{layer.custom_routing_function}."
-                    )
-                if layer.scoring_func != "softmax":
+                # TODO(rob): check if these kernels can also work with other
+                # values. Since cutlass does not fuse .select_experts(), the
+                # moe kernel is not even aware of all these values...
+                # from vllm.model_executor.models.llama4 import Llama4MoE
+                if self.quant_config.activation_scheme != "static":
                     raise NotImplementedError(
                         "FlashInfer CUTLASS FP8 MoE backend only supports "
-                        f"'softmax' scoring function, but got {layer.scoring_func}."
+                        "static activation quantization."
                     )
+
+                # if (
+                #     layer.renormalize
+                #     or layer.custom_routing_function
+                #     != Llama4MoE.custom_routing_function
+                # ):
+                #     raise NotImplementedError(
+                #         "FlashInfer CUTLASS FP8 MoE backend does custom routing "
+                #         f"function or renormalization, but got {layer.renormalize} and "
+                #         f"{layer.custom_routing_function}."
+                #     )
+                # if layer.scoring_func != "softmax":
+                #     raise NotImplementedError(
+                #         "FlashInfer CUTLASS FP8 MoE backend only supports "
+                #         f"'softmax' scoring function, but got {layer.scoring_func}."
+                #     )
             if layer.activation != "silu":
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
