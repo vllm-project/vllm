@@ -349,7 +349,9 @@ steps:
 - label: V1 Test e2e + engine # 65min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_4
+  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
+  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
+  agent_pool: mi325_8
   # grade: Blocking
   source_file_dependencies:
     - vllm/
