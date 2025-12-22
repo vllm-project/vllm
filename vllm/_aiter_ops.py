@@ -6,8 +6,11 @@ from collections.abc import Callable
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+
+logger = init_logger(__name__)
 
 
 def is_aiter_found() -> bool:
@@ -438,33 +441,45 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
-def _rocm_aiter_topk_sigmoid_impl(
-    gating_output: torch.Tensor, topk: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import topk_sigmoid
+try:
+    from aiter import topk_sigmoid  # noqa: F401
 
-    tokens, _ = gating_output.shape
-    router_scores = torch.empty(
-        (tokens, topk), dtype=torch.float32, device=gating_output.device
+    _rocm_aiter_topk_sigmoid_available = True
+except ImportError:
+    logger.warning_once(
+        "torch.ops.vllm.rocm_aiter_topk_sigmoid is not available. "
+        "Using generic torch functions. Update aiter for this optimization."
     )
-    router_indices = torch.empty(
-        (tokens, topk), dtype=torch.int32, device=gating_output.device
-    )
-    topk_sigmoid(router_scores, router_indices, gating_output)
-    return router_scores, router_indices
+    _rocm_aiter_topk_sigmoid_available = False
 
+if _rocm_aiter_topk_sigmoid_available:
 
-def _rocm_aiter_topk_sigmoid_fake(
-    gating_output: torch.Tensor, topk: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    tokens, _ = gating_output.shape
-    router_scores = torch.empty(
-        (tokens, topk), dtype=torch.float32, device=gating_output.device
-    )
-    router_indices = torch.empty(
-        (tokens, topk), dtype=torch.int32, device=gating_output.device
-    )
-    return router_scores, router_indices
+    def _rocm_aiter_topk_sigmoid_impl(
+        gating_output: torch.Tensor, topk: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from aiter import topk_sigmoid
+
+        tokens, _ = gating_output.shape
+        router_scores = torch.empty(
+            (tokens, topk), dtype=torch.float32, device=gating_output.device
+        )
+        router_indices = torch.empty(
+            (tokens, topk), dtype=torch.int32, device=gating_output.device
+        )
+        topk_sigmoid(router_scores, router_indices, gating_output)
+        return router_scores, router_indices
+
+    def _rocm_aiter_topk_sigmoid_fake(
+        gating_output: torch.Tensor, topk: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens, _ = gating_output.shape
+        router_scores = torch.empty(
+            (tokens, topk), dtype=torch.float32, device=gating_output.device
+        )
+        router_indices = torch.empty(
+            (tokens, topk), dtype=torch.int32, device=gating_output.device
+        )
+        return router_scores, router_indices
 
 
 # Global flag to ensure ops are registered only once
@@ -665,13 +680,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
-            direct_register_custom_op(
-                op_name="rocm_aiter_topk_sigmoid",
-                op_func=_rocm_aiter_topk_sigmoid_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_topk_sigmoid_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
+            if _rocm_aiter_topk_sigmoid_available:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_topk_sigmoid",
+                    op_func=_rocm_aiter_topk_sigmoid_impl,
+                    mutates_args=[],
+                    fake_impl=_rocm_aiter_topk_sigmoid_fake,
+                    dispatch_key=current_platform.dispatch_key,
+                )
 
             _OPS_REGISTERED = True
 
