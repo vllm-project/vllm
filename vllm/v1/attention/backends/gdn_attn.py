@@ -175,7 +175,7 @@ class GDNAttentionMetadataBuilder(
 
         query_start_loc = m.query_start_loc
         context_lens_cpu = m.num_computed_tokens_cpu
-        context_lens = context_lens_cpu.to(query_start_loc.device)
+        context_lens = context_lens_cpu.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         enable_apc = self.vllm_config.cache_config.enable_prefix_caching
