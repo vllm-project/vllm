@@ -474,6 +474,23 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = None
 
         return delta_message, function_name_returned
+    
+    def get_metrics_from_request_output(
+            self,
+            response: ChatCompletionStreamResponse,
+            res: RequestOutput,
+            switch_name: str,
+            key: str
+    ) -> ChatCompletionStreamResponse:
+        enable_metrics = getattr(response, "enable_metrics", None)
+        if enable_metrics and enable_metrics.get(switch_name, False):
+            if response.metrics is None:
+                response.metrics = {}
+            if getattr(res, "capture_metrics_result", None) and key in res.capture_metrics_result:
+                response.metrics[key] = int(res.capture_metrics_result.get(key))
+            else:
+                response.metrics[key] = None
+        return response
 
     async def chat_completion_stream_generator(
         self,
@@ -608,11 +625,7 @@ class OpenAIServingChat(OpenAIServing):
                             prompt_token_ids=(res.prompt_token_ids
                                               if request.return_token_ids else
                                               None))
-                        enable_metrics = getattr(request, "enable_metrics", None)
-                        if enable_metrics and enable_metrics.get("encode", False):
-                            if chunk.metrics is None:
-                                chunk.metrics = {}
-                            chunk.metrics["encode_time_ms"] = int(res.capture_metrics_result.get("encode_time_ms", None))
+                        chunk = self.get_metrics_from_request_output(chunk, res, "encode", "encode_time_ms")
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
@@ -1428,11 +1441,7 @@ class OpenAIServingChat(OpenAIServing):
                               if request.return_token_ids else None),
             kv_transfer_params=final_res.kv_transfer_params,
         )
-        enable_metrics = getattr(request, "enable_metrics", None)
-        if enable_metrics and enable_metrics.get("encode", False):
-            if response.metrics is None:
-                response.metrics = {}
-            response.metrics["encode_time_ms"] = int(final_res.capture_metrics_result.get("encode_time_ms"))
+        response = self.get_metrics_from_request_output(response, final_res, "encode", "encode_time_ms")
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
