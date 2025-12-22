@@ -256,7 +256,8 @@ class TpKVTopology:
     def cross_layers_blocks(self) -> bool:
         return self._cross_layers_blocks
 
-    def block_size_position(self, device_type: str) -> int:
+    @property
+    def block_size_position(self) -> int:
         return -2 if self.is_mla or self._cross_layers_blocks else -3
 
     def tp_ratio(
