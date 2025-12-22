@@ -222,6 +222,9 @@ class TpKVTopology:
         )
 
         self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
+        if self._cross_layers_blocks:
+            # expect one additional dimension (num_layers)
+            assert len(self.tensor_shape) == len(test_shape) + 1
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
