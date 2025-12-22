@@ -897,7 +897,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = getattr(layer, f"w13_{self.weight_scale_name}")
         w2_weight_scale = getattr(layer, f"w2_{self.weight_scale_name}")
 
-        # For ROCm platform: rescale to fp8_fnuz
+        # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
         if current_platform.is_fp8_fnuz():
             w13_weight, w13_weight_scale, layer.w13_input_scale = (
                 normalize_e4m3fn_to_e4m3fnuz(
@@ -910,7 +910,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             )
 
-        # Per tensor kernels require single activation scale. We use max.
+        # Per tensor kernels require single activation scale. Use the max.
         if self.quant_config.activation_scheme == "static":
             assert not self.block_quant
             assert layer.w13_input_scale is not None
@@ -927,7 +927,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
         # Per tensor kernels require single weight scale for w13 per expert, but
-        # on disk there is a scale for w1 and w3. We use the max to requantize.
+        # on disk there is a scale for w1 and w3. Use the max to requantize.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = w13_weight_scale.max(dim=1).values
@@ -944,14 +944,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
         # Reshuffle weights into kernel runtime format.
-        # TODO(once AITER refactor lands, this can be an if ... elif ... else).
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
+            # TODO(rob): Do we have to do this after replacing layer.w13?
             prepare_moe_fp8_layer_for_marlin(
                 layer, False, input_dtype=self.marlin_input_dtype
             )
             del layer.w13_input_scale
             del layer.w2_input_scale
-        if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             assert self.block_quant
             w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
                 wq=w13_weight,
@@ -965,11 +965,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=is_deep_gemm_e8m0_used(),
             )
-        if self.rocm_aiter_moe_enabled:
-            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-                w13_weight, w2_weight
-            )
-        if self.fp8_backend in [
+        elif self.fp8_backend in [
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ]:
@@ -980,9 +976,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 register_moe_scaling_factors(layer)
             if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                 rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+        elif self.rocm_aiter_moe_enabled:
+            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
+                w13_weight, w2_weight
+            )
 
-        # Replace parameters with updated versions. Note that this
-        # function ensures weight reloading remains possible.
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
