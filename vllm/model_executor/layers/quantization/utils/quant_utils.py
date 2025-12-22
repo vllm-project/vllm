@@ -36,7 +36,8 @@ def get_fp8_min_max(dtype: torch.dtype | None = None) -> tuple[float, float]:
     if dtype is None:
         dtype = FP8_DTYPE
     finfo = torch.finfo(dtype)
-    if current_platform.is_fp8_fnuz():
+    # Only apply the 224.0 override for the actual fnuz dtype on fnuz platform
+    if current_platform.is_fp8_fnuz() and dtype == torch.float8_e4m3fnuz:
         return -224.0, 224.0
     return finfo.min, finfo.max
 
