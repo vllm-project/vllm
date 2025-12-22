@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
+"""`
 Tool call parser for "Cursor-style" tool tags (named "cwm" in vLLM).
 
 Supported format (one or more tool blocks):
@@ -13,6 +13,14 @@ Supported format (one or more tool blocks):
 
 The `<tool: ...>` tag label is treated as informational; the function name is
 extracted from the first token inside the tool body ("terminal" in the example).
+
+Additionally, we support a more permissive/shorthand format that omits the `>`
+after the label:
+
+    <tool: python import os; print("hi") </tool>
+
+In this shorthand format, the label ("python") is treated as the tool name and
+the remainder ("import os; ...") is treated as the arguments payload.
 
 Arguments are extracted as:
   - If the remaining text parses as JSON object/array: use that as arguments.
@@ -50,9 +58,12 @@ class CwmToolParser(ToolParser):
     Used when `--enable-auto-tool-choice --tool-call-parser cwm` are set.
     """
 
-    # <tool: function> ... </tool>
+    # Supported:
+    #   - Canonical:  <tool: label> body </tool>
+    #   - Shorthand:  <tool: label body </tool>  (missing '>' after label)
     _TOOL_BLOCK_RE = re.compile(
-        r"<tool:\s*(?P<label>[^>\s]+)\s*>\s*(?P<body>[\s\S]*?)\s*</tool>",
+        r"<tool:\s*(?P<label>[^>\s]+)"
+        r"(?:\s*>\s*(?P<body>[\s\S]*?)|\s+(?P<body_no_gt>[\s\S]*?))\s*</tool>",
         re.IGNORECASE,
     )
 
@@ -67,6 +78,25 @@ class CwmToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
+
+    @staticmethod
+    def _payload_to_args_json(payload: str) -> str:
+        """
+        Convert an arguments payload to a JSON string.
+
+        - If payload is JSON object/array, parse + canonicalize it.
+        - Otherwise, wrap as {"command": "<payload>"}.
+        """
+        remaining = (payload or "").strip()
+        if remaining:
+            stripped = remaining.lstrip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    parsed = json.loads(remaining)
+                    return json.dumps(parsed, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    pass
+        return json.dumps({"command": remaining}, ensure_ascii=False)
 
     @staticmethod
     def _parse_tool_body_to_name_and_args(body: str) -> tuple[str, str] | None:
@@ -98,21 +128,7 @@ class CwmToolParser(ToolParser):
         else:
             remaining = rest_first_line.strip()
 
-        # If the remaining payload looks like JSON, accept it as-is (canonicalized).
-        if remaining:
-            stripped = remaining.lstrip()
-            if stripped.startswith("{") or stripped.startswith("["):
-                try:
-                    parsed = json.loads(remaining)
-                    # Canonicalize to compact JSON string.
-                    args_json = json.dumps(parsed, ensure_ascii=False)
-                    return tool_name, args_json
-                except json.JSONDecodeError:
-                    pass
-
-        # Otherwise, wrap plain text under "command".
-        args_json = json.dumps({"command": remaining}, ensure_ascii=False)
-        return tool_name, args_json
+        return tool_name, CwmToolParser._payload_to_args_json(remaining)
 
     @classmethod
     def _extract_all_tool_calls_from_text(cls, text: str) -> tuple[list[ToolCall], str]:
@@ -124,10 +140,22 @@ class CwmToolParser(ToolParser):
         content = content if content.strip() else None
 
         for idx, match in enumerate(cls._TOOL_BLOCK_RE.finditer(text)):
-            parsed = cls._parse_tool_body_to_name_and_args(match.group("body"))
-            if parsed is None:
-                continue
-            tool_name, args_json = parsed
+            body = match.group("body")
+            body_no_gt = match.group("body_no_gt")
+
+            # Canonical form: parse tool name from body.
+            if body is not None:
+                parsed = cls._parse_tool_body_to_name_and_args(body)
+                if parsed is None:
+                    continue
+                tool_name, args_json = parsed
+            # Shorthand form: treat label as tool name, rest as payload.
+            else:
+                tool_name = (match.group("label") or "").strip()
+                if not tool_name:
+                    continue
+                args_json = cls._payload_to_args_json(body_no_gt or "")
+
             tool_calls.append(
                 ToolCall(
                     id=make_tool_call_id(func_name=tool_name, idx=idx),

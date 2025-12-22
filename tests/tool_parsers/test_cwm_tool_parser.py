@@ -94,3 +94,29 @@ def test_extract_tool_calls_multiple_tools(cwm_tool_parser):
     assert extracted.content == "preamble"
 
 
+def test_extract_tool_calls_shorthand_missing_gt_uses_label_as_tool_name(
+    cwm_tool_parser,
+):
+    # Shorthand format: `<tool: python ... </tool>` (missing `>` after label).
+    model_output = (
+        "prefix\n"
+        "</think> "
+        '<tool: python import os; print(os.listdir("_pytest")) </tool>\n'
+    )
+    extracted = cwm_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+    assert extracted.tools_called
+    expected = [
+        ToolCall(
+            function=FunctionCall(
+                name="python",
+                arguments=json.dumps(
+                    {"command": 'import os; print(os.listdir("_pytest"))'},
+                    ensure_ascii=False,
+                ),
+            )
+        )
+    ]
+    assert_tool_calls(extracted.tool_calls, expected)
+    assert extracted.content == "prefix\n</think>"
+
+
