@@ -31,6 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
@@ -291,6 +292,7 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns_overrides=None,
         )
 
+    @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
