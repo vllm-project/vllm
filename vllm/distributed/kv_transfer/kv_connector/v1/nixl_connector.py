@@ -944,6 +944,7 @@ class NixlConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self.compat_hash: str | None = None
+        self.kv_topo: TpKVTopology | None = None
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}

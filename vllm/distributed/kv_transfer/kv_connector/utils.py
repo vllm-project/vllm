@@ -198,9 +198,9 @@ class TpKVTopology:
     is_mla: bool
     total_num_kv_heads: int
     attn_backend: type[AttentionBackend]
-    tensor_shape: torch.Size
     engine_id: str
     remote_block_size: dict[str, int]
+    tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -221,10 +221,11 @@ class TpKVTopology:
             num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
         )
 
-        self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
-        if self._cross_layers_blocks:
-            # expect one additional dimension (num_layers)
-            assert len(self.tensor_shape) == len(test_shape) + 1
+        if self.tensor_shape is not None:
+            self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
+            if self._cross_layers_blocks:
+                # expect one additional dimension (num_layers)
+                assert len(self.tensor_shape) == len(test_shape) + 1
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
