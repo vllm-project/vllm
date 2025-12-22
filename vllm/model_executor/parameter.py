@@ -211,6 +211,7 @@ class RowvLLMParameter(BasevLLMParameter):
 
     def __init__(self, input_dim: int, **kwargs):
         self._input_dim = input_dim
+        self.kwargs = kwargs
         super().__init__(**kwargs)
 
     @property
@@ -226,7 +227,9 @@ class RowvLLMParameter(BasevLLMParameter):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape, (
+            f"{self.data.shape=!r} {loaded_weight.shape=!r} {self.input_dim=!r}"
+        )
         self.data.copy_(loaded_weight)
 
 
@@ -236,7 +239,17 @@ class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
     row parallelism.
     """
 
-    pass
+    def maybe_padding_weight(
+        self, loaded_weight: torch.Tensor, tp_size: int, shard_dim: int
+    ):
+        src_size = loaded_weight.shape[shard_dim]
+        dst_size = self.shape[shard_dim] * tp_size
+        if dst_size != src_size:
+            padding_cfg = [0, 0] * loaded_weight.dim()
+            pair_idx = (loaded_weight.dim() - 1 - shard_dim) * 2
+            padding_cfg[pair_idx + 1] = dst_size - src_size
+            return torch.nn.functional.pad(loaded_weight, padding_cfg, value=0)
+        return loaded_weight
 
 
 class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
@@ -414,7 +427,21 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     block-wise quantization. Uses both column and row parallelism.
     """
 
-    pass
+    def maybe_padding_scale(
+        self,
+        loaded_weight: torch.Tensor,
+        tp_size: int,
+        shard_dim: int,
+        dst_size_per_partition: int,
+    ):
+        src_size = loaded_weight.shape[shard_dim]
+        dst_size = dst_size_per_partition * tp_size
+        if dst_size != src_size:
+            padding_cfg = [0, 0] * loaded_weight.dim()
+            pair_idx = (loaded_weight.dim() - 1 - shard_dim) * 2
+            padding_cfg[pair_idx + 1] = dst_size - src_size
+            return torch.nn.functional.pad(loaded_weight, padding_cfg, value=0)
+        return loaded_weight
 
 
 class SharedWeightParameter(BasevLLMParameter):
