@@ -50,6 +50,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
+from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
@@ -377,6 +378,7 @@ def validate_api_server_args(args):
         )
 
 
+@instrument(span_name="API server setup")
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""

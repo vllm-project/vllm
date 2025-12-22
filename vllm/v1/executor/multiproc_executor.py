@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -527,6 +528,7 @@ class WorkerProc:
                 )
             )
 
+    @instrument(span_name="Worker init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -887,6 +889,12 @@ class WorkerProc:
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
         decorate_logs(process_name)
+
+        maybe_init_worker_tracer(
+            instrumenting_module_name="vllm.worker",
+            process_kind="worker",
+            process_name=process_name,
+        )
 
 
 def set_multiprocessing_worker_envs():
