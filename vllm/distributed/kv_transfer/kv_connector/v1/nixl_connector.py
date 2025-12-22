@@ -186,7 +186,7 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
-        "cross_layers": cross_layers,
+        "cross_layers_blocks": cross_layers_blocks,
     }
 
     compat_hash = hash_factors(factors)
