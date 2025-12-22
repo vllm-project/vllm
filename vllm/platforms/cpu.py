@@ -488,7 +488,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        """Import any platform-specific C kernels."""
+        """Import CPU C kernels."""
         import torch
 
         if torch.cpu._is_avx512_supported():  # noqa: SIM108
