@@ -5,8 +5,9 @@ experimental support for tensor-parallel inference with torchrun,
 see https://github.com/vllm-project/vllm/issues/11400 for
 the motivation and use case for this example.
 run the script with `torchrun --nproc-per-node=4 torchrun_example.py`,
-the argument `4` should match the product of `tensor_parallel_size` and `pipeline_parallel_size` below.
-see `tests/distributed/test_torchrun_example.py` for the unit test.
+the argument `4` should match the product of `tensor_parallel_size` and
+`pipeline_parallel_size` below. see `tests/distributed/test_torchrun_example.py`
+for the unit test.
 """
 
 import torch.distributed as dist
