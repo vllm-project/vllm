@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 from collections.abc import Callable
 from dataclasses import asdict
@@ -15,7 +16,6 @@ from huggingface_hub import (
 )
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -52,6 +52,32 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+
+def _get_allowed_layer_types() -> tuple[str, ...]:
+    """Get allowed layer types with backwards compatibility for transformers."""
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+
+        return ALLOWED_LAYER_TYPES
+
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import (
+            ALLOWED_ATTENTION_LAYER_TYPES,
+            ALLOWED_MLP_LAYER_TYPES,
+        )
+
+        return ALLOWED_ATTENTION_LAYER_TYPES + ALLOWED_MLP_LAYER_TYPES
+
+    raise ImportError(
+        "Could not import layer type constants from transformers. "
+        "Please ensure you have a compatible version installed. "
+        "Expected 'ALLOWED_LAYER_TYPES' or 'ALLOWED_ATTENTION_LAYER_TYPES'/"
+        "'ALLOWED_MLP_LAYER_TYPES'."
+    )
+
+
+ALLOWED_LAYER_TYPES = _get_allowed_layer_types()
 
 
 class LazyConfigDict(dict):

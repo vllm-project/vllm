@@ -16,13 +16,13 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+import contextlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import nn
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
@@ -39,6 +39,32 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def _get_allowed_layer_types() -> tuple[str, ...]:
+    """Get allowed layer types with backwards compatibility for transformers."""
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+
+        return ALLOWED_LAYER_TYPES
+
+    with contextlib.suppress(ImportError):
+        from transformers.configuration_utils import (
+            ALLOWED_ATTENTION_LAYER_TYPES,
+            ALLOWED_MLP_LAYER_TYPES,
+        )
+
+        return ALLOWED_ATTENTION_LAYER_TYPES + ALLOWED_MLP_LAYER_TYPES
+
+    raise ImportError(
+        "Could not import layer type constants from transformers. "
+        "Please ensure you have a compatible version installed. "
+        "Expected 'ALLOWED_LAYER_TYPES' or 'ALLOWED_ATTENTION_LAYER_TYPES'/"
+        "'ALLOWED_MLP_LAYER_TYPES'."
+    )
+
+
+ALLOWED_LAYER_TYPES = _get_allowed_layer_types()
 
 
 # Copied from `accelerate`
