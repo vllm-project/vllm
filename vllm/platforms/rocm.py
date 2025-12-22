@@ -169,23 +169,6 @@ class RocmPlatform(Platform):
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
-    supported_quantization: list[str] = [
-        "awq",
-        "gptq",
-        "fp8",
-        "compressed-tensors",
-        "fbgemm_fp8",
-        "gguf",
-        "quark",
-        "ptpc_fp8",
-        "mxfp4",
-        "petit_nvfp4",
-        "torchao",
-    ]
-    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-    if not on_gfx9():
-        supported_quantization += ["bitsandbytes"]
-
     @classmethod
     def get_attn_backend_cls(
         cls,
@@ -306,6 +289,28 @@ class RocmPlatform(Platform):
             "ROCm. Note that V0 attention backends have been removed."
         )
 
+    @property
+    def supported_quantization(self):
+        # Delay resolving supported_quantization in order to avoid "No
+        # HIP GPUs are available" errors.
+        _supported_quantization: list[str] = [
+            "awq",
+            "gptq",
+            "fp8",
+            "compressed-tensors",
+            "fbgemm_fp8",
+            "gguf",
+            "quark",
+            "ptpc_fp8",
+            "mxfp4",
+            "petit_nvfp4",
+            "torchao",
+        ]
+        # bitsandbytes not supported on gfx9 (warp size 64 limitation)
+        if not on_gfx9():
+            _supported_quantization += ["bitsandbytes"]
+        return _supported_quantization
+
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
         return [
@@ -392,6 +397,10 @@ class RocmPlatform(Platform):
         if device_name in _ROCM_DEVICE_ID_NAME_MAP:
             return _ROCM_DEVICE_ID_NAME_MAP[device_name]
         return asic_info["market_name"]
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        return str(torch.cuda.get_device_properties(device_id).uuid)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

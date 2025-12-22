@@ -248,7 +248,7 @@ steps:
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
