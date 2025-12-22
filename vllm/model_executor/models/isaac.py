@@ -642,7 +642,7 @@ class IsaacImageProcessor:
         return_tensors: str | TensorType | None,
         **kwargs: Unpack[IsaacImageProcessorKwargs],
     ) -> BatchFeature:
-        """Isaac's resize → normalize → patchify → pack."""
+        """Preprocess images into format compatibile with vLLM input processing."""
 
         all_pixel_values: list[torch.Tensor] = []
         all_image_grids: list[torch.Tensor] = []
@@ -668,7 +668,7 @@ class IsaacImageProcessor:
             # Use real patch dimensions for image_grid_thw, not virtual dimensions
             # This ensures the vision model receives correct grid info for pixel shuffle
             dims_real = [1, hp, wp]  # Real patch dimensions
-            image_grid_thw = torch.tensor(dims_real).unsqueeze(0)  # [1, [T, H, W]]
+            image_grid_thw = torch.tensor(dims_real).unsqueeze(0)
 
             all_pixel_values.append(pixel_values)
             all_image_grids.append(image_grid_thw)
@@ -700,11 +700,30 @@ class IsaacProcessor:
     def __call__(self, text=None, images=None, **kwargs) -> BatchFeature:
         result = {}
 
+        if images is not None:
+            image_inputs = self.image_processor.preprocess(images, **kwargs)
+            image_grid_thw = image_inputs["image_grid_thw"]
+            result.update(image_inputs)
+
+            if text is not None:
+                if not isinstance(text, list):
+                    text = [text]
+
+                text = text.copy()  # below lines change text in-place
+                merge_length = self.image_processor.pixel_shuffle_scale**2
+                index = 0
+                for i in range(len(text)):
+                    while self.image_token in text[i]:
+                        num_image_tokens = image_grid_thw[index].prod() // merge_length
+                        text[i] = text[i].replace(
+                            self.image_token, "<|placeholder|>" * num_image_tokens, 1
+                        )
+                        index += 1
+                    text[i] = text[i].replace("<|placeholder|>", "<|image_pad|>")
+
         if text is not None:
             result.update(self.tokenizer(text, **kwargs))
-        if images is not None:
-            image_result = self.image_processor.preprocess(images, **kwargs)
-            result.update(image_result)
+
         return BatchFeature(result)
 
     def apply_chat_template(
