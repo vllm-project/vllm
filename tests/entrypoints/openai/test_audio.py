@@ -313,7 +313,7 @@ async def test_chat_streaming_input_audio(
                         "format": "wav",
                     },
                 },
-                {"type": "text", "text": "What's happening in this audio?"},
+                {"type": "text", "text": "What's a short title for this audio?"},
             ],
         }
     ]
