@@ -181,7 +181,7 @@ KVConnectorFactory.register_connector(
 
 KVConnectorFactory.register_connector(
     "MoRIIOConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio_connector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector",
     "MoRIIOConnector",
 )
 
