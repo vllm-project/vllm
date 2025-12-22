@@ -305,7 +305,12 @@ class StreamableResponsesParser:
                     previous_token_ids=self._previous_content_token_ids,
                     current_token_ids=current_content_token_ids,
                     delta_token_ids=delta_token_ids,
-                    request=self.request,
+                    # TODO： currently, only some tool parser need to access
+                    # request.tools in extract_tool_calls_streaming, and
+                    # ResponsesRequest have this attribute too. Maybe we should
+                    # update ToolParser params to allow ResponsesRequest along
+                    # with ChatCompletionRequest.
+                    request=self.request,  # type: ignore
                 )
 
                 if tool_delta is not None:
