@@ -168,7 +168,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert hidden_states.dim() <= 2, (
+        assert hidden_states.dim() in (1, 2), (
             "Qwen2MoeSparseMoeBlock only supports 1D or 2D inputs"
         )
         is_input_1d = hidden_states.dim() == 1

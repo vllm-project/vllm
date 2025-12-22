@@ -178,8 +178,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
+        assert hidden_states.dim() in (1, 2), (
+            "Qwen3NextSparseMoeBlock only supports 1D or 2D inputs"
+        )
+        is_input_1d = hidden_states.dim() == 1
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -211,7 +213,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 final_hidden_states
             )
 
-        return final_hidden_states.view(orig_shape)
+        return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
 
 
 class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):

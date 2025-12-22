@@ -113,8 +113,11 @@ class GraniteMoeMoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
+        assert hidden_states.dim() in (1, 2), (
+            "GraniteMoeMoE only supports 1D or 2D inputs"
+        )
+        num_tokens = hidden_states.shape[0]
+        is_input_1d = hidden_states.dim() == 1
         hidden_states = hidden_states.view(-1, self.hidden_size)
 
         if self.is_sequence_parallel:
@@ -128,10 +131,10 @@ class GraniteMoeMoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
-            num_tokens = orig_shape[0]
+
             final_hidden_states = final_hidden_states[:num_tokens]
 
-        return final_hidden_states.view(orig_shape)
+        return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
 
 
 class GraniteMoeAttention(nn.Module):
