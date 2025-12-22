@@ -93,10 +93,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     tarsier2="Tarsier2Config",
 )
 
-_CONFIG_ATTRS_MAPPING: dict[str, str] = {
-    "llm_config": "text_config",
-}
-
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
@@ -168,7 +164,6 @@ class HFConfigParser(ConfigParserBase):
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
-        config = _maybe_remap_hf_config_attrs(config)
         return config_dict, config
 
 
@@ -460,16 +455,6 @@ def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs
-
-
-def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
-    """Remap config attributes to match the expected names."""
-    for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
-        if hasattr(config, old_attr):
-            if not hasattr(config, new_attr):
-                config.update({new_attr: getattr(config, old_attr)})
-            logger.debug("Remapped config attribute '%s' to '%s'", old_attr, new_attr)
-    return config
 
 
 def maybe_override_with_speculators(

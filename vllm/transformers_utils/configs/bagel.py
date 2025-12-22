@@ -13,7 +13,7 @@ class BagelConfig(PretrainedConfig):
         self,
         visual_gen: bool = True,
         visual_und: bool = True,
-        llm_config: dict | Qwen2Config | None = None,
+        text_config: dict | Qwen2Config | None = None,
         vit_config: dict | SiglipVisionConfig | None = None,
         vae_config: dict | None = None,
         latent_patch_size: int = 2,
@@ -28,11 +28,15 @@ class BagelConfig(PretrainedConfig):
         self.visual_gen = visual_gen
         self.visual_und = visual_und
 
+        # Checkpoint contains llm_config but that's a non-standard name
+        if "llm_config" in kwargs:
+            text_config = kwargs.pop("llm_config")
+
         # Convert dict configs to proper config objects
-        if isinstance(llm_config, dict):
-            self.llm_config = Qwen2Config(**llm_config)
+        if isinstance(text_config, dict):
+            self.text_config = Qwen2Config(**text_config)
         else:
-            self.llm_config = llm_config or Qwen2Config()
+            self.text_config = text_config or Qwen2Config()
 
         if isinstance(vit_config, dict):
             self.vit_config = SiglipVisionConfig(**vit_config)
@@ -50,4 +54,4 @@ class BagelConfig(PretrainedConfig):
     @property
     def hidden_size(self) -> int:
         """Return the hidden size of the language model."""
-        return self.llm_config.hidden_size
+        return self.text_config.hidden_size

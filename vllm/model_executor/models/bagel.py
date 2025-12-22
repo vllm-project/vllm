@@ -365,10 +365,10 @@ class BagelForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         # Initialize language model (Qwen2)
-        # Pass the llm_config from BagelConfig to initialize Qwen2 properly
+        # Pass the text_config from BagelConfig to initialize Qwen2 properly
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.llm_config,
+            hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen2ForCausalLM"],
         )
@@ -399,12 +399,12 @@ class BagelForConditionalGeneration(
 
             # Initialize connector (MLP)
             vit_hidden_size = config.vit_config.hidden_size
-            llm_hidden_size = config.llm_config.hidden_size
+            text_hidden_size = config.text_config.hidden_size
 
             self.connector = BagelVisionMLP(
                 in_features=vit_hidden_size,
-                hidden_features=llm_hidden_size,
-                out_features=llm_hidden_size,
+                hidden_features=text_hidden_size,
+                out_features=text_hidden_size,
                 act_layer=config.connector_act,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "connector"),
@@ -413,7 +413,7 @@ class BagelForConditionalGeneration(
             # Position embedding for vision tokens
             self.vit_pos_embed = PositionEmbedding(
                 max_num_patch_per_side=config.vit_max_num_patch_per_side,
-                hidden_size=llm_hidden_size,
+                hidden_size=text_hidden_size,
             )
         else:
             self.vit_model = None

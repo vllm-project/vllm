@@ -142,7 +142,7 @@ class OvisConfig(PretrainedConfig):
 
     def __init__(
         self,
-        llm_config: PretrainedConfig | dict | None = None,
+        text_config: PretrainedConfig | dict | None = None,
         visual_tokenizer_config: PretrainedConfig | dict | None = None,
         multimodal_max_length=8192,
         hidden_size=None,
@@ -152,17 +152,20 @@ class OvisConfig(PretrainedConfig):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        if llm_config is not None:
-            assert isinstance(llm_config, (PretrainedConfig, dict)), (
-                f"expect `llm_config` to be instance of PretrainedConfig or dict, but got {type(llm_config)} type"
+        # Checkpoint contains llm_config but that's a non-standard name
+        if "llm_config" in kwargs:
+            text_config = kwargs.pop("llm_config")
+        if text_config is not None:
+            assert isinstance(text_config, (PretrainedConfig, dict)), (
+                f"expect `text_config` to be instance of PretrainedConfig or dict, but got {type(text_config)} type"
             )
-            if not isinstance(llm_config, PretrainedConfig):
-                model_type = llm_config["model_type"]
-                llm_config.pop("model_type")
-                llm_config = AutoConfig.for_model(model_type, **llm_config)
+            if not isinstance(text_config, PretrainedConfig):
+                model_type = text_config["model_type"]
+                text_config.pop("model_type")
+                text_config = AutoConfig.for_model(model_type, **text_config)
 
-        # map llm_config to text_config
-        self.text_config = llm_config
+        # map text_config to text_config
+        self.text_config = text_config
         if visual_tokenizer_config is not None:
             assert isinstance(visual_tokenizer_config, (PretrainedConfig, dict)), (
                 f"expect `visual_tokenizer_config` to be instance of PretrainedConfig or dict, but got {type(visual_tokenizer_config)} type"
