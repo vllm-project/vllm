@@ -20,8 +20,8 @@ DEFAULT_INFO_COLS = [
     "Dataset Name",
     "Input Len",
     "Output Len",
-    "TP Size",
-    "PP Size",
+    #    "TP Size",
+    #    "PP Size",
     "# of max concurrency.",
     "qps",
 ]
@@ -272,7 +272,7 @@ def _apply_two_decimals(
     num_cols = df.select_dtypes("number").columns
     if len(num_cols) == 0:
         return styler
-    return styler.format({c: "{:.2f}" for c in num_cols}, na_rep="—")
+    return styler.format({c: "{:.2f}" for c in num_cols}, na_rep="")
 
 
 # -----------------------------
@@ -442,7 +442,7 @@ def build_valid_max_concurrency_summary_html(
         if c == "Configuration":
             continue
         # default argument binds per-column formatter correctly
-        formatters[c] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+        formatters[c] = lambda v: "" if pd.isna(v) else f"{float(v):.2f}"
 
     styler = summary_df.style.format(formatters)
 
@@ -730,7 +730,8 @@ def write_report_group_first(
         for metric_label, (df, _) in metric_cache.items()
     }
 
-    with open("perf_comparison.html", "w") as main_fh:
+    with open("perf_comparison.html", "w", encoding="utf-8") as main_fh:
+        main_fh.write('<meta charset="utf-8">\n')
         for gkey in group_keys:
             gkey_tuple = normalize_group_key(gkey)
             suffix = build_group_suffix(group_cols_canonical, gkey_tuple)
@@ -743,9 +744,9 @@ def write_report_group_first(
             )
 
             main_fh.write(group_header)
-            with open(sub_path, "w") as sub_fh:
+            with open(sub_path, "w", encoding="utf-8") as sub_fh:
+                sub_fh.write('<meta charset="utf-8">\n')
                 sub_fh.write(group_header)
-
                 tput_group_df = None
                 ttft_group_df = None
                 tpot_group_df = None
