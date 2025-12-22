@@ -5,7 +5,6 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-import regex as re
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -184,7 +183,6 @@ def is_base_embeddding_weights(name: str) -> bool:
         ".lm_head.base_layer.weight",
     )
     return name.endswith(embedding_suffixes)
-
 
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
