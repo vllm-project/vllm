@@ -79,9 +79,10 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -645,6 +646,7 @@ class OpenPanguSinkAttention(nn.Module):
         else:
             sliding_window = None
 
+        FlashAttentionDiffKVBackend.set_head_size_v(self.v_channels)
         self.attn = StaticSinkAttention(
             self.num_heads,
             self.head_dim,
@@ -656,7 +658,7 @@ class OpenPanguSinkAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            attn_backend=FlashAttentionBackend,
+            attn_backend=FlashAttentionDiffKVBackend,
             head_size_v=self.v_channels,
         )
 
@@ -668,7 +670,7 @@ class OpenPanguSinkAttention(nn.Module):
                         self.num_kv_heads,
                         self.head_dim,
                     ),
-                    device=torch.cuda.current_device(),
+                    device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
             )
@@ -688,7 +690,7 @@ class OpenPanguSinkAttention(nn.Module):
                             self.num_kv_heads,
                             self.v_channels,
                         ),
-                        device=torch.cuda.current_device(),
+                        device=current_platform.current_device(),
                         dtype=config.torch_dtype,
                     )
                 )
@@ -706,9 +708,11 @@ class OpenPanguSinkAttention(nn.Module):
                         self.num_kv_heads,
                         self.v_channels,
                     ),
-                    device=torch.cuda.current_device(),
+                    device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
+        # To enable dummy run with out weight
+        self.post_weight_load()
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         output_dim = getattr(param, "output_dim", None)
