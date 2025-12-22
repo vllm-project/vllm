@@ -6,13 +6,12 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
-from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -63,11 +62,6 @@ class OffloadingConnectorStats(KVConnectorStats):
             "load_time": [],
             "total_transactions": [0, 0],  # num_stores, num_loads
         }
-
-    def clone_and_reset(self) -> "OffloadingConnectorStats":
-        old = copy.copy(self)
-        self.reset()
-        return old
 
     def clone_and_reset(self) -> "OffloadingConnectorStats":
         old = copy.copy(self)
@@ -230,7 +224,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return OffloadPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -658,7 +652,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
         self.total_store_time = 0
@@ -802,4 +796,3 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         )
         self.gauge_kv_load_time_avg[engine_idx].set(avg_load_time)
         self.gauge_kv_store_time_avg[engine_idx].set(avg_store_time)
-
