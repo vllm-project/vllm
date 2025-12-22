@@ -741,6 +741,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "size [128, 128]."
                 )
             if not self.block_quant:
+                # The CUTLASS FP8 per-tensor kernel was built for Llama4,
+                # so ensure we have a Llama-4 like layer.
                 from vllm.model_executor.models.llama4 import Llama4MoE
 
                 if (
@@ -753,10 +755,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         f"function or renormalization, but got {layer.renormalize} and "
                         f"{layer.custom_routing_function}."
                     )
-                if layer.scoring_func != "sigmoid":
+                if layer.scoring_func != "softmax":
                     raise NotImplementedError(
                         "FlashInfer CUTLASS FP8 MoE backend only supports "
-                        f"'sigmoid' scoring function, but got {layer.scoring_func}."
+                        f"'softmax' scoring function, but got {layer.scoring_func}."
                     )
             if layer.activation != "silu":
                 raise NotImplementedError(
