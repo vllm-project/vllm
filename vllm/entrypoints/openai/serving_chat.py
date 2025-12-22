@@ -811,6 +811,11 @@ class OpenAIServingChat(OpenAIServing):
                             delta_text += harmony_parser.last_content_delta or ""
                         cur_channel = harmony_parser.current_channel
                         cur_recipient = harmony_parser.current_recipient
+                        # handle the case where several tokens where generated at once
+                        # including the final token, leading to a delta in the text
+                        # but the current channel to be empty (start state)
+                        if not cur_channel and delta_text:
+                            cur_channel = "final"
                     else:
                         delta_text = output.text
 
