@@ -141,7 +141,6 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_audio.py \
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
-  --ignore=entrypoints/openai/test_sleep.py \
   --ignore=entrypoints/openai/test_models.py \
   --ignore=entrypoints/openai/test_lora_adapters.py \
   --ignore=entrypoints/openai/test_return_tokens_as_ids.py \

@@ -487,7 +487,7 @@ class BagelForConditionalGeneration(
         # Split by image
         return tuple(vision_embeds)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Get multimodal embeddings from input."""
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
