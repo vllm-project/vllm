@@ -320,8 +320,9 @@ class RequestState:
         if delta:
             if self.detokenizer.delta_token_count > 0:
                 start = (
-                        self.detokenizer.visible_token_index
-                        - self.detokenizer.delta_token_count)
+                    self.detokenizer.visible_token_index
+                    - self.detokenizer.delta_token_count
+                )
                 end = self.detokenizer.visible_token_index
                 token_ids = self.detokenizer.output_token_ids[start:end]
             else:

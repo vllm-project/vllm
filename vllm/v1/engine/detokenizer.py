@@ -182,9 +182,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         if self.visible_token_index > start_token_index:
             self._last_visible_text_offset = last_offset + released_text_len
-            return self.output_text[
-                   last_offset:self._last_visible_text_offset
-                   ]
+            return self.output_text[last_offset : self._last_visible_text_offset]
 
         return ""
 
