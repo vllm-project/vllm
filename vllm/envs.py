@@ -1407,8 +1407,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Override the backend used for FlashInfer FP8 BMM operations.
     # Supported options: "auto", "cutlass", "cudnn", "trtllm"
     # If not set, defaults to "auto" which lets FlashInfer choose.
-    "VLLM_FLASHINFER_FP8_BACKEND": lambda: os.getenv(
-        "VLLM_FLASHINFER_FP8_BACKEND", None
+    "VLLM_FLASHINFER_FP8_BACKEND": env_with_choices(
+        "VLLM_FLASHINFER_FP8_BACKEND",
+        None,
+        ["auto", "cutlass", "cudnn", "trtllm"],
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
