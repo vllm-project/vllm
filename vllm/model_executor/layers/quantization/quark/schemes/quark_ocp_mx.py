@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 # for envs checks which does not require @cache anymore.
 # triton kernel is torch compile compatible.
 # does not require direct registration.
-# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
+# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_quant`.
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
     return (

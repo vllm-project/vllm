@@ -1152,7 +1152,7 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
-    def triton_fp4_gemm_dynamic_qaunt(
+    def triton_fp4_gemm_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
