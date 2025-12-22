@@ -429,12 +429,12 @@ def group_mm_kwargs_by_modality(
     if merge_by_field_config is not None:
         logger.warning_once(
             "The `merge_by_field_config` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.13."
+            "is deprecated and will be removed in v0.14."
         )
     if multimodal_cpu_fields is not None:
         logger.warning_once(
             "The `multimodal_cpu_fields` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.13."
+            "is deprecated and will be removed in v0.14."
         )
 
     from vllm.multimodal.inputs import MultiModalKwargsItems

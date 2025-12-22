@@ -10,7 +10,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.v1.engine.processor.Processor` has been moved to "
             "`vllm.v1.engine.input_processor.InputProcessor`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )

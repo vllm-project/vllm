@@ -54,6 +54,9 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.workspace import init_workspace_manager
+
+from .utils import request_memory
 
 logger = init_logger(__name__)
 
@@ -81,7 +84,7 @@ class Worker(WorkerBase):
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
-        torch.set_float32_matmul_precision(precision)
+        torch.backends.cuda.matmul.fp32_precision = precision
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -236,24 +239,14 @@ class Worker(WorkerBase):
             torch.cuda.empty_cache()
 
             # take current memory snapshot
-            self.init_snapshot = MemorySnapshot()
-            self.requested_memory = (
-                self.init_snapshot.total_memory
-                * self.cache_config.gpu_memory_utilization
-            )
-            if self.init_snapshot.free_memory < self.requested_memory:
-                GiB = lambda b: round(b / GiB_bytes, 2)
-                raise ValueError(
-                    f"Free memory on device "
-                    f"({GiB(self.init_snapshot.free_memory)}/"
-                    f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                    f"is less than desired GPU memory utilization "
-                    f"({self.cache_config.gpu_memory_utilization}, "
-                    f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                    f"utilization or reduce GPU memory used by other processes."
-                )
+            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            self.requested_memory = request_memory(init_snapshot, self.cache_config)
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
+
+        # Initialize workspace manager
+        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
         if self.use_v2_model_runner:
@@ -926,10 +919,11 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
+    attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-    init_batch_invariance()
+    init_batch_invariance(attention_config.backend)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"

@@ -285,7 +285,6 @@ class Glm4MoeAttention(nn.Module):
         config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )

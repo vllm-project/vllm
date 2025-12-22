@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
+from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -240,24 +241,30 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         quant_key: QuantKey,
         enabled: bool | None = None,
-        use_col_major_scales: bool = False,
-        use_e8m0: bool = False,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
     ):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
         super().__init__(enabled)
         self.quant_key = quant_key
-        self.use_col_major_scales = use_col_major_scales
-        self.use_e8m0 = use_e8m0
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
+
+        self.has_col_major_scales = has_col_major_scales
+        self.is_e8m0 = is_e8m0
 
         assert quant_key.dtype == current_platform.fp8_dtype(), (
             "Only QuantFP8 supported by"
         )
         assert quant_key.scale2 is None
-        self.quant_fp8 = QuantFP8(quant_key.scale.static, quant_key.scale.group_shape)
+        self.quant_fp8 = QuantFP8(
+            quant_key.scale.static,
+            quant_key.scale.group_shape,
+            column_major_scales=has_col_major_scales,
+            use_ue8m0=is_e8m0,
+        )
 
     def forward_custom(
         self,
@@ -270,11 +277,11 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.group_shape.is_per_group():
             assert scale is None
-            scale = self.make_scale(input, transposed=self.use_col_major_scales)
+            scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
-            fp8_min = finfo.min
-            fp8_max = finfo.max
+            fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
+            fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
 
             _, result, scale = auto_functionalized(
                 self.QUANT_OP,
@@ -285,7 +292,7 @@ class MatcherQuantFP8(MatcherCustomOp):
                 eps=1e-10,
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
-                scale_ue8m0=self.use_e8m0,
+                scale_ue8m0=self.is_e8m0,
             )
             return result, scale
 
