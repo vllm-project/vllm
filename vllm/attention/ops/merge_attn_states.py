@@ -15,7 +15,7 @@ def merge_attn_states(
     output_lse: torch.Tensor | None = None,
 ) -> None:
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
-    # is not support for FP8 dtype, fallback to use Triton kernel.
+    # does not support FP8 dtype, fallback to use Triton kernel.
     def supported_dtypes(o: torch.Tensor) -> bool:
         return o.dtype in [torch.float32, torch.half, torch.bfloat16]
 
