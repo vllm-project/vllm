@@ -340,3 +340,4 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_map=expert_map,
             quant_config=self.quant_config,
         )
+        return output
