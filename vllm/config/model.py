@@ -71,7 +71,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
