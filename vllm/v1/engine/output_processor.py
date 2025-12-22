@@ -313,6 +313,10 @@ class RequestState:
 
         # Prepare text and token_ids, based on delta mode
         text = self.detokenizer.get_next_output_text(finished, delta)
+
+        if finish_reason:
+            self.detokenizer.visible_token_index = 0
+
         if delta:
             if self.detokenizer.delta_token_count > 0:
                 start = (

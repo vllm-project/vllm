@@ -141,7 +141,6 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
-                self.visible_token_index = 0
                 stop_string, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
