@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -14,7 +13,9 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     _normalize_quant_group_shape,
+    kFp8Dynamic64ColMajorSym,
     kFp8Dynamic64Sym,
+    kFp8Dynamic128ColMajorSym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -36,17 +37,30 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
+        torch.ops._C.per_token_group_fp8_quant.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64ColMajorSym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+
 if current_platform.is_rocm():
-    TRITON_PER_TOKEN_GROUP_QUANT_OP = (
+    QUANT_OPS[kFp8Dynamic128Sym] = (
         torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
-    )
-    QUANT_OPS[kFp8Dynamic128Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
-    QUANT_OPS[kFp8Dynamic64Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64ColMajorSym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
+    )  # noqa: E501
+
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
@@ -241,7 +255,6 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         quant_key: QuantKey,
         enabled: bool | None = None,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
         if enabled is None:
@@ -252,7 +265,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
-        self.has_col_major_scales = has_col_major_scales
+        self.has_col_major_scales = quant_key.scale.col_major
         self.is_e8m0 = is_e8m0
 
         assert quant_key.dtype == current_platform.fp8_dtype(), (
@@ -262,7 +275,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.quant_fp8 = QuantFP8(
             quant_key.scale.static,
             quant_key.scale.group_shape,
-            column_major_scales=has_col_major_scales,
+            column_major_scales=self.has_col_major_scales,
             use_ue8m0=is_e8m0,
         )
 

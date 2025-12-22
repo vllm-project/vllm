@@ -15,7 +15,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic64ColMajorSym,
     kFp8Dynamic64Sym,
+    kFp8Dynamic128ColMajorSym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -62,18 +64,31 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
+
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
+
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
+        torch.ops._C.per_token_group_fp8_quant.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64ColMajorSym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 if current_platform.is_rocm():
-    TRITON_PER_TOKEN_GROUP_QUANT_OP = (
+    QUANT_OPS[kFp8Dynamic128Sym] = (
         torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
-    )
-    QUANT_OPS[kFp8Dynamic128Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
-    QUANT_OPS[kFp8Dynamic64Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64ColMajorSym] = (
+        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
+    )  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -113,10 +128,22 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
         kFp8Dynamic128Sym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
+        kFp8Dynamic128ColMajorSym, False
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic128ColMajorSym, True
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
         kFp8Dynamic64Sym, False
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, True
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic64ColMajorSym, False
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic64ColMajorSym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
 
@@ -126,7 +153,6 @@ class RMSNormQuantPattern:
         self,
         epsilon: float,
         key: FusedRMSQuantKey,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
         self.epsilon = epsilon
@@ -142,9 +168,7 @@ class RMSNormQuantPattern:
             if not key.fused_add
             else MatcherFusedAddRMSNorm(epsilon)
         )
-        self.quant_matcher = MatcherQuantFP8(
-            key.quant, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
-        )
+        self.quant_matcher = MatcherQuantFP8(key.quant, is_e8m0=is_e8m0)
 
 
 class RMSNormStaticQuantPattern(RMSNormQuantPattern):
@@ -264,7 +288,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
-        scale = ScaleDesc(torch.float32, False, group_shape)
+        scale = ScaleDesc(torch.float32, False, group_shape, has_col_major_scales)
         key = FusedRMSQuantKey(
             fused_add=True,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
@@ -272,9 +296,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         self.group_shape = group_shape
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
-        super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
-        )
+        super().__init__(epsilon, key, is_e8m0=is_e8m0)
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor):
@@ -326,15 +348,13 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
-        scale = ScaleDesc(torch.float32, False, group_shape)
+        scale = ScaleDesc(torch.float32, False, group_shape, has_col_major_scales)
         key = FusedRMSQuantKey(
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        super().__init__(
-            epsilon, key, has_col_major_scales=has_col_major_scales, is_e8m0=is_e8m0
-        )
+        super().__init__(epsilon, key, is_e8m0=is_e8m0)
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(input: torch.Tensor, weight: torch.Tensor):
