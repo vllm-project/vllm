@@ -24,9 +24,9 @@ soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm >=1.0.17 # required for internvl and gemma3n-mm test
-torch==2.9.0
-torchaudio==2.9.0
-torchvision==0.24.0
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.5 # required for voxtral test
