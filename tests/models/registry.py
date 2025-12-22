@@ -850,6 +850,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # disable this temporarily until we support HF format
         is_available_online=False,
     ),
+    "VoxtralStreamingGeneration": _HfExamplesInfo(
+        "mistralai/Voxtral-Mini-3B-2507",
+        # disable this temporarily until we support HF format
+        is_available_online=False,
+    ),
     # [Encoder-decoder]
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
