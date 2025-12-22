@@ -564,6 +564,11 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
     The second-generation GTE model (mGTE-TRM) is named `NewForSequenceClassification`. The name `NewForSequenceClassification` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'` to specify the use of the `GteNewForSequenceClassification` architecture.
 
 !!! note
+    `nvidia/llama-nemotron-rerank-1b-v2` require a specific prompt format to work correctly.
+
+    Examples : [offline_using_template.py](../../examples/pooling/score/offline_using_template.py) [online_using_template.py](../../examples/pooling/score/online_using_template.py)
+
+!!! note
     Load the official original `mxbai-rerank-v2` by using the following command.
 
     ```bash
@@ -576,12 +581,6 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
-
-!!! note
-    `nvidia/llama-nemotron-rerank-1b-v2` require a specific prompt format to work correctly.
-
-    Examples : [offline_using_template.py](../../examples/pooling/score/offline_using_template.py) [online_using_template.py](../../examples/pooling/score/online_using_template.py)
-
 
 #### Reward Modeling
 
