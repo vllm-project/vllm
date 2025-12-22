@@ -990,7 +990,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Replace parameters with updated versions. Note that this
         # function ensures weight reloading remains possible.
         replace_parameter(layer, "w13_weight", w13_weight)
-        replace_parameter(layer, "w2_weight", w13_weight)
+        replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, f"w13_{weight_scale_name}", w13_weight_scale)
         replace_parameter(layer, f"w2_{weight_scale_name}", w2_weight_scale)
 
