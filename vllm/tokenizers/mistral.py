@@ -269,11 +269,11 @@ class MistralTokenizer(TokenizerLike):
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
 
-        # Cache special tokens for faster access.
-        self._vocab = self.tokenizer.vocab()
         # Vocab sorted by token id.
+        self._vocab = self.tokenizer.vocab()
         self._max_token_id = self.vocab_size - 1
 
+        # Cache special tokens for faster access.
         self._special_token_ids = self._get_special_token_ids()
         self._special_token_ids_set = set(self._special_token_ids)
         self._special_tokens = self._get_special_tokens(self._special_token_ids)
