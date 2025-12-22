@@ -609,6 +609,8 @@ class OpenAIServingChat(OpenAIServing):
                                               if request.return_token_ids else
                                               None))
                         if request.enable_metrics is not None and request.enable_metrics.get("encode", False):
+                            if chunk.metrics is None:
+                                chunk.metrics = {}
                             chunk.metrics["encode_time_ms"] = res.capture_metrics_result.get("encode_time_ms", None)
 
                         # if continuous usage stats are requested, add it
@@ -1426,7 +1428,9 @@ class OpenAIServingChat(OpenAIServing):
             kv_transfer_params=final_res.kv_transfer_params,
         )
         if request.enable_metrics is not None and request.enable_metrics.get("encode", False):
-            response.metrics["encode_time_ms"] = final_res.capture_metrics_result.get("encode_time_ms")
+            if response.metrics is None:
+                response.metrics = {}
+            response.metrics["encode_time_ms"] = final_res.metrics.get("encode_time_ms")
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
