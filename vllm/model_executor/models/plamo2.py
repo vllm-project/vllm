@@ -784,6 +784,7 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
     packed_modules_mapping = {
         "qkv_proj": ["qkv_proj"],
         "gate_up_proj": ["gate_up_proj"],
+        "in_proj": ["in_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
