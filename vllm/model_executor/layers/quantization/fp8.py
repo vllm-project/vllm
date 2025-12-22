@@ -741,7 +741,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "size [128, 128]."
                 )
             if not self.block_quant:
-                if layer.renormalize or layer.custom_routing_function is not None:
+                from vllm.model_executor.models.llama4 import Llama4MoE
+
+                if (
+                    layer.renormalize
+                    or layer.custom_routing_function
+                    != Llama4MoE.custom_routing_function
+                ):
                     raise NotImplementedError(
                         "FlashInfer CUTLASS FP8 MoE backend does custom routing "
                         f"function or renormalization, but got {layer.renormalize} and "
