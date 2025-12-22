@@ -485,16 +485,12 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        if self.pos_embed_type in (
-            WhisperPosEmbedType.SINUSOIDAL,
-            WhisperPosEmbedType.LEARNED,
-        ):
-            if is_causal:
-                raise ValueError(
-                    "Only NOPE position embeddings are supported "
-                    f"for causal models, but got {self.pos_embed_type}"
-                )
-
+        if is_causal and self.pos_embed_type != WhisperPosEmbedType.NOPE:
+            raise ValueError(
+                "Only NOPE position embeddings are supported "
+                f"for causal models, but got {self.pos_embed_type}"
+            )
+        elif self.pos_embed_type in (WhisperPosEmbedType.SINUSOIDAL, WhisperPosEmbedType.LEARNED):
             maybe_fp32_init_ctx = (
                 set_default_torch_dtype(torch.float32)
                 if init_in_fp32
