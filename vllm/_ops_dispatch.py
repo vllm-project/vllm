@@ -33,18 +33,17 @@ def _detect_cpu_extension() -> str:
         "" if no extension detected
     """
     # Check for AVX512 extension first (more specific)
-    if hasattr(torch.ops, '_C_avx512'):
-        # Verify it has actual CPU ops registered (not empty)
-        if hasattr(torch.ops._C_avx512, 'silu_and_mul'):
-            return "_C_avx512"
+    if hasattr(torch.ops, '_C_avx512') \
+        and hasattr(torch.ops._C_avx512, 'silu_and_mul'): # Verify it has actual CPU ops registered (not empty)
+        return "_C_avx512"
 
     # Check for AVX2/default extension
-    if hasattr(torch.ops, '_C'):
-        # For CPU builds, check for a CPU-specific op
-        # For CUDA builds, _C will have CUDA ops
-        if hasattr(torch.ops._C, 'silu_and_mul'):
-            return "_C"
+    # For CPU builds, check for a CPU-specific op
+    # For CUDA builds, _C will have CUDA ops
+    if hasattr(torch.ops, '_C') and hasattr(torch.ops._C, 'silu_and_mul'):
+        return "_C"
 
+    # FIXME: warn here?
     # No CPU extension loaded
     return ""
 
@@ -63,11 +62,12 @@ def get_ops():
     ext = _detect_cpu_extension()
     if ext == "_C_avx512":
         return torch.ops._C_avx512
-    elif ext == "_C":
+
+    if ext == "_C":
         return torch.ops._C
-    else:
-        # Fall back to _C (for CUDA builds or if detection fails)
-        return torch.ops._C
+
+    # Fall back to _C (for CUDA builds or if detection fails)
+    return torch.ops._C
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +105,7 @@ def get_cpu_ops():
     return None
 
 
-def has_op(op_name: str) -> bool:
+def has_op(op_name: str) -> bool: # FIXME: this should be equivalent to doing `hasattr(ops, name)`
     """
     Check if an operation is available in the loaded extension.
 
