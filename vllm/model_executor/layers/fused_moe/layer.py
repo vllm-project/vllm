@@ -1981,6 +1981,7 @@ class FusedMoE(CustomOp):
                 else hidden_states,
                 router_logits=router_logits,
             )
+            zero_expert_result: torch.Tensor | None = None
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None
@@ -2001,6 +2002,12 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
+            elif (
+                self.zero_expert_num is not None
+                and self.zero_expert_num > 0
+                and isinstance(final_hidden_states, tuple)
+            ):
+                final_hidden_states, zero_expert_result = final_hidden_states
 
             def reduce_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
