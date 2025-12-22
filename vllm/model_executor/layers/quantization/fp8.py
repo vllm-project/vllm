@@ -949,6 +949,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             prepare_moe_fp8_layer_for_marlin(
                 layer, False, input_dtype=self.marlin_input_dtype
             )
+            # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
         elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
