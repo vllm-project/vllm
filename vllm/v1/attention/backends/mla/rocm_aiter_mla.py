@@ -157,7 +157,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.qo_indptr[: 1 + num_reqs].copy_(
                 query_start_loc_device, non_blocking=True
             )
-            self.qo_indptr[1 + num_reqs :] = query_start_loc_device[-1]
+            self.qo_indptr[1 + num_reqs :].fill_(query_start_loc_device[-1])
             qo_indptr = self.qo_indptr[: 1 + num_reqs]
 
         else:
