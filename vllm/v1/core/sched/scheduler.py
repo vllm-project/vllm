@@ -1651,10 +1651,6 @@ class Scheduler(SchedulerInterface):
             schedule the request during the next step.
         """
 
-        # avoid busy checking
-        if len(self.running) == 0:
-            time.sleep(0.01)
-
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
 
