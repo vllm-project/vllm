@@ -29,6 +29,7 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import CpuArchEnum, Platform
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -38,9 +39,15 @@ logger = init_logger(__name__)
 # We prefer to use os.sched_yield as it results in tighter polling loops,
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
-    sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8
-)
+#
+# On Arm systems, os.sched_yield does not take effect, causing the GIL
+# (Global Interpreter Lock) to remain unrelinquished and resulting in CPU bound
+# issues. we should making the process execute time.sleep(0) instead to release
+# the GIL.
+USE_SCHED_YIELD = (
+    (sys.version_info[:3] >= (3, 11, 1))
+    or (sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8)
+) and Platform.get_cpu_architecture() != CpuArchEnum.ARM
 
 
 def sched_yield():
