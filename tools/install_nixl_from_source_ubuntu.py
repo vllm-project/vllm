@@ -43,7 +43,7 @@ def run_command(command, cwd=".", env=None):
 def is_pip_package_installed(package_name):
     """Checks if a package is installed via pip without raising an exception."""
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "show", package_name],
+        ["uv", "pip", "show", package_name],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -117,7 +117,7 @@ def build_and_install_prerequisites(args):
             flush=True,
         )
         print("--> Installing from cache, skipping all source builds.", flush=True)
-        install_command = [sys.executable, "-m", "pip", "install", cached_wheel]
+        install_command = ["uv", "pip", "install", cached_wheel]
         run_command(install_command)
         print("\n--- Installation from cache complete. ---", flush=True)
         return
@@ -128,7 +128,7 @@ def build_and_install_prerequisites(args):
         flush=True,
     )
     print("\n--> Installing auditwheel...", flush=True)
-    run_command([sys.executable, "-m", "pip", "install", "auditwheel"])
+    run_command(["uv", "pip", "install", "auditwheel"])
     install_system_dependencies()
     ucx_install_path = os.path.abspath(UCX_INSTALL_DIR)
     print(f"--> Using wheel cache directory: {WHEELS_CACHE_HOME}", flush=True)
@@ -182,7 +182,7 @@ def build_and_install_prerequisites(args):
     temp_wheel_dir = os.path.join(ROOT_DIR, "temp_wheelhouse")
     run_command(
         [
-            sys.executable,
+            sys.executable,  # uv pip is not guaranteed to be the same python
             "-m",
             "pip",
             "wheel",
@@ -226,8 +226,7 @@ def build_and_install_prerequisites(args):
         flush=True,
     )
     install_command = [
-        sys.executable,
-        "-m",
+        "uv",
         "pip",
         "install",
         "--no-deps",  # w/o "no-deps", it will install cuda-torch
