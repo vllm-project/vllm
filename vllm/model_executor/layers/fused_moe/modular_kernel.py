@@ -1039,7 +1039,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         )
 
         num_chunks, CHUNK_SIZE = self._chunk_info(M_full)
-        print(f"{num_chunks=}")
 
         def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
             if num_chunks == 1:

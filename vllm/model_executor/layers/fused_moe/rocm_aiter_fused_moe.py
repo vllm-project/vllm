@@ -329,7 +329,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert a2_scale is None
         assert expert_tokens_meta is None
 
-        output = rocm_aiter_fused_experts(
+        result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -340,4 +340,5 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_map=expert_map,
             quant_config=self.quant_config,
         )
-        return output
+        assert result.shape == output.shape
+        output.copy_(result)
