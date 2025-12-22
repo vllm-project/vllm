@@ -372,7 +372,7 @@ if __name__ == "__main__":
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
-    # keep only "official" files for a non-nightly version (specifed by cli args)
+    # keep only "official" files for a non-nightly version (specified by cli args)
     PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
     if PY_VERSION_RE.match(version):
         # upload-wheels.sh ensures no "dev" is in args.version
