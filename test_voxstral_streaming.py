@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import asdict
-import numpy as np
-from mistral_common.protocol.instruct.chunk import RawAudio
 
 from mistral_common.audio import Audio
+from mistral_common.protocol.instruct.chunk import RawAudio
+from mistral_common.protocol.transcription.request import (
+    StreamingMode,
+    TranscriptionRequest,
+)
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.protocol.transcription.request import StreamingMode, TranscriptionRequest
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
