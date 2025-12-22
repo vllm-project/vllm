@@ -25,10 +25,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    _valid_cutlass_block_scaled_grouped_gemm,
-    run_cutlass_block_scaled_fused_experts,
-)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
@@ -1678,11 +1674,9 @@ def fused_experts(
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
-    allow_cutlass_block_scaled_grouped_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-    use_fp8_w8a8 = quant_config.use_fp8_w8a8
 
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
@@ -1696,7 +1690,6 @@ def fused_experts(
         and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
     ):
         assert quant_config is not None
-        assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1712,23 +1705,6 @@ def fused_experts(
             a1_scale=quant_config.a1_scale,
             a2_scale=quant_config.a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    elif (
-        allow_cutlass_block_scaled_grouped_gemm
-        and use_fp8_w8a8
-        and _valid_cutlass_block_scaled_grouped_gemm(
-            w1, w2, inplace, activation, apply_router_weight_on_input, expert_map
-        )
-    ):
-        assert quant_config is not None
-        return run_cutlass_block_scaled_fused_experts(
-            a=hidden_states,
-            w1=w1,
-            w2=w2,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
         )
     else:
         return dispatch_fused_experts_func(inplace)(

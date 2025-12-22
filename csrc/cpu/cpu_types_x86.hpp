@@ -352,6 +352,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(bool, void* ptr)
       : reg((__m512)_mm512_stream_load_si512(ptr)) {}
 
+  // strided load
+  explicit FP32Vec16(const float* ptr, INT32Vec16 idx)
+      : reg(_mm512_i32gather_ps(idx.reg, ptr, 4)) {}
+
   explicit FP32Vec16(__m512 data) : reg(data) {}
 
   // de-pack 4 bit values
@@ -406,6 +410,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16 operator-(const FP32Vec16& b) const {
     return FP32Vec16(_mm512_sub_ps(reg, b.reg));
+  }
+
+  FP32Vec16 operator-() const {
+    return FP32Vec16(_mm512_xor_ps(reg, _mm512_set1_ps(-0.0f)));
   }
 
   FP32Vec16 operator/(const FP32Vec16& b) const {
