@@ -92,14 +92,21 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        req_blocks = self.req_to_blocks.get(request_id)
+        num_req_blocks = len(req_blocks) if req_blocks is not None else 0
 
+        # Fast-path for the common case: no new prefix-cache hits.
+        # This means new_computed_blocks is empty, i.e. no local computed tokens,
+        # and total_computed_tokens is 0, i.e. no external computed tokens.
+        if request_id in self.num_cached_block:
+            assert len(new_computed_blocks) == 0
+            return max(num_required_blocks - num_req_blocks, 0)
+
+        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
             # Nothing is skipped.
             num_new_blocks = (
-                num_required_blocks
-                - len(new_computed_blocks)
-                - len(self.req_to_blocks[request_id])
+                num_required_blocks - len(new_computed_blocks) - num_req_blocks
             )
             num_evictable_blocks = sum(
                 blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
@@ -108,9 +115,7 @@ class SingleTypeKVCacheManager(ABC):
 
         # General case: some prefix tokens are skipped by the attention window.
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        num_local_computed_blocks = len(new_computed_blocks) + len(
-            self.req_to_blocks[request_id]
-        )
+        num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
 
         if num_skipped_blocks >= num_local_computed_blocks:
             # All local-computed blocks (both existing and newly computed) are
@@ -128,7 +133,7 @@ class SingleTypeKVCacheManager(ABC):
             # `num_skipped_new_computed_blocks` correspond to skipped tokens and
             # therefore do not need to be "touched" / re-allocated.
             num_skipped_new_computed_blocks = max(
-                0, num_skipped_blocks - len(self.req_to_blocks[request_id])
+                0, num_skipped_blocks - num_req_blocks
             )
 
             # If a computed block of a request is an eviction candidate (in the
