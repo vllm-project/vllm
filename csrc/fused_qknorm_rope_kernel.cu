@@ -405,7 +405,6 @@ void fused_qk_norm_rope(
                   qkv.scalar_type() == k_weight.scalar_type(),
               "qkv, q_weight and k_weight must have the same dtype");
 
-  int64_t rotary_dim = cos_sin_cache.size(1);
   int64_t num_tokens = qkv.size(0);
   TORCH_CHECK(position_ids.size(0) == num_tokens,
               "Number of tokens in position_ids must match QKV");
