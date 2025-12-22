@@ -154,6 +154,12 @@ def prepare_fp4_layer_for_marlin(
     )
 
     is_nvfp4 = hasattr(layer, "weight_scale_2")
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        if is_nvfp4:
+            raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
+        elif input_dtype != torch.float8_e4m3fn:
+            raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
+
     group_size = 16 if is_nvfp4 else 32
 
     part_size_n = layer.output_size_per_partition
@@ -231,6 +237,12 @@ def prepare_moe_fp4_layer_for_marlin(
     )
 
     is_nvfp4 = hasattr(layer, "w13_weight_scale_2")
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        if is_nvfp4:
+            raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
+        elif input_dtype != torch.float8_e4m3fn:
+            raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
+
     group_size = 16 if is_nvfp4 else 32
 
     e = layer.num_experts

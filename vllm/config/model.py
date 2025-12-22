@@ -71,7 +71,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -843,12 +843,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
@@ -1848,6 +1854,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
+
+
+def str_dtype_to_torch_dtype(type: str):
+    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
 
 # model_type -> reason
 _FLOAT16_NOT_SUPPORTED_MODELS = {

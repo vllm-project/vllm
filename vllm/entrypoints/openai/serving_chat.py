@@ -811,6 +811,11 @@ class OpenAIServingChat(OpenAIServing):
                             delta_text += harmony_parser.last_content_delta or ""
                         cur_channel = harmony_parser.current_channel
                         cur_recipient = harmony_parser.current_recipient
+                        # handle the case where several tokens where generated at once
+                        # including the final token, leading to a delta in the text
+                        # but the current channel to be empty (start state)
+                        if not cur_channel and delta_text:
+                            cur_channel = "final"
                     else:
                         delta_text = output.text
 
@@ -1828,10 +1833,11 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message(
-            tools=request.tools if should_include_tools else None
-        )
-        messages.append(dev_msg)
+        if request.tools:
+            dev_msg = get_developer_message(
+                tools=request.tools if should_include_tools else None
+            )
+            messages.append(dev_msg)
 
         # Add user message.
         messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
