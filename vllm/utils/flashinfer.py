@@ -540,27 +540,52 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
+    "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
+)
+
+
 @functools.cache
-def has_flashinfer_block_gemm() -> bool:
-    """Return `True` if FlashInfer FP8 block-scale GEMM is available."""
-    if not has_flashinfer():
-        return False
-    if not current_platform.is_cuda():
-        return False
-    # Only SM90+ (Hopper) supports this kernel
-    if not current_platform.is_device_capability(90):
+def has_flashinfer_fp8_blockscale_gemm() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is available."""
+    return has_flashinfer() and hasattr(
+        _get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90"
+    )
+
+
+@functools.cache
+def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is supported."""
+    return envs.VLLM_USE_FLASHINFER_FP8_LINEAR and has_flashinfer_fp8_blockscale_gemm()
+
+
+def should_use_flashinfer_for_block_scale_fp8_linear(
+    is_flashinfer_supported: bool,
+    output_dtype: torch.dtype,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+):
+    if not is_flashinfer_supported:
         return False
 
-    try:
-        import flashinfer
+    # Verify DeepGEMM N/K dims requirements
+    # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
+    # test inside kernels/quatization/test_block_fp8.py
+    N_MULTIPLE = 64
+    K_MULTIPLE = 128
 
-        # Check if the module has the required binding
-        return hasattr(flashinfer, "Fp8BlockScaleGemmRunner")
-    except (ImportError, AttributeError):
-        logger.debug_once(
-            "FlashInfer block-scale GEMM not available: module or binding not found"
-        )
-        return False
+    weight_dtype = weight.dtype
+    input_dtype = input.dtype
+
+    should_use_flashinfer = (
+        output_dtype == torch.bfloat16
+        and input_dtype == torch.bfloat16
+        and weight_dtype == torch.float8_e4m3fn
+        and weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
+    )
+
+    return should_use_flashinfer
 
 
 __all__ = [
@@ -579,11 +604,14 @@ __all__ = [
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
-    "has_flashinfer_block_gemm",
+    "flashinfer_fp8_blockscale_gemm",
+    "should_use_flashinfer_for_block_scale_fp8_linear",
+    "is_flashinfer_fp8_blockscale_gemm_supported",
 ]
