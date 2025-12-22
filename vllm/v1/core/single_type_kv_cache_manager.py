@@ -95,9 +95,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.get(request_id)
         num_req_blocks = len(req_blocks) if req_blocks is not None else 0
 
-        # Fast-path for the common case: no new prefix-cache hits.
-        # This means new_computed_blocks is empty, i.e. no local computed tokens,
-        # and total_computed_tokens is 0, i.e. no external computed tokens.
+        # Fast-path for the common case when no new prefix-cache hits.
         if request_id in self.num_cached_block:
             assert len(new_computed_blocks) == 0
             return max(num_required_blocks - num_req_blocks, 0)

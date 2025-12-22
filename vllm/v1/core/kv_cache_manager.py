@@ -218,7 +218,7 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_new_tokens: The number of tokens to be computed.
+            num_new_tokens: The number of new tokens to be allocated and computed.
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed

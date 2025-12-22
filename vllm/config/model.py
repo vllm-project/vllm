@@ -1148,9 +1148,6 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
-        ## REMOVE THIS BEFORE MERGING (YIFAN): temporarily disable mm prefix lm
-        # for correctness test.
-        return False
         MM_PREFIX_LM_MODELS = (
             "gemma3",
             # TODO(Isotr0py): Disable paligemma for now before
