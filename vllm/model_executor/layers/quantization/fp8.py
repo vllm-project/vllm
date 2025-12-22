@@ -897,8 +897,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # Lazy import to avoid importing triton too early.
-
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
