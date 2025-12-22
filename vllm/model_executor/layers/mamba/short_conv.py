@@ -225,8 +225,8 @@ class ShortConv(MambaBase, CustomOp):
             conv_kernel=self.L_cache,
         )
 
-    def get_copy_spec(self):
-        return MambaCopySpecCalculator.short_conv_state_copy_spec()
+    def get_copy_spec_func(self):
+        return MambaCopySpecCalculator.short_conv_state_copy_spec_func()
 
     @property
     def mamba_type(self) -> str:

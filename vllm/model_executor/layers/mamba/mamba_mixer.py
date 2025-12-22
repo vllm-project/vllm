@@ -445,8 +445,8 @@ class MambaMixer(MambaBase, CustomOp):
             conv_kernel=self.conv_kernel_size,
         )
 
-    def get_copy_spec(self):
-        return MambaCopySpecCalculator.mamba1_state_copy_spec()
+    def get_copy_spec_func(self):
+        return MambaCopySpecCalculator.mamba1_state_copy_spec_func()
 
     @property
     def mamba_type(self) -> str:

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeAlias
 
 import torch
 
@@ -227,89 +229,72 @@ class MambaStateShapeCalculator:
         )
 
 
-class MambaCopySpec(ABC):
-    @staticmethod
-    @abstractmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        """
-        Return the offset of the source block idx which needs to be copied.
-        """
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        """
-        Return the offset of the data in the source block which needs to be copied.
-        """
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        """
-        Return the number of elements to be copied.
-        """
-        pass
+@dataclass
+class MambaCopySpec:
+    start_addr: int
+    num_elements: int
 
 
-class MambaTemporalCopySpec(MambaCopySpec):
-    @staticmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        return accept_token_bias
-
-    @staticmethod
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return 0
-
-    @staticmethod
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return state.numel()
+MambaCopySpecFunc: TypeAlias = Callable[
+    [torch.Tensor, list[int], int, int], MambaCopySpec
+]
 
 
-class MambaConvCopySpec(MambaCopySpec):
-    @staticmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        return 0
+def get_conv_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    src_block_id = block_ids[cur_block_idx]
+    src_state = state[src_block_id, num_accepted_tokens - 1 :]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
 
-    @staticmethod
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return accept_token_bias * state.stride(0)
 
-    @staticmethod
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return state.numel() - accept_token_bias * state.stride(0)
+def get_temporal_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    src_state = state[src_block_id]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
 
 
-MambaFullCopySpec = MambaTemporalCopySpec
+get_full_copy_spec = get_temporal_copy_spec
 
 
 class MambaCopySpecCalculator:
     @classmethod
-    def linear_attention_copy_spec(cls):
-        return (MambaTemporalCopySpec,)
+    def linear_attention_copy_spec_func(cls):
+        return (get_temporal_copy_spec,)
 
     @classmethod
-    def mamba1_state_copy_spec(cls):
-        return MambaConvCopySpec, MambaTemporalCopySpec
+    def mamba1_state_copy_spec_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def mamba2_state_copy_spec(cls):
-        return MambaConvCopySpec, MambaTemporalCopySpec
+    def mamba2_state_copy_spec_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def short_conv_state_copy_spec(cls):
-        return (MambaConvCopySpec,)
+    def short_conv_state_copy_spec_func(cls):
+        return (get_conv_copy_spec,)
 
     @classmethod
-    def gated_delta_net_copy_spec(cls):
-        return MambaConvCopySpec, MambaTemporalCopySpec
+    def gated_delta_net_copy_spec_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def kda_state_copy_spec(cls):
+    def kda_state_copy_spec_func(cls):
         return (
-            MambaConvCopySpec,
-            MambaConvCopySpec,
-            MambaConvCopySpec,
-            MambaTemporalCopySpec,
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_temporal_copy_spec,
         )

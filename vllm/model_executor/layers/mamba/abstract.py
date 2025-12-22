@@ -9,9 +9,11 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.mamba.mamba_utils import MambaFullCopySpec
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaCopySpecFunc,
+    get_full_copy_spec,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
-from vllm.v1.worker.mamba_utils import MambaCopySpec
 
 
 class MambaBase(AttentionLayerBase):
@@ -42,8 +44,8 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
-    def get_copy_spec(self) -> tuple[type[MambaCopySpec], ...]:
-        return (MambaFullCopySpec,) * len(self.get_state_dtype())
+    def get_copy_spec_func(self) -> tuple[MambaCopySpecFunc, ...]:
+        return (get_full_copy_spec,) * len(self.get_state_dtype())
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         if (
@@ -66,7 +68,7 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
-            copy_specs=self.get_copy_spec(),
+            copy_spec_funcs=self.get_copy_spec_func(),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

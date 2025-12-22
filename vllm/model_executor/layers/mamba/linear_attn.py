@@ -128,8 +128,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             num_heads=self.num_heads, tp_size=self.tp_size, head_dim=self.head_dim
         )
 
-    def get_copy_spec(self):
-        return MambaCopySpecCalculator.linear_attention_copy_spec()
+    def get_copy_spec_func(self):
+        return MambaCopySpecCalculator.linear_attention_copy_spec_func()
 
     def __init__(
         self,

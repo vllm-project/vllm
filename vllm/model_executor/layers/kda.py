@@ -104,8 +104,8 @@ class KimiDeltaAttention(nn.Module, MambaBase):
             self.tp_size, self.num_heads, self.head_dim, conv_kernel_size=self.conv_size
         )
 
-    def get_copy_spec(self):
-        return MambaCopySpecCalculator.kda_state_copy_spec()
+    def get_copy_spec_func(self):
+        return MambaCopySpecCalculator.kda_state_copy_spec_func()
 
     def __init__(
         self,

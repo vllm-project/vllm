@@ -9,7 +9,7 @@ import triton.language as tl
 
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpec,
+    MambaCopySpecFunc,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -75,7 +75,8 @@ def collect_mamba_copy_meta(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    copy_specs: tuple[type[MambaCopySpec], ...] = mamba_spec.copy_specs
+    copy_spec_funcs: tuple[MambaCopySpecFunc, ...] = mamba_spec.copy_spec_funcs
+    assert copy_spec_funcs is not None
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
@@ -83,17 +84,14 @@ def collect_mamba_copy_meta(
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache[0]
-            for state, copy_spec in zip(kv_caches, copy_specs):
-                src_block_id = block_ids[
-                    src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)
-                ]
-                data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
-                num_elements = copy_spec.num_elements_func(state[0], accept_token_bias)
-                src_state_list.append(
-                    state[src_block_id].data_ptr() + data_offset * state.element_size()
+            for state, copy_spec_func in zip(kv_caches, copy_spec_funcs):
+                copy_spec = copy_spec_func(
+                    state, block_ids, src_block_idx, accept_token_bias + 1
                 )
+
+                src_state_list.append(copy_spec.start_addr)
                 dest_state_list.append(state[dest_block_id].data_ptr())
-                num_elements_list.append(num_elements * state.element_size())
+                num_elements_list.append(copy_spec.num_elements * state.element_size())
 
 
 def do_mamba_copy_block(
