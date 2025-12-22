@@ -289,17 +289,18 @@ class MistralTokenizer(TokenizerLike):
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
 
         # Cache special tokens for faster access.
+        self._vocab = self.tokenizer.vocab()
+        # Vocab sorted by token id.
+        self._max_token_id = self.vocab_size - 1
+
+        self._special_token_ids = self._get_special_token_ids()
         self._special_token_ids_set = set(self._special_token_ids)
         self._special_tokens = self._get_special_tokens(self._special_token_ids)
         self._special_tokens_set = set(self._special_tokens)
 
-        # Vocab sorted by token id.
-        self._vocab = self.tokenizer._vocab
-        self._max_token_id = self.vocab_size - 1
 
-    @cached_property
-    def _special_token_ids(self) -> list[int]:
-        return sorted(self.tokenizer.is_special(i) for i in len(self.tokenizer.vocab()))
+    def _get_special_token_ids(self) -> list[int]:
+        return sorted(self.tokenizer.is_special(i) for i in len(self._vocab))
 
     def _get_special_tokens(self, all_special_ids: list[int]) -> list[str]:
         return [
