@@ -73,13 +73,15 @@ def init_aiter_topK_meta_data(
     if is_EP:
         s_topk_ids_list = [
             [fake_expertid] * (n_shared_experts + is_EP)
-        ] * max_num_tokens
+            for _ in range(max_num_tokens)
+        ]
         for i in range(tp_rank, max_num_tokens, tp_size):
             s_topk_ids_list[i] = shared_expert_ids
     else:
         s_topk_ids_list = [
             list(range(n_routed_experts, fake_expertid))
-        ] * max_num_tokens
+            for _ in range(max_num_tokens)
+        ]
     s_topk_ids[:] = torch.tensor(s_topk_ids_list, dtype=torch.int32, device="cuda")
 
     total_topk_weights = torch.empty(
