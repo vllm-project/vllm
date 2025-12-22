@@ -218,52 +218,30 @@ list(APPEND CXX_COMPILE_FLAGS_AVX512
     "-mavx512bw"
     "-mavx512dq")
 
-if (FALSE) # FIXME: handle custom ISAs
-    find_isa(${CPUINFO} "avx512_bf16" AVX512BF16_FOUND)
-    if (AVX512BF16_FOUND OR ENABLE_AVX512BF16)
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-            list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512bf16")
-            set(ENABLE_AVX512BF16 ON)
-        else()
-            set(ENABLE_AVX512BF16 OFF)
-            message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
-        endif()
+if (ENABLE_AVX512BF16)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+        list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512bf16")
     else()
-        set(ENABLE_AVX512BF16 OFF)
-        message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
+        message(FATAL_ERROR "Cannot enable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
+endif()
 
-    find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
-    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-            list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512vnni")
-            set(ENABLE_AVX512VNNI ON)
-        else()
-            set(ENABLE_AVX512VNNI OFF)
-            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
-        endif()
+if (ENABLE_AVX512VNNI)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+        list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512vnni")
     else()
-        set(ENABLE_AVX512VNNI OFF)
-        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
+        message(FATAL_ERROR "Cannot enable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
+endif()
 
-    find_isa(${CPUINFO} "amx_bf16" AMXBF16_FOUND)
-    if (AMXBF16_FOUND OR ENABLE_AMXBF16)
-        # FIXME add support for AMX
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-            list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile")
-            set(ENABLE_AMXBF16 ON)
-            add_compile_definitions(-DCPU_CAPABILITY_AMXBF16)
-        else()
-            set(ENABLE_AMXBF16 OFF)
-            message(WARNING "Disable AMX_BF16 ISA support, requires gcc/g++ >= 12.3")
-        endif()
+if (ENABLE_AMXBF16)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile" "-DCPU_CAPABILITY_AMXBF16")
     else()
-        set(ENABLE_AMXBF16 OFF)
-        message(WARNING "Disable AMX_BF16 ISA support, no amx_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AMXBF16=1.")
+        message(FATAL_ERROR "Cannot enable AMX_BF16 ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
 endif()
 
@@ -409,7 +387,6 @@ set(VLLM_EXT_AVX512_SRC
     ${VLLM_EXT_SRC}
 )
 
-# FIXME: enable these if required
 if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
     set(VLLM_EXT_AVX512_SRC
         "csrc/cpu/sgl-kernels/gemm.cpp"
@@ -420,7 +397,10 @@ if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
         ${VLLM_EXT_AVX512_SRC}
     )
-    add_compile_definitions(-DCPU_CAPABILITY_AVX512)
+    list(APPEND CXX_COMPILE_FLAGS_AVX512 "-DCPU_CAPABILITY_AVX512")
+endif()
+if (ENABLE_AMXBF16)
+    list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS_AMX})
 endif()
 
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
