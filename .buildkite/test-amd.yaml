@@ -403,7 +403,7 @@ steps:
 # TODO: Add the "V1 Test attetion (MI300)" test group
 
 - label: V1 Test attention (H100) # 10min
-  mirror_hardwares: [amdexperimental, amdmyvalidation]
+  mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
   timeout_in_minutes: 30
