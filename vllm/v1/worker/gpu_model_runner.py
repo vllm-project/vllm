@@ -332,10 +332,6 @@ class GPUModelRunner(
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
         self.attention_chunk_size = model_config.attention_chunk_size
-        self.sink_len = getattr(
-            self.vllm_config.model_config.hf_config, "param_sink_number", 0
-        )
-        assert self.sink_len % self.cache_config.block_size == 0
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
 
@@ -459,7 +455,6 @@ class GPUModelRunner(
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            sink_len=self.sink_len,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -5079,7 +5074,7 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=self.num_spec_tokens,
-                sink_len=self.sink_len,
+                # sink_len=self.sink_len,
             )
 
     def _allocate_kv_cache_tensors(
@@ -5206,28 +5201,16 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    if (
-                        hasattr(kv_cache_spec, "head_size_v")
-                        and kv_cache_spec.head_size_v != kv_cache_spec.head_size
-                    ):
-                        kwargs = {"head_size_v": kv_cache_spec.head_size_v}
-                        stride_kwargs = {"diff_kv": True}
-                    else:
-                        kwargs = {}
-                        stride_kwargs = {}
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         kernel_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
-                        **kwargs,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                            **stride_kwargs
-                        )
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))

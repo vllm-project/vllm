@@ -17,6 +17,8 @@ from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -48,9 +50,23 @@ def create_static_sink_attention_backend(
             device: torch.device,
         ):
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+            model_config = vllm_config.model_config
+            scheduler_config = vllm_config.scheduler_config
             self.sink_len = sink_len
+            self.block_size = vllm_config.cache_config.block_size
             self.num_sink_blocks = self.sink_len // vllm_config.cache_config.block_size
-            self.sink_block_table = torch.arange(
+            self.max_num_blocks = cdiv(
+                model_config.max_model_len, vllm_config.cache_config.block_size
+            )
+            self.block_table_with_sink = torch.zeros(
+                (
+                    scheduler_config.max_num_seqs,
+                    self.max_num_blocks + self.num_sink_blocks,
+                ),
+                device=device,
+                dtype=torch.int32,
+            )
+            self.block_table_with_sink[:, : self.num_sink_blocks] = torch.arange(
                 1,
                 self.num_sink_blocks + 1,
                 device=device,
@@ -72,6 +88,14 @@ def create_static_sink_attention_backend(
             common_attn_metadata.max_seq_len = (
                 common_attn_metadata.max_seq_len + self.sink_len
             )
+            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
+            num_reqs = common_attn_metadata.num_reqs
+            self.block_table_with_sink[
+                :num_reqs, self.num_sink_blocks : self.num_sink_blocks + max_num_blocks
+            ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]
+            common_attn_metadata.block_table_tensor = self.block_table_with_sink[
+                :num_reqs
+            ]
 
             return super().build(common_prefix_len, common_attn_metadata, fast_build)
 
@@ -84,7 +108,8 @@ def create_static_sink_attention_backend(
     return attn_backend
 
 
-class StaticSinkAttention(Attention):
+@CustomOp.register("static_sink_attention")
+class StaticSinkAttention(Attention, CustomOp):
     """
     Attention with static sink tokens
     """
@@ -118,7 +143,8 @@ class StaticSinkAttention(Attention):
             underlying_attn_backend,
             sink_len=sink_len,
         )
-        super().__init__(
+        Attention.__init__(
+            self=self,
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -126,6 +152,7 @@ class StaticSinkAttention(Attention):
             attn_backend=attn_backend,
             **kwargs,
         )
+        CustomOp.__init__(self)
 
         self.sink_len = sink_len
         self.block_size = block_size
@@ -137,7 +164,7 @@ class StaticSinkAttention(Attention):
         self.sink_key = sink_key
         self.sink_value = sink_value
 
-    def forward(
+    def forward_native(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -153,6 +180,18 @@ class StaticSinkAttention(Attention):
             torch.ops.vllm.maybe_populate_sink(self_kv_cache, self.layer_name)
 
         return super().forward(query, key, value, output_shape)
+
+    def forward_cuda(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        return self.forward_native(query, key, value, output_shape)
+
+    def forward(self, *args, **kwargs):
+        return self._forward_method(*args, **kwargs)
 
     def populate_sink_kv(self, self_kv_cache):
         sink_kv_slot_mapping = torch.arange(

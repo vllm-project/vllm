@@ -23,7 +23,6 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
-        sink_len: int = 0,
     ):
         """
         Args:
@@ -64,8 +63,6 @@ class BlockTable:
             self.use_hybrid_blocks = True
 
         self.max_num_blocks_per_req = max_num_blocks_per_req * self.blocks_per_kv_block
-        self.sink_block_len = sink_len // self.block_size
-        self.max_num_blocks_per_req = self.max_num_blocks_per_req + self.sink_block_len
 
         self.block_table = self._make_buffer(
             self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
@@ -154,7 +151,7 @@ class BlockTable:
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
                 + positions // virtual_block_size
-            ) + self.sink_block_len
+            )
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
@@ -180,10 +177,9 @@ class BlockTable:
                 mask, slot_mapping, -1
             )
         else:
-            # When self.sink_block_len > 0, we need to shift block table indices
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req + positions // self.block_size
-            ) + self.sink_block_len
+            )
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
@@ -267,7 +263,6 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
-        sink_len: int = 0,
     ) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -305,7 +300,6 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
-                sink_len=sink_len,
             )
             for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]

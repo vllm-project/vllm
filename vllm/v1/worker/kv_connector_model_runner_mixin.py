@@ -190,28 +190,17 @@ class KVConnectorModelRunnerMixin:
             return False
 
         attn_backend = attn_group.backend
-        if (
-            hasattr(kv_cache_spec, "head_size_v")
-            and kv_cache_spec.head_size_v != kv_cache_spec.head_size
-        ):
-            kwargs = {"head_size_v": kv_cache_spec.head_size_v}
-            stride_kwargs = {"diff_kv": True}
-        else:
-            kwargs = {}
-            stride_kwargs = {}
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             1234,
             kv_cache_spec.block_size,
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
             cache_dtype_str=cache_dtype,
-            **kwargs,
         )
 
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True,
-                **stride_kwargs,
             )
         except (AttributeError, NotImplementedError):
             return False
@@ -268,22 +257,12 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
         attn_backend = attn_group.backend
-        if (
-            hasattr(kv_cache_spec, "head_size_v")
-            and kv_cache_spec.head_size_v != kv_cache_spec.head_size
-        ):
-            kwargs = {"head_size_v": kv_cache_spec.head_size_v}
-            stride_kwargs = {"diff_kv": True}
-        else:
-            kwargs = {}
-            stride_kwargs = {}
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             kernel_num_blocks,
             kernel_block_size,
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
             cache_dtype_str=cache_dtype,
-            **kwargs,
         )
 
         # prepend a num_layers dimension into the shape
@@ -292,7 +271,6 @@ class KVConnectorModelRunnerMixin:
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True,
-                **stride_kwargs,
             )
             assert len(kv_cache_stride_order) == len(kv_cache_shape)
         except (AttributeError, NotImplementedError):
