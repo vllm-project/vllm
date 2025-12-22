@@ -52,9 +52,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        # Defer input quantization to the fused moe kernel. This is
-        # need for certain kernels (e.g. AITER, FI BlockQuant) which
-        # use a single operation for input quant and the experts.
+        # Defer input quantization to the fused moe kernel as certain
+        # kernels (e.g. AITER, FI BlockQuant) use a single kernel call
+        # for input quantization and experts.
         if self.defer_input_quant:
             return a1, None, None, None, None
 
