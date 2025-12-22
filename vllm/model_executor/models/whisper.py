@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 import enum
-import functools
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import replace
 from functools import partial
 from typing import Annotated, Literal, cast
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import (
     BatchFeature,
@@ -23,14 +19,11 @@ from transformers import (
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionMetadata,
     AttentionType,
 )
 from vllm.attention.layer import Attention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
-from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -46,6 +39,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.models.whisper_utils import (
+    ISO639_1_SUPPORTED_LANGS,
+    WhisperAttentionWithBlockPooling,
+    WhisperCausalConv1d,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -64,13 +62,6 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
-    subclass_attention_backend_with_overrides,
-)
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.models.whisper_utils import ISO639_1_SUPPORTED_LANGS, WhisperCausalConv1d, WhisperAttentionWithBlockPooling
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -471,7 +462,9 @@ class WhisperEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
 
-        self.pos_embed_type = WhisperPosEmbedType(getattr(config, "pos_embed", "sinusoidal"))
+        self.pos_embed_type = WhisperPosEmbedType(
+            getattr(config, "pos_embed", "sinusoidal")
+        )
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
@@ -492,7 +485,10 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        if self.pos_embed_type in (WhisperPosEmbedType.SINUSOIDAL, WhisperPosEmbedType.LEARNED):
+        if self.pos_embed_type in (
+            WhisperPosEmbedType.SINUSOIDAL,
+            WhisperPosEmbedType.LEARNED,
+        ):
             if is_causal:
                 raise ValueError(
                     "Only NOPE position embeddings are supported "
@@ -525,7 +521,10 @@ class WhisperEncoder(nn.Module):
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
 
-            if self.pos_embed_type in (WhisperPosEmbedType.SINUSOIDAL, WhisperPosEmbedType.LEARNED):
+            if self.pos_embed_type in (
+                WhisperPosEmbedType.SINUSOIDAL,
+                WhisperPosEmbedType.LEARNED,
+            ):
                 embeds = embeds.transpose(-1, -2)
                 embeds = (
                     embeds + self.embed_positions.weight[: embeds.size(-2), :]

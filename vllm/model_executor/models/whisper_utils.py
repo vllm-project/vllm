@@ -1,27 +1,29 @@
-import torch
-from torch import nn
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+import functools
 import math
+from dataclasses import replace
+
+import torch
 import torch.nn.functional as F
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.attention.selector import get_attn_backend
+from torch import nn
+
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
 )
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from dataclasses import replace
+from vllm.attention.selector import get_attn_backend
+from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
-import copy
-import enum
-import functools
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 ISO639_1_SUPPORTED_LANGS = {
@@ -85,8 +87,6 @@ ISO639_1_SUPPORTED_LANGS = {
 }
 
 
-
-
 def _pad1d(
     x: torch.Tensor,
     paddings: tuple[int, int],
@@ -146,9 +146,6 @@ class WhisperCausalConv1d(nn.Conv1d):
         extra_padding = target_length - x.shape[-1]
         x = _pad1d(x, (self._padding_total, extra_padding), mode="constant")
         return super().forward(x)
-
-
-
 
 
 @functools.lru_cache
@@ -300,5 +297,3 @@ class WhisperAttentionWithBlockPooling(Attention):
             num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
         )
         return kv_cache_spec
-
-
