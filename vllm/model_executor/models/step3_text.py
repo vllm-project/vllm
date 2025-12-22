@@ -322,14 +322,6 @@ class Step3TextDecoderLayer(nn.Module):
 
         return hidden_states, residual
 
-    def compute_attn_output(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ):
-        pass
-
     def compute_ffn_output(self, hidden_states):
         assert self.afd_role == "ffn"
         if self.use_moe:
