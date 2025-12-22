@@ -21,13 +21,13 @@ from vllm.entrypoints.pooling.score.protocol import (
     RerankResponse,
     RerankResult,
     RerankUsage,
+    ScoreContentPartParam,
+    ScoreMultiModalParam,
     ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
 )
 from vllm.entrypoints.score_utils import (
-    ScoreContentPartParam,
-    ScoreMultiModalParam,
     _cosine_similarity,
     _validate_score_input_lens,
     compress_token_type_ids,
