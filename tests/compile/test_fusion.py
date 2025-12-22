@@ -259,7 +259,7 @@ def test_fusion_rmsnorm_quant(
     if current_platform.is_rocm() and not enable_rms_norm_custom_op:
         pytest.skip("Unsupported rms norm op")
     if current_platform.is_rocm() and not enable_quant_fp8_custom_op:
-        pytest.skip("Unsupported rms norm op")
+        pytest.skip("Unsupported quant op")
 
     if not enable_quant_fp8_custom_op and group_shape.is_per_group():
         pytest.skip("Unsupported unwrapped quant fp8 op for blockwise quantization")

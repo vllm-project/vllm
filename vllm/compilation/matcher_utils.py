@@ -48,6 +48,9 @@ if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic64ColMajorSym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 if current_platform.is_rocm():
+    # Import to trigger custom op registrations via direct_register_custom_op
+    from vllm.model_executor.layers.quantization.utils import fp8_utils  # noqa: F401
+
     QUANT_OPS[kFp8Dynamic128Sym] = (
         torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
     )  # noqa: E501
