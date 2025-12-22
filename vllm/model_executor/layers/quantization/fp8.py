@@ -1073,9 +1073,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             self.kernel = mk.FusedMoEModularKernel(
-                # TODO(rob): in follow up, we can use the generic
-                # MoEPrepareAndFinalizeNoEP with the changes to
-                # defer input quantization
+                # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
+                # with the changes to defer input quantization
                 FlashInferAllGatherMoEPrepareAndFinalize(
                     use_dp=(self.moe.dp_size > 1),
                     use_deepseek_fp8_block_scale=self.block_quant,
