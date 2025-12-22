@@ -1043,8 +1043,6 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                # Indexer tensors are token-flattened ([num_tokens, ...]) so we
-                # must use non-NeoX RoPE layout to preserve ranks.
                 is_neox_style=False,
             )
             self.indexer = Indexer(
