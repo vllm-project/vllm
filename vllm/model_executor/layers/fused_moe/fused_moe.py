@@ -1974,9 +1974,12 @@ def fused_experts_impl(
             if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
                 pass
             elif ocp_mx_scheme.endswith("a_fp8"):
-                # perform QDQ (quantize and dequantize) on activation for emulation purpose,
-                # because of no native kernel for weight in ocp_mx_scheme and activation in FP8.
-                # However, the implementation is based on existing non-emulation ops.
+                # perform QDQ (quantize and dequantize)
+                # on activation for emulation purpose,
+                # because of no native kernel for weight
+                # in ocp_mx_scheme and activation in FP8.
+                # However, the implementation is based on
+                # existing non-emulation ops.
                 qcurr_hidden_states, a1q_scale = ops.scaled_fp8_quant(
                     curr_hidden_states, a1_scale, use_per_token_if_dynamic=False
                 )
@@ -1986,7 +1989,6 @@ def fused_experts_impl(
                 input_quant_dtype = None
                 a1_scale = None
             else:
-                # TODO: @felix for ocp_mx_scheme.endswith("fp6_e3m2"), ocp_mx_scheme.endswith("fp6_e2m3")
                 raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
 
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
@@ -2057,9 +2059,12 @@ def fused_experts_impl(
             if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
                 pass
             elif ocp_mx_scheme.endswith("a_fp8"):
-                # perform QDQ (quantize and dequantize) on activation for emulation purpose,
-                # because of no native kernel for weight in ocp_mx_scheme and activation in FP8.
-                # However, the implementation is based on existing non-emulation ops.
+                # perform QDQ (quantize and dequantize)
+                # on activation for emulation purpose,
+                # because of no native kernel for weight
+                # in ocp_mx_scheme and activation in FP8.
+                # However, the implementation is based on
+                # existing non-emulation ops.
                 qintermediate_cache2, a2q_scale = ops.scaled_fp8_quant(
                     intermediate_cache2, a2_scale, use_per_token_if_dynamic=False
                 )
@@ -2069,7 +2074,6 @@ def fused_experts_impl(
                 input_quant_dtype = None
                 a2_scale = None
             else:
-                # TODO: @felix for ocp_mx_scheme.endswith("fp6_e3m2"), ocp_mx_scheme.endswith("fp6_e2m3")
                 raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(

@@ -324,9 +324,9 @@ class QuarkConfig(QuantizationConfig):
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
         """
-        This check returns True only if it is an OCP-MX weight quantization. 
-        The activation can be any quantization data type (e.g., FP16/BF16, FP8, or any OCP-MX series). 
-        The rationale for checking only the weight type is that 
+        This check returns True only if it is an OCP-MX weight quantization.
+        The activation can be any quantization data type (e.g., FP16/BF16, FP8, or any OCP-MX series).
+        The rationale for checking only the weight type is that
         the model loading concept and process (create weights) primarily concerns the weights themselves.
         """
         # Confirm weights quantized.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -594,8 +594,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def __init__(
         self,
         weight_config: dict[str, Any],
-        input_config: Optional[dict[str, Any]] = None,
-        moe: Optional[FusedMoEConfig] = None,
+        input_config: dict[str, Any] | None = None,
+        moe: FusedMoEConfig | None = None,
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
@@ -623,7 +623,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 )
         else:
             self.input_dtype = None
-        
+
         self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
@@ -633,13 +633,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
         else:
             self.mxfp4_backend = None
-        
+
         if not self.weight_only_quant:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
         else:
             self.static_input_scales = False
 
-        if any(self.ocp_mx_scheme.endswith(a_scheme) for a_scheme in ["a_mxfp4", "a_mxfp6_e3m2", "a_mxfp6_e2m3"]):
+        if any(
+            self.ocp_mx_scheme.endswith(a_scheme)
+            for a_scheme in ["a_mxfp4", "a_mxfp6_e3m2", "a_mxfp6_e2m3"]
+        ):
             if self.static_input_scales:
                 raise NotImplementedError(
                     "QuarkOCP_MX_MoEMethod with static input scales is currently "
@@ -651,7 +654,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                     "QuarkOCP_MX_MoEMethod with dynamic input scales is currently "
                     f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. Please open an issue."
                 )
-        
+
         self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
 
         self.model_type = getattr(
@@ -659,9 +662,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         self._emulate = (
-            not current_platform.supports_mx() or not self.ocp_mx_scheme.startswith("w_mxfp4")
+            not current_platform.supports_mx()
+            or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
-        
+
         self.emulate = (
             True if self.model_type == "gpt_oss" else self._emulate
         )  # TODO (xuebwang-amd)
@@ -913,7 +917,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 block_shape=None,
             )
         elif self.ocp_mx_scheme in ["w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"]:
-            raise NotImplementedError(f"Currently there is no corresponding fused moe quant config for scheme {self.ocp_mx_scheme}. Please open an issue.")
+            raise NotImplementedError(
+                f"Currently there is no corresponding fused moe quant config for scheme {self.ocp_mx_scheme}. Please open an issue."
+            )
         else:
             return ocp_mx_moe_quant_config(
                 quant_dtype=self.input_dtype,
