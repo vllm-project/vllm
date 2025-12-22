@@ -5074,7 +5074,6 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=self.num_spec_tokens,
-                # sink_len=self.sink_len,
             )
 
     def _allocate_kv_cache_tensors(
