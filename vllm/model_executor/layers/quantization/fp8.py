@@ -722,6 +722,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
+        self.weight_scale_name = (
+            "weight_scale_inv" if self.block_quant else "weight_scale"
+        )
         self.fp8_backend = get_fp8_moe_backend(
             self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
@@ -826,38 +829,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # WEIGHT_SCALES
         if not self.block_quant:
-            # Allocate 2 scales for w1 and w3 respectively.
-            # They will be combined to a single scale after weight loading.
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
-            )
-            w2_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-            )
-            layer.register_parameter("w13_weight_scale", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            # For per-tensor quant, the scales are per expert and weight.
+            w13_scale_data = torch.ones(num_experts, 2, dtype=torch.float32)
+            w2_scale_data = torch.ones(num_experts, dtype=torch.float32)
         else:
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
-                    (hidden_size + block_k - 1) // block_k,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
+            # For block quant, the scales are per block (typically 128x128).
+            w13_scale_data = torch.ones(
+                num_experts,
+                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                (hidden_size + block_k - 1) // block_k,
+                dtype=torch.float32,
             )
-            w2_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    (hidden_size + block_n - 1) // block_n,
-                    (intermediate_size_per_partition + block_k - 1) // block_k,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
+            w2_scale_data = torch.ones(
+                num_experts,
+                (hidden_size + block_n - 1) // block_n,
+                (intermediate_size_per_partition + block_k - 1) // block_k,
+                dtype=torch.float32,
             )
-            layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
-            assert self.quant_config.activation_scheme == "dynamic"
+        w13_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
+        w2_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
+        # Note: name is weight_scale for tensor, weight_scale_inv for block.
+        layer.register_parameter(f"w13_{self.weight_scale_name}", w13_scale)
+        layer.register_parameter(f"w2_{self.weight_scale_name}", w2_scale)
 
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
@@ -866,11 +859,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant
             else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_scale, extra_weight_attrs)
+        set_weight_attrs(w2_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
+            assert not self.block_quant
             w13_input_scale = torch.nn.Parameter(
                 torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
@@ -898,11 +892,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # Allow for accessing weights and scales in standard way.
-        weight_scale_name = "weight_scale_inv" if self.block_quant else "weight_scale"
         w13_weight = layer.w13_weight
         w2_weight = layer.w2_weight
-        w13_weight_scale = getattr(layer, f"w13_{weight_scale_name}")
-        w2_weight_scale = getattr(layer, f"w2_{weight_scale_name}")
+        w13_weight_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_weight_scale = getattr(layer, f"w2_{self.weight_scale_name}")
 
         # For ROCm platform: rescale to fp8_fnuz
         if current_platform.is_fp8_fnuz():
@@ -933,8 +926,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
             replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
-        # Per tensor kernels require single weight scale for w13 per expert.
-        # We use the max and then requantize each expert.
+        # Per tensor kernels require single weight scale for w13 per expert, but
+        # on disk there is a scale for w1 and w3. We use the max to requantize.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = w13_weight_scale.max(dim=1).values
@@ -992,8 +985,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # function ensures weight reloading remains possible.
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
-        replace_parameter(layer, f"w13_{weight_scale_name}", w13_weight_scale)
-        replace_parameter(layer, f"w2_{weight_scale_name}", w2_weight_scale)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
 
         # NOTE(rob): this is a WIP refactor. We are first migrating
         # all of the kernels in the TP case to use mk. Once this is
