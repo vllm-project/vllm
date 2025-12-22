@@ -116,7 +116,6 @@ class Fp8MoeBackend(Enum):
     DEEPGEMM = 3
     MARLIN = 4
     TRITON = 5
-    AITER = 6
 
 
 def get_fp8_moe_backend(
@@ -188,10 +187,6 @@ def get_fp8_moe_backend(
         elif is_deep_gemm_supported():
             logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
-
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-        logger.info_once("Using ROCm AITER backend for FP8 MoE", scope="local")
-        return Fp8MoeBackend.AITER
 
     # default to Triton
     logger.info_once("Using Triton backend for FP8 MoE")
@@ -760,6 +755,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "activation function, but got {layer.activation}."
                 )
 
+        self.rocm_aiter_moe_enabled = False
+
     def create_weights(
         self,
         layer: Module,
@@ -896,6 +893,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        # Lazy import to avoid importing triton too early.
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+
         # Allow for accessing weights and scales in standard way.
         weight_scale_name = "weight_scale_inv" if self.block_quant else "weight_scale"
         w13_weight = layer.w13_weight
@@ -916,7 +916,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             )
 
-        # Kernels require single activation scale (use the max).
+        # Per tensor kernels require single activation scale. We use max.
         if self.quant_config.activation_scheme == "static":
             assert not self.block_quant
             assert layer.w13_input_scale is not None
@@ -932,8 +932,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
             replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
-        # Kernels require single weight scale for w3 per expert (use the
-        # max and then requantize each expert).
+        # Per tensor kernels require single weight scale for w13 per expert.
+        # We use the max and then requantize each expert.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = w13_weight_scale.max(dim=1).values
@@ -950,13 +950,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
         # Reshuffle weights into kernel runtime format.
+        # TODO(once AITER refactor lands, this can be an if ... elif ... else).
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
             prepare_moe_fp8_layer_for_marlin(
                 layer, False, input_dtype=self.marlin_input_dtype
             )
             del layer.w13_input_scale
             del layer.w2_input_scale
-        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             assert self.block_quant
             w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
                 wq=w13_weight,
@@ -970,11 +971,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=is_deep_gemm_e8m0_used(),
             )
-        elif self.fp8_backend == Fp8MoeBackend.AITER:
+        if self.rocm_aiter_moe_enabled:
             w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
                 w13_weight, w2_weight
             )
-        elif self.fp8_backend in [
+        if self.fp8_backend in [
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ]:
@@ -1034,7 +1035,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             Fp8MoeBackend.DEEPGEMM,
             Fp8MoeBackend.TRITON,
             Fp8MoeBackend.MARLIN,
-            Fp8MoeBackend.AITER,
         ]:
             from vllm.model_executor.layers.fused_moe import (
                 TritonOrDeepGemmExperts,
@@ -1045,21 +1045,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.prepare_finalize import (
                 MoEPrepareAndFinalizeNoEP,
             )
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                AiterExperts,
-            )
 
             config = self.get_fused_moe_quant_config(layer)
             assert config is not None
             self.moe_quant_config = config
 
-            if self.fp8_backend == Fp8MoeBackend.AITER:
-                self.kernel = mk.FusedMoEModularKernel(
-                    # TODO: make defer_input_quant an attr of the AiterExperts
-                    MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-                    AiterExperts(quant_config=self.moe_quant_config),
-                )
-            elif self.fp8_backend == Fp8MoeBackend.MARLIN:
+            if self.fp8_backend == Fp8MoeBackend.MARLIN:
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     MarlinExperts(quant_config=self.moe_quant_config),
@@ -1079,7 +1070,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.fp8_backend == Fp8MoeBackend.AITER
+            self.rocm_aiter_moe_enabled
             or self.fp8_backend == Fp8MoeBackend.MARLIN
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
@@ -1112,7 +1103,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
+        if self.fp8_backend == Fp8MoeBackend.MARLIN or self.rocm_aiter_moe_enabled:
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
@@ -1387,9 +1378,14 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
+        self.rocm_aiter_moe_enabled = False
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
+
+        # Lazy import to avoid importing triton too early.
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
@@ -1407,7 +1403,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         replace_parameter(layer, "w2_weight", w2_weight)
 
         # Reshuffle weights for AITER if needed.
-        if self.fp8_backend == Fp8MoeBackend.AITER:
+        if self.rocm_aiter_moe_enabled:
             shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight, layer.w2_weight
             )
@@ -1415,7 +1411,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             replace_parameter(layer, "w2_weight", shuffled_w2)
 
         # Rushuffle weights for MARLIN if needed.
-        elif self.fp8_backend == Fp8MoeBackend.MARLIN:
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
             prepare_moe_fp8_layer_for_marlin(
                 layer, False, input_dtype=self.marlin_input_dtype
             )
