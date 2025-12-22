@@ -51,7 +51,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -557,11 +557,12 @@ class Worker(WorkerBase):
 
         self.profiler.step()
 
-        num_new = len(scheduler_output.scheduled_new_reqs)
-        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+        iteration_details = compute_iteration_details(scheduler_output)
 
         return self.profiler.annotate_context_manager(
-            f"execute_new_{num_new}_cached_{num_cached}"
+            f"execute_"
+            f"context_{iteration_details.num_ctx_requests}({iteration_details.num_ctx_tokens})_"
+            f"generation_{iteration_details.num_generation_requests}({iteration_details.num_generation_tokens})"
         )
 
     @torch.inference_mode()
