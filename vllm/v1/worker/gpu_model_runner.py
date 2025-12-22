@@ -3141,7 +3141,9 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
-        afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+        afd_metadata = self._build_afd_metadata(
+            ubatch_slices_padded, num_tokens_unpadded
+        )
 
         self.profiler.step()
         # Run the model.
@@ -3160,8 +3162,9 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            logger.info(f"input_ids: {input_ids.shape}")
-            if inputs_embeds:
+            if input_ids is not None:
+                logger.info(f"input_ids: {input_ids.shape}")
+            if inputs_embeds is not None:
                 logger.info(f"inputs_embeds: {inputs_embeds.shape}")
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -4274,7 +4277,9 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
-            afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+            afd_metadata = self._build_afd_metadata(
+                ubatch_slices_padded, num_tokens_unpadded
+            )
 
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),

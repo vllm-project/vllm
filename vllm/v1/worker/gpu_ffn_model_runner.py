@@ -130,15 +130,17 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
         try:
             hidden_states, recv_metadata = self.connector.recv_attn_output()
-            if hasattr(self.connector, 'dp_metadata_list'):
-                dp_metadata = self.connector.dp_metadata_list.get(recv_metadata.stage_idx, None)
+            if hasattr(self.connector, "dp_metadata_list"):
+                dp_metadata = self.connector.dp_metadata_list.get(
+                    recv_metadata.stage_idx, None
+                )
             else:
                 dp_metadata = None
             current_layer_idx = recv_metadata.layer_idx
-            logger.info(
-                f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
-                f" dp_metadata: {dp_metadata}"
-            )
+            # logger.info(
+            #     f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
+            #     f" dp_metadata: {dp_metadata}"
+            # )
             num_tokens = hidden_states.shape[0]
             if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
                 for work in recv_metadata.recv_handle_list:
@@ -220,7 +222,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 hidden_states, dim=0
             )
             ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, gathered_hidden_states
+                gathered_hidden_states, current_layer_idx
             )
             # Extract the output corresponding to current rank
             start_idx = hidden_states.shape[0] * get_tensor_model_parallel_rank()
@@ -229,7 +231,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         else:
             # Single TP case
             rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states
+                hidden_states, current_layer_idx
             )
 
         return rank_ffn_output
@@ -349,7 +351,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 hidden_states, dim=0
             )
             ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, gathered_hidden_states
+                gathered_hidden_states, current_layer_idx
             )
 
             # Extract the output corresponding to current rank
@@ -359,7 +361,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         else:
             # Single TP case
             rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states
+                hidden_states, current_layer_idx
             )
 
         return rank_ffn_output

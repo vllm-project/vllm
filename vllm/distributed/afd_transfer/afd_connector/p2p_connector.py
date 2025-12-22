@@ -52,9 +52,15 @@ class P2PAFDConnector(AFDConnectorBase):
         self._need_recv_metadata: bool = True
         self._tensor_metadata_list: dict[int, TensorMetadata] = {}
         self._current_afd_connector_metadata: AFDConnectorMetadata | None = None
-        self.num_hidden_layers: int = (
-            self.config.model_config.hf_config.num_hidden_layers
-        )
+        if getattr(self.config.model_config.hf_config, "text_config", None) is not None:
+            self.num_hidden_layers: int = (
+                self.config.model_config.hf_config.text_config.num_hidden_layers
+            )
+        else:
+            self.num_hidden_layers: int = (
+                self.config.model_config.hf_config.num_hidden_layers
+            )
+
         self.recv_attn_output_counter: int = 0
         self.recv_ffn_output_counter: int = 0
         self.dp_metadata_list: dict[int, DPMetadata] = {}
@@ -175,16 +181,28 @@ class P2PAFDConnector(AFDConnectorBase):
             tensor_metadata, self._current_afd_connector_metadata
         )
         if self.config.parallel_config.data_parallel_size > 1:
-            logger.info("jcz recv_metadata num_of_stages:{}".format(self._current_afd_connector_metadata.num_of_stages))
+            logger.info(
+                "jcz recv_metadata num_of_stages:{}".format(
+                    self._current_afd_connector_metadata.num_of_stages
+                )
+            )
             for stage_idx in range(self._current_afd_connector_metadata.num_of_stages):
                 num_tokens_per_ubatch = self._tensor_metadata_list[stage_idx].size[0]
                 self.dp_metadata_list[stage_idx] = DPMetadata.make(
                     self.config.parallel_config,
                     num_tokens_per_ubatch,
-                    torch.tensor([num_tokens_per_ubatch] * self.config.parallel_config.data_parallel_size,
-                                device="cpu", dtype=torch.int32),
+                    torch.tensor(
+                        [num_tokens_per_ubatch]
+                        * self.config.parallel_config.data_parallel_size,
+                        device="cpu",
+                        dtype=torch.int32,
+                    ),
                 )
-            logger.info("jcz recv_metadata self.dp_metadata_list:{}".format(self.dp_metadata_list))
+            logger.info(
+                "jcz recv_metadata self.dp_metadata_list:{}".format(
+                    self.dp_metadata_list
+                )
+            )
 
     def _send_hidden_states(
         self,
