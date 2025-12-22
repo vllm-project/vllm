@@ -195,8 +195,9 @@ def example_round_robin_dp_loader(request_number, dp_size):
 @app.route("/v1/chat/completions", methods=["POST"])
 async def handle_request():
     try:
-        global request_nums
-        request_nums += 1
+        with _list_lock:
+            global request_nums
+            request_nums += 1
 
         def extract_ip_port_fast(url):
             match = IP_PORT_PATTERN.search(url)
@@ -210,6 +211,10 @@ async def handle_request():
         prefill_instance_endpoint = None
         decode_instance_endpoint = None
 
+        if not prefill_instances or not decode_instances:
+            return await make_response(
+                ("Service Unavailable: No prefill or decode instances are registered.",
+                 503))
         pid = request_nums % len(prefill_instances)
         did = request_nums % len(decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
@@ -291,8 +296,11 @@ async def handle_request():
         response = await make_response(stream_generator)
         return response
     except Exception as e:
-        print(e)
-        pass
+        logger.exception("An error occurred while handling the request: %s", e)
+        return await make_response((
+            f"Internal Server Error: {e!s}",
+            500,
+        ))
 
 
 if __name__ == "__main__":
