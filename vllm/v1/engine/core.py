@@ -344,7 +344,6 @@ class EngineCore:
             return
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
-        self.iteration_index += 1
         yield
         logger.info(
             "".join(
@@ -365,6 +364,7 @@ class EngineCore:
                 ]
             )
         )
+        self.iteration_index += 1
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
