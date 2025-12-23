@@ -970,7 +970,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
-                # TODO(rob): this function is a hack, we should clean it up.
+                # TODO(rob): this function is a hack that renames the scaling
+                # factors in the Module. This is a hack we should clean up.
                 register_moe_scaling_factors(layer)
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
