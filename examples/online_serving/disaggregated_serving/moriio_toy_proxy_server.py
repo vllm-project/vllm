@@ -210,11 +210,16 @@ async def handle_request():
 
         prefill_instance_endpoint = None
         decode_instance_endpoint = None
-
+        error_msg = (
+            "Service Unavailable: No prefill or decode instances are registered."
+        )
         if not prefill_instances or not decode_instances:
             return await make_response(
-                ("Service Unavailable: No prefill or decode instances are registered.",
-                 503))
+                (
+                    error_msg,
+                    503,
+                )
+            )
         pid = request_nums % len(prefill_instances)
         did = request_nums % len(decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
@@ -297,10 +302,12 @@ async def handle_request():
         return response
     except Exception as e:
         logger.exception("An error occurred while handling the request: %s", e)
-        return await make_response((
-            f"Internal Server Error: {e!s}",
-            500,
-        ))
+        return await make_response(
+            (
+                f"Internal Server Error: {e!s}",
+                500,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -342,8 +342,8 @@ class MoRIIOConnectorScheduler:
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
 
-        if params is not None and params.get("do_remote_prefill"): #
-            if self.mode == MoRIIOMode.READ:        #read mode decode
+        if params is not None and params.get("do_remote_prefill"):
+            if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
                     if all(
                         p in params
@@ -373,7 +373,7 @@ class MoRIIOConnectorScheduler:
                         )
 
             else:
-                assert request.kv_transfer_params is not None, (       #write mode decode
+                assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
 
@@ -890,7 +890,7 @@ class MoRIIOConnectorWorker:
         layer_name_to_local_kv_cache_metadata: dict,
     ):
         """Background thread for getting new MoRIIO handshakes."""
-        logger.info("tmp")
+
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
