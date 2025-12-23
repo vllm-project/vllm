@@ -200,7 +200,7 @@ class CwmToolParser(ToolParser):
         """
         Minimal streaming implementation:
           - Stream regular content until `<tool:` appears.
-          - Do not stream tool block text.
+          - Do not stream tool block tokens.
           - Once a complete `</tool>` is observed, emit any newly completed tool calls
             as a single DeltaMessage(tool_calls=[...]).
         """
