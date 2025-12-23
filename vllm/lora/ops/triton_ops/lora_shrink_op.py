@@ -218,7 +218,7 @@ def _lora_shrink(
         # Each LoRA receives its own set of thread blocks for output
         # computation. If some LoRA doesn't have any tokens to process, its
         # thread blocks exit early.
-        MAX_LORAS,
+        num_active_loras,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.
