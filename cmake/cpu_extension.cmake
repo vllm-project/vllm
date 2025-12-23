@@ -239,7 +239,7 @@ endif()
 if (ENABLE_AMXBF16)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile" "-DCPU_CAPABILITY_AMXBF16")
+        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile" "-DCPU_CAPABILITY_AMXBF16") # FIXME: CPU_CAPABILITY_AMXBF16 is enabled in C code
     else()
         message(FATAL_ERROR "Cannot enable AMX_BF16 ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
