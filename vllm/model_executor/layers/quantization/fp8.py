@@ -944,15 +944,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
             w13_weight_scale = max_w13_scales
 
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            # TODO(rob): Do we have to do this after replacing layer.w13?
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
-        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             assert self.block_quant
             w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
                 wq=w13_weight,
@@ -993,6 +985,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
+
+        # TODO(rob): we do this after replace_parameter() because
+        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
+        # directly. We will refactor this in a follow up PR.
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=self.marlin_input_dtype
+            )
+            # Activations not quantized for marlin.
+            del layer.w13_input_scale
+            del layer.w2_input_scale
 
         # NOTE(rob): this is a WIP refactor. We are first migrating
         # all of the kernels in the TP case to use mk. Once this is
