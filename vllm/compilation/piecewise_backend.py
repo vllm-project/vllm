@@ -117,6 +117,8 @@ class PiecewiseBackend:
             )
             and vllm_config.compilation_config.compile_mm_encoder
         )
+        if self.is_encoder_compilation:
+            vllm_backend.is_encoder = True
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
         if self.is_encoder_compilation:
