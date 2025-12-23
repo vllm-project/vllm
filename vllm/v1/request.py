@@ -3,6 +3,7 @@
 
 import enum
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
@@ -132,7 +133,9 @@ class Request:
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
         if block_hasher is not None:
-            self.get_hash_new_full_blocks = partial(block_hasher, self)
+            # Use weakref to avoid circular reference: Request -> partial -> Request
+            # This allows immediate reclamation by refcounting without waiting for GC.
+            self.get_hash_new_full_blocks = partial(block_hasher, weakref.proxy(self))
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
