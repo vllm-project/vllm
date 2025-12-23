@@ -13,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+    def __init__(self, defer_input_quant: bool = False) -> None:
+        super().__init__()
+        self.defer_input_quant = defer_input_quant
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -47,6 +51,11 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             )
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
+
+        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
+        # which use a single kernel call for quant + experts.
+        if self.defer_input_quant:
+            return a1, None, None, None, None
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
