@@ -1615,7 +1615,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
-    logprobs: TranscriptionLogProbs | None = None
+    logprobs: "TranscriptionLogProbs | None" = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
 
