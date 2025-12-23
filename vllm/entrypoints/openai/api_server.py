@@ -1145,6 +1145,7 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)
