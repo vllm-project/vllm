@@ -352,9 +352,7 @@ async def forward_non_stream(
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
-async def stream_retry_wrap(
-    forward_func, max_retries: int = 3, delay: float = 0.1
-):
+async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.1):
     last_exc = None
     first_chunk_sent = False
     for attempt in range(max_retries):
@@ -376,9 +374,7 @@ async def stream_retry_wrap(
             )
             await asyncio.sleep(delay * (attempt + 1))
 
-    raise RuntimeError(
-        f"all {max_retries} retries failed."
-    ) from last_exc
+    raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
 
 
 async def non_stream_retry_wrap(
