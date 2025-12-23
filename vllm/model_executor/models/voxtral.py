@@ -50,6 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -159,7 +160,11 @@ class VoxtralProcessorAdapter:
 
             # pad if necessary
             audio = self._audio_processor.pad(
-                audio, self.sampling_rate, is_online_streaming=False
+                audio,
+                self.sampling_rate,
+                **(
+                    {"is_online_streaming": False} if current_platform.is_rocm() else {}
+                ),
             )
 
             audio_tokens = [self.begin_audio_token_id] + [
