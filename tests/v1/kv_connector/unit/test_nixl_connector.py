@@ -41,10 +41,13 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
     has_kv_transfer_group,
 )
 from vllm.forward_context import ForwardContext
+from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -1265,6 +1268,22 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
         run_test_and_cleanup()
 
 
+class RequestIdMapper:
+    """Helper class to map external request IDs to internal request IDs."""
+
+    def __init__(self, output_processor: OutputProcessor):
+        self.req_id_mapping: dict[str, str] = {}
+        self.original_add_request = output_processor.add_request
+        output_processor.add_request = self._add_request
+
+    def _add_request(self, request: EngineCoreRequest, *args, **kwargs):
+        self.req_id_mapping[request.external_req_id] = request.request_id
+        return self.original_add_request(request, *args, **kwargs)
+
+    def __call__(self, external_req_id: str) -> str:
+        return self.req_id_mapping[external_req_id]
+
+
 def _run_abort_timeout_test(llm: LLM, timeout: int):
     """Helper function to run the abort timeout test logic."""
     remote_prefill_opts = {
@@ -1286,24 +1305,34 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         0
     ].req_to_blocks
 
+    id_mapper = RequestIdMapper(llm.llm_engine.output_processor)
+
+    def req_id(outputs: list[RequestOutput]) -> str:
+        assert len(outputs) == 1
+        return id_mapper(outputs[0].request_id)
+
     padding = "Just making this request a little longer so that we're sure "
     "we're not hitting the small-request lower bound beneath which we don't "
     "actually trigger the whole kv transfer, but rather just recompute the "
     "blocks on D."
-    _ = llm.generate([f"What is the capital of Japan? {padding}"], sampling_params)
+    req0_id = req_id(
+        llm.generate([f"What is the capital of Japan? {padding}"], sampling_params)
+    )
 
     # Request finished but not freed
-    assert "0" in scheduler.finished_req_ids and "0" in req_to_blocks
+    assert req0_id in scheduler.finished_req_ids and req0_id in req_to_blocks
     # Some other request, 0 still not freed
-    _ = llm.generate([f"What is the capital of Italy? {padding}"], sampling_params)
-    assert "0" in req_to_blocks
-    assert "1" in scheduler.finished_req_ids and "1" in req_to_blocks
+    req1_id = req_id(
+        llm.generate([f"What is the capital of Italy? {padding}"], sampling_params)
+    )
+    assert req0_id in req_to_blocks
+    assert req1_id in scheduler.finished_req_ids and req1_id in req_to_blocks
 
     # Wait for timeout and trigger another scheduler loop
     time.sleep(timeout)
     _ = llm.generate([f"What is the capital of France? {padding}"], sampling_params)
     # Request-0 times out and is cleared!
-    assert "0" not in req_to_blocks
+    assert req0_id not in req_to_blocks
     # Need to shutdown the background thread to release NIXL side channel port
     llm.llm_engine.engine_core.shutdown()
 
