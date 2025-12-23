@@ -448,9 +448,10 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     num_context_tokens = 0
     num_generation_requests = 0
     num_generation_tokens = 0
+    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
     for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or any(
-            new_req.req_id == req_id for new_req in scheduler_output.scheduled_new_reqs
+        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
+            req_id in new_req_ids
         ):
             num_context_requests += 1
             num_context_tokens += num_tokens
