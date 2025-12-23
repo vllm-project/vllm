@@ -157,8 +157,13 @@ WORKDIR /workspace
 # install build and runtime dependencies
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
+COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+        python3 use_existing_torch.py; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -178,6 +183,7 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
+COPY use_existing_torch.py use_existing_torch.py
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -188,6 +194,10 @@ ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+        python3 use_existing_torch.py; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -319,6 +329,7 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
+COPY use_existing_torch.py use_existing_torch.py
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -329,6 +340,10 @@ ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+        python3 use_existing_torch.py; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -509,11 +524,16 @@ ENV PRERELEASE_FLAG=""
 
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+COPY use_existing_torch.py /tmp/use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+        cd /tmp && python3 use_existing_torch.py; \
+    fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG} && \
-    rm /tmp/requirements-cuda.txt /tmp/common.txt
+    rm /tmp/requirements-cuda.txt /tmp/common.txt /tmp/use_existing_torch.py
 
 # Install FlashInfer pre-compiled kernel cache and binaries
 # This is ~1.1GB and only changes when FlashInfer version bumps
