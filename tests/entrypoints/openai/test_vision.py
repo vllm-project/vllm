@@ -9,7 +9,7 @@ import pytest_asyncio
 from transformers import AutoProcessor
 
 from vllm.multimodal.base import MediaWithBytes
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
@@ -36,7 +36,7 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "The image shows a colorful Venn diagram with",
+        "The image displays a Venn diagram with three over",
     ],
     [
         "This image displays a gradient of colors ranging from",
@@ -101,11 +101,9 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server) -> dict[str, str]:
+def url_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_asset: encode_image_base64(
-            local_asset_server.get_image_asset(image_asset)
-        )
+        image_asset: encode_image_url(local_asset_server.get_image_asset(image_asset))
         for image_asset in TEST_IMAGE_ASSETS
     }
 
@@ -265,11 +263,11 @@ async def test_single_chat_session_image_base64encoded(
     model_name: str,
     raw_image_url: str,
     image_url: str,
-    base64_encoded_image: dict[str, str],
+    url_encoded_image: dict[str, str],
 ):
     content_text = "What's in this image?"
     messages = dummy_messages_from_image_url(
-        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",
+        url_encoded_image[raw_image_url],
         content_text,
     )
 
@@ -319,7 +317,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     client: openai.AsyncOpenAI,
     model_name: str,
     image_idx: int,
-    base64_encoded_image: dict[str, str],
+    url_encoded_image: dict[str, str],
 ):
     # ROCm: Switch expected results based on platform
     from vllm.platforms import current_platform
@@ -332,9 +330,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     else:
         expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
-    messages = dummy_messages_from_image_url(
-        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
-    )
+    messages = dummy_messages_from_image_url(url_encoded_image[raw_image_url])
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
