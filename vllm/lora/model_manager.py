@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from abc import abstractmethod
 from collections.abc import Callable, MutableMapping
 from typing import TypeVar
 
@@ -27,7 +26,6 @@ from vllm.lora.utils import (
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models import (
     SupportsLoRA,
-    SupportsMultiModal,
     supports_multimodal,
 )
 from vllm.model_executor.models.interfaces import is_pooling_model
@@ -42,11 +40,6 @@ T = TypeVar("T")
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
-
-
-class SupportsMultiModalLoRAModel(SupportsMultiModal, SupportsLoRAModel):
-    @abstractmethod
-    def get_mm_mapping(self) -> MultiModelKeys: ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -65,7 +58,7 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: SupportsLoRAModel | SupportsMultiModalLoRAModel,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -83,7 +76,7 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
-        self.model: SupportsLoRAModel | SupportsMultiModalLoRAModel = model
+        self.model: SupportsLoRAModel = model
         self._registered_adapters: MutableMapping[int, LoRAModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._active_adapters: MutableMapping[int, None] = {}
@@ -460,7 +453,7 @@ class LoRAModelManager:
         language model. LoRA for other modules, such as the vision tower, will
         be filtered out.
         """
-        if self.supports_mm:
+        if self.supports_mm and hasattr(self.model, "get_mm_mapping"):
             module_mapping: MultiModelKeys = self.model.get_mm_mapping()
             prefix_lst = module_mapping.connector + module_mapping.tower_model
             return any([module_name.startswith(prefix) for prefix in prefix_lst])
@@ -608,7 +601,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def __init__(
         self,
-        model: SupportsLoRAModel | SupportsMultiModalLoRAModel,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -684,7 +677,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
 
 def create_lora_manager(
-    model: SupportsLoRAModel | SupportsMultiModalLoRAModel,
+    model: SupportsLoRAModel,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,
@@ -694,7 +687,7 @@ def create_lora_manager(
     **kwargs,
 ) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not isinstance(model, SupportsLoRAModel | SupportsMultiModalLoRAModel):
+    if not isinstance(model, SupportsLoRAModel):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,
