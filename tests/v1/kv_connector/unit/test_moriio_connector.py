@@ -243,7 +243,7 @@ def test_write_mode_saves_local_block_ids():
     # Fake Config
     request = _setup_kv_transfer_request(request)
 
-    # Remote Prefill, triggers NixlConnectorMetadata.
+    # Remote Prefill, triggers MoRIIOConnectorMetadata.
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None, "kv_connector_metadata is None"
