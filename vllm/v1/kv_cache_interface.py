@@ -88,7 +88,7 @@ class FullAttentionSpec(AttentionSpec):
     attention in model runner.
     In this case, we use FullAttentionSpec and record the sliding window size.
     """
-    
+
     head_size_v: int | None = None
 
     sliding_window: int | None = None
