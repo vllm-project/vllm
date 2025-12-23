@@ -416,7 +416,11 @@ class InputProcessor:
         vary depending on the LoRA request. Therefore, the mm_hash must be
         generated based on the LoRA request to prevent incorrect cache hits.
         """
-        if lora_request is None or not self.lora_config.enable_tower_connector_lora:
+        if (
+            lora_request is None
+            or self.lora_config is None
+            or not self.lora_config.enable_tower_connector_lora
+        ):
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
 
