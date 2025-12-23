@@ -753,7 +753,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "FlashInfer CUTLASS FP8 MoE blockscale backend only supports "
                     "block size [128, 128]."
                 )
-            elif self.block_quant:
+            elif not self.block_quant:
                 if layer.renormalize or layer.custom_routing_function is not None:
                     raise NotImplementedError(
                         "FlashInfer CUTLASS FP8 MoE per-tensor backend does not "
