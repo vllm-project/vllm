@@ -57,11 +57,11 @@ EXPECTED_MM_BEAM_SEARCH_RES_ROCM = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "The image shows a colorful Venn diagram with",
+        "The image contains a Venn diagram with three over",
     ],
     [
         "This image displays a gradient of colors ranging from",
-        "The image displays a gradient of colors ranging from",
+        "This image displays a gradient of colors transitioning from",
     ],
 ]
 

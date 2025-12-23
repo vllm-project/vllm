@@ -158,7 +158,9 @@ class VoxtralProcessorAdapter:
             assert audio.ndim == 1
 
             # pad if necessary
-            audio = self._audio_processor.pad(audio, self.sampling_rate)
+            audio = self._audio_processor.pad(
+                audio, self.sampling_rate, is_online_streaming=False
+            )
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id

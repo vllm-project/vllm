@@ -33,6 +33,15 @@ DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' +
 DTYPE = "bfloat16"
 
 
+if current_platform.is_rocm():
+    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [
