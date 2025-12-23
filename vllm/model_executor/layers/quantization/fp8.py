@@ -934,26 +934,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
                     )
                     start += shard_size
-
-            if self.fp8_backend == Fp8MoeBackend.AITER:
-                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                    layer.w13_weight, layer.w2_weight
-                )
-
-                replace_parameter(layer, "w13_weight", shuffled_w13)
-                replace_parameter(layer, "w2_weight", shuffled_w2)
-
-            replace_parameter(layer, "w13_weight_scale", max_w13_scales)
-
-            if self.flashinfer_moe_backend is not None:
-                # NOTE: weights have to be swapped since the activation is
-                # applied on different half for flashinfer vs vllm
-                assert not self.block_quant
-                register_moe_scaling_factors(layer)
-                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-                if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
-                layer.w13_weight.data = w13_weight.data
+            w13_weight_scale = max_w13_scales
 
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
             # TODO(rob): Do we have to do this after replacing layer.w13?
@@ -976,6 +957,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 ws=w2_weight_scale,
                 quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=is_deep_gemm_e8m0_used(),
+            )
+        elif self.fp8_backend == Fp8MoeBackend.AITER:
+            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
+                w13_weight, w2_weight
             )
         elif self.fp8_backend in [
             Fp8MoeBackend.FLASHINFER_CUTLASS,
