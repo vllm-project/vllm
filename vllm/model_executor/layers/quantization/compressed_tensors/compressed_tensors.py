@@ -18,6 +18,7 @@ from compressed_tensors.quantization import (
 from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -115,24 +116,43 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(self.target_scheme_map)
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
-        self.sparsity_scheme_map = hf_to_vllm_mapper.apply_dict(
-            self.sparsity_scheme_map
-        )
-        self.sparsity_ignore_list = hf_to_vllm_mapper.apply_list(
-            self.sparsity_ignore_list
-        )
+        """
+        Transform layer paths in config targets to match vLLM's naming.
+
+        The WeightsMapper is designed for weight paths, but some backends
+        (e.g. transformers) use broad prefix mappings like "" -> "model."
+        which would incorrectly transform non-path targets.
+
+        compressed-tensors targets can be:
+        - Layer paths: "layers.0.self_attn.q_proj" -> transformed
+        - Module class names: "Linear" -> preserved (no ".")
+        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        """
+
+        def _map_target(target: str) -> str | None:
+            is_layer_path = "." in target and not target.startswith("re:")
+            if is_layer_path:
+                return hf_to_vllm_mapper._map_name(target)
+            return target
+
+        def _apply_dict(d: dict) -> dict:
+            return {k: v for t, v in d.items() if (k := _map_target(t)) is not None}
+
+        def _apply_list(lst: list) -> list:
+            return [t for x in lst if (t := _map_target(x)) is not None]
+
+        self.target_scheme_map = _apply_dict(self.target_scheme_map)
+        self.ignore = _apply_list(self.ignore)
+        self.sparsity_scheme_map = _apply_dict(self.sparsity_scheme_map)
+        self.sparsity_ignore_list = _apply_list(self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
-            self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(self.kv_cache_scheme)
+            self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
     def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -158,7 +178,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer, prefix)
+            return CompressedTensorsMoEMethod.get_moe_method(
+                self, layer, layer_name=prefix
+            )
         return None
 
     def _add_fused_moe_to_target_scheme_map(self):
@@ -255,7 +277,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     if format is not None
                     else is_activation_quantization_format(quant_format)
                 )
-                # TODO(czhu): w4a8fp8 is in packed-quantized format
+                # w4a8fp8 is in packed-quantized format
                 # but needs input activation quantization
                 input_activations = quant_config.get("input_activations")
                 if act_quant_format or input_activations:
@@ -548,6 +570,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
         format: str | None = None,
+        layer_name: str | None = None,
     ) -> "CompressedTensorsScheme":
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
@@ -586,6 +609,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     symmetric=weight_quant.symmetric,
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder,
+                    layer_name=layer_name,
                 )
 
         act_quant_format = is_activation_quantization_format(format)
@@ -725,7 +749,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(  # type: ignore
-                weight_quant=weight_quant, input_quant=input_quant, format=format
+                weight_quant=weight_quant,
+                input_quant=input_quant,
+                format=format,
+                layer_name=layer_name,
             )
 
         # Raise error if device does not support the scheme
@@ -761,8 +788,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
             )
-
-            return self.target_scheme_map[matched_target]
+            scheme_dict = self.target_scheme_map[matched_target]
+            if scheme_dict.get("format") is None:
+                scheme_dict["format"] = self.quant_format
+            return scheme_dict
 
         return None
 

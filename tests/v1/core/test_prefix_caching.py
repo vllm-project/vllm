@@ -45,7 +45,7 @@ pytestmark = pytest.mark.cpu_test
 def _auto_init_hash_fn(request):
     hash_fn: Callable
     if "hash_fn" in request.fixturenames:
-        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+        hash_fn = request.getfixturevalue("hash_fn")
     else:
         hash_fn = sha256
     init_none_hash(hash_fn)

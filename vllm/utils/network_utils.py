@@ -72,7 +72,7 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
-def test_loopback_bind(address, family):
+def test_loopback_bind(address: str, family: int) -> bool:
     try:
         s = socket.socket(family, socket.SOCK_DGRAM)
         s.bind((address, 0))  # Port 0 = auto assign

@@ -24,7 +24,11 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -33,7 +37,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
@@ -226,6 +230,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(
@@ -300,6 +305,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -326,7 +333,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         num_prompts: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
@@ -437,6 +444,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
+                    self._raise_if_error(finish_reason, request_id)
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -498,8 +507,11 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
+            logger.exception("Error in completion stream generator.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
@@ -511,7 +523,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
@@ -530,6 +542,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                self._raise_if_error(output.finish_reason, request_id)
+
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
@@ -622,7 +636,7 @@ class OpenAIServingCompletion(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -642,9 +656,15 @@ class OpenAIServingCompletion(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = tokenizer.decode(token_id)
                 if should_return_as_token_id:
                     token = f"token_id:{token_id}"
+                else:
+                    if tokenizer is None:
+                        raise ValueError(
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
+                        )
+
+                    token = tokenizer.decode(token_id)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)

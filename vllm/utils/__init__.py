@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.logger import init_logger
-
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
     "cprofile_context": "profiling",
@@ -36,21 +34,6 @@ def __dir__() -> list[str]:
     # expose deprecated names in dir() for better UX/tab-completion
     return sorted(list(globals().keys()) + list(_DEPRECATED_MAPPINGS.keys()))
 
-
-logger = init_logger(__name__)
-
-# Constants related to forcing the attention backend selection
-
-# String name of register which may be set in order to
-# force auto-selection of attention backend by Attention
-# wrapper
-STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
-
-# Possible string values of STR_BACKEND_ENV_VAR
-# register, corresponding to possible backends
-STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_INVALID_VAL: str = "INVALID"
 
 MASK_64_BITS = (1 << 64) - 1
 

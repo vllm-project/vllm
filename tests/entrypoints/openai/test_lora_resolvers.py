@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -114,7 +114,7 @@ def mock_serving_setup():
     mock_engine.add_lora.reset_mock()
 
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     models = OpenAIServingModels(

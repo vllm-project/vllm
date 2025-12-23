@@ -47,6 +47,8 @@ We currently support the following OpenAI APIs:
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
+- [Responses API](#responses-api) (`/v1/responses`)
+    - Only applicable to [text generation models](../models/generative_models.md).
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
     - *Note: `user` parameter is ignored.*
@@ -229,12 +231,37 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
     ```
 
+### Responses API
+
+Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/online_serving/openai_responses_client_with_tools.py)
+
+#### Extra parameters
+
+The following extra parameters in the request object are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/openai/protocol.py:responses-extra-params"
+    ```
+
+The following extra parameters in the response object are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/openai/protocol.py:responses-response-extra-params"
+    ```
+
 ### Embeddings API
 
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/pooling/openai_embedding_client.py](../../examples/online_serving/pooling/openai_embedding_client.py)
+Code example: [examples/pooling/embed/openai_embedding_client.py](../../examples/pooling/embed/openai_embedding_client.py)
 
 If the model has a [chat template](../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
@@ -335,7 +362,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
-Full example: [examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py](../../examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py)
+Full example: [examples/pooling/embed/openai_chat_embedding_client_for_multimodal.py](../../examples/pooling/embed/openai_chat_embedding_client_for_multimodal.py)
 
 #### Extra parameters
 
@@ -351,7 +378,7 @@ The following extra parameters are supported by default:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
     ```
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
@@ -359,7 +386,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
     ```
 
 ### Transcriptions API
@@ -456,6 +483,7 @@ For `verbose_json` response format:
       ]
     }
     ```
+Currently “verbose_json” response format doesn’t support avg_logprob, compression_ratio, no_speech_prob.
 
 #### Extra Parameters
 
@@ -515,7 +543,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: [examples/online_serving/pooling/openai_pooling_client.py](../../examples/online_serving/pooling/openai_pooling_client.py)
+Code example: [examples/pooling/pooling/openai_pooling_client.py](../../examples/pooling/pooling/openai_pooling_client.py)
 
 ### Classification API
 
@@ -523,7 +551,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: [examples/online_serving/pooling/openai_classification_client.py](../../examples/online_serving/pooling/openai_classification_client.py)
+Code example: [examples/pooling/classify/openai_classification_client.py](../../examples/pooling/classify/openai_classification_client.py)
 
 #### Example Requests
 
@@ -629,7 +657,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
+--8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
 ```
 
 ### Score API
@@ -639,7 +667,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-Code example: [examples/online_serving/pooling/openai_cross_encoder_score.py](../../examples/online_serving/pooling/openai_cross_encoder_score.py)
+Code example: [examples/pooling/score/openai_cross_encoder_score.py](../../examples/pooling/score/openai_cross_encoder_score.py)
 
 #### Single inference
 
@@ -820,7 +848,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
         print("Scoring output:", response_json["data"][0]["score"])
         print("Scoring output:", response_json["data"][1]["score"])
         ```
-Full example: [examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py](../../examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py)
+Full example: [examples/pooling/score/openai_cross_encoder_score_for_multimodal.py](../../examples/pooling/score/openai_cross_encoder_score_for_multimodal.py)
 
 #### Extra parameters
 
@@ -834,7 +862,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 ### Re-rank API
@@ -850,7 +878,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: [examples/online_serving/pooling/jinaai_rerank_client.py](../../examples/online_serving/pooling/jinaai_rerank_client.py)
+Code example: [examples/pooling/score/openai_reranker.py](../../examples/pooling/score/openai_reranker.py)
 
 #### Example Request
 
@@ -915,7 +943,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM

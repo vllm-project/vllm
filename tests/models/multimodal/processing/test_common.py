@@ -20,13 +20,10 @@ from vllm.config.multimodal import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import MultiModalInputs
+from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.transformers_utils.tokenizer import (
-    MistralTokenizer,
-    cached_tokenizer_from_config,
-    encode_tokens,
-)
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -154,7 +151,7 @@ def get_text_token_prompts(
     mm_data: MultiModalDataDict,
 ):
     dummy_inputs = processor.dummy_inputs
-    tokenizer = processor.info.get_tokenizer()
+    tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
     model_type = model_config.hf_config.model_type
@@ -191,10 +188,9 @@ def get_text_token_prompts(
         assert isinstance(inputs.prompt, str)
 
         text_prompt = inputs.prompt
-        token_prompt = encode_tokens(
-            tokenizer,
+        token_prompt = tokenizer.encode(
             text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type),
+            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
         )
 
     return text_prompt, token_prompt
@@ -233,7 +229,7 @@ def _test_processing_correctness(
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    factories = model_cls._processor_factory
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
@@ -397,28 +393,6 @@ def test_processing_correctness(
     )
 
 
-# Phi4MultimodalForCausalLM share same model repo with original format
-# Phi4MMForCausalLM, so we add it as a separate test case
-# Remove this test after conversion PR merged:
-# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
-@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-def test_processing_correctness_phi4_multimodal(
-    model_arch: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
-):
-    _test_processing_correctness(
-        model_arch,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
-    )
-
-
 def _assert_inputs_equal(
     a: MultiModalInputs,
     b: MultiModalInputs,
@@ -441,4 +415,4 @@ def _assert_inputs_equal(
         a_data.pop(key, None)
         b_data.pop(key, None)
 
-    assert a_data == b_data, msg
+    assert batched_tensors_equal(a_data, b_data), msg
