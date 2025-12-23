@@ -77,6 +77,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
       PackedVec in_vec;
+      int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
 
       // If we are outside valid rows OR outside valid columns -> Use Zeros
       if (rowIdx >= numRows || elem_idx >= numCols) {
@@ -84,8 +85,6 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
       } else {
         // Valid Region: Load actual data
-        int64_t inOffset =
-            rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
         in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
       }
 
@@ -100,10 +99,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       // We do NOT write output for padding because the 'out' tensor is not
       // padded.
       if (rowIdx < numRows && elem_idx < numCols) {
-        // Get the output tensor offset.
         // Same as inOffset because 8 elements are packed into one uint32_t.
-        int64_t inOffset =
-            rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
         out[inOffset] = out_val;
       }
     }
