@@ -541,19 +541,6 @@ class SamplingParams(
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
-    def freeze(self) -> "SamplingParams":
-        """Freeze this SamplingParams to prevent further modifications.
-
-        Called after all internal setup is complete to detect any
-        unintended mutations when skip_clone=True. Uses class swapping
-        to convert this instance to a FrozenSamplingParams which raises
-        TypeError on any attribute modification.
-
-        Returns self for chaining.
-        """
-        self.__class__ = FrozenSamplingParams  # type: ignore[assignment]
-        return self
-
     def clone(self) -> "SamplingParams":
         """Deep copy, but maybe not the LogitsProcessor objects.
 
@@ -562,20 +549,11 @@ class SamplingParams(
         needs to support parallel decoding for multiple sequences
         See https://github.com/vllm-project/vllm/issues/3087
 
-        If skip_clone is True, returns self without copying (early exit).
-        The caller should call freeze() after completing any necessary
-        internal setup to prevent further modifications.
+        If skip_clone is True, uses shallow copy instead of deep copy.
         """
 
         if self.skip_clone:
-            if isinstance(self, FrozenSamplingParams):
-                raise ValueError(
-                    "SamplingParams with skip_clone=True was already used. "
-                    "Each request must have its own SamplingParams instance "
-                    "when skip_clone=True. Either create a new SamplingParams "
-                    "for each request, or set skip_clone=False."
-                )
-            return self
+            return copy.copy(self)
 
         logit_processor_refs = (
             None
@@ -613,24 +591,6 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
-        )
-
-
-class FrozenSamplingParams(SamplingParams):
-    """A frozen version of SamplingParams that raises TypeError on modification.
-
-    This class is used via class swapping when freeze() is called on a
-    SamplingParams instance. It inherits all functionality but overrides
-    __setattr__ to prevent any attribute modifications, helping detect
-    unintended mutations in the engine pipeline.
-    """
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        raise TypeError(
-            f"Cannot modify frozen SamplingParams: attempted to set '{name}'. "
-            f"This SamplingParams was created with skip_clone=True and has "
-            f"already been processed. Each request must have its own "
-            f"SamplingParams instance when skip_clone=True."
         )
 
 

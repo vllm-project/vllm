@@ -504,9 +504,6 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
-            # Freeze params after internal setup to detect unintended mutations
-            if sampling_params.skip_clone:
-                sampling_params.freeze()
         else:
             pooling_params = params.clone()
 
