@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from tests.models.language.pooling_mteb_test.mteb_utils import (
+from tests.models.language.pooling_mteb_test.mteb_embed_utils import (
     MTEB_EMBED_TASKS,
     MTEB_EMBED_TOL,
     OpenAIClientMtebEncoder,
