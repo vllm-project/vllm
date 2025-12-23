@@ -1095,7 +1095,9 @@ class ModelConfig:
         # of the hidden states, however there are exceptions, such as
         # embedding models like CLIP and SigLIP
         names = ("projection_dim", "projection_size")
-        return getattr_iter(self.hf_text_config, names, self.get_hidden_size())
+        return getattr_iter(
+            self.hf_text_config, names, default_factory=self.get_hidden_size
+        )
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1230,8 +1232,10 @@ class ModelConfig:
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        default = self.hf_text_config.num_attention_heads
-        return getattr_iter(self.hf_text_config, attributes, default)
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
