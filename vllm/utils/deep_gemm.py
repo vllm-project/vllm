@@ -379,6 +379,9 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
+is_hopper = current_platform.is_device_capability(90)
+
+
 def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
     weight: torch.Tensor,
@@ -388,7 +391,6 @@ def should_use_deepgemm_for_fp8_linear(
         supports_deep_gemm = is_deep_gemm_supported()
 
     # DeepGEMM is faster on Hopper GPUs, slower on Blackwell GPUs.
-    is_hopper = current_platform.is_device_capability(90)
     if not envs.is_set("VLLM_USE_DEEP_GEMM") and not is_hopper:
         return False
 
