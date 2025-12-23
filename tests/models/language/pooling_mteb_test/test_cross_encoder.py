@@ -6,7 +6,7 @@ from tests.models.utils import (
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
     RerankModelInfo(

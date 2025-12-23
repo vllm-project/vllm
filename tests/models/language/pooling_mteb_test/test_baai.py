@@ -8,7 +8,8 @@ from tests.models.utils import (
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
+from .mteb_embed_utils import mteb_test_embed_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 MODELS = [
     ########## BertModel

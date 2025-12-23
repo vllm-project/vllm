@@ -5,7 +5,7 @@ import pytest
 from tests.models.language.pooling.embed_utils import correctness_test_embed_models
 from tests.models.utils import EmbedModelInfo
 
-from .mteb_utils import mteb_test_embed_models
+from .mteb_embed_utils import mteb_test_embed_models
 
 MODELS = [
     ########## BertModel

@@ -9,7 +9,7 @@ from tests.conftest import HfRunner
 from tests.models.utils import RerankModelInfo
 from tests.utils import multi_gpu_test
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 qwen3_reranker_hf_overrides = {
     "architectures": ["Qwen3ForSequenceClassification"],

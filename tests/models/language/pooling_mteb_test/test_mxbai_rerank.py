@@ -8,7 +8,7 @@ import torch
 from tests.conftest import HfRunner
 from tests.models.utils import RerankModelInfo
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 mxbai_rerank_hf_overrides = {
     "architectures": ["Qwen2ForSequenceClassification"],

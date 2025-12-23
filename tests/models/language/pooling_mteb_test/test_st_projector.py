@@ -6,7 +6,7 @@ from tests.models.utils import (
     EmbedModelInfo,
 )
 
-from .mteb_utils import mteb_test_embed_models
+from .mteb_embed_utils import mteb_test_embed_models
 
 # ST models with projector (Dense) layers
 ST_PROJECTOR_MODELS = [

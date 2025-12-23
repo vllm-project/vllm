@@ -105,7 +105,7 @@ class ScoreClientMtebEncoder(MtebCrossEncoderMixin):
         return response["data"][0]["score"]
 
 
-class RerankClientMtebEncoder(MtebCrossEncoderMixin):
+class RerankClientMtebEncoder(ScoreClientMtebEncoder):
     def get_score(self, query, corpus):
         response = requests.post(
             self.url,

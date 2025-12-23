@@ -9,11 +9,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from tests.conftest import HfRunner
-from tests.models.language.pooling_mteb_test.mteb_utils import (
-    VllmMtebCrossEncoder,
-    mteb_test_rerank_models,
-)
 from tests.models.utils import RerankModelInfo
+
+from .mteb_score_utils import VllmMtebCrossEncoder, mteb_test_rerank_models
 
 RERANK_MODELS = [
     RerankModelInfo(
