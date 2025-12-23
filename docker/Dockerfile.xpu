@@ -47,6 +47,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
     -r requirements/xpu.txt
 
+# arctic-inference is built from source which needs torch-xpu properly installed
+# used for suffix method speculative decoding
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir arctic-inference==0.1.1
+
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
