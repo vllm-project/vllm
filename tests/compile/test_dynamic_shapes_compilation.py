@@ -77,6 +77,7 @@ def test_dynamic_shapes_compilation(
                 "evaluate_guards": evaluate_guards,
             },
         },
+        max_model_len=1024,
     )
 
     output = model.generate(prompt)
