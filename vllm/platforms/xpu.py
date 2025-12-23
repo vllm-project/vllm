@@ -156,7 +156,9 @@ class XPUPlatform(Platform):
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
-
+        # decrease triton kernel compilation scratch space for speculative decoding
+        if vllm_config.speculative_config is not None:
+            os.environ["IGC_ForceOCLSIMDWidth"] = "16"  # noqa: SIM112
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
