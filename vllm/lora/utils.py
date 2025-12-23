@@ -5,7 +5,6 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
-import regex as re
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -184,39 +183,6 @@ def is_base_embeddding_weights(name: str) -> bool:
         ".lm_head.base_layer.weight",
     )
     return name.endswith(embedding_suffixes)
-
-
-def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: set[str]
-) -> bool:
-    """
-    PEFT supports passing `target_modules` in the form of regular expressions,
-    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
-    determine whether the suffix in the regular expression is present in the
-    `expected_lora_modules`.
-    """
-
-    def is_valid_regex(pattern):
-        try:
-            re.compile(pattern)
-            return True
-        except re.error:
-            return False
-
-    def is_subset(sub_list, full_set):
-        return set(sub_list).issubset(full_set)
-
-    # Similar to PEFT's processing logic, regex-related operations are only
-    #  executed when the load_modules is a `str`.
-    if not isinstance(load_modules, str):
-        return False
-
-    if is_valid_regex(load_modules):
-        match = re.search(r"\((.*?)\)\$?$", load_modules)
-        if match:
-            suffix = match.group(1).split("|")
-            return is_subset(suffix, expected_lora_modules)
-    return False
 
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
