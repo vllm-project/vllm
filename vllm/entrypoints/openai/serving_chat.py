@@ -244,7 +244,8 @@ class OpenAIServingChat(OpenAIServing):
 
             model_name = self.models.model_name(lora_request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -299,9 +300,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
+
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
@@ -1727,7 +1729,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     if tokenizer is None:
                         raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
                         )
 
                     token = tokenizer.decode(token_id)
