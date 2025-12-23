@@ -319,6 +319,7 @@ def flashinfer_trtllm_fp4_moe(
         output2_scale_scalar=layer.g2_alphas.data,
         num_experts=global_num_experts,
         top_k=top_k,
+        tile_tokens_dim=None,
         n_group=num_expert_group if num_expert_group is not None else 0,
         topk_group=topk_group if topk_group is not None else 0,
         intermediate_size=layer.intermediate_size_per_partition,
@@ -331,7 +332,6 @@ def flashinfer_trtllm_fp4_moe(
 
     return out
 
-import flashinfer
 
 def flashinfer_trtllm_fp4_routed_moe(
         layer: torch.nn.Module,
@@ -355,6 +355,9 @@ def flashinfer_trtllm_fp4_routed_moe(
     Returns:
         Output tensor from the MoE layer
     """
+
+    import flashinfer
+
 
     # Pack top k ids and expert weights into a single int32 tensor, as
     # required by TRT-LLM
