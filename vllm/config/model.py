@@ -1094,11 +1094,10 @@ class ModelConfig:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
         # embedding models like CLIP and SigLIP
-        for target_attr in ("projection_dim", "projection_size"):
-            if hasattr(self.hf_text_config, target_attr):
-                return getattr(self.hf_text_config, target_attr)
-
-        return self.get_hidden_size()
+        names = ("projection_dim", "projection_size")
+        return getattr_iter(
+            self.hf_text_config, names, default_factory=self.get_hidden_size
+        )
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1231,14 +1230,12 @@ class ModelConfig:
             # For ChatGLM:
             "multi_query_group_num",
         ]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_text_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_text_config.num_attention_heads
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
