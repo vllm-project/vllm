@@ -141,6 +141,14 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return None, None
+
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
 
@@ -300,6 +308,10 @@ def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
+
+
+def supports_mm_encoder_only(model: type[object] | object) -> bool:
+    return getattr(model, "is_mm_encoder_only_model", False)
 
 
 @overload
