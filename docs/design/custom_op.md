@@ -29,7 +29,7 @@ When a `CustomOp` is called (i.e., call its `forward()` method), if it is enable
 - **OOT platform:** dispatch to `forward_oot()`. This will only be called on OOT platforms.
 - **Default:** dispatch to `forward_native()` as a final fallback for all platforms.
 
-Furthur more, vLLM decides whether enable or disable a `CustomOp` by `compilation_config.custom_ops`. To be specific, if a `CustomOp` is not registered (i.e., use default config), it will be enabled if there is a `all` in `compilation_config.custom_ops` or will be disabled if there is a `none`. 
+Furthur more, vLLM decides whether enable or disable a `CustomOp` by `compilation_config.custom_ops`. To be specific, if a `CustomOp` is not registered (i.e., use default config), it will be enabled if there is a `all` in `compilation_config.custom_ops` or will be disabled if there is a `none`.
 
 !!! note
     Note that `all` and `none` cannot coexist in `compilation_config.custom_ops`.
@@ -38,7 +38,7 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
 !!! note
     For multi-modal models, vLLM has enforece enabled some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
-    
+
     Note that this `enforce_enable` mechanism will be removed after we adding a separate `compilation_config` for multi-modal part.
 
 ## How to Customise Your Configuration for CustomOp
