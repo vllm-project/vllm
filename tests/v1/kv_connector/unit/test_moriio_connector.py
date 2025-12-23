@@ -179,6 +179,7 @@ def create_vllm_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
+        is_encoder_decoder=False,
     )
     model_config = ModelConfig(
         model=model,
