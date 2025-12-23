@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -93,7 +94,7 @@ class RequestState:
         request_id: str,
         parent_req: ParentRequest | None,
         request_index: int,
-        lora_name: str | None,
+        lora_request: LoRARequest | None,
         output_kind: RequestOutputKind,
         prompt: str | None,
         prompt_token_ids: list[int] | None,
@@ -112,7 +113,8 @@ class RequestState:
         self.request_id = request_id
         self.parent_req = parent_req
         self.request_index = request_index
-        self.lora_name = lora_name
+        self.lora_request = lora_request
+        self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -178,9 +180,7 @@ class RequestState:
             request_id=request.request_id,
             parent_req=parent_req,
             request_index=request_index,
-            lora_name=(
-                request.lora_request.name if request.lora_request is not None else None
-            ),
+            lora_request=request.lora_request,
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -289,6 +289,7 @@ class RequestState:
 
         return RequestOutput(
             request_id=request_id,
+            lora_request=self.lora_request,
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,

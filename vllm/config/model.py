@@ -8,10 +8,9 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
-from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +28,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -71,7 +71,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -109,7 +109,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: SkipValidation[str] = None  # type: ignore
+    tokenizer: str = Field(default=None)
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -164,7 +164,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: int = Field(default=None, gt=0)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -175,7 +175,7 @@ class ModelConfig:
     - 25.6k -> 25,600"""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: SkipValidation[QuantizationMethods | None] = None
+    quantization: QuantizationMethods | str | None = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
@@ -597,6 +597,14 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
+    @field_validator("tokenizer", "max_model_len", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
         return tokenizer_mode.lower()
@@ -610,10 +618,19 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+        """Called after __post_init__"""
         if not isinstance(self.tokenizer, str):
-            raise ValueError("tokenizer must be a string after __post_init__.")
+            raise ValueError(
+                f"tokenizer must be a string, got "
+                f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
+                "Please provide a valid tokenizer path or HuggingFace model ID."
+            )
         if not isinstance(self.max_model_len, int):
-            raise ValueError("max_model_len must be an integer after __post_init__.")
+            raise ValueError(
+                f"max_model_len must be a positive integer, "
+                f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
+                "Example: max_model_len=2048"
+            )
         return self
 
     def _get_transformers_backend_cls(self) -> str:
@@ -826,12 +843,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
@@ -1186,7 +1209,15 @@ class ModelConfig:
                         // block.attention.n_heads_in_group
                     )
 
-            raise RuntimeError("Couldn't determine number of kv heads")
+            raise RuntimeError(
+                "Could not determine the number of key-value attention heads "
+                "from model configuration. "
+                f"Model: {self.model}, Architecture: {self.architectures}. "
+                "This usually indicates an unsupported model architecture or "
+                "missing configuration. "
+                "Please check if your model is supported at: "
+                "https://docs.vllm.ai/en/latest/models/supported_models.html"
+            )
 
         if self.is_attention_free:
             return 0
@@ -1780,6 +1811,7 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForTextEncoding", ("pooling", "embed")),
     ("EmbeddingModel", ("pooling", "embed")),
     ("ForSequenceClassification", ("pooling", "classify")),
+    ("ForTokenClassification", ("pooling", "classify")),
     ("ForAudioClassification", ("pooling", "classify")),
     ("ForImageClassification", ("pooling", "classify")),
     ("ForVideoClassification", ("pooling", "classify")),
@@ -1822,6 +1854,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
+
+
+def str_dtype_to_torch_dtype(type: str):
+    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
 
 # model_type -> reason
 _FLOAT16_NOT_SUPPORTED_MODELS = {
@@ -2088,9 +2125,7 @@ def _get_and_verify_max_len(
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
-    ):
+    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
