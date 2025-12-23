@@ -98,7 +98,8 @@ Currently, there are no pre-built ROCm wheels.
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-        
+
+
 4. If you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
 
     ```bash
