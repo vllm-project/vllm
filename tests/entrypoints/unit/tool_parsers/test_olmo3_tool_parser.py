@@ -4,11 +4,11 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
+
 from vllm.entrypoints.openai.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -25,6 +25,14 @@ MORE_TYPES_FUNCTION_OUTPUT = (
     "address={'city': 'San Francisco', 'state': 'CA'}, "
     "role=None, "
     "passed_test=True, "
+    "aliases=['John', 'Johnny'])"
+)
+MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS = (
+    "register_user(name='John Doe', "
+    "age=37, "
+    "address={'city': 'San Francisco', 'state': 'CA'}, "
+    "role=null, "
+    "passed_test=true, "
     "aliases=['John', 'Johnny'])"
 )
 MORE_TYPES_FUNCTION_CALL = FunctionCall(
@@ -62,7 +70,7 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 
 @pytest.mark.parametrize("streaming", [True, False])
 def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )
     model_output = "How can I help you today?"
@@ -78,85 +86,97 @@ def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
 TEST_CASES = [
     pytest.param(
         True,
-        f"[{SIMPLE_FUNCTION_OUTPUT}]",
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL],
         id="simple_streaming",
     ),
     pytest.param(
         False,
-        f"[{SIMPLE_FUNCTION_OUTPUT}]",
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL],
         id="simple_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{MORE_TYPES_FUNCTION_OUTPUT}]",
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [MORE_TYPES_FUNCTION_CALL],
         id="more_types_streaming",
     ),
     pytest.param(
         False,
-        f"[{MORE_TYPES_FUNCTION_OUTPUT}]",
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [MORE_TYPES_FUNCTION_CALL],
         id="more_types_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_streaming_json_literals",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_nonstreaming_json_literals",
+    ),
+    pytest.param(
+        True,
+        f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
         [PARAMETERLESS_FUNCTION_CALL],
         id="parameterless_streaming",
     ),
     pytest.param(
         False,
-        f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
+        f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
         [PARAMETERLESS_FUNCTION_CALL],
         id="parameterless_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{EMPTY_DICT_FUNCTION_OUTPUT}]",
+        f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>",
         [EMPTY_DICT_FUNCTION_CALL],
         id="empty_dict_streaming",
     ),
     pytest.param(
         False,
-        f"[{EMPTY_DICT_FUNCTION_OUTPUT}]",
+        f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>",
         [EMPTY_DICT_FUNCTION_CALL],
         id="empty_dict_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
         [EMPTY_LIST_FUNCTION_CALL],
         id="empty_list_streaming",
     ),
     pytest.param(
         False,
-        f"[{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
         [EMPTY_LIST_FUNCTION_CALL],
         id="empty_list_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
+        f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
         [ESCAPED_STRING_FUNCTION_CALL],
         id="escaped_string_streaming",
     ),
     pytest.param(
         False,
-        f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
+        f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
         [ESCAPED_STRING_FUNCTION_CALL],
         id="escaped_string_nonstreaming",
     ),
     pytest.param(
         True,
-        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_streaming",
     ),
     pytest.param(
         False,
-        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
     ),
@@ -170,7 +190,7 @@ def test_tool_call(
     expected_tool_calls: list[FunctionCall],
     default_tokenizer: TokenizerLike,
 ):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )
 
@@ -186,14 +206,14 @@ def test_tool_call(
 
 
 def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )
     model_output_deltas = [
-        "[get_weather(city='San",
-        " Francisco', metric='celsius'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        "<function_calls>get_weather(city='San",
+        " Francisco', metric='celsius')\n"
+        f"{PARAMETERLESS_FUNCTION_OUTPUT}\n"
+        f"{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -210,7 +230,7 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """test regex timeout is handled gracefully"""
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )
 
