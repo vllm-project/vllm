@@ -753,6 +753,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "FlashInfer CUTLASS FP8 MoE blockscale backend only supports "
                     "block size [128, 128]."
                 )
+            elif not self.block_quant and (
+                layer.renormalize or layer.custom_routing_function is not None
+            ):
+                raise NotImplementedError(
+                    "FlashInfer CUTLASS FP8 MoE per-tensor backend does custom "
+                    f"routing function or renormalization, but got {layer.renormalize}"
+                    f"and {layer.custom_routing_function}."
+                )
+            if layer.scoring_func != "sigmoid":
+                raise NotImplementedError(
+                    "FlashInfer CUTLASS FP8 MoE backend only supports "
+                    f"'sigmoid' scoring function, but got {layer.scoring_func}."
+                )
             if not self.block_quant and self.quant_config.activation_scheme != "static":
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE per-tensor backend only supports "
