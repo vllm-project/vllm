@@ -1292,8 +1292,12 @@ def test_allocate_with_lookahead():
 
 def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
-    model_config = ModelConfig(max_model_len=16)
+    # Use max_model_len=256 and max_num_batched_tokens=4 so that
+    # full attention layers (16 blocks) >> sliding window layers (2 blocks),
+    # making the overhead calculations work correctly for grouping
+    model_config = ModelConfig(max_model_len=256)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     # all layers are full attention -> single group
@@ -1855,3 +1859,150 @@ def test_auto_fit_max_model_len_not_triggered():
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
+
+
+class TestFindBestGroupSize:
+    """
+    Tests for the _find_best_group_size function which finds optimal
+    KV cache group sizes while preferring larger groups.
+    
+    Key behaviors:
+    - Prefers LARGER group sizes
+    - Enforces group_size >= 3 unless overhead exceeds 10%
+    - Raises ValueError on empty input
+    """
+
+    @pytest.fixture
+    def vllm_config(self):
+        """Create a minimal VllmConfig for testing."""
+        model_config = ModelConfig(max_model_len=4096)
+        return VllmConfig(model_config=model_config)
+
+    def test_empty_input_raises(self, vllm_config):
+        """Empty input should raise ValueError."""
+        with pytest.raises(ValueError, match="must not be empty"):
+            kv_cache_utils._find_best_group_size({}, vllm_config)
+
+    def test_single_layer_type_returns_layer_count(self, vllm_config):
+        """Homogeneous layers: group_size == num_layers (single group optimal)."""
+        spec = new_kv_cache_spec()
+        same_type_layers = {spec: [f"layer_{i}" for i in range(5)]}
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # With 5 homogeneous layers, optimal is group_size=5 (one group, no padding)
+        assert result == 5
+
+    def test_single_layer_returns_one(self, vllm_config):
+        """Single layer returns 1."""
+        spec = new_kv_cache_spec()
+        same_type_layers = {spec: ["layer_0"]}
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        assert result == 1
+
+    def test_two_layers_returns_two(self, vllm_config):
+        """Two homogeneous layers -> group_size=2."""
+        spec = new_kv_cache_spec()
+        same_type_layers = {spec: ["layer_0", "layer_1"]}
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # max_layers=2, min_preferred=3 >= max_layers, so returns max_layers=2
+        assert result == 2
+
+    def test_gemma3_pattern_regression(self, vllm_config):
+        """
+        Regression test: Gemma3-like model with 5:1 sw/full pattern.
+        25 sw + 5 full: group_size=5 gives 0 padding for both.
+        """
+        full_spec = new_kv_cache_spec()
+        sw_spec = new_sliding_window_spec(sliding_window=512)
+        
+        same_type_layers = {
+            sw_spec: [f"sw_{i}" for i in range(25)],
+            full_spec: [f"full_{i}" for i in range(5)],
+        }
+        
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # GCD(25, 5) = 5, so group_size=5 gives 0 padding
+        # Larger sizes like 25 would give padding for full layers
+        assert result == 5
+
+    def test_llama4_pattern_regression(self, vllm_config):
+        """
+        Regression test: LLaMA4-like model with 3:1 local/full pattern.
+        24 local + 8 full: group_size=8 gives 0 padding for both.
+        Prefer 8 over 4 because 8 is larger (fewer groups).
+        """
+        full_spec = new_kv_cache_spec()
+        local_spec = new_sliding_window_spec(sliding_window=256)
+        
+        same_type_layers = {
+            local_spec: [f"local_{i}" for i in range(24)],
+            full_spec: [f"full_{i}" for i in range(8)],
+        }
+        
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # GCD(24, 8) = 8, both 4 and 8 give 0 padding
+        # Prefer 8 (larger group size = fewer groups)
+        assert result == 8
+
+    def test_mixed_20_30_prefers_larger_group(self, vllm_config):
+        """
+        20 full + 30 sw layers.
+        Both group_size=5 and 10 give zero padding.
+        Prefer 10 because it's larger (fewer groups).
+        """
+        full_spec = new_kv_cache_spec()
+        sw_spec = new_sliding_window_spec(sliding_window=512)
+        
+        same_type_layers = {
+            full_spec: [f"full_{i}" for i in range(20)],
+            sw_spec: [f"sw_{i}" for i in range(30)],
+        }
+        
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # GCD(20, 30) = 10, both 5 and 10 divide evenly
+        # Prefer 10 (larger = fewer groups)
+        assert result == 10
+
+    def test_eagle_gpt_oss_20b_pattern_regression(self, vllm_config):
+        """
+        Regression test: GPT-OSS-20B + Eagle pattern (12 sw + 13 full).
+        group_size=13: 1 padding layer for sw (small overhead), 0 for full.
+        This is acceptable overhead, so prefer 13.
+        """
+        full_spec = new_kv_cache_spec()
+        sw_spec = new_sliding_window_spec(sliding_window=512)
+        
+        same_type_layers = {
+            sw_spec: [f"sw_{i}" for i in range(12)],
+            full_spec: [f"full_{i}" for i in range(13)],
+        }
+        
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # group_size=13: 1 padding for sw, 0 for full
+        # 1 padding out of 25 total = 4% overhead, well under 10%
+        assert result == 13
+
+    def test_fallback_when_overhead_exceeds_threshold(self, vllm_config):
+        """
+        When enforcing min_group_size >= 3 adds > 10% overhead, fallback to 1.
+        
+        Example: 1 full + 5 sw layers.
+        - group_size=1: 0 padding (optimal baseline)
+        - group_size=3: need to pad 2 full layers + 1 sw layer = 3 padding layers
+          That's 3 padding out of 6 total = 10% overhead, way over 10%
+        - group_size=5: need to pad 4 full layers = 4 padding layers
+          That's 4 padding out of 6 total = 67% overhead
+        
+        So group_size=1 should be chosen as the fallback.
+        """
+        full_spec = new_kv_cache_spec()
+        sw_spec = new_sliding_window_spec(sliding_window=512)
+        
+        same_type_layers = {
+            full_spec: ["full_0"],  # 1 full layer
+            sw_spec: [f"sw_{i}" for i in range(5)],  # 5 sw layers
+        }
+        
+        result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
+        # group_size >= 3 would add > 10% overhead, so fallback to 1
+        assert result == 1
+

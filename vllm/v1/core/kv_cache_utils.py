@@ -940,8 +940,99 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
     return not kv_cache_spec
 
 
+def _find_best_group_size(
+        same_type_layers: dict["KVCacheSpec", list[str]],
+        vllm_config: "VllmConfig",
+        min_preferred_group_size: int = 3,
+        overhead_threshold: float = 0.10) -> int:
+    """
+    Find the optimal group size that minimizes padding memory, preferring
+    larger group sizes (fewer tensors).
+
+    For each layer type, padding = (group_size - count % group_size) % group_size
+    weighted by that layer's max_memory_usage_bytes. Different layer types 
+    contribute differently to total padding based on their actual memory usage
+    (e.g., full attention vs sliding window).
+
+    This function prefers LARGER group sizes. Empirically, small group sizes (1-2)
+    lead to KV cache memory being concentrated in just a few large tensors, which
+    can reduce performance due to memory allocation patterns.
+    
+    The algorithm enforces group_size >= min_preferred_group_size (default 3),
+    unless doing so would add more than overhead_threshold (default 10%) extra
+    padding memory compared to the optimal unconstrained group size.
+
+    Args:
+        same_type_layers: Dict mapping KVCacheSpec to list of layer names.
+            Must not be empty.
+        vllm_config: The global VllmConfig, used to compute max_memory_usage_bytes
+        min_preferred_group_size: Preferred minimum group size (default 3).
+            Group sizes below this are avoided unless overhead exceeds threshold.
+        overhead_threshold: Maximum allowed overhead ratio (default 0.10 = 10%)
+            before falling back to smaller group sizes.
+
+    Returns:
+        The optimal group size (minimizes padding, ties broken by larger group size)
+    
+    Raises:
+        ValueError: If same_type_layers is empty
+    """
+    if not same_type_layers:
+        raise ValueError("same_type_layers must not be empty")
+
+    # Extract (layer_count, max_memory_usage_bytes) per spec
+    # max_memory_usage_bytes properly weights full attention vs sliding window
+    layer_info = [
+        (len(layers), spec.max_memory_usage_bytes(vllm_config))
+        for spec, layers in same_type_layers.items()
+    ]
+
+    max_layers = max(count for count, _ in layer_info)
+    total_base_memory = sum(count * mem_size for count, mem_size in layer_info)
+
+    def calc_padding_memory(group_size: int) -> int:
+        """Total padding memory, weighted by each layer type's memory size."""
+        return sum(
+            ((group_size - count % group_size) % group_size) * mem_size
+            for count, mem_size in layer_info
+        )
+
+    def find_best_in_range(start: int, end: int) -> int:
+        """Find best group size in [start, end] range.
+        
+        Prefers larger group sizes (fewer tensors) when padding is equal.
+        Key: (padding_memory, -group_size) so larger group_size wins ties.
+        """
+        return min(range(start, end + 1),
+                   key=lambda gs: (calc_padding_memory(gs), -gs))
+
+    # Calculate baseline: optimal group size with no minimum constraint
+    baseline_group_size = find_best_in_range(1, max_layers)
+    baseline_padding = calc_padding_memory(baseline_group_size)
+
+    # If preferred minimum is >= max_layers, just use max_layers
+    if min_preferred_group_size >= max_layers:
+        return max_layers
+
+    # Calculate preferred: optimal group size with minimum constraint
+    preferred_group_size = find_best_in_range(min_preferred_group_size, max_layers)
+    preferred_padding = calc_padding_memory(preferred_group_size)
+
+    # Check if enforcing the minimum preference adds too much overhead
+    # Overhead is measured relative to total memory
+    overhead = (preferred_padding - baseline_padding) / total_base_memory \
+        if total_base_memory > 0 else 0.0
+
+    if overhead > overhead_threshold:
+        # Fallback to baseline (allowing smaller group sizes)
+        return baseline_group_size
+
+    return preferred_group_size
+
+
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: "VllmConfig",
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1017,23 +1108,10 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
-    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
-    # open-source hybrid model follows a n:1 pattern between different attention
-    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
-    # full), so we can use the "1" in the n:1 pattern as the group size, which
-    # is the minimum number of layers among all attention types. Need a better
-    # strategy if we want to support more complex patterns (e.g., 20 full + 30
-    # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in same_type_layers.values()])
-    group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in same_type_layers.values()])
-    if max_num_layers < min_num_layers * 1.25:
-        # If the number of layers is not much larger than the minimum number of layers,
-        # use the maximum number of layers as the group size to avoid too many padding
-        # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
-        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
-        # magic number to avoid too many padding layers.
-        group_size = max_num_layers
+    # Find optimal group_size by trying all options and choosing the one with
+    # minimal padding (weighted by layer memory size). Prefers larger group sizes
+    # (fewer tensors) and enforces group_size >= 3 unless overhead exceeds 20%.
+    group_size = _find_best_group_size(same_type_layers, vllm_config)
     grouped_layers = []
     for layers in same_type_layers.values():
         num_padding_layers = group_size - len(layers) % group_size
@@ -1239,7 +1317,7 @@ def get_kv_cache_groups(
     # have the same physical memory per block per layer. Split the layers
     # into groups with the same number of layers, and thus same total page
     # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec, vllm_config)
 
 
 def generate_scheduler_kv_cache_config(
