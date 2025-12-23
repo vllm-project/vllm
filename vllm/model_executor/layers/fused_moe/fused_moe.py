@@ -2132,6 +2132,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float16,
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
         ]
 
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
@@ -2156,7 +2157,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif hidden_states.dtype == torch.float8_e4m3fn:
+        elif (
+            hidden_states.dtype == torch.float8_e4m3fn
+            or hidden_states.dtype == torch.float8_e4m3fnuz
+        ):
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")

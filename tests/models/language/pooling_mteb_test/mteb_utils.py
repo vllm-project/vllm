@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from pathlib import Path
 
 import mteb
 import numpy as np
@@ -17,6 +18,11 @@ from tests.models.utils import (
     RerankModelInfo,
     check_embeddings_close,
     get_vllm_extra_kwargs,
+)
+
+template_home = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "examples/pooling/score/template"
 )
 
 # Most embedding models on the STS12 task (See #17175):
@@ -102,30 +108,6 @@ class VllmMtebEncoder(mteb.EncoderProtocol):
         return sim
 
 
-class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
-    mteb_model_meta = _empty_model_meta
-
-    def __init__(self, vllm_model):
-        self.llm = vllm_model
-        self.rng = np.random.default_rng(seed=42)
-
-    def predict(
-        self,
-        inputs1: DataLoader[mteb.types.BatchedInput],
-        inputs2: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
-    ) -> np.ndarray:
-        queries = [text for batch in inputs1 for text in batch["text"]]
-        corpus = [text for batch in inputs2 for text in batch["text"]]
-
-        outputs = self.llm.score(
-            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
-        )
-        scores = np.array(outputs)
-        return scores
-
-
 class OpenAIClientMtebEncoder(VllmMtebEncoder):
     def __init__(self, model_name: str, client):
         self.model_name = model_name
@@ -151,6 +133,35 @@ class OpenAIClientMtebEncoder(VllmMtebEncoder):
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
+
+
+class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
+    def __init__(self, vllm_model):
+        self.llm = vllm_model
+        self.rng = np.random.default_rng(seed=42)
+        self.chat_template: str | None = getattr(vllm_model, "chat_template", None)
+
+    def predict(
+        self,
+        inputs1: DataLoader[mteb.types.BatchedInput],
+        inputs2: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        queries = [text for batch in inputs1 for text in batch["text"]]
+        corpus = [text for batch in inputs2 for text in batch["text"]]
+
+        outputs = self.llm.score(
+            queries,
+            corpus,
+            truncate_prompt_tokens=-1,
+            use_tqdm=False,
+            chat_template=self.chat_template,
+        )
+        scores = np.array(outputs)
+        return scores
 
 
 class ScoreClientMtebEncoder(mteb.CrossEncoderProtocol):
@@ -386,6 +397,11 @@ def mteb_test_rerank_models(
             model_config._model_info.default_pooling_type
             == model_info.default_pooling_type
         )
+
+        chat_template: str | None = None
+        if model_info.chat_template_name is not None:
+            chat_template = (template_home / model_info.chat_template_name).read_text()
+        vllm_model.chat_template = chat_template
 
         vllm_main_score = run_mteb_rerank(
             vllm_mteb_encoder(vllm_model),
