@@ -4,6 +4,12 @@
 # See details in README (benchmarks/auto_tune/README.md).
 
 TAG=${TAG:-$(date +"%Y_%m_%d_%H_%M")}
+
+# Sanitize TAG to prevent path traversal
+if [[ "$TAG" == *..* || "$TAG" == /* ]]; then
+    echo "Error: TAG cannot contain '..' or be an absolute path." >&2
+    exit 1
+fi
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 BASE=${BASE:-"$SCRIPT_DIR/../../.."}
