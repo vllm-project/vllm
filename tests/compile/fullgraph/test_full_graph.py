@@ -195,26 +195,6 @@ def test_custom_compile_config(
     ):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
-    # For get_raw_stream patch test: verify version and log context
-    if compilation_config.compile_sizes and len(compilation_config.compile_sizes) > 1:
-        # Verify torch version >= 2.9.0 for compile_sizes autotune
-        if not is_torch_equal_or_newer("2.9.0"):
-            pytest.skip(
-                f"compile_sizes autotune requires torch >= 2.9.0, "
-                f"got {torch.__version__}"
-            )
-
-        # Log version context for get_raw_stream patch testing
-        is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
-        version_context = (
-            "2.9.x (get_raw_stream patch applied)"
-            if is_torch_2_9
-            else "2.10+ (get_raw_stream patch not needed)"
-        )
-        print(
-            f"Testing compile_sizes with torch {torch.__version__} ({version_context})"
-        )
-
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
 
