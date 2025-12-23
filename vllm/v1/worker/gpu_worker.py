@@ -551,7 +551,8 @@ class Worker(WorkerBase):
 
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
-        # new/cached request numbers in each iteration
+        # context/generation request numbers in each iteration.
+        # A context request is a request that has not yet generated any tokens
         if not self.profiler:
             return nullcontext()
 
@@ -559,11 +560,14 @@ class Worker(WorkerBase):
 
         iteration_details = compute_iteration_details(scheduler_output)
 
-        return self.profiler.annotate_context_manager(
+        annotation = (
             f"execute_"
-            f"context_{iteration_details.num_ctx_requests}({iteration_details.num_ctx_tokens})_"
-            f"generation_{iteration_details.num_generation_requests}({iteration_details.num_generation_tokens})"
+            f"context_{iteration_details.num_ctx_requests}"
+            f"({iteration_details.num_ctx_tokens})_"
+            f"generation_{iteration_details.num_generation_requests}"
+            f"({iteration_details.num_generation_tokens})"
         )
+        return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
     def sample_tokens(
