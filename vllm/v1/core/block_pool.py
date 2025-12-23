@@ -254,6 +254,10 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
+            # NOTE: for mamba, full blocks includes the null block
+            #       and the null block should be skipped
+            if blk is self.null_block:
+                continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 

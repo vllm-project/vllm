@@ -40,7 +40,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.compilation_config.max_cudagraph_capture_size,
         )
 
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if self.vllm_config.cache_config.mamba_cache_mode == "all":
             self.state_indices_tensor = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,

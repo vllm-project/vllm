@@ -22,6 +22,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -240,7 +241,7 @@ class MambaMixer(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        return_intermediate_states = self.cache_config.mamba_cache_mode == "all"
 
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
@@ -289,7 +290,7 @@ class MambaMixer(MambaBase, CustomOp):
         state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
         state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
 
-        if prefix_caching_enabled:
+        if return_intermediate_states:
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
                 torch.split(
                     attn_metadata.block_idx_last_computed_token,
@@ -365,7 +366,7 @@ class MambaMixer(MambaBase, CustomOp):
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
-            if prefix_caching_enabled:
+            if return_intermediate_states:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
@@ -443,6 +444,9 @@ class MambaMixer(MambaBase, CustomOp):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
         )
+
+    def get_copy_spec(self):
+        return MambaCopySpecCalculator.mamba1_state_copy_spec()
 
     @property
     def mamba_type(self) -> str:

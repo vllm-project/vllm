@@ -50,6 +50,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -234,6 +235,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             self.conv_kernel_size,
             self.num_spec,
         )
+
+    def get_copy_spec(self):
+        return MambaCopySpecCalculator.gated_delta_net_copy_spec()
 
     def __init__(
         self,
@@ -1192,9 +1196,11 @@ class Qwen3NextForCausalLM(
         cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3Next currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
