@@ -738,37 +738,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
-            if not self.block_quant and (
-                layer.renormalize or layer.custom_routing_function is not None
-            ):
-                raise NotImplementedError(
-                    "FlashInfer TRTLLM FP8 MoE per-tensor backend only supports "
-                    "Llama-4 style select_experts, but found renormalization or "
-                    "custom routing function."
-                )
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE blockscale backend only supports "
-                    "block size [128, 128]."
+                    "FlashInfer CUTLASS FP8 MoE backend only supports block "
+                    "size [128, 128]."
                 )
-            elif not self.block_quant:
+            if not self.block_quant:
                 if layer.renormalize or layer.custom_routing_function is not None:
                     raise NotImplementedError(
-                        "FlashInfer CUTLASS FP8 MoE per-tensor backend does not "
-                        "support custom routing function or renormalization."
+                        "FlashInfer CUTLASS FP8 MoE backend does custom routing "
+                        f"function or renormalization, but got {layer.renormalize} and "
+                        f"{layer.custom_routing_function}."
                     )
                 if layer.scoring_func != "sigmoid":
                     raise NotImplementedError(
-                        "FlashInfer CUTLASS FP8 MoE per-tensor backend only supports "
+                        "FlashInfer CUTLASS FP8 MoE backend only supports "
                         f"'sigmoid' scoring function, but got {layer.scoring_func}."
                     )
-            if not self.block_quant and self.quant_config.activation_scheme != "static":
-                raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE per-tensor backend only supports "
-                    "static activation quantization."
-                )
             if layer.activation != "silu":
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
