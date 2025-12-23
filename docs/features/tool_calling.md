@@ -324,7 +324,7 @@ Supported models:
 * `openai/gpt-oss-20b`
 * `openai/gpt-oss-120b`
 
-Flags: `--tool-call-parser openai --enable-auto-tool-choice`
+Flags: `--tool-call-parser openai`
 
 ### Kimi-K2 Models (`kimi_k2`)
 
