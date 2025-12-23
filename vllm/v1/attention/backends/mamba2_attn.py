@@ -396,8 +396,8 @@ class Mamba2AttentionMetadataBuilder(
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
             else:
-                assert block_idx_first_scheduled_token is not None
                 if self.vllm_config.cache_config.enable_prefix_caching:
+                    assert block_idx_first_scheduled_token is not None
                     block_idx_first_scheduled_token = block_idx_first_scheduled_token[
                         ~spec_sequence_masks
                     ]
