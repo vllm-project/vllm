@@ -136,7 +136,7 @@ class MMEncoderAttention(CustomOp):
             cu_seqlens=cu_seqlens,
         )
         if is_reshaped:
-            output = output.view(bsz, q_len, -1)
+            output = output.reshape(bsz, q_len, -1)
         return output
 
     def _forward_fa(
@@ -174,7 +174,7 @@ class MMEncoderAttention(CustomOp):
             fa_version=self._fa_version,
         )
         if is_reshaped:
-            output = output.view(bsz, q_len, -1)
+            output = output.reshape(bsz, q_len, -1)
         return output
 
     def forward_native(
