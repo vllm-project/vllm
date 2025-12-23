@@ -20,12 +20,6 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 
 @pytest.fixture(scope="module")
 def server(request: pytest.FixtureRequest):
-    # ROCm SPECIFIC CONFIGURATION:
-    # To ensure the test passes on ROCm, we select
-    # FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder models/cross-attention on ROCm.
-    from vllm.platforms import current_platform
-
     passed_params = []
     if hasattr(request, "param"):
         passed_params = request.param
@@ -45,10 +39,6 @@ def server(request: pytest.FixtureRequest):
         "2",
         *passed_params,
     ]
-
-    # ROCm: Use FLEX_ATTENTION backend
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
