@@ -133,19 +133,25 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG USE_TORCH_NIGHTLY
 
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
+    else \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+RUN . /etc/environment && echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
+
 WORKDIR /workspace
 
 # install build and runtime dependencies
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
-    else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+    . /etc/environment && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -175,14 +181,19 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
     else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /etc/environment && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -316,14 +327,19 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
     else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /etc/environment && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -383,19 +399,24 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
+    else \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
 RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
-    else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+    . /etc/environment && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 #################### DEV IMAGE ####################
@@ -492,16 +513,22 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG USE_TORCH_NIGHTLY
+
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
+    else \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
-    else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+    . /etc/environment && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG} && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
@@ -560,13 +587,7 @@ ARG USE_TORCH_NIGHTLY
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
-    else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+    . /etc/environment && \
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -589,13 +610,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG="--prerelease=allow"; \
-    else \
-        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-        PRERELEASE_FLAG=""; \
-    fi && \
+    . /etc/environment && \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -631,6 +646,17 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Set PyTorch index URL and prerelease flag based on USE_TORCH_NIGHTLY
+RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
+    else \
+        echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment; \
+        echo "PRERELEASE_FLAG=" >> /etc/environment; \
+    fi
+ENV PYTORCH_INDEX=""
+ENV PRERELEASE_FLAG=""
+
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
@@ -640,13 +666,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-            PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-            PRERELEASE_FLAG="--prerelease=allow"; \
-        else \
-            PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
-            PRERELEASE_FLAG=""; \
-        fi && \
+        . /etc/environment && \
         uv pip install --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
     fi
