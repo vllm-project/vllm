@@ -266,9 +266,18 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudgraph with v32 MTP is not supported,
+                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
                     self.enforce_eager = True
+                if self.target_model_config.hf_text_config.model_type == "nemotron_h":
+                    # TODO (smor): currently nemotron_h MTP has multiple layers,
+                    # need to support cudagraph for this case.
+                    self.enforce_eager = True
+                    logger.warning(
+                        "Enforcing eager mode for Nemotron_h MTP. "
+                        "Full or PIECEWISE cudagraphs are not supported "
+                        "for this model."
+                    )
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as

@@ -161,7 +161,7 @@ class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    supports_update_block_table: bool = False
+    supports_update_block_table: bool = False  # TODO smor- fix this
 
     def __init__(
         self,
@@ -767,6 +767,6 @@ class Mamba2AttentionMetadataBuilder(
             persistent_state_indices_t.copy_(state_indices_t, non_blocking=True)
             state_indices_t = persistent_state_indices_t
 
-            new_metadata.non_spec_state_indices_tensor = state_indices_t
+        new_metadata.non_spec_state_indices_tensor = state_indices_t
 
         return new_metadata

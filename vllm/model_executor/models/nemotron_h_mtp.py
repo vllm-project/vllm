@@ -8,10 +8,8 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -208,7 +206,6 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
 class NemotronHMultiTokenPredictor(nn.Module):
     """MTP predictor with NemotronH layers."""
 
@@ -310,7 +307,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class NemotronHMTP(nn.Module, SupportsPP):
     """NemotronH MTP model."""
 
@@ -525,9 +521,4 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        if get_tensor_model_parallel_rank() == 0:
-            torch.save(
-                self.state_dict(),
-                f"/tmp/nemotron_h_mtp_weights_tp_rank_{get_tensor_model_parallel_rank()}.pt",
-            )
         return loaded_params
