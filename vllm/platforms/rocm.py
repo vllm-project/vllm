@@ -408,7 +408,7 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
-        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enaled()
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
