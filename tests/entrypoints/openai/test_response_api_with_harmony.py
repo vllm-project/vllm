@@ -504,11 +504,8 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    # Code interpreter needs more time for container init + code execution
-    # Extend timeout especially for ROCm
-    from vllm.platforms import current_platform
-
-    timeout_value = client.timeout * 3 if current_platform.is_rocm() else client.timeout
+    # Code interpreter may need more time for container init + code execution
+    timeout_value = client.timeout * 3
     client_with_timeout = client.with_options(timeout=timeout_value)
 
     response = await client_with_timeout.responses.create(
