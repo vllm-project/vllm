@@ -196,3 +196,69 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
+
+  # Build nightly torch Docker images (x86)
+  - label: "Build nightly torch image (x86)"
+    depends_on: ~
+    id: build-nightly-torch-image-x86
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg USE_TORCH_NIGHTLY=true --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-x86_64 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-x86_64"
+
+  # Build nightly torch Docker images (arm64)
+  - label: "Build nightly torch image (arm64)"
+    depends_on: ~
+    id: build-nightly-torch-image-arm64
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg USE_TORCH_NIGHTLY=true --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-aarch64 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-aarch64"
+
+  # Create multi-arch manifest for nightly torch images
+  - label: "Create nightly torch multi-arch manifest"
+    depends_on:
+      - build-nightly-torch-image-x86
+      - build-nightly-torch-image-arm64
+    id: create-nightly-torch-multi-arch-manifest
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-aarch64 --amend"
+      - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly"
+
+  # Publish nightly torch images to DockerHub
+  - label: "Publish nightly torch images to DockerHub"
+    depends_on:
+      - create-nightly-torch-multi-arch-manifest
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-x86_64"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-aarch64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-x86_64 vllm/vllm-openai:torch-nightly-x86_64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-torch-nightly-aarch64 vllm/vllm-openai:torch-nightly-aarch64"
+      - "docker push vllm/vllm-openai:torch-nightly-x86_64"
+      - "docker push vllm/vllm-openai:torch-nightly-aarch64"
+      - "docker manifest create vllm/vllm-openai:torch-nightly vllm/vllm-openai:torch-nightly-x86_64 vllm/vllm-openai:torch-nightly-aarch64 --amend"
+      - "docker manifest create vllm/vllm-openai:torch-nightly-$BUILDKITE_COMMIT vllm/vllm-openai:torch-nightly-x86_64 vllm/vllm-openai:torch-nightly-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:torch-nightly"
+      - "docker manifest push vllm/vllm-openai:torch-nightly-$BUILDKITE_COMMIT"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
