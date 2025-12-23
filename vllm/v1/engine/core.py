@@ -349,18 +349,23 @@ class EngineCore:
         self.iteration_index += 1
         yield
         logger.info(
-            "Iteration(%d): "
-            "%d context requests, "
-            "%d context tokens, "
-            "%d generation requests, "
-            "%d generation tokens, "
-            "iteration elapsed time: %.2f ms",
-            self.iteration_index,
-            iteration_details.num_ctx_requests,
-            iteration_details.num_ctx_tokens,
-            iteration_details.num_generation_requests,
-            iteration_details.num_generation_tokens,
-            (time.monotonic() - before) * 1000,
+            "".join(
+                [
+                    "Iteration(",
+                    str(self.iteration_index),
+                    "): ",
+                    str(iteration_details.num_ctx_requests),
+                    " context requests, ",
+                    str(iteration_details.num_ctx_tokens),
+                    " context tokens, ",
+                    str(iteration_details.num_generation_requests),
+                    " generation requests, ",
+                    str(iteration_details.num_generation_tokens),
+                    " generation tokens, iteration elapsed time: ",
+                    format((time.monotonic() - before) * 1000, ".2f"),
+                    " ms",
+                ]
+            )
         )
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:

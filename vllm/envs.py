@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
-    VLLM_LOG_ITERATION_DETAILS: bool = True
+    VLLM_LOG_ITERATION_DETAILS: bool = False
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
@@ -666,7 +666,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This includes number of context/generation requests and tokens
     # and the elapsed cpu time for the iteration.
     "VLLM_LOG_ITERATION_DETAILS": lambda: bool(
-        int(os.getenv("VLLM_LOG_ITERATION_DETAILS", "1"))
+        int(os.getenv("VLLM_LOG_ITERATION_DETAILS", "0"))
     ),
     # Trace function calls
     # If set to 1, vllm will trace function calls

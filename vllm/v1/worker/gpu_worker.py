@@ -560,12 +560,18 @@ class Worker(WorkerBase):
 
         iteration_details = compute_iteration_details(scheduler_output)
 
-        annotation = (
-            f"execute_"
-            f"context_{iteration_details.num_ctx_requests}"
-            f"({iteration_details.num_ctx_tokens})_"
-            f"generation_{iteration_details.num_generation_requests}"
-            f"({iteration_details.num_generation_tokens})"
+        annotation = "".join(
+            [
+                "execute_context_",
+                str(iteration_details.num_ctx_requests),
+                "(",
+                str(iteration_details.num_ctx_tokens),
+                ")_generation_",
+                str(iteration_details.num_generation_requests),
+                "(",
+                str(iteration_details.num_generation_tokens),
+                ")",
+            ]
         )
         return self.profiler.annotate_context_manager(annotation)
 
