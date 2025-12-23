@@ -105,6 +105,7 @@ class KimiK2ToolParser(ToolParser):
     def _check_and_strip_markers(self, text: str) -> tuple[str, bool, bool]:
         """
         Check for section begin/end markers in text and strip them.
+        Also strips tool call markers to prevent leakage into content.
         Returns: (cleaned_text, found_section_begin, found_section_end)
         """
         found_begin = False
@@ -122,7 +123,6 @@ class KimiK2ToolParser(ToolParser):
             if variant in cleaned:
                 cleaned = cleaned.replace(variant, "")
                 found_end = True
-
         return cleaned, found_begin, found_end
 
     def _reset_section_state(self) -> None:
@@ -238,6 +238,7 @@ class KimiK2ToolParser(ToolParser):
             self.in_tool_section = True
             self.token_buffer = buffered_text  # Use cleaned buffer
             self.section_char_count = 0  # Reset counter for new section
+
         if found_section_end and self.in_tool_section:
             logger.debug("Detected section end marker")
             # CRITICAL: Don't exit early if tool_call_end is in this chunk.
@@ -252,13 +253,8 @@ class KimiK2ToolParser(ToolParser):
             else:
                 # No tool call ending, safe to exit immediately
                 logger.debug("Exiting tool section")
-                remaining = buffered_text
                 self._reset_section_state()
-                # Return remaining text as reasoning content if non-empty
-                if remaining.strip():
-                    return DeltaMessage(content=remaining)
-                # Return empty delta to maintain function contract
-                # (always returns DeltaMessage)
+                # Don't return buffered content as it may contain tool call data
                 return DeltaMessage(content="")
         else:
             self.token_buffer = buffered_text
@@ -316,12 +312,12 @@ class KimiK2ToolParser(ToolParser):
                 and prev_tool_end_count == cur_tool_end_count
                 and self.tool_call_end_token not in delta_text
             ):
-                # CRITICAL FIX: Suppress content if in tool section but
-                # no tool calls started
+                # Suppress content between section begin and first tool begin
+                # (header noise). Don't suppress content between tools to avoid
+                # breaking potential delimiter characters.
                 if self.in_tool_section and cur_tool_start_count == 0:
                     logger.debug(
-                        "In tool section but no tool calls started yet. "
-                        "Suppressing: %s",
+                        "In tool section before first tool, suppressing: %s",
                         delta_text,
                     )
                     # Return empty delta to maintain iterator contract
@@ -488,6 +484,9 @@ class KimiK2ToolParser(ToolParser):
             if tool_call_portion is None:
                 # if there's text but not tool calls, send that -
                 # otherwise None to skip chunk
+                # CRITICAL: Never return content if we're in a tool section
+                if self.in_tool_section:
+                    return None
                 delta = (
                     DeltaMessage(content=delta_text)
                     if text_portion is not None

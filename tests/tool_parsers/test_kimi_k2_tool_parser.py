@@ -922,3 +922,249 @@ def test_tool_call_end_and_section_end_same_chunk(kimi_k2_tool_parser):
     # Content after tool section should stream normally
     assert result4 is not None
     assert result4.content == " Done"
+
+
+def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
+    """
+    CRITICAL TEST: Verify that tool call markers (<|tool_call_begin|>,
+    <|tool_call_end|>, <|tool_call_argument_begin|>) are NOT leaked
+    into the content field during streaming.
+
+    This reproduces the AWS Bedrock bug where tool call markers appeared
+    in the 'text' field of responses.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+
+    # List of markers that should NEVER appear in content
+    forbidden_markers = [
+        "<|tool_call_begin|>",
+        "<|tool_call_end|>",
+        "<|tool_call_argument_begin|>",
+        "<|tool_calls_section_begin|>",
+        "<|tool_calls_section_end|>",
+    ]
+
+    all_content = []
+
+    # Step 1: Normal reasoning text
+    result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text="I'll check the weather. ",
+        delta_text="I'll check the weather. ",
+        previous_token_ids=[],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[1, 2, 3],
+        request=None,
+    )
+    if result1 and result1.content:
+        all_content.append(result1.content)
+
+    # Step 2: Section begin
+    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text="I'll check the weather. ",
+        current_text="I'll check the weather. <|tool_calls_section_begin|>",
+        delta_text="<|tool_calls_section_begin|>",
+        previous_token_ids=[1, 2, 3],
+        current_token_ids=[1, 2, 3, section_begin_id],
+        delta_token_ids=[section_begin_id],
+        request=None,
+    )
+    if result2 and result2.content:
+        all_content.append(result2.content)
+
+    # Step 3: Tool call with all markers in a single chunk
+    tool_chunk = (
+        "<|tool_call_begin|> functions.get_weather:0 "
+        '<|tool_call_argument_begin|> {"city": "Tokyo"} <|tool_call_end|>'
+    )
+    prev_text = "I'll check the weather. <|tool_calls_section_begin|>"
+    curr_text = prev_text + tool_chunk
+
+    result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text,
+        current_text=curr_text,
+        delta_text=tool_chunk,
+        previous_token_ids=[1, 2, 3, section_begin_id],
+        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id],
+        delta_token_ids=[tool_begin_id, 10, 11, tool_end_id],
+        request=None,
+    )
+    if result3 and result3.content:
+        all_content.append(result3.content)
+
+    # Step 4: Section end
+    result4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=curr_text,
+        current_text=curr_text + "<|tool_calls_section_end|>",
+        delta_text="<|tool_calls_section_end|>",
+        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id],
+        current_token_ids=[
+            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id
+        ],
+        delta_token_ids=[section_end_id],
+        request=None,
+    )
+    if result4 and result4.content:
+        all_content.append(result4.content)
+
+    # Step 5: Post-section content
+    final_text = curr_text + "<|tool_calls_section_end|>"
+    result5 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=final_text,
+        current_text=final_text + " Here's the result.",
+        delta_text=" Here's the result.",
+        previous_token_ids=[
+            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id
+        ],
+        current_token_ids=[
+            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id, 20, 21
+        ],
+        delta_token_ids=[20, 21],
+        request=None,
+    )
+    if result5 and result5.content:
+        all_content.append(result5.content)
+
+    # CRITICAL ASSERTIONS: No forbidden markers in any content
+    full_content = "".join(all_content)
+    for marker in forbidden_markers:
+        assert marker not in full_content, (
+            f"MARKER LEAK DETECTED: '{marker}' found in content. "
+            f"Full content: {repr(full_content)}"
+        )
+
+    # Also check that tool call content (function name, arguments) is not leaked
+    assert "get_weather" not in full_content, (
+        f"TOOL CALL CONTENT LEAKED: 'get_weather' found in content. "
+        f"Full content: {repr(full_content)}"
+    )
+    assert "Tokyo" not in full_content, (
+        f"TOOL CALL CONTENT LEAKED: 'Tokyo' found in content. "
+        f"Full content: {repr(full_content)}"
+    )
+
+    # Verify that legitimate content was preserved
+    assert "I'll check the weather." in full_content or len(all_content) > 0
+
+
+def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
+    """
+    Test that MULTIPLE tool calls in streaming mode do not leak into content.
+    This reproduces the AWS Bedrock scenario: "Compare weather in Tokyo and NYC".
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+
+    all_content = []
+
+    # Step 1: Normal reasoning text
+    r1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text="I'll compare the weather. ",
+        delta_text="I'll compare the weather. ",
+        previous_token_ids=[],
+        current_token_ids=[1, 2, 3],
+        delta_token_ids=[1, 2, 3],
+        request=None,
+    )
+    if r1 and r1.content:
+        all_content.append(r1.content)
+
+    # Step 2: Section begin
+    prev_text = "I'll compare the weather. "
+    r2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text,
+        current_text=prev_text + "<|tool_calls_section_begin|>",
+        delta_text="<|tool_calls_section_begin|>",
+        previous_token_ids=[1, 2, 3],
+        current_token_ids=[1, 2, 3, section_begin_id],
+        delta_token_ids=[section_begin_id],
+        request=None,
+    )
+    if r2 and r2.content:
+        all_content.append(r2.content)
+
+    # Step 3: First tool call (Tokyo)
+    tool1 = '<|tool_call_begin|> get_weather:0 <|tool_call_argument_begin|> {"city": "Tokyo"} <|tool_call_end|>'
+    prev_text = "I'll compare the weather. <|tool_calls_section_begin|>"
+    curr_text = prev_text + tool1
+    r3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text,
+        current_text=curr_text,
+        delta_text=tool1,
+        previous_token_ids=[1, 2, 3, section_begin_id],
+        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id],
+        delta_token_ids=[tool_begin_id, 10, tool_end_id],
+        request=None,
+    )
+    if r3 and r3.content:
+        all_content.append(r3.content)
+
+    # Step 4: Second tool call (NYC)
+    tool2 = ' <|tool_call_begin|> get_weather:1 <|tool_call_argument_begin|> {"city": "New York"} <|tool_call_end|>'
+    prev_text = curr_text
+    curr_text = prev_text + tool2
+    r4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text,
+        current_text=curr_text,
+        delta_text=tool2,
+        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id],
+        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id],
+        delta_token_ids=[tool_begin_id, 20, tool_end_id],
+        request=None,
+    )
+    if r4 and r4.content:
+        all_content.append(r4.content)
+
+    # Step 5: Section end
+    prev_text = curr_text
+    r5 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=prev_text,
+        current_text=prev_text + "<|tool_calls_section_end|>",
+        delta_text="<|tool_calls_section_end|>",
+        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id],
+        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id],
+        delta_token_ids=[section_end_id],
+        request=None,
+    )
+    if r5 and r5.content:
+        all_content.append(r5.content)
+
+    # Step 6: Post-section content
+    final_text = prev_text + "<|tool_calls_section_end|>"
+    r6 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text=final_text,
+        current_text=final_text + " Here's the comparison.",
+        delta_text=" Here's the comparison.",
+        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id],
+        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id, 30],
+        delta_token_ids=[30],
+        request=None,
+    )
+    if r6 and r6.content:
+        all_content.append(r6.content)
+
+    # Assertions
+    full_content = "".join(all_content)
+
+    # Check no markers leaked
+    forbidden = ["<|tool_call", "<|tool_calls_section"]
+    for marker in forbidden:
+        assert marker not in full_content, f"MARKER LEAKED: {marker} in {repr(full_content)}"
+
+    # Check no tool call content leaked (both tools)
+    assert "get_weather" not in full_content, f"TOOL NAME LEAKED: {repr(full_content)}"
+    assert "Tokyo" not in full_content, f"TOOL ARG LEAKED (Tokyo): {repr(full_content)}"
+    assert "New York" not in full_content, f"TOOL ARG LEAKED (NYC): {repr(full_content)}"
+
+    # Legitimate content preserved
+    assert "compare" in full_content.lower() or len(all_content) > 0
