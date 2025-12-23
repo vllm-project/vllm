@@ -40,30 +40,33 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
-        torch.ops._C.per_token_group_fp8_quant.default
-    )  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64ColMajorSym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS.update(
+        dict.fromkeys(
+            [
+                kFp8Dynamic128Sym,
+                kFp8Dynamic128ColMajorSym,
+                kFp8Dynamic64Sym,
+                kFp8Dynamic64ColMajorSym,
+            ],
+            torch.ops._C.per_token_group_fp8_quant.default,
+        )
+    )
 
 if current_platform.is_rocm():
     # Import to trigger custom op registrations via direct_register_custom_op
     from vllm.model_executor.layers.quantization.utils import fp8_utils  # noqa: F401
 
-    QUANT_OPS[kFp8Dynamic128Sym] = (
-        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
-    )  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = (
-        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
-    )  # noqa: E501
-    QUANT_OPS[kFp8Dynamic128ColMajorSym] = (
-        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
-    )  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64ColMajorSym] = (
-        torch.ops.vllm.per_token_group_quant_fp8_col_scales.default
-    )  # noqa: E501
-
+    QUANT_OPS.update(
+        dict.fromkeys(
+            [
+                kFp8Dynamic128Sym,
+                kFp8Dynamic128ColMajorSym,
+                kFp8Dynamic64Sym,
+                kFp8Dynamic64ColMajorSym,
+            ],
+            torch.ops.vllm.per_token_group_quant_fp8.default,
+        )
+    )
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 

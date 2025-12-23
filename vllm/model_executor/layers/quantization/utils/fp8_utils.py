@@ -729,7 +729,7 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
-def per_token_group_quant_fp8_col_scales_impl(
+def per_token_group_quant_fp8_impl(
     input: torch.Tensor,
     output_q: torch.Tensor,
     output_s: torch.Tensor,
@@ -745,71 +745,48 @@ def per_token_group_quant_fp8_col_scales_impl(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8_colmajor[(M,)](
-        input,
-        output_q,
-        output_s,
-        group_size,
-        input.shape[1],
-        input.stride(0),
-        output_s.stride(1),
-        eps,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        use_ue8m0=scale_ue8m0,
-        BLOCK=BLOCK,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+
+    # Detect scale tensor layout by checking stride pattern
+    # Column-major: stride[0] == 1 (first dimension contiguous)
+    # Row-major: stride[-1] == 1 (last dimension contiguous)
+    is_column_major = output_s.stride(0) == 1
+
+    if is_column_major:
+        _per_token_group_quant_fp8_colmajor[(M,)](
+            input,
+            output_q,
+            output_s,
+            group_size,
+            input.shape[1],
+            input.stride(0),
+            output_s.stride(1),
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=scale_ue8m0,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        _per_token_group_quant_fp8[(M,)](
+            input,
+            output_q,
+            output_s,
+            group_size,
+            input.shape[1],
+            input.stride(0),
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=scale_ue8m0,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
 
-def per_token_group_quant_fp8_row_scales_impl(
-    input: torch.Tensor,
-    output_q: torch.Tensor,
-    output_s: torch.Tensor,
-    group_size: int,
-    eps: float,
-    fp8_min: float,
-    fp8_max: float,
-    scale_ue8m0: bool,
-) -> None:
-    M = input.numel() // group_size
-    N = group_size
-    BLOCK = triton.next_power_of_2(N)
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK // 256, 1), 8)
-    num_stages = 1
-    _per_token_group_quant_fp8[(M,)](
-        input,
-        output_q,
-        output_s,
-        group_size,
-        input.shape[1],
-        input.stride(0),
-        eps,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        use_ue8m0=scale_ue8m0,
-        BLOCK=BLOCK,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-
-
-def per_token_group_quant_fp8_col_scales_fake(
-    input: torch.Tensor,
-    output_q: torch.Tensor,
-    output_s: torch.Tensor,
-    group_size: int,
-    eps: float,
-    fp8_min: float,
-    fp8_max: float,
-    scale_ue8m0: bool,
-):
-    pass
-
-
-def per_token_group_quant_fp8_row_scales_fake(
+def per_token_group_quant_fp8_fake(
     input: torch.Tensor,
     output_q: torch.Tensor,
     output_s: torch.Tensor,
@@ -823,16 +800,10 @@ def per_token_group_quant_fp8_row_scales_fake(
 
 
 direct_register_custom_op(
-    op_name="per_token_group_quant_fp8_col_scales",
-    op_func=per_token_group_quant_fp8_col_scales_impl,
+    op_name="per_token_group_quant_fp8",
+    op_func=per_token_group_quant_fp8_impl,
     mutates_args=["output_q", "output_s"],
-    fake_impl=per_token_group_quant_fp8_col_scales_fake,
-)
-direct_register_custom_op(
-    op_name="per_token_group_quant_fp8_row_scales",
-    op_func=per_token_group_quant_fp8_row_scales_impl,
-    mutates_args=["output_q", "output_s"],
-    fake_impl=per_token_group_quant_fp8_row_scales_fake,
+    fake_impl=per_token_group_quant_fp8_fake,
 )
 
 
@@ -896,12 +867,8 @@ def per_token_group_quant_fp8(
             x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
         )
     # TRITON FALLBACK
-    elif column_major_scales:
-        torch.ops.vllm.per_token_group_quant_fp8_col_scales(
-            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
-        )
     else:
-        torch.ops.vllm.per_token_group_quant_fp8_row_scales(
+        torch.ops.vllm.per_token_group_quant_fp8(
             x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
         )
     return x_q, x_s
