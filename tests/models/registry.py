@@ -215,7 +215,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
-    "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
+    # FIXME: databricks/dbrx-instruct has been deleted
+    "DbrxForCausalLM": _HfExamplesInfo(
+        "databricks/dbrx-instruct", is_available_online=False
+    ),
     "DeciLMForCausalLM": _HfExamplesInfo(
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         trust_remote_code=True,
@@ -366,7 +369,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         {"tiny": "TitanML/tiny-mixtral"},
     ),
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
-    "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
+    # FIXME: mosaicml/mpt-7b has been deleted
+    "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b", is_available_online=False),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-H-8B-Base-8K", trust_remote_code=True
@@ -484,6 +488,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
+    "LlamaBidirectionalModel": _HfExamplesInfo(
+        "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
+    ),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo(
         "Alibaba-NLP/gte-modernbert-base", trust_remote_code=True
@@ -549,6 +556,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         "Alibaba-NLP/gte-multilingual-reranker-base",
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
+    ),
+    "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
+        "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"

@@ -5,6 +5,7 @@ import pytest
 import torch.cuda
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 
@@ -13,6 +14,11 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
+
+    if current_platform.is_rocm():
+        pytest.skip(
+            "Skipped on ROCm: this test only works with 'fork', but ROCm uses 'spawn'."
+        )
 
     assert not torch.cuda.is_initialized(), (
         "fork needs to be used for the engine "
