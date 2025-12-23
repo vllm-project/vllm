@@ -43,20 +43,6 @@ INPUT_REASONING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "
 {"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "What is the capital of France?"}]}}"""
 
 
-def _get_rocm_attention_args():
-    """Return attention backend CLI args for ROCm platform.
-
-    ROCm: `TritonAttentionImpl`, `FlashAttentionImpl`, and `RocmAttentionImpl`
-    don't support encoder-only models or cross-attention. Use `FlexAttention`
-    backend which supports those features.
-    """
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        return ["--attention-backend", "FLEX_ATTENTION"]
-    return []
-
-
 def test_empty_file():
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
@@ -74,7 +60,6 @@ def test_empty_file():
                 output_file.name,
                 "--model",
                 "intfloat/multilingual-e5-small",
-                *_get_rocm_attention_args(),
             ],
         )
         proc.communicate()
@@ -159,7 +144,6 @@ def test_embeddings():
                 output_file.name,
                 "--model",
                 "intfloat/multilingual-e5-small",
-                *_get_rocm_attention_args(),
             ],
         )
         proc.communicate()
@@ -191,7 +175,6 @@ def test_score(input_batch):
                 output_file.name,
                 "--model",
                 "BAAI/bge-reranker-v2-m3",
-                *_get_rocm_attention_args(),
             ],
         )
         proc.communicate()
