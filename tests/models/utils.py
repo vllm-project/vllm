@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.model import ModelConfig, ModelDType, RunnerOption, AttnTypeStr
+from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
