@@ -678,6 +678,9 @@ class OpenAISpeechToText(OpenAIServing):
                     # Create logprobs for this chunk if requested
                     chunk_logprobs: TranscriptionLogProbs | None = None
                     if include_logprobs and output.logprobs is not None:
+                        assert (
+                            request.logprobs is not None
+                        )  # Checked in include_logprobs
                         chunk_logprobs = self._create_transcription_logprobs(
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
