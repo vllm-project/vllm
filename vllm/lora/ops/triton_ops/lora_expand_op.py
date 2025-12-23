@@ -240,7 +240,7 @@ def _lora_expand(
         # Each LoRA receives its own set of thread blocks for output
         # computation. If some LoRA doesn't have any tokens to process, its
         # thread blocks simply exit.
-        MAX_LORAS,
+        num_active_loras,
     )
     use_gdc = supports_pdl(inputs.device)
     _lora_expand_kernel[grid](
