@@ -250,6 +250,14 @@ class W8A8BlockFp8LinearOp:
         self.is_hopper = current_platform.is_device_capability(90)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
 
+        # Check environment variable to disable CUTLASS block FP8 and use Triton instead
+        # CUTLASS block FP8 on sm103 (Blackwell) can cause accuracy issues
+        if envs.VLLM_DISABLE_CUTLASS_BLOCK_FP8:
+            cutlass_block_fp8_supported = False
+            logger.info(
+                "VLLM_DISABLE_CUTLASS_BLOCK_FP8 is set, using Triton instead of CUTLASS"
+            )
+
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
         # to use deepgemm because we don't know the shape of weights (and
