@@ -507,10 +507,10 @@ The following extra parameters are supported:
 
 The following parameters are vLLM-specific extensions not present in the OpenAI Whisper API:
 
-- `logprobs` (int): Return log probabilities for the top N tokens at each position. When set, the response will include a `logprobs` object containing:
+- `logprobs` (int): Return log probabilities for the top N+1 tokens at each position (N alternatives plus the chosen token, consistent with vLLM's completion API). When set, the response will include a `logprobs` object containing:
     - `tokens`: List of generated tokens
     - `token_logprobs`: Log probability of each token
-    - `top_logprobs`: Dictionary of top N alternative tokens and their log probabilities at each position
+    - `top_logprobs`: Dictionary of top N+1 tokens and their log probabilities at each position
 
 **Example usage:**
 
