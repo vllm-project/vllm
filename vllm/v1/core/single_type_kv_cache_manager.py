@@ -356,8 +356,9 @@ class SingleTypeKVCacheManager(ABC):
         blocks = self.req_to_blocks[request_id]
         num_skipped_blocks = num_skipped_tokens // self.block_size
         # `num_skipped_tokens` may include tokens that haven't been allocated yet
-        # (e.g., the attention window moves into the pending-token range), so we
-        # must cap to the number of blocks that currently exist for this request.
+        # (e.g., when the attention window moves into the external computed tokens
+        # range), so we must cap to the number of blocks that currently exist for
+        # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
         removed_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
