@@ -110,6 +110,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
+        self.is_lora_enabled = bool(vllm_config.lora_config)
         self.hidden_size = self.config.hidden_size
         self.ssm_state_size = self.config.mamba_d_state
         self.conv_kernel_size = self.config.mamba_d_conv
@@ -207,7 +208,11 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         self.prefix = prefix
 
     def _project_ssm_parameters(self, hidden_states):
-        ssm_parameters = self.bcdt_proj(hidden_states)
+        if self.is_lora_enabled:
+            #  Lora kernel requires contiguous tensor.
+            ssm_parameters = self.bcdt_proj(hidden_states.contiguous())
+        else:
+            ssm_parameters = self.bcdt_proj(hidden_states)
         B, C, time_step = torch.split(
             ssm_parameters,
             [self.ssm_state_size, self.ssm_state_size, self.time_step_rank],
