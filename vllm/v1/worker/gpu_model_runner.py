@@ -3581,7 +3581,12 @@ class GPUModelRunner(
             return DraftTokenIds(req_ids, [[] for _ in req_ids])
 
         if isinstance(self._draft_token_ids, torch.Tensor):
-            draft_token_ids = self._draft_token_ids.tolist()
+            draft_token_ids_raw = self._draft_token_ids.tolist()
+            # Filter out -1 values (invalid draft tokens, e.g., from ngram_gpu
+            # when no n-gram match is found)
+            draft_token_ids = [
+                [t for t in tokens if t >= 0] for tokens in draft_token_ids_raw
+            ]
         else:
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
@@ -3649,7 +3654,27 @@ class GPUModelRunner(
         elif spec_config.method == "ngram_gpu":
             # GPU-accelerated ngram proposer
             assert isinstance(self.drafter, NgramProposerGPU)
-            assert isinstance(sampled_token_ids, torch.Tensor), (
+            sampled_token_ids_gpu_tensor = sampled_token_ids
+            if isinstance(sampled_token_ids_gpu_tensor, list):
+                # When disable_padded_drafter_batch=True, sampled_token_ids is
+                # an irregular list[list[int]] where sublists may have different
+                # lengths (including empty lists for discarded requests).
+                # Pad all sublists to the same length with -1 before converting
+                # to tensor.
+                max_len = max(
+                    (len(sublist) for sublist in sampled_token_ids_gpu_tensor),
+                    default=0,
+                )
+                # Ensure at least length 1 for tensor creation
+                max_len = max(max_len, 1)
+                padded_list = [
+                    sublist + [-1] * (max_len - len(sublist))
+                    for sublist in sampled_token_ids_gpu_tensor
+                ]
+                sampled_token_ids_gpu_tensor = torch.tensor(
+                    padded_list, dtype=torch.int32, device=self.device
+                )
+            assert isinstance(sampled_token_ids_gpu_tensor, torch.Tensor), (
                 "sampled_token_ids should be a torch.Tensor for ngram_gpu"
             )
             (
@@ -3657,7 +3682,7 @@ class GPUModelRunner(
                 valid_sampled_tokens_count,
                 valid_sampled_token_ids_gpu,
             ) = self.drafter.update_token_ids_ngram(
-                sampled_token_ids,
+                sampled_token_ids_gpu_tensor,
                 self.input_batch,
                 self.token_ids_gpu_tensor,
                 self.num_tokens_no_spec_gpu,
