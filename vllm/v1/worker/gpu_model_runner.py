@@ -66,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsXDRoPE,
     is_mixture_of_experts,
     supports_eagle3,
+    supports_mm_encoder_only,
     supports_mrope,
     supports_multimodal_pruning,
     supports_transcription,
@@ -930,7 +931,6 @@ class GPUModelRunner(
                         self.input_batch.num_prompt_tokens[req_index]
                         + num_output_tokens
                     )
-                    self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
             # Update the block IDs.
@@ -975,7 +975,6 @@ class GPUModelRunner(
                     req_index, start_token_index:end_token_index
                 ] = new_token_ids
                 self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-                self.input_batch.num_tokens[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
@@ -991,8 +990,6 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index
                 ] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec tokens.
-                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
             # When speculative decoding is used with structured output,
             # the scheduler can drop draft tokens that do not
@@ -1685,7 +1682,10 @@ class GPUModelRunner(
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
-            cache_key = (kv_cache_groups[kv_cache_gid].kv_cache_spec, type(builder))
+            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
+            cache_key = (kv_cache_spec, type(builder))
 
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
@@ -2742,7 +2742,6 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            self.input_batch.num_tokens[req_idx] = end_idx
 
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
@@ -3438,9 +3437,13 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if self._draft_token_ids is None:
+        if not self.num_spec_tokens:
             return None
+
         req_ids = self.input_batch.req_ids
+        if self._draft_token_ids is None:
+            return DraftTokenIds(req_ids, [[] for _ in req_ids])
+
         if isinstance(self._draft_token_ids, torch.Tensor):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
@@ -3571,6 +3574,7 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+            num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
@@ -3601,12 +3605,14 @@ class GPUModelRunner(
                     else:
                         target_hidden_states = hidden_states[token_indices]
                 else:
-                    common_attn_metadata, token_indices_to_sample = (
-                        self.drafter.prepare_inputs_padded(
-                            common_attn_metadata,
-                            spec_decode_metadata,
-                            valid_sampled_tokens_count,
-                        )
+                    (
+                        common_attn_metadata,
+                        token_indices_to_sample,
+                        num_rejected_tokens_gpu,
+                    ) = self.drafter.prepare_inputs_padded(
+                        common_attn_metadata,
+                        spec_decode_metadata,
+                        valid_sampled_tokens_count,
                     )
                     total_num_tokens = common_attn_metadata.num_actual_tokens
                     # When padding the batch, token_indices is just a range
@@ -3637,6 +3643,7 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
 
         return draft_token_ids
@@ -4105,6 +4112,11 @@ class GPUModelRunner(
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             activate_lora: If False, dummy_run is performed without LoRAs.
         """
+        if supports_mm_encoder_only(self.model):
+            # The current dummy run only covers LM execution, so we can skip it.
+            # mm encoder dummy run may need to add in the future.
+            return torch.tensor([]), torch.tensor([])
+
         assert (
             cudagraph_runtime_mode is None
             or cudagraph_runtime_mode.valid_runtime_modes()
@@ -4382,6 +4394,11 @@ class GPUModelRunner(
         # The dummy hidden states may contain special values,
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
+
+        if supports_mm_encoder_only(self.model):
+            # MM Encoder only model no need to run sampler.
+            return torch.tensor([])
+
         hidden_states = torch.rand_like(hidden_states)
 
         logits = self.model.compute_logits(hidden_states)
@@ -4510,6 +4527,10 @@ class GPUModelRunner(
         self,
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
+        if supports_mm_encoder_only(self.model):
+            # MM Encoder only model not need to run pooler.
+            return torch.tensor([])
+
         # Find the task that has the largest output for subsequent steps
         supported_pooling_tasks = self.get_supported_pooling_tasks()
 

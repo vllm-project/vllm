@@ -44,10 +44,10 @@ trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
   VLLM_DEEP_GEMM_WARMUP=skip \
-  VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
     --enable-eplb \
+    --all2all-backend $BACK \
     --eplb-config '{"window_size":10, "step_interval":100, "num_redundant_experts":0, "log_balancedness":true}' \
     --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
     --data-parallel-size ${DATA_PARALLEL_SIZE} \
