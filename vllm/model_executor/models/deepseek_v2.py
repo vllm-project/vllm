@@ -880,8 +880,8 @@ class Indexer(nn.Module):
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
         # Note: RoPE (NeoX) can introduce extra leading dimensions during compilation
         # so we need to reshape back to token-flattened shapes
-        q_pe = q_pe.reshape(-1, q_pe.shape[-2], q_pe.shape[-1])
-        k_pe = k_pe.reshape(-1, k_pe.shape[-2], k_pe.shape[-1])
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
         q = torch.cat([q_pe, q_nope], dim=-1)
         # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
