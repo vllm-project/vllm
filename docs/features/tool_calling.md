@@ -373,7 +373,8 @@ Supported models:
 * `google/functiongemma-270m-it`
 
 FunctionGemma uses a unique output format with `<start_function_call>` and `<end_function_call>` tags:
-```
+
+```text
 <start_function_call>call:get_weather{location:<escape>London<escape>}<end_function_call>
 ```
 

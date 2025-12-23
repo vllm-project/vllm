@@ -279,9 +279,17 @@ class FunctionGemmaToolParser(ToolParser):
                 if self.current_tool_id >= 0 and self.current_tool_id < len(
                     self.prev_tool_call_arr
                 ):
-                    args = self.prev_tool_call_arr[self.current_tool_id].get(
-                        "arguments", {}
-                    )
+                    all_calls = self.tool_call_regex.findall(current_text)
+                    args = {}
+                    if self.current_tool_id < len(all_calls):
+                        match = all_calls[self.current_tool_id]
+                        if match[0]:
+                            args_str = match[1]
+                            args = self._parse_arguments(args_str)
+                            self.prev_tool_call_arr[self.current_tool_id][
+                                "arguments"
+                            ] = args
+
                     if args:
                         args_json = json.dumps(args, ensure_ascii=False)
                         prev_streamed = self.streamed_args_for_tool[
