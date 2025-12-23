@@ -14,9 +14,6 @@ from vllm.config.model import ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.model_arch_config_convertor import (
-    ModelArchConfigConvertorBase,
-)
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -486,12 +483,10 @@ def dummy_hf_overrides(
         "num_kv_shared_layers": 1,
     }
 
-    class DummyConfig:
-        hf_text_config = text_config
-
+    model_arch_config = ModelConfig.get_model_arch_config(hf_config, text_config)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
-    if ModelArchConfigConvertorBase.get_num_experts(text_config) > 0:
+    if model_arch_config.num_experts > 0:
         update_dict.update(
             {
                 "num_experts": num_experts,

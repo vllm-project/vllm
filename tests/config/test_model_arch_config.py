@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
@@ -57,9 +60,10 @@ def _load_groundtruth(filename: str) -> dict:
 
 
 def _assert_model_arch_config(
-    model_arch_config, expected: dict, check_head_size: bool = True
+    model_config, expected: dict, check_head_size: bool = True
 ):
     """Assert model_arch_config matches expected values."""
+    model_arch_config = model_config.model_arch_config
     assert model_arch_config.architectures == expected["architectures"]
     assert model_arch_config.model_type == expected["model_type"]
     assert model_arch_config.text_model_type == expected["text_model_type"]
@@ -75,7 +79,11 @@ def _assert_model_arch_config(
     assert model_arch_config.total_num_kv_heads == expected["total_num_kv_heads"]
     assert model_arch_config.num_experts == expected["num_experts"]
     assert model_arch_config.is_deepseek_mla == expected["is_deepseek_mla"]
-    assert str(model_arch_config.torch_dtype) == expected["dtype"]
+
+    torch_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
+        model_config.hf_config, model_config.model_id, revision=model_config.revision
+    )
+    assert str(torch_dtype) == expected["dtype"]
 
     if check_head_size:
         assert model_arch_config.head_size == expected["head_size"]
@@ -109,7 +117,7 @@ def test_base_model_arch_config(model: str):
         model, trust_remote_code=model in BASE_TRUST_REMOTE_CODE_MODELS
     )
 
-    _assert_model_arch_config(model_config.model_arch_config, expected)
+    _assert_model_arch_config(model_config, expected)
     _assert_model_config_methods(model_config, expected)
 
 

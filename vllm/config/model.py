@@ -484,7 +484,9 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
-        self.model_arch_config = self.get_model_arch_config()
+        self.model_arch_config = self.get_model_arch_config(
+            self.hf_config, self.hf_text_config
+        )
 
         architectures = self.architectures
         registry = self.registry
@@ -602,12 +604,15 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    def get_model_arch_config(self) -> ModelArchitectureConfig:
+    @classmethod
+    def get_model_arch_config(
+        cls, hf_config, hf_text_config
+    ) -> ModelArchitectureConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
-            self.hf_config.model_type, ModelArchConfigConvertorBase
+            hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
-        return convertor.convert(self.model, self.revision)
+        convertor = convertor_cls(hf_config, hf_text_config)
+        return convertor.convert()
 
     @field_validator("tokenizer", "max_model_len", mode="wrap")
     @classmethod
@@ -850,7 +855,7 @@ class ModelConfig:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
 
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = ModelArchConfigConvertorBase.get_quantization_config(self.hf_config)
+        quant_cfg = self.model_arch_config.quantization_config
 
         if quant_cfg is not None:
             quant_method = quant_cfg["quant_method"]

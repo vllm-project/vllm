@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
@@ -50,9 +49,6 @@ class ModelArchitectureConfig:
 
     quantization_config: dict[str, Any] | None
     """Quantization configuration dictionary containing quantization parameters."""
-
-    torch_dtype: torch.dtype | str | None
-    """PyTorch data type for model weights (e.g., 'float16', 'bfloat16')."""
 
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""

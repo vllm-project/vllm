@@ -81,9 +81,7 @@ class ModelArchConfigConvertorBase:
 
         return self.hf_text_config.num_attention_heads
 
-    @final
-    @classmethod
-    def get_num_experts(cls, hf_text_config: PretrainedConfig) -> int:
+    def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
         num_expert_names = [
             "num_experts",  # Jamba
@@ -91,7 +89,7 @@ class ModelArchConfigConvertorBase:
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
         ]
-        num_experts = getattr_iter(hf_text_config, num_expert_names, 0)
+        num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
         if isinstance(num_experts, list):
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
@@ -137,9 +135,7 @@ class ModelArchConfigConvertorBase:
 
         return config_dtype
 
-    @final
-    @classmethod
-    def _normalize_quantization_config(cls, config: PretrainedConfig):
+    def _normalize_quantization_config(self, config: PretrainedConfig):
         quant_cfg = getattr(config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
@@ -176,15 +172,13 @@ class ModelArchConfigConvertorBase:
 
         return quant_cfg
 
-    @final
-    @classmethod
-    def get_quantization_config(cls, hf_config: PretrainedConfig):
-        quant_cfg = cls._normalize_quantization_config(hf_config)
+    def get_quantization_config(self):
+        quant_cfg = self._normalize_quantization_config(self.hf_config)
         if quant_cfg is None and (
-            text_config := getattr(hf_config, "text_config", None)
+            text_config := getattr(self.hf_config, "text_config", None)
         ):
             # Check the text config as well for multi-modal models.
-            quant_cfg = cls._normalize_quantization_config(text_config)
+            quant_cfg = self._normalize_quantization_config(text_config)
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
@@ -247,7 +241,7 @@ class ModelArchConfigConvertorBase:
             derived_max_model_len = tmp_max_len
         return derived_max_model_len, max_len_key
 
-    def convert(self, model_id: str, revision: str | None) -> ModelArchitectureConfig:
+    def convert(self) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
             architectures=self.get_architectures(),
             model_type=self.hf_config.model_type,
@@ -258,9 +252,8 @@ class ModelArchConfigConvertorBase:
             head_size=self.get_head_size(),
             vocab_size=self.get_vocab_size(),
             total_num_kv_heads=self.get_total_num_kv_heads(),
-            num_experts=self.get_num_experts(self.hf_text_config),
-            quantization_config=self.get_quantization_config(self.hf_config),
-            torch_dtype=self.get_torch_dtype(self.hf_config, model_id, revision),
+            num_experts=self.get_num_experts(),
+            quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
