@@ -377,9 +377,12 @@ def _patch_get_raw_stream_if_needed():
     if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
         import builtins
 
-        from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+        # Check if CUDA functionality is available without initializing CUDA
+        # _cuda_getCurrentRawStream only exists in CUDA builds of PyTorch
+        if hasattr(torch._C, "_cuda_getCurrentRawStream"):
+            from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
 
-        builtins.get_raw_stream = _get_raw_stream
+            builtins.get_raw_stream = _get_raw_stream
 
 
 _patch_get_raw_stream_if_needed()
