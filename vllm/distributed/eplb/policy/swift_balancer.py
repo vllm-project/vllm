@@ -125,7 +125,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         """
 
         num_ranks = len(single_layer_deployment)
-        redundant_expert_pos = [[] for _ in range(num_ranks)]
+        redundant_expert_pos: list[list[int]] = [[] for _ in range(num_ranks)]
         num_redundant_experts = 0
         expert_from_rank = np.zeros(
             self.num_original_experts,
@@ -669,7 +669,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         exchange within the node to reduce the workload of the hottest rank
         """
 
-        max_workload = 0
+        max_workload = 0.0
         after_swap_ranks_deployment = []
         for idx in range(len(all_node_assignments)):
 
@@ -756,6 +756,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         weight = weight.float()
         experts_workload = weight.cpu().numpy()
+        assert old_global_expert_indices is not None
         current_deployment = old_global_expert_indices.cpu().numpy()
         assert experts_workload is not None and current_deployment is not None
 
