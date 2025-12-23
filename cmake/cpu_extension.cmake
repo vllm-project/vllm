@@ -218,31 +218,41 @@ list(APPEND CXX_COMPILE_FLAGS_AVX512
     "-mavx512bw"
     "-mavx512dq")
 
-if (ENABLE_AVX512BF16)
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+if(ENABLE_AVX512BF16)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
         list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512bf16")
     else()
         message(FATAL_ERROR "Cannot enable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
+    message(STATUS "AVX512BF16: enabled")
+else()
+    message(STATUS "AVX512BF16: disabled")
 endif()
 
-if (ENABLE_AVX512VNNI)
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+if(ENABLE_AVX512VNNI)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
         list(APPEND CXX_COMPILE_FLAGS_AVX512 "-mavx512vnni")
     else()
         message(FATAL_ERROR "Cannot enable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
+    message(STATUS "AVX512-VNNI: enabled")
+else()
+    message(STATUS "AVX512-VNNI: disabled")
 endif()
 
-if (ENABLE_AMXBF16)
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+if(ENABLE_AMXBF16)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
-        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile" "-DCPU_CAPABILITY_AMXBF16") # FIXME: CPU_CAPABILITY_AMXBF16 is enabled in C code
+        # FIXME: CPU_CAPABILITY_AMXBF16 is enabled in C code
+        list(APPEND CXX_COMPILE_FLAGS_AMX "-mamx-bf16" "-mamx-tile" "-DCPU_CAPABILITY_AMXBF16")
     else()
         message(FATAL_ERROR "Cannot enable AMX_BF16 ISA support, requires gcc/g++ >= 12.3 (found: ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
+    message(STATUS "AMXBF16: enabled")
+else()
+    message(STATUS "AMXBF16: disabled")
 endif()
 
 
