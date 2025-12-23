@@ -78,10 +78,6 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
-        # elif quant_config._is_w_ocp_mx_a_fp8(weight_config, input_config):
-        #     return Quark_OCPMX_FP8_MoEMethod(
-        #         weight_config, input_config, module.moe_config
-        #     )
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -99,8 +95,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
         self.weight_qscheme = self.weight_quant.get("qscheme")
         self.input_qscheme = self.input_quant.get("qscheme")
-        self.weight_dtype = self.weight_quant.get("dtype").replace("fp8_e4m3", "fp8")
-        self.input_dtype = self.input_quant.get("dtype").replace("fp8_e4m3", "fp8")
+        self.weight_dtype = self.weight_quant.get("dtype", "").replace(
+            "fp8_e4m3", "fp8"
+        )
+        self.input_dtype = self.input_quant.get("dtype", "").replace("fp8_e4m3", "fp8")
         per_tensor = (
             self.weight_qscheme == "per_tensor" and self.input_qscheme == "per_tensor"
         )
@@ -594,13 +592,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def __init__(
         self,
         weight_config: dict[str, Any],
-        input_config: dict[str, Any] | None = None,
-        moe: FusedMoEConfig | None = None,
+        input_config: dict[str, Any] | None,
+        moe: FusedMoEConfig,
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
-        self.weight_only_quant = True if self.input_quant is None else False
 
         weight_qscheme = self.weight_quant.get("qscheme")
         if not weight_qscheme == "per_group":
@@ -610,7 +607,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )  # noqa E501
 
         self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
-        if not self.weight_only_quant:
+        if self.input_quant is not None:
             input_quant = self.input_quant["dtype"]
             if input_quant in ["fp4", "fp6_e3m2", "fp6_e2m3"]:
                 self.input_dtype = input_quant.replace("fp", "mxfp")
@@ -629,12 +626,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
         )
+
+        self.mxfp4_backend: Mxfp4Backend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
             self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
-        else:
-            self.mxfp4_backend = None
 
-        if not self.weight_only_quant:
+        if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
         else:
             self.static_input_scales = False
@@ -646,14 +643,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             if self.static_input_scales:
                 raise NotImplementedError(
                     "QuarkOCP_MX_MoEMethod with static input scales is currently "
-                    f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. Please open an issue."
+                    f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. "
+                    "Please open an issue."
                 )
-        elif self.ocp_mx_scheme.endswith("a_fp8"):
-            if not self.static_input_scales:
-                raise NotImplementedError(
-                    "QuarkOCP_MX_MoEMethod with dynamic input scales is currently "
-                    f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. Please open an issue."
-                )
+        elif self.ocp_mx_scheme.endswith("a_fp8") and not self.static_input_scales:
+            raise NotImplementedError(
+                "QuarkOCP_MX_MoEMethod with dynamic input scales is currently "
+                f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. "
+                "Please open an issue."
+            )
 
         self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
 
@@ -918,7 +916,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )
         elif self.ocp_mx_scheme in ["w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"]:
             raise NotImplementedError(
-                f"Currently there is no corresponding fused moe quant config for scheme {self.ocp_mx_scheme}. Please open an issue."
+                "Currently there is no corresponding fused moe quant config configured "
+                f"in vLLM for OCP MX scheme {self.ocp_mx_scheme}. Please open an issue."
             )
         else:
             return ocp_mx_moe_quant_config(
@@ -954,7 +953,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 and self.mxfp4_backend == Mxfp4Backend.TRITON
             ):
                 raise NotImplementedError(
-                    "Triton kernel based fused MoE for GPT_OSS model in Quark(MoE) format is not integrated or provided yet."
+                    "Triton kernel implemented fused MoE for GPT_OSS model "
+                    "in Quark(MoE) format is not integrated or provided yet."
                 )
 
             else:

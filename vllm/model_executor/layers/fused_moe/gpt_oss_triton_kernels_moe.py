@@ -91,7 +91,11 @@ def triton_kernel_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    if quant_config.use_mxfp4_w4a16 and quant_config.ocp_mx_scheme == "w_mxfp4":
+    if (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a16
+        and quant_config.ocp_mx_scheme == "w_mxfp4"
+    ):
         output = torch.empty_like(hidden_states)
 
         return triton_kernel_fused_experts(
@@ -110,17 +114,21 @@ def triton_kernel_moe_forward(
             expert_map=expert_map,
         )
 
-    elif quant_config.use_mxfp4_w4a8 and quant_config.ocp_mx_scheme.startswith(
-        "w_mxfp4"
+    elif (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a8
+        and quant_config.ocp_mx_scheme is not None
+        and quant_config.ocp_mx_scheme.startswith("w_mxfp4")
     ):
-        # TODO (xuebwang-amd)
         raise NotImplementedError(
-            "Currently, native kernel for weight in ocp_mx_scheme and activation in FP8 is not provided."
+            "Native kernel for weight in ocp_mx_scheme (MXFP4) and activation in FP8 "
+            "is currently not provided or integrated. Please open an issue."
         )
 
     else:
         raise NotImplementedError(
-            f"Unsupported quant_config={quant_config} for fused experts with triton kernel."
+            f"The quant_config={quant_config} for fused experts with triton kernel "
+            "is currently not provided or integrated. Please open an issue."
         )
 
 
@@ -194,7 +202,8 @@ def triton_kernel_fused_experts(
         w1_precision = quant_config.w1_precision
     else:
         raise TypeError(
-            "quant_config._w1.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'."
+            "quant_config._w1.scale is expected to be in type of "
+            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
         )
 
     if isinstance(quant_config._w2.scale, torch.nn.Parameter):
@@ -205,7 +214,8 @@ def triton_kernel_fused_experts(
         w2_precision = quant_config.w2_precision
     else:
         raise TypeError(
-            "quant_config._w2.scale is expected to be in type of either 'torch.nn.Parameter' or 'PrecisionConfig'."
+            "quant_config._w2.scale is expected to be in type of "
+            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
         )
 
     matmul_ogs(

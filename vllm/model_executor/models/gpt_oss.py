@@ -359,20 +359,22 @@ class GptOssModel(nn.Module):
                 ids = [s for s in parts if s.isdigit()]
 
                 # for amd-quark format that each expert is seperated
+                # need to extract the parameter name with experts fused.
                 if len(ids) == 2:
                     layer_id, expert_id = int(ids[0]), int(ids[-1])
                     parts.pop(len(parts) - 1 - parts[::-1].index(str(expert_id)))
                     fused_name = ".".join(parts)
 
                 # for openai mxfp4 format that all experts are combined
+                # no need to extract the parameter name with experts fused.
                 elif len(ids) == 1:
                     layer_id, expert_id = int(ids[0]), None
                     fused_name = name
 
                 else:
                     raise NameError(
-                        f"Layer name {name} contains more than 2 digital index which is unexpected. \
-                                    Please file an issue if encountered."
+                        f"Layer {name} contains more than 2 numeric indices. This is "
+                        "an unexpected condition. Please open an issue if encountered."
                     )
 
                 moe_quant_method = (
