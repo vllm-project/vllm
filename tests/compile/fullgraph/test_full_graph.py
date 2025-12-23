@@ -14,7 +14,6 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
-    is_torch_equal,
     is_torch_equal_or_newer,
 )
 
