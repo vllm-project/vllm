@@ -88,7 +88,6 @@ Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
 # Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
 
 
-# TODO(nhaber): get 2048 from config
 # TODO(nhaber): does use_thumbnail=True work?
 # TODO(nhaber): mixing images and videos will mess up the "text_prompt_length" calculation.
 
@@ -102,28 +101,20 @@ IMG_CONTEXT = "<image>"
 DEFAULT_NUM_TILES = 12
 
 
-@dataclass(kw_only=True, frozen=True)
-class Dims:
-    height: int
-    width: int
-  
-
-CONV_MERGING = False # This is assumed to be False for now
-PIXEL_SHUFFLE = True # This is assumed to be True for now
-REDUCTION_FACTOR = 2 ** (PIXEL_SHUFFLE + CONV_MERGING)
-
-def num_image_token_per_tile(*, tile_dims: Dims, patch_size: int, downsample_ratio: int) -> int:
-    tile_size = math.sqrt(tile_dims.width * tile_dims.height)
-    num_tokens = int(
-        (tile_size // patch_size) ** 2 * (downsample_ratio**2)
-    )
+def num_image_token_per_tile(
+    *, width: int, height: int, patch_size: int, downsample_ratio: int
+) -> int:
+    tile_size = math.sqrt((width // patch_size) * (height // patch_size))
+    num_tokens = int(tile_size**2 // (downsample_ratio**2))
     return num_tokens
+
 
 def width_and_height_for_max_num_tokens_available(
     *,
     target_num_tokens_post_shuffle: int,
     patch_size: int,
-) -> Dims:
+    downsample_ratio: int,
+) -> tuple[int, int]:
     """
     TODO(nhaber): optimize this so it squeezes closer to target number of tokens.
     Calculate image dimensions that produce approximately `target` tokens after
@@ -133,14 +124,26 @@ def width_and_height_for_max_num_tokens_available(
     need 4*B patches to get B tokens.
 
     Examples:
-        >>> dims = width_and_height_for_max_num_tokens_available(B=8192, patch_size=16)
-        >>> assert dims.width, dims.height == (2880, 2880)
-        >>> assert ((dims.width // 16) * (dims.height // 16) // 4) == 8100 # tokens after shuffle
-        >>> assert num_image_token_per_tile(tile_dims=dims, patch_size=16, downsample_ratio=2) == 8100
+    >>> width, height = width_and_height_for_max_num_tokens_available(
+    ...     target_num_tokens_post_shuffle=8192,
+    ...     patch_size=16,
+    ...     downsample_ratio=2,
+    ... )
+    >>> assert width, height == (2880, 2880)
+    >>> assert (width // 16) * (height // 16) // 2**2 == 8100  # tokens post-shuffle
+    >>> assert (
+    ...     num_image_token_per_tile(
+    ...         width=width, height=height, patch_size=16, downsample_ratio=2
+    ...     )
+    ...     == 8100
+    ... )
     """
-    side_pixels = math.isqrt(target_num_tokens_post_shuffle) * REDUCTION_FACTOR * patch_size
+    side_pixels = (
+        math.isqrt(target_num_tokens_post_shuffle) * downsample_ratio * patch_size
+    )
     assert isinstance(side_pixels, int) and side_pixels % patch_size == 0
-    return Dims(width=side_pixels, height=side_pixels)
+    return side_pixels, side_pixels
+
 
 @dataclass
 class DynamicResolutionParams:
@@ -354,7 +357,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self.max_num_tiles = max_num_tiles or DEFAULT_NUM_TILES
         image_size: int = config.force_image_size
         self.patch_size: int = getattr(config, "patch_size", 16)
-        self.downsample_ratio: float = self.config.downsample_ratio
+        # self.downsample_ratio: float = self.config.downsample_ratio
 
         self.image_size = image_size
         self.use_thumbnail: bool = config.use_thumbnail
@@ -392,9 +395,10 @@ class BaseNanoNemotronVLProcessor(ABC):
         )
 
         return num_tiles * num_image_token_per_tile(
-            tile_dims=Dims(width=image_width, height=image_height),
+            width=image_width,
+            height=image_height,
             patch_size=self.patch_size,
-            downsample_ratio=self.downsample_ratio
+            downsample_ratio=self.downsample_ratio,
         )
 
     def _images_to_pixel_values_lst(
@@ -508,8 +512,9 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         super().__init__(
             config=config, tokenizer=tokenizer, max_num_tiles=max_num_tiles, **kwargs
         )
-        self.max_model_len = max_model_len
 
+        self._patch_size: int = getattr(config, "patch_size", 16)
+        self.max_model_len = max_model_len
         self._min_num_patches = min_num_patches
         self._factor_max = factor_max
         self._pixel_shuffle = pixel_shuffle
@@ -518,47 +523,90 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         self._use_thumbnail = use_thumbnail
         self._thumbnail_size = thumbnail_size
         self._thumbnail_area_threshold = thumbnail_area_threshold
+        self.norm_mean = torch.tensor(self.CLIP_PIXEL_MEAN).reshape(1, 3, 1, 1)
+        self.norm_std = torch.tensor(self.CLIP_PIXEL_STD).reshape(1, 3, 1, 1)
         self._transform = T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
                 T.ToTensor(),  # T.Lambda(lambda img: _fast_to_tensor(img)),
+                # T.Normalize(mean=pixel_mean, std=pixel_std), - This is done down below with input_conditioner
             ]
         )
         self._apply_data_augment = apply_data_augment
+        reduction_factor = 1 / self.config.downsample_ratio
+        assert reduction_factor == 2.0, (
+            "I don't understand what's going on if this isn't 4"
+        )
+        self.downsample_ratio = int(reduction_factor) ** (pixel_shuffle + conv_merging)
+        assert self.downsample_ratio == 2, (
+            f"I don't understand what's going on if {self.downsample_ratio=} isn't 2"
+        )
 
-        self.norm_mean = torch.tensor(self.CLIP_PIXEL_MEAN).reshape(1, 3, 1, 1)
-        self.norm_std = torch.tensor(self.CLIP_PIXEL_STD).reshape(1, 3, 1, 1)
-        self.downsample_ratio = 2 if pixel_shuffle else 1
+    def _get_num_embeddings(self, width: int, height: int) -> int:
+        return num_image_token_per_tile(
+            width=width,
+            height=height,
+            patch_size=self._patch_size,
+            downsample_ratio=self.downsample_ratio,
+        )
+
+    def max_num_tokens_available(self, text_prompt_length: int) -> int:
+        return self.max_model_len - text_prompt_length - 4
+
+    def _images_to_pixel_values_lst(
+        self,
+        text_prompt_length: int,
+        images: list[Image.Image],
+        max_num_tiles: int,
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        num_tokens_available = self.max_num_tokens_available(text_prompt_length)
+        params_per_image = self.compute_params(images, num_tokens_available)
+
+        feature_sizes = []
+        images = []
+        for param in params_per_image:
+            for t in self.apply_params(param):
+                if t.ndim == 3:
+                    t = t.unsqueeze(0)
+                images.append(t)
+                feature_sizes.append(param.num_embeddings)
+        print(f"{feature_sizes=}")
+        print(f"{params_per_image=}")
+        return images, feature_sizes
 
     feature_size_cache: dict[
         Image.Image, int
-    ] = {}  # TODO(nhaber): Find a less silly way of doing this... Why can't this be a class variable?
+    ] = {}  # TODO(nhaber): Find a less silly way of doing this... Why can't this be an instance variable?
 
-    def apply_params(self, params: DynamicResolutionParams) -> torch.Tensor:
+    def get_cached_feature_size(self, image: Image.Image) -> int:
+        feature_size = self.feature_size_cache[id(image)]
+        del self.feature_size_cache[id(image)]
+        return feature_size
+
+    def apply_params(self, params: DynamicResolutionParams) -> list[torch.Tensor]:
         resized_img = params.media.resize(
             (
-                params.patch_size[0] * self.patch_size,
-                params.patch_size[1] * self.patch_size,
+                params.patch_size[0] * self._patch_size,
+                params.patch_size[1] * self._patch_size,
             )
         )
-        # processed_images = [resized_img]
+        processed_images = [resized_img]
 
-        # # Add thumbnail if enabled and image area is below threshold
-        # if self._use_thumbnail:
-        #     # Calculate areas
-        #     resized_area = resized_img.size[0] * resized_img.size[1]
-        #     thumbnail_area = self._thumbnail_size * self._thumbnail_size
-        #     area_ratio = resized_area / thumbnail_area
+        # Add thumbnail if enabled and image area is below threshold
+        if self._use_thumbnail:
+            # Calculate areas
+            resized_area = resized_img.size[0] * resized_img.size[1]
+            thumbnail_area = self._thumbnail_size * self._thumbnail_size
+            area_ratio = resized_area / thumbnail_area
 
-        #     # Only add thumbnail if resized image area is less than threshold % of
-        #     # thumbnail area
-        #     if area_ratio < self._thumbnail_area_threshold:
-        #         thumbnail_img = params.media.resize(
-        #             (self._thumbnail_size, self._thumbnail_size)
-        #         )
-        #         processed_images.append(thumbnail_img)
+            # Only add thumbnail if resized image area is less than threshold % of thumbnail area
+            if area_ratio < self._thumbnail_area_threshold:
+                thumbnail_img = params.media.resize(
+                    (self._thumbnail_size, self._thumbnail_size)
+                )
+                processed_images.append(thumbnail_img)
 
-        return self._transform(resized_img)
+        return [self._transform(img) for img in processed_images]
 
     def process_media(
         self,
@@ -568,11 +616,11 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         tiling_augment_prob: float = 0.4,
     ) -> tuple[DynamicResolutionParams, int]:
         """Process a single media item and return its parameters.
+
         Args:
             media: The media item to process
             num_tokens_available: Number of tokens available for this media
-            data_augment: Whether to apply data augmentation to the image. Defaults to
-            False.
+            data_augment: Whether to apply data augmentation to the image. Defaults to False.
         Returns:
             DynamicResolutionParams for the media
         """
@@ -581,11 +629,9 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
             "Dynamic resolution is only supported for image media"
         )
         orig_width, orig_height = media.width, media.height
-
-        closest_patch_height = math.ceil(
-            orig_height / self.patch_size
-        )  # TODO(nhaber): Ask Tyler - the previous round + 0.5 code is dangerous [banker's rounding], no? If we flip this back to the round, the max_wh_fill_budget needs to do -1 for each of w;h to be safe
-        closest_patch_width = math.ceil(orig_width / self.patch_size)
+        # TODO(nhaber): Ask Tyler - the round + 0.5 code is dangerous [banker's rounding], no?
+        closest_patch_height = round(orig_height / self._patch_size + 0.5)
+        closest_patch_width = round(orig_width / self._patch_size + 0.5)
         patches = closest_patch_height * closest_patch_width
 
         factor = min(
@@ -594,8 +640,7 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         target_patch_height = math.floor(factor * closest_patch_height)
         target_patch_width = math.floor(factor * closest_patch_width)
 
-        # We only consider self._min_num_patches if it is greater than
-        # current_num_tokens_available.
+        # We only consider self._min_num_patches if it is greater than current_num_tokens_available.
         if (
             current_num_tokens_available > self._min_num_patches
             and target_patch_height * target_patch_width < self._min_num_patches
@@ -608,20 +653,19 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
 
         if (
             self._min_side is not None
-            and min(target_patch_width, target_patch_height) * self.patch_size
+            and min(target_patch_width, target_patch_height) * self._patch_size
             < self._min_side
         ):
             if target_patch_width <= target_patch_height:
-                up_factor = self._min_side / (target_patch_width * self.patch_size)
+                up_factor = self._min_side / (target_patch_width * self._patch_size)
                 new_patch_height = math.ceil(up_factor * target_patch_height)
                 new_patch_width = math.ceil(up_factor * target_patch_width)
 
                 if new_patch_height * new_patch_width > current_num_tokens_available:
-                    # If only one side can be min_side, make as big as possible at
-                    # native aspect ratio while staying below max_patches
+                    # If only one side can be min_side, make as big as possible at native aspect ratio while staying below max_patches
                     if (
                         max(current_num_tokens_available // new_patch_width, 1)
-                        * self.patch_size
+                        * self._patch_size
                         < self._min_side
                     ):
                         up_factor = math.sqrt(
@@ -640,16 +684,15 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                     target_patch_height = new_patch_height
                     target_patch_width = new_patch_width
             else:
-                up_factor = self._min_side / (target_patch_height * self.patch_size)
+                up_factor = self._min_side / (target_patch_height * self._patch_size)
                 new_patch_height = math.ceil(up_factor * target_patch_height)
                 new_patch_width = math.ceil(up_factor * target_patch_width)
 
                 if new_patch_height * new_patch_width > current_num_tokens_available:
-                    # If only one side can be min_side, make as big as possible at
-                    # native aspect ratio while staying below max_patches
+                    # If only one side can be min_side, make as big as possible at native aspect ratio while staying below max_patches
                     if (
                         max(current_num_tokens_available // new_patch_height, 1)
-                        * self.patch_size
+                        * self._patch_size
                         < self._min_side
                     ):
                         up_factor = math.sqrt(
@@ -708,15 +751,10 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                 target_patch_width, target_patch_height, current_num_tokens_available
             )
 
-        assert isinstance(media, Image.Image), (
-            "Dynamic resolution is only supported for image media"
-        )
-
         # Calculate embeddings for the main dynamic resolution image
-        num_embeddings_per_tile = num_image_token_per_tile(
-            tile_dims=Dims(width=target_patch_width, height=target_patch_height),
-            patch_size=self.patch_size,
-            downsample_ratio=self.downsample_ratio
+        num_embeddings = self._get_num_embeddings(
+            target_patch_width * self._patch_size,
+            target_patch_height * self._patch_size,
         )
 
         token_count = target_patch_width * target_patch_height
@@ -725,33 +763,30 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         num_tiles = 1  # Base dynamic resolution image
         if self._use_thumbnail:
             # Calculate areas
-            resized_area = (target_patch_width * self.patch_size) * (
-                target_patch_height * self.patch_size
+            resized_area = (target_patch_width * self._patch_size) * (
+                target_patch_height * self._patch_size
             )
             thumbnail_area = self._thumbnail_size * self._thumbnail_size
             area_ratio = resized_area / thumbnail_area
 
-            # Only add thumbnail if resized image area is less than threshold % of
-            # thumbnail area
+            # Only add thumbnail if resized image area is less than threshold % of thumbnail area
             if area_ratio < self._thumbnail_area_threshold:
                 num_tiles += 1  # Add 1 for thumbnail
                 # Add embeddings for thumbnail (thumbnail_size x thumbnail_size)
-                num_embeddings_per_tile += num_image_token_per_tile(
-                    tile_dims=Dims(width=self._thumbnail_size, height=self._thumbnail_size),
-                    patch_size=self.patch_size,
-                    downsample_ratio=self.downsample_ratio
+                num_embeddings += self._get_num_embeddings(
+                    self._thumbnail_size, self._thumbnail_size
                 )
                 token_count += (
                     self._thumbnail_size
-                    // self.patch_size
+                    // self._patch_size
                     * self._thumbnail_size
-                    // self.patch_size
+                    // self._patch_size
                 )
 
         return DynamicResolutionParams(
             media=media,
             num_tiles=num_tiles,
-            num_embeddings=num_embeddings_per_tile,
+            num_embeddings=num_embeddings,
             patch_size=(target_patch_width, target_patch_height),
         ), token_count
 
@@ -805,7 +840,7 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         media_list: list[Image.Image],
         num_tokens_available: int | None = None,
         data_augment: bool = False,
-    ) -> tuple[list[DynamicResolutionParams], list[int]]:
+    ) -> list[DynamicResolutionParams]:
         """Compute parameters for all media with iterative token budgeting.
 
         Args:
@@ -821,26 +856,24 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
             * (4 if self._pixel_shuffle else 1)
             * (4 if self._conv_merging else 1)
         )
-        # When the number of available token is too small, allow self._min_num_patches
-        # per media and let the sample be truncated.
+        # When the number of available token is too small, allow self._min_num_patches per media and
+        # let the sample be truncated.
         num_tokens_available = max(
             num_tokens_available, self._min_num_patches * len(media_list)
         )
 
-        # Clip the number of tokens available per media to be between min and max
-        # patches.
+        # Clip the number of tokens available per media to be between min and max patches.
         num_tokens_available_per_media = [
             max(num_tokens_available, self._min_num_patches)
             for _ in range(len(media_list))
         ]
 
-        # In theory this could be a while True loop, but in case the process_media
-        # method slightly
+        # In theory this could be a while True loop, but in case the process_media method slightly
         # changes, I want to make sure we don't get stuck in an infinite loop.
         for _ in range(10):
             # Step 1: Process each media with current token budget
-            params: list[DynamicResolutionParams] = []
-            token_counts: list[int] = []
+            params = []
+            token_counts = []
 
             for media, tokens_for_media in zip(
                 media_list, num_tokens_available_per_media
@@ -850,18 +883,14 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                 )
                 params.append(param)
                 token_counts.append(token_count)
+                self.feature_size_cache[id(param.media)] = param.num_embeddings
 
             # Step 2: Check if total tokens is within budget
             total_tokens = sum(token_counts)
 
             if total_tokens <= num_tokens_available:
                 # We're within budget, return the params
-                # Convert from patch count to actual token count after downsampling
-                divisor = (4 if self._pixel_shuffle else 1) * (4 if self._conv_merging else 1)
-                adjusted_token_counts = [tc // divisor for tc in token_counts]
-                for param, feature_size in zip(params, adjusted_token_counts, strict=True):
-                    self.feature_size_cache[id(param.media)] = feature_size
-                return params, adjusted_token_counts
+                return params
 
             # Step 3: We're over budget, need to scale down
             # Calculate scaling factor to get under budget
@@ -880,8 +909,8 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                     for i in range(len(num_tokens_available_per_media))
                 ]
             )
-            # If there was not scaling down, we're stuck just use min_num_patches per
-            # media, else try with the scaled down num_tokens_available_per_media.
+            # If there was not scaling down, we're stuck just use min_num_patches per media, else
+            # try with the scaled down num_tokens_available_per_media.
             if not scaled_down:
                 num_tokens_available_per_media = [self._min_num_patches] * len(
                     media_list
@@ -900,15 +929,15 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
         )
 
         def rearrange_img(x):
-            py = x.shape[-2] // self.patch_size
-            px = x.shape[-1] // self.patch_size
+            py = x.shape[-2] // self._patch_size
+            px = x.shape[-1] // self._patch_size
             x = einops.rearrange(
                 x,
                 "c (py yy) (px xx) -> (py px) (c yy xx)",
                 py=py,
-                yy=self.patch_size,
+                yy=self._patch_size,
                 px=px,
-                xx=self.patch_size,
+                xx=self._patch_size,
             )
             return x
 
@@ -940,34 +969,6 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                 None,
                 None,
             )
-
-    def max_num_tokens_available(self, text_prompt_length: int) -> int:
-        return self.max_model_len - text_prompt_length - 4
-
-    def _images_to_pixel_values_lst(
-        self,
-        text_prompt_length: int,
-        images: list[Image.Image],
-        max_num_tiles: int,
-    ) -> tuple[list[torch.Tensor], list[int]]:
-        num_tokens_available = self.max_num_tokens_available(text_prompt_length)
-        params_per_image, feature_sizes = self.compute_params(
-            images, num_tokens_available
-        )
-        print(f"{feature_sizes=}")
-        print(f"{params_per_image=}")
-        images = []
-        for param in params_per_image:
-            t = self.apply_params(param)
-            if t.ndim == 3:
-                t = t.unsqueeze(0)
-            images.append(t)
-        return images, feature_sizes
-
-    def get_cached_feature_size(self, image: Image.Image) -> int:
-        feature_size = self.feature_size_cache[id(image)]
-        del self.feature_size_cache[id(image)]
-        return feature_size
 
 
 class NanoNemotronVLProcessor(DynamicResolutionImageTiler):
@@ -1339,12 +1340,11 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         processor = self.get_hf_processor()  # we get the CustomProcessor here
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (
-            seq_len - max_image_tokens
-        ) // num_image_token_per_tile(
-            tile_dims=Dims(width=256, height=256),
-            patch_size=processor.patch_size,
-            downsample_ratio=processor.downsample_ratio
+        max_total_frames = (seq_len - max_image_tokens) // num_image_token_per_tile(
+            width=256,
+            height=256,
+            patch_size=processor._patch_size,
+            downsample_ratio=processor.downsample_ratio,
         )  # TODO(nhaber): get 256 dynamically
         max_frames_per_video = max_total_frames // max(max_videos, 1)
         return max(max_frames_per_video, 1)
@@ -1483,9 +1483,10 @@ class NanoNemotronVLMultiModalProcessor(
 
         def get_video_replacement_internvl(item_idx: int):
             feature_size = num_image_token_per_tile(
-                tile_dims=Dims(width=256, height=256),
-                patch_size=hf_processor.patch_size,
-                downsample_ratio=hf_processor.downsample_ratio
+                width=256,
+                height=256,
+                patch_size=hf_processor._patch_size,
+                downsample_ratio=hf_processor.downsample_ratio,
             )  # TODO(nhaber): get 256 dynamically
             video, metadata = mm_items["video"][item_idx]
             num_patches = video_num_patches[item_idx]
@@ -1550,17 +1551,18 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
         B = processor.max_num_tokens_available(text_prompt_length=num_images)
-        target_dims = width_and_height_for_max_num_tokens_available(
+        target_width, target_height = width_and_height_for_max_num_tokens_available(
             target_num_tokens_post_shuffle=B,
-            patch_size=processor.patch_size,
+            patch_size=processor._patch_size,
+            downsample_ratio=processor.downsample_ratio,
         )
 
         image_overrides = mm_options.get("image") if mm_options else None
 
         return {
             "image": self._get_dummy_images(
-                width=target_dims.width,
-                height=target_dims.height,
+                width=target_width,
+                height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
             )
