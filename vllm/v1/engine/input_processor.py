@@ -21,7 +21,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -405,6 +405,19 @@ class InputProcessor:
             )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
+
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniquness.
+        """
+        if request.external_req_id is not None:
+            raise ValueError(
+                "The external_req_id field should not be set on EngineCoreRequests"
+                " passed to vLLM; use the request_id field."
+            )
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,
