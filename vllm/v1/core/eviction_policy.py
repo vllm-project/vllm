@@ -395,8 +395,8 @@ class PagedEvictionPolicy(EvictionPolicy):
         """
         Compute per-token importance scores using Key and Value norms.
         """
-        return torch.norm(value_tensor, p=2, dim=-1) / torch.norm(
-            key_tensor, p=2, dim=-1
+        return torch.norm(value_tensor, p=2, dim=-1) / (
+            torch.norm(key_tensor, p=2, dim=-1) + 1e-6
         )
 
     def compute_block_importance(
