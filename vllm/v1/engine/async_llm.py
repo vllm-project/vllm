@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import asyncio
 import os
 import socket
 import time
 import warnings
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import Any, cast
 
@@ -270,8 +271,9 @@ class AsyncLLM(EngineClient):
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
 
-    async def add_request(
+    async def _add_single_request(
         self,
+        queue: RequestOutputCollector,
         request_id: str,
         prompt: EngineCoreRequest | PromptType,
         params: SamplingParams | PoolingParams,
@@ -282,16 +284,10 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
-    ) -> RequestOutputCollector:
+    ):
         """Add new request to the AsyncLLM."""
 
-        if self.errored:
-            raise EngineDeadError()
-
         is_pooling = isinstance(params, PoolingParams)
-
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -319,7 +315,7 @@ class AsyncLLM(EngineClient):
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
-            return queue
+            return
 
         parent_params = params
         assert isinstance(parent_params, SamplingParams)
@@ -334,6 +330,94 @@ class AsyncLLM(EngineClient):
             await self._add_request(
                 child_request, prompt_text, parent_request, idx, queue
             )
+        return
+
+    async def add_request(
+        self,
+        request_id: str,
+        prompt: EngineCoreRequest | PromptType,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+        prompt_text: str | None = None,
+    ) -> RequestOutputCollector:
+        """Add new request to the AsyncLLM."""
+
+        if self.errored:
+            raise EngineDeadError()
+
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector()
+
+        await self._add_single_request(
+            queue,
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            tokenization_kwargs,
+            trace_headers,
+            priority,
+            data_parallel_rank,
+            prompt_text,
+        )
+
+        return queue
+
+    async def add_requests(
+        self,
+        request_ids: list[str],
+        prompts: list[EngineCoreRequest | PromptType],
+        params: list[SamplingParams | PoolingParams] | SamplingParams | PoolingParams,
+        arrival_times: list[float] | None = None,
+        lora_requests: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: list[Mapping[str, str]] | None = None,
+        priorities: list[int] | int = 0,
+        data_parallel_ranks: list[int] | int | None = None,
+        prompt_texts: list[str] | None = None,
+    ) -> RequestOutputCollector:
+        """Add new requests to the AsyncLLM."""
+
+        if self.errored:
+            raise EngineDeadError()
+
+        # Create a new batch output collector for the requests.
+        queue = RequestOutputCollector()
+
+        for i, request_id in enumerate(request_ids):
+            prompt = prompts[i]
+            arrival_time = arrival_times[i] if arrival_times is not None else None
+            lora_request = (
+                lora_requests[i] if isinstance(lora_requests, list) else lora_requests
+            )
+            priority = priorities[i] if isinstance(priorities, list) else priorities
+            data_parallel_rank = (
+                data_parallel_ranks[i]
+                if isinstance(data_parallel_ranks, list)
+                else data_parallel_ranks
+            )
+            prompt_text = prompt_texts[i] if prompt_texts is not None else None
+
+            await self._add_single_request(
+                queue,
+                request_id,
+                prompt,
+                params[i] if isinstance(params, list) else params,
+                arrival_time,
+                lora_request,
+                tokenization_kwargs,
+                trace_headers[i] if trace_headers is not None else None,
+                priority,
+                data_parallel_rank,
+                prompt_text,
+            )
+
         return queue
 
     async def _add_request(
@@ -353,50 +437,191 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
-    # TODO: we should support multiple prompts in one call, as you
-    # can do with LLM.generate. So that for multi-prompt completion
-    # requests we don't need to send multiple messages to core proc,
-    # and so we don't need multiple streams which then get
-    # re-multiplexed in the API server anyhow.
+    def _validate_generate_requests(
+        self,
+        prompt: EngineCoreRequest
+        | PromptType
+        | Sequence[EngineCoreRequest]
+        | Sequence[PromptType],
+        sampling_params: SamplingParams
+        | Sequence[SamplingParams]
+        | PoolingParams
+        | Sequence[PoolingParams],
+        request_id: str | Sequence[str],
+        *,
+        prompt_text: str | list[str] | None = None,
+        lora_request: LoRARequest | Sequence[LoRARequest] | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
+        data_parallel_rank: int | list[int] | None = None,
+    ) -> None:
+        num_requests = len(prompt)
+
+        if (
+            isinstance(sampling_params, Sequence)
+            and len(sampling_params) != num_requests
+        ):
+            raise ValueError(
+                "The lengths of prompts and sampling_params must be the same."
+            )
+
+        if isinstance(request_id, str):
+            raise ValueError("request_id must be a sequence.")
+        if isinstance(request_id, Sequence) and len(request_id) != num_requests:
+            raise ValueError("The lengths of prompts and request_id must be the same.")
+
+        if isinstance(prompt_text, str):
+            raise ValueError("prompt_text must be a sequence.")
+        if isinstance(prompt_text, Sequence) and len(prompt_text) != num_requests:
+            raise ValueError("The lengths of prompts and prompt_text must be the same.")
+
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and lora_request must be the same."
+                )
+        elif lora_request is not None:
+            raise ValueError("lora_request must be a sequence or None.")
+
+        if isinstance(trace_headers, list):
+            if len(trace_headers) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and trace_headers must be the same."
+                )
+        elif trace_headers is not None:
+            raise ValueError("trace_headers must be a list or None.")
+
+        if isinstance(priority, Sequence) and len(priority) != num_requests:
+            raise ValueError("The lengths of prompts and priority must be the same.")
+
+        if (
+            isinstance(data_parallel_rank, Sequence)
+            and len(data_parallel_rank) != num_requests
+        ):
+            raise ValueError(
+                "The lengths of prompts and data_parallel_rank must be the same."
+            )
+
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
+        prompt: EngineCoreRequest
+        | PromptType
+        | Sequence[EngineCoreRequest]
+        | Sequence[PromptType],
+        sampling_params: SamplingParams
+        | Sequence[SamplingParams]
+        | PoolingParams
+        | Sequence[PoolingParams],
+        request_id: str | Sequence[str],
         *,
-        prompt_text: str | None = None,
-        lora_request: LoRARequest | None = None,
+        prompt_text: str | list[str] | None = None,
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
-        data_parallel_rank: int | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
+        data_parallel_rank: int | list[int] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
-        Main function called by the API server to kick off a request
-            * 1) Making an AsyncStream corresponding to the Request.
-            * 2) Processing the Input.
-            * 3) Adding the Request to the Detokenizer.
-            * 4) Adding the Request to the EngineCore (separate process).
+        Generates the completions for the input prompts.
+
+        This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
+
+        Main function called by the API server to kick off requests
+            * 1) Making an AsyncStream corresponding to the Requests.
+            * 2) Processing the Inputs.
+            * 3) Adding the Requests to the Detokenizer.
+            * 4) Adding the Requests to the EngineCore (separate process).
 
         A separate output_handler loop runs in a background AsyncIO task,
-        pulling outputs from EngineCore and putting them into the
-        per-request AsyncStream.
+        pulling outputs from EngineCore and putting them into the AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
-        """
 
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and sampling_params.prompt_logprobs
+        Args:
+            prompt: The prompts to the AsyncLLM. You may pass a sequence of
+                prompts or EngineCoreRequests for batch inference.
+                See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
+            sampling_params: The sampling parameters for text generation. If
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            request_id: The request_ids for the prompts.
+                It must be a list of str matching the length of `prompts`,
+                and it is paired one by one with the prompt.
+            prompt_text: The prompt texts for the prompts.
+                If provided, must be a list of str matching the length
+                of `prompts`, where each prompt text value corresponds to the
+                prompt at the same index.
+            lora_request: LoRA request to use for generation, if any.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            tokenization_kwargs: The tokenization kwargs for the prompts.
+            trace_headers: The trace headers for the prompts.
+                When it is a single map, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list of integers matching the length
+                of `prompts`, where each priority value corresponds to the prompt
+                at the same index.
+            data_parallel_rank: The data parallel rank of the requests, if any.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+
+        Returns:
+            An AsyncGenerator of `RequestOutput` objects containing the
+            generated completions for the input prompts.
+
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
+        """
+        is_batch = False
+        if not isinstance(prompt, (str, dict)) and isinstance(prompt, Sequence):
+            is_batch = True
+
+        for sp in (
+            sampling_params
+            if isinstance(sampling_params, Sequence)
+            else (sampling_params,)
         ):
-            raise ValueError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
+            if (
+                self.vllm_config.cache_config.kv_sharing_fast_prefill
+                and sp.prompt_logprobs
+            ):
+                raise ValueError(
+                    "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                    "prompt tokens, please disable it when the requests need "
+                    "prompt logprobs"
+                )
 
         try:
+            if is_batch:
+                self._validate_generate_requests(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    prompt_text=prompt_text,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                )
+            else:
+                prompt = [prompt]  # type: ignore[list-item, assignment]
+                request_id = [request_id]  # type: ignore[list-item]
+                prompt_text = [prompt_text] if prompt_text is not None else None  # type: ignore[list-item]
+                trace_headers = [trace_headers] if trace_headers is not None else None  # type: ignore[list-item]
+
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
@@ -408,39 +633,46 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
-                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+                for sp in (
+                    sampling_params
+                    if isinstance(sampling_params, Sequence)
+                    else (sampling_params,)
+                ):
+                    truncate_prompt_tokens = sp.truncate_prompt_tokens
 
-                _validate_truncation_size(
-                    self.model_config.max_model_len,
-                    truncate_prompt_tokens,
-                    tokenization_kwargs,
-                )
+                    _validate_truncation_size(
+                        self.model_config.max_model_len,
+                        truncate_prompt_tokens,
+                        tokenization_kwargs,
+                    )
 
-            q = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
+            q = await self.add_requests(
+                request_ids=request_id,  # type: ignore[arg-type]
+                prompts=prompt,  # type: ignore[arg-type]
+                params=sampling_params,  # type: ignore[arg-type]
+                lora_requests=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-                prompt_text=prompt_text,
+                trace_headers=trace_headers,  # type: ignore[arg-type]
+                priorities=priority,
+                data_parallel_ranks=data_parallel_rank,
+                prompt_texts=prompt_text,  # type: ignore[arg-type]
             )
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            finished = False
-            while not finished:
+            running_reqs = set(request_id)
+            while len(running_reqs) > 0:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() or await q.get()
+                outs = q.get_nowait() or await q.get()
 
-                # Note: both OutputProcessor and EngineCore handle their
-                # own request cleanup based on finished.
-                finished = out.finished
-                assert isinstance(out, RequestOutput)
-                yield out
+                for out in outs:
+                    # Note: both OutputProcessor and EngineCore handle their
+                    # own request cleanup based on finished.
+                    if out.finished:
+                        running_reqs.remove(out.request_id)
+                    assert isinstance(out, RequestOutput)
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
@@ -605,35 +837,92 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
+    def _validate_encode_requests(
+        self,
+        prompt: PromptType | Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams],
+        request_id: str | Sequence[str],
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
+    ) -> None:
+        num_requests = len(prompt)
+
+        if isinstance(pooling_params, Sequence) and len(pooling_params) != num_requests:
+            raise ValueError(
+                "The lengths of prompts and pooling_params must be the same."
+            )
+
+        if isinstance(request_id, str):
+            raise ValueError("request_id must be a sequence.")
+        if isinstance(request_id, Sequence) and len(request_id) != num_requests:
+            raise ValueError("The lengths of prompts and request_id must be the same.")
+
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and lora_request must be the same."
+                )
+        elif lora_request is not None:
+            raise ValueError("lora_request must be a sequence or None.")
+
+        if isinstance(trace_headers, list):
+            if len(trace_headers) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and trace_headers must be the same."
+                )
+        elif trace_headers is not None:
+            raise ValueError("trace_headers must be a list or None.")
+
+        if isinstance(priority, Sequence) and len(priority) != num_requests:
+            raise ValueError("The lengths of prompts and priority must be the same.")
+
     async def encode(
         self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: LoRARequest | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        prompt: PromptType | Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams],
+        request_id: str | Sequence[str],
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
-        Main function called by the API server to kick off a request
-            * 1) Making an AsyncStream corresponding to the Request.
-            * 2) Processing the Input.
-            * 3) Adding the Request to the EngineCore (separate process).
+        Main function called by the API server to kick off requests
+            * 1) Making an AsyncStream corresponding to the Requests.
+            * 2) Processing the Inputs.
+            * 3) Adding the Requests to the EngineCore (separate process).
 
         A separate output_handler loop runs in a background AsyncIO task,
-        pulling outputs from EngineCore and putting them into the
-        per-request AsyncStream.
+        pulling outputs from EngineCore and putting them into the AsyncStream.
 
-        The caller of generate() iterates the returned AsyncGenerator,
+        The caller of encode() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
 
         NOTE: truncate_prompt_tokens is deprecated in v0.14.
         TODO: Remove truncate_prompt_tokens in v0.15.
         """
+        is_batch = False
+        if not isinstance(prompt, (str, dict)) and isinstance(prompt, Sequence):
+            is_batch = True
 
         try:
+            if is_batch:
+                self._validate_encode_requests(
+                    prompt,
+                    pooling_params,
+                    request_id,
+                    lora_request,
+                    trace_headers,
+                    priority,
+                )
+            else:
+                prompt = [prompt]  # type: ignore[list-item]
+                request_id = [request_id]  # type: ignore[list-item]
+                trace_headers = [trace_headers] if trace_headers is not None else None  # type: ignore[list-item]
+                priority = [priority]  # type: ignore[list-item]
+
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
@@ -655,34 +944,42 @@ class AsyncLLM(EngineClient):
                     stacklevel=2,
                 )
 
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                pooling_params.truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+            for params in (
+                pooling_params
+                if isinstance(pooling_params, Sequence)
+                else [pooling_params]
+            ):
+                _validate_truncation_size(
+                    self.model_config.max_model_len,
+                    params.truncate_prompt_tokens,
+                    tokenization_kwargs,
+                )
 
-            q = await self.add_request(
-                request_id,
-                prompt,
-                pooling_params,
-                lora_request=lora_request,
+            q = await self.add_requests(
+                request_id,  # type: ignore[arg-type]
+                prompt,  # type: ignore[arg-type]
+                pooling_params,  # type: ignore[arg-type]
+                lora_requests=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
+                trace_headers=trace_headers,  # type: ignore[arg-type]
+                priorities=priority,
             )
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            finished = False
-            while not finished:
+            running_reqs = set(request_id)
+            while len(running_reqs) > 0:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() or await q.get()
-                assert isinstance(out, PoolingRequestOutput)
-                # Note: both OutputProcessor and EngineCore handle their
-                # own request cleanup based on finished.
-                finished = out.finished
-                yield out
+                outs = q.get_nowait() or await q.get()
+
+                for out in outs:
+                    assert isinstance(out, PoolingRequestOutput)
+                    # Note: both OutputProcessor and EngineCore handle their
+                    # own request cleanup based on finished.
+                    if out.finished:
+                        running_reqs.remove(out.request_id)
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
