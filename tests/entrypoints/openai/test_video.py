@@ -7,7 +7,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_video_base64, fetch_video
+from vllm.multimodal.utils import encode_video_url, fetch_video
 
 from ...utils import RemoteOpenAIServer
 
@@ -48,9 +48,9 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_video() -> dict[str, str]:
+def url_encoded_video() -> dict[str, str]:
     return {
-        video_url: encode_video_base64(fetch_video(video_url)[0])
+        video_url: encode_video_url(fetch_video(video_url)[0])
         for video_url in TEST_VIDEO_URLS
     }
 
@@ -175,11 +175,9 @@ async def test_single_chat_session_video_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    base64_encoded_video: dict[str, str],
+    url_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(
-        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
-    )
+    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -223,11 +221,9 @@ async def test_single_chat_session_video_base64encoded_beamsearch(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    base64_encoded_video: dict[str, str],
+    url_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(
-        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
-    )
+    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
 
     chat_completion = await client.chat.completions.create(
         model=model_name,

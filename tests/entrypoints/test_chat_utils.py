@@ -25,9 +25,9 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
-    encode_audio_base64,
-    encode_image_base64,
-    encode_video_base64,
+    encode_audio_url,
+    encode_image_url,
+    encode_video_url,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -141,22 +141,19 @@ def mistral_model_config():
 @pytest.fixture(scope="module")
 def image_url():
     image = ImageAsset("cherry_blossom")
-    base64 = encode_image_base64(image.pil_image)
-    return f"data:image/jpeg;base64,{base64}"
+    return encode_image_url(image.pil_image)
 
 
 @pytest.fixture(scope="module")
 def video_url():
     video = VideoAsset("baby_reading", 1)
-    base64 = encode_video_base64(video.np_ndarrays)
-    return f"data:video/jpeg;base64,{base64}"
+    return encode_video_url(video.np_ndarrays)
 
 
 @pytest.fixture(scope="module")
 def audio_url():
     audio = AudioAsset("mary_had_lamb")
-    base64 = encode_audio_base64(*audio.audio_and_sample_rate)
-    return f"data:audio/ogg;base64,{base64}"
+    return encode_audio_url(*audio.audio_and_sample_rate)
 
 
 def _assert_mm_data_is_image_input(
