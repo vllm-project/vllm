@@ -205,13 +205,15 @@ class CwmToolParser(ToolParser):
             as a single DeltaMessage(tool_calls=[...]).
         """
         cur_lower = current_text.lower()
+        open_count = cur_lower.count("<tool:")
+        close_count = cur_lower.count("</tool>")
 
         # Detect entering a tool block (stop emitting content).
-        if not self._in_tool_block and "<tool:" in cur_lower:
+        if not self._in_tool_block and open_count > close_count:
             self._in_tool_block = True
 
             # If the `<tool:` tag arrived mid-delta, only emit the prefix before it.
-            tool_pos = cur_lower.find("<tool:")
+            tool_pos = cur_lower.rfind("<tool:")
             prev_len = len(previous_text)
             new_prefix = current_text[:tool_pos]
             if len(new_prefix) > prev_len:
@@ -233,41 +235,45 @@ class CwmToolParser(ToolParser):
             logger.exception("Error extracting streaming Cwm-style tool calls.")
             return None
 
-        if self._emitted_tool_calls >= len(tool_calls):
-            # Might have just closed a tool block but nothing new parsed.
-            return None
-
-        new_calls = tool_calls[self._emitted_tool_calls :]
         tool_deltas: list[DeltaToolCall] = []
+        if len(tool_calls) > self._emitted_tool_calls:
+            new_calls = tool_calls[self._emitted_tool_calls :]
+            for i, call in enumerate(new_calls, start=self._emitted_tool_calls):
+                # Update compatibility arrays.
+                while len(self.prev_tool_call_arr) <= i:
+                    self.prev_tool_call_arr.append({"name": "", "arguments": ""})
+                while len(self.streamed_args_for_tool) <= i:
+                    self.streamed_args_for_tool.append("")
 
-        for i, call in enumerate(new_calls, start=self._emitted_tool_calls):
-            # Update compatibility arrays.
-            while len(self.prev_tool_call_arr) <= i:
-                self.prev_tool_call_arr.append({"name": "", "arguments": ""})
-            while len(self.streamed_args_for_tool) <= i:
-                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr[i]["name"] = call.function.name
+                self.prev_tool_call_arr[i]["arguments"] = call.function.arguments
+                self.streamed_args_for_tool[i] = call.function.arguments or ""
 
-            self.prev_tool_call_arr[i]["name"] = call.function.name
-            self.prev_tool_call_arr[i]["arguments"] = call.function.arguments
-            self.streamed_args_for_tool[i] = call.function.arguments or ""
-
-            tool_deltas.append(
-                DeltaToolCall(
-                    index=i,
-                    id=call.id,
-                    type="function",
-                    function=DeltaFunctionCall(
-                        name=call.function.name, arguments=call.function.arguments
-                    ),
+                tool_deltas.append(
+                    DeltaToolCall(
+                        index=i,
+                        id=call.id,
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name=call.function.name, arguments=call.function.arguments
+                        ),
+                    )
                 )
-            )
+            self._emitted_tool_calls = len(tool_calls)
 
-        self._emitted_tool_calls = len(tool_calls)
-
-        # If all tool blocks are closed, allow emitting content again.
-        open_count = cur_lower.count("<tool:")
-        close_count = cur_lower.count("</tool>")
+        content_to_emit = None
         if close_count >= open_count:
             self._in_tool_block = False
+            # Emit content that appears after the tool block(s).
+            last_match_end = 0
+            for match in self._TOOL_BLOCK_RE.finditer(current_text):
+                last_match_end = match.end()
 
-        return DeltaMessage(tool_calls=tool_deltas)
+            delta_start_pos = len(previous_text)
+            content_start_pos = max(last_match_end, delta_start_pos)
+            content_to_emit = current_text[content_start_pos:]
+
+        if not tool_deltas and not content_to_emit:
+            return None
+
+        return DeltaMessage(tool_calls=tool_deltas, content=content_to_emit or None)
