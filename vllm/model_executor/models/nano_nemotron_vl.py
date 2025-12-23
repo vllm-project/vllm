@@ -386,7 +386,7 @@ class BaseNanoNemotronVLProcessor(ABC):
     ) -> int:
         target_ratios = get_internvl_target_ratios(1, max_num_tiles)
 
-        num_tiles, _, _ = calculate_internvl_targets(
+        num_patches, _, _ = calculate_internvl_targets(
             orig_width=image_width,
             orig_height=image_height,
             target_ratios=target_ratios,
@@ -394,7 +394,7 @@ class BaseNanoNemotronVLProcessor(ABC):
             use_thumbnail=self.use_thumbnail,
         )
 
-        return num_tiles * num_image_token_per_tile(
+        return num_patches * num_image_token_per_tile(
             width=image_width,
             height=image_height,
             patch_size=self.patch_size,
