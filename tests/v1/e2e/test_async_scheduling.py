@@ -106,8 +106,7 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
-        # TODO there is a logprobs diff for this combo, independent of async scheduling
-        # dict(logprobs=2, presence_penalty=-1.0),
+        dict(logprobs=2, presence_penalty=-1.0),
     ]
 
     # test_preemption, executor, async_scheduling,
