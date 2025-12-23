@@ -494,10 +494,7 @@ class ParallelConfig:
             "_api_process_rank",
         }
 
-        factors = get_compile_factors(self, ignored_factors)
-        # Explicitly include backend affecting env factor as before
-        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
-        return factors
+        return get_compile_factors(self, ignored_factors)
 
     def __post_init__(self) -> None:
         # Set all2all_backend from env var if not specified, with deprecation warning

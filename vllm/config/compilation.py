@@ -640,9 +640,13 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "static_forward_context",
+            # handled explicitly below for clarity
+            "pass_config",
         }
 
-        return get_compile_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
+        factors["pass_config"] = self.pass_config.compile_factors()
+        return factors
 
     def __repr__(self) -> str:
         exclude = {

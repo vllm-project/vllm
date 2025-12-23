@@ -44,10 +44,6 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = 0
-    """Extra vocab size reserved for LoRA adapters."""
-    lora_vocab_padding_size: int = 0
-    """Padding size applied to LoRA vocab."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
