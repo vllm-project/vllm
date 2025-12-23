@@ -1530,6 +1530,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         assert prefill.query_seq_lens is not None
         assert prefill.workspace_buffer is not None
+        # allocate BF16 / FP16 output tensor for TRT-LLM ragged attention
+        out = torch.zeros(
+            q.shape[0],
+            q.shape[1],
+            v.shape[2],
+            device=q.device,
+            dtype=q.dtype,
+        )
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
@@ -1549,6 +1557,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             enable_pdl=False,
             is_causal=True,
             return_lse=return_softmax_lse,
+            out=out,
         )
 
         if isinstance(ret, tuple):
@@ -1573,6 +1582,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=q.device,
             dtype=q.dtype,
         )
+
         prefill.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
