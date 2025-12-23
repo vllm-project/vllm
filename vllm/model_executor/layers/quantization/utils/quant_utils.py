@@ -56,11 +56,13 @@ class ScaleDesc:
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
+    col_major: col_major if True, row_major if False
     """
 
     dtype: torch.dtype
     static: bool
     group_shape: GroupShape
+    col_major: bool = False
 
     def __str__(self):
         group_shape = (
@@ -72,11 +74,10 @@ class ScaleDesc:
                 else str(self.group_shape)
             )
         )
+        static = "static" if self.static else "dynamic"
+        col_major = "col_major" if self.col_major else "row_major"
 
-        return (
-            f"{fx.graph.dtype_abbrs[self.dtype]},"
-            f"{'static' if self.static else 'dynamic'},{group_shape}"
-        )
+        return f"{fx.graph.dtype_abbrs[self.dtype]},{static},{group_shape},{col_major}"
 
 
 @dataclass(frozen=True)
@@ -118,8 +119,16 @@ kNvfp4Quant = QuantKey(FP4_DTYPE, scale=kNvfp4GroupScale, scale2=kStaticTensorSc
 kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
 kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 
+kDynamic128ColMajorScale = ScaleDesc(torch.float32, False, GroupShape(1, 128), True)
+kFp8Dynamic128ColMajorSym = QuantKey(
+    FP8_DTYPE, kDynamic128ColMajorScale, symmetric=True
+)
+
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
+
+kDynamic64ColMajorScale = ScaleDesc(torch.float32, False, GroupShape(1, 64), True)
+kFp8Dynamic64ColMajorSym = QuantKey(FP8_DTYPE, kDynamic64ColMajorScale, symmetric=True)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
