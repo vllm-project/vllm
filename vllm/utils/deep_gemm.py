@@ -387,6 +387,11 @@ def should_use_deepgemm_for_fp8_linear(
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
 
+    # DeepGEMM is faster on Hopper GPUs, slower on Blackwell GPUs.
+    is_hopper = current_platform.is_device_capability(90)
+    if not envs.is_set("VLLM_USE_DEEP_GEMM") and not is_hopper:
+        return False
+
     # Verify DeepGEMM N/K dims requirements
     # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
     # test inside kernels/quantization/test_block_fp8.py
