@@ -61,6 +61,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
@@ -2149,6 +2150,8 @@ class GPUModelRunner(
             device=self.device,
             pin_memory=self.pin_memory,
         ):
+            curr_group_outputs: MultiModalEmbeddings
+
             # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data. This solves the issue with scheduler
