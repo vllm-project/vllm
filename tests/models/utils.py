@@ -483,8 +483,10 @@ def dummy_hf_overrides(
         "num_kv_shared_layers": 1,
     }
 
+    _hf_config = hf_config
+
     class DummyConfig:
-        hf_config = hf_config
+        hf_config = _hf_config
         hf_text_config = text_config
 
     model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
