@@ -209,11 +209,10 @@ def get_score_prompt(
                 prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
         return full_prompt, prompt_inputs
 
-    # FIXME: Models implementing SupportsScoreTemplate must use their custom
-    # template implementation by default to preserve existing functionality.
-    # Attempting to use tokenizer_config.json templates would most likely break
-    # these models, as often they just inherit the template from the original LLM.
-    # CLI --chat-template overrides are still supported.
+    # FIXME: For now, we only apply a template when one is explicitly provided.
+    # We cannot rely on the tokenizer's chat template because many models
+    # inherit junk templates from their base LLM, which breaks both the models
+    # and the tests that use them.
     if score_template is None:
         full_prompt, prompt_inputs = default_tokenizer_encode()
     else:
