@@ -738,6 +738,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
+            if not self.block_quant and (
+                layer.renomalize or layer.custom_routing_function is not None
+            ):
+                raise NotImplementedError(
+                    "FlashInfer TRTLLM FP8 MoE per-tensor backend only supports "
+                    "Llama-4 style select_experts, but found renormalization or "
+                    "custom routing function."
+                )
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
             if self.block_quant and self.weight_block_size != [128, 128]:
