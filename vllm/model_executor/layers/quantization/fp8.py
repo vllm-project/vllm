@@ -883,10 +883,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # Lazy import to avoid importing triton too early.
-
-        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
         # Allow for accessing weights and scales in standard way.
         w13_weight = layer.w13_weight
         w2_weight = layer.w2_weight
