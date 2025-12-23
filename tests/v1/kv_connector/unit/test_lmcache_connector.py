@@ -223,6 +223,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events.add_events([event])
 
@@ -243,6 +244,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         existing_events.add_events([event1])
         existing_events.add_events([event1])  # Simulate 2 workers reporting
@@ -258,6 +260,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         new_events.add_events([event2])
 
@@ -288,6 +291,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         new_events.add_events([event])
 
@@ -309,6 +313,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events1.add_events([event1])
         output1 = KVConnectorOutput(kv_cache_events=events1)
@@ -323,6 +328,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events2.add_events([event2])
         output2 = KVConnectorOutput(kv_cache_events=events2)
@@ -337,6 +343,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events3.add_events([event3])
         output3 = KVConnectorOutput(kv_cache_events=events3)
@@ -358,6 +365,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events1.add_events([event1])
         output1 = KVConnectorOutput(kv_cache_events=events1)
@@ -397,6 +405,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         event2 = BlockStored(
             block_hashes=["hash2"],
@@ -405,6 +414,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events.add_events([event1, event2])
         mock_connector._kv_cache_events = kv_events
@@ -431,6 +441,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         uncommon_event = BlockStored(
             block_hashes=["hash_uncommon"],
@@ -439,6 +450,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # All 3 workers report common_event
@@ -469,6 +481,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events1.add_events([event1])
         mock_connector._kv_cache_events = kv_events1
@@ -491,6 +504,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events2.add_events([event2])
         mock_connector._kv_cache_events = kv_events2
@@ -510,6 +524,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         event2 = BlockStored(
             block_hashes=["hash2"],
@@ -518,6 +533,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # Worker 1 reports event1
@@ -667,6 +683,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker1_unique_event = BlockStored(
@@ -676,6 +693,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker2_unique_event = BlockStored(
@@ -685,6 +703,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker3_unique_event = BlockStored(
@@ -694,6 +713,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # Create events for each worker
