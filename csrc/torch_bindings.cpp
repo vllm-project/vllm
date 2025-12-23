@@ -152,14 +152,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
-      "()");
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon, "
+      "bool is_gemma=False) -> ()");
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
+      "float epsilon, bool is_gemma=False) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
   // Function for fused QK Norm and RoPE
