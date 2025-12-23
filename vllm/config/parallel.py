@@ -17,7 +17,10 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_ports_list
+from vllm.utils.network_utils import (
+    get_reserved_ports_as_int_list,
+    release_reserved_port,
+)
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
@@ -224,8 +227,9 @@ class ParallelConfig:
     """Global rank in distributed setup."""
 
     _data_parallel_master_port_list: list[int] = Field(default_factory=list)
-    """List of open port auto-queried for data parallel messaging.
-    Set to be private as it's not intended to be configured by users.
+    """List of reserved port numbers for data parallel messaging.
+    Sockets are held internally until ports are used, preventing race conditions
+    (see issue #28498). Set to be private as not intended to be user-configured.
     """
 
     decode_context_parallel_size: int = 1
@@ -341,14 +345,16 @@ class ParallelConfig:
         can live in different processes. To avoid port conflicts, we
         pop a new port from the prepared port list each time we need to
         initialize a new process group related to data parallelism.
+
+        Port sockets are held internally until released here (issue #28498).
         """
         if self._data_parallel_master_port_list:
-            answer = self._data_parallel_master_port_list.pop()
+            port = self._data_parallel_master_port_list.pop()
+            return release_reserved_port(port)
         else:
             answer = self.data_parallel_master_port
             self.data_parallel_master_port += 1
-
-        return answer
+            return answer
 
     def stateless_init_dp_group(self) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
@@ -529,8 +535,9 @@ class ParallelConfig:
                     self.data_parallel_rank,
                 )
             if not self._data_parallel_master_port_list:
-                self._data_parallel_master_port_list = get_open_ports_list(5)
-            self.data_parallel_master_port = self._data_parallel_master_port_list.pop()
+                self._data_parallel_master_port_list = get_reserved_ports_as_int_list(5)
+            port = self._data_parallel_master_port_list.pop()
+            self.data_parallel_master_port = release_reserved_port(port)
 
             if not (0 <= self.data_parallel_rank < self.data_parallel_size):
                 raise ValueError(
