@@ -483,7 +483,11 @@ def dummy_hf_overrides(
         "num_kv_shared_layers": 1,
     }
 
-    model_arch_config = ModelConfig.get_model_arch_config(hf_config, text_config)
+    class DummyConfig:
+        hf_config = hf_config
+        hf_text_config = text_config
+
+    model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
