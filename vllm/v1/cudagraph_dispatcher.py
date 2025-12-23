@@ -57,9 +57,26 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
-        # Set it as False by default now.
-        # Will provide the option to use max-loras or active loras in grid construction
         self.specialize_lora_count = False
+
+    def _get_lora_cases(self) -> list[tuple[bool, int]]:
+        """
+        Returns list of (has_lora, num_active_loras) tuples for CUDA graph
+        capture. This is the single source of truth for LoRA capture cases.
+        """
+        lora_config = self.vllm_config.lora_config
+        if lora_config is None:
+            # No LoRA configured - single case with no LoRA
+            return [(False, 0)]
+
+        # LoRA is enabled - capture graphs for different active LoRA counts
+        # Always include the no-LoRA case (for requests without adapters)
+        cases: list[tuple[bool, int]] = [(False, 0)]
+
+        for n in range(1, lora_config.max_loras + 1):
+            cases.append((True, n))
+
+        return cases
 
     def _get_lora_cases(self) -> list[tuple[bool, int]]:
         """
