@@ -739,7 +739,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
             if not self.block_quant and (
-                layer.renomalize or layer.custom_routing_function is not None
+                layer.renormalize or layer.custom_routing_function is not None
             ):
                 raise NotImplementedError(
                     "FlashInfer TRTLLM FP8 MoE per-tensor backend only supports "
