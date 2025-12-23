@@ -94,6 +94,12 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
+    requires_raw_input_tokens: ClassVar[bool] = False
+    """
+    A flag that indicates this model processes input id tokens
+    in their raw form and not input embeddings.
+    """
+
     merge_by_field_config: ClassVar[bool | None] = None
     """
     [DEPRECATED] A flag that indicates which implementation of
@@ -304,6 +310,10 @@ def supports_multimodal(
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
+
+
+def requires_raw_input_tokens(model: type[object] | object) -> bool:
+    return getattr(model, "requires_raw_input_tokens", False)
 
 
 def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:

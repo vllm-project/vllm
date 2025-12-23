@@ -94,6 +94,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import (
     GenerationError,
@@ -271,6 +272,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message=error_message,
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="input",
             )
         return None
 
@@ -282,6 +284,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message="logprobs are not supported with gpt-oss models",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="logprobs",
             )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
@@ -294,6 +297,7 @@ class OpenAIServingResponses(OpenAIServing):
                     "the vLLM server."
                 ),
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="background",
             )
         if request.previous_input_messages and request.previous_response_id:
             return self.create_error_response(
@@ -301,6 +305,7 @@ class OpenAIServingResponses(OpenAIServing):
                 message="Only one of `previous_input_messages` and "
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="previous_response_id",
             )
         return None
 
@@ -457,8 +462,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -546,7 +550,7 @@ class OpenAIServingResponses(OpenAIServing):
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _make_request(
         self,
@@ -630,8 +634,7 @@ class OpenAIServingResponses(OpenAIServing):
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
+                return self.create_error_response(e)
 
         # NOTE: Implementation of stauts is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -1074,7 +1077,7 @@ class OpenAIServingResponses(OpenAIServing):
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
 
@@ -1099,7 +1102,7 @@ class OpenAIServingResponses(OpenAIServing):
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
@@ -1116,7 +1119,11 @@ class OpenAIServingResponses(OpenAIServing):
         starting_after: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         if response_id not in self.event_store:
-            raise ValueError(f"Unknown response_id: {response_id}")
+            raise VLLMValidationError(
+                f"Unknown response_id: {response_id}",
+                parameter="response_id",
+                value=response_id,
+            )
 
         event_deque, new_event_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
@@ -1172,6 +1179,7 @@ class OpenAIServingResponses(OpenAIServing):
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message="Cannot cancel a synchronous response.",
+                    param="response_id",
                 )
 
             # Update the status to "cancelled".
@@ -1191,6 +1199,7 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+            param="response_id",
         )
 
     def _make_store_not_supported_error(self) -> ErrorResponse:
@@ -1203,6 +1212,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "starting the vLLM server."
             ),
             status_code=HTTPStatus.BAD_REQUEST,
+            param="store",
         )
 
     async def _process_simple_streaming_events(
