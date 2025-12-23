@@ -28,7 +28,7 @@ class VerifyAndUpdateConfig:
         return
 
 
-class Gemma3TextModelConfig:
+class Gemma3TextModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         hf_config = model_config.hf_config
