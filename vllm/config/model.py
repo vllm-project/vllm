@@ -11,7 +11,6 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +28,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -71,7 +71,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -843,12 +843,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
@@ -1537,6 +1543,10 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def requires_raw_input_tokens(self) -> bool:
+        return self._model_info.requires_raw_input_tokens
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"
@@ -2119,9 +2129,7 @@ def _get_and_verify_max_len(
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
-    ):
+    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
