@@ -742,22 +742,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
-                    "FlashInfer CUTLASS FP8 MoE backend only supports block "
-                    "size [128, 128]."
+                    "FlashInfer CUTLASS FP8 MoE blockscale backend only supports "
+                    "block size [128, 128]."
                 )
-            if not self.block_quant:
-                assert quant_config.is_checkpoint_fp8_serialized
-                # The CUTLASS FP8 per-tensor kernel was built for Llama4,
-                # so ensure we have a Llama-4 like layer.
-                # TODO(rob): check if these kernels can also work with other
-                # values. Since cutlass does not fuse .select_experts(), the
-                # moe kernel is not even aware of all these values...
-                # from vllm.model_executor.models.llama4 import Llama4MoE
-                if self.quant_config.activation_scheme != "static":
-                    raise NotImplementedError(
-                        "FlashInfer CUTLASS FP8 MoE backend only supports "
-                        "static activation quantization."
-                    )
+            if not self.block_quant and self.quant_config.activation_scheme != "static":
+                raise NotImplementedError(
+                    "FlashInfer CUTLASS FP8 MoE per-tensor backend only supports "
+                    "static activation quantization."
+                )
             if layer.activation != "silu":
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
