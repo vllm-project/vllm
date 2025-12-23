@@ -102,8 +102,11 @@ def on_mi3xx() -> bool:
 
 
 @cache
+@with_amdsmi_context
 def on_gfx9() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    h = amdsmi_get_processor_handles()[0]
+    asic = amdsmi_get_gpu_asic_info(h)
+    GPU_ARCH = asic["target_graphics_version"]
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
@@ -168,6 +171,23 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+
+    supported_quantization: list[str] = [
+        "awq",
+        "gptq",
+        "fp8",
+        "compressed-tensors",
+        "fbgemm_fp8",
+        "gguf",
+        "quark",
+        "ptpc_fp8",
+        "mxfp4",
+        "petit_nvfp4",
+        "torchao",
+    ]
+    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
+    if not on_gfx9():
+        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def get_attn_backend_cls(
@@ -288,35 +308,6 @@ class RocmPlatform(Platform):
             f"Attention backend {selected_backend.name} is not supported on "
             "ROCm. Note that V0 attention backends have been removed."
         )
-
-    class classproperty:
-        def __init__(self, func):
-            self.func = func
-
-        def __get__(self, instance, owner):
-            return self.func(owner)
-
-    @classproperty
-    def supported_quantization(cls) -> list[str]:
-        # Delay resolving supported_quantization in order to avoid "No
-        # HIP GPUs are available" errors.
-        _supported_quantization: list[str] = [
-            "awq",
-            "gptq",
-            "fp8",
-            "compressed-tensors",
-            "fbgemm_fp8",
-            "gguf",
-            "quark",
-            "ptpc_fp8",
-            "mxfp4",
-            "petit_nvfp4",
-            "torchao",
-        ]
-        # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-        if not on_gfx9():
-            _supported_quantization += ["bitsandbytes"]
-        return _supported_quantization
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
