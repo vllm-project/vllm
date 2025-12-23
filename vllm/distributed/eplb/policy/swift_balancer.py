@@ -7,7 +7,7 @@ from typing import DefaultDict
 import numpy as np
 import torch
 
-from abstract import AbstractEplbPolicy
+from .abstract import AbstractEplbPolicy
 
 
 class SwiftBalancerPolicy(AbstractEplbPolicy):
@@ -115,12 +115,12 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         Parameters:
             single_layer_deployment: [num_ranks, num_experts_per_rank]
-            the expert deployment status on each rank
+                the expert deployment status on each rank
         Returns:
             redundant_expert_pos: the positions of redundant experts
-            on each rank
+                on each rank
             expert_from_rank: [num_logical_experts] the rank where
-            each logical expert resides
+                each logical expert resides
             num_redundant_experts: the number of redundant experts
         """
 
@@ -159,9 +159,9 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
             num_redundant_experts: the number of redundant experts
         Returns:
             redundant_expert_list:[(expert_id, expert_load)]
-            the redundantly generated experts
+                the redundantly generated experts
             update_weight: [num_logical_experts] expert workload status after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
         """
 
         current_weights = initial_weights.copy()
@@ -261,16 +261,16 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         Parameters:
             origin_deployment: [num_ranks, num_experts_per_rank]
-            the expert deployment status on each rank
+                the expert deployment status on each rank
             updated_weights: [num_logical_experts] expert workload status after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
             redundant_expert_pos: the positions of redundant experts
-            on each rank
+                on each rank
         Returns:
             rank_assignments: [num_ranks, num_experts_per_rank]
-            the deployment of logical experts on each rank
+                the deployment of logical experts on each rank
             rank_loads: [num_ranks] The workload of
-            logical experts on each rank
+                logical experts on each rank
         """
 
         num_cur_deployment_ranks = origin_deployment.shape[0]
@@ -294,6 +294,10 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                                    initial_weights: np.ndarray,
                                    rank_assignments: np.ndarray
                                    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Calculate the load of the logic expert again based
+        on the current deployment
+        """
         num_per_existing_expert = (
             np.zeros(self.num_original_experts, dtype=np.int64))
         for rank in rank_assignments:
@@ -322,22 +326,22 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         Parameters:
             rank_assignments: [num_ranks, num_experts_per_rank]
-            the deployment of logical experts on each rank
+                the deployment of logical experts on each rank
             rank_loads: [num_ranks] The workload of
-            logical experts on each rank
+                logical experts on each rank
             redundant_expert_list:[(expert_id, expert_load)]
-            the redundantly generated experts
+                the redundantly generated experts
             expert_from_rank: [num_logical_experts] the rank where
-            each logical expert resides
+                each logical expert resides
             redundant_expert_pos: the positions of redundant experts
-            on each rank
+                on each rank
         Returns:
             num_com_between_rank:[num_ranks, num_ranks] the communication
-            status between ranks
+                status between ranks
             rev_expert_per_rank:the experts assigned to each rank
-            after reconfiguring redundancy
+                after reconfiguring redundancy
             undeployed_ranks: record the ranks that have not been
-            assigned redundant experts in redundancy positions
+                assigned redundant experts in redundancy positions
         """
 
         num_ranks = len(rank_assignments)
@@ -389,19 +393,19 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         Parameters:
             initial_weights: [num_logical_experts] expert load statistics
             cur_layer_deployment: [num_ranks, num_experts_per_rank]
-            the expert deployment status on each rank
+                the expert deployment status on each rank
         Returns:
             rank_assignments: [num_ranks, num_experts_per_rank]
-            the expert deployment status on each rank after
+                the expert deployment status on each rank after
             reconfiguring redundant experts
             rank_loads: [num_ranks] the workload status of each rank after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
             updated_weights: [num_logical_experts] expert workload status after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
             num_com_between_rank:[num_ranks, num_ranks] the communication
-            status between ranks
+                status between ranks
             rev_expert_per_rank:the experts assigned to each rank
-            after reconfiguring redundancy
+                after reconfiguring redundancy
         """
 
         redundant_expert_pos, expert_from_rank, num_redundant_experts = (
@@ -569,20 +573,20 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         Perform inter-rank expert exchange within a single node
 
         Parameters:
-            rank_assignments: [num_ranks, num_experts_per_rank]
-            the expert deployment status on each rank after
-            reconfiguring redundant experts
+            rank_assignments: [num_ranks, num_experts_per_rank] the expert
+                deployment status on each rank after reconfiguring
+                redundant experts
             rank_loads: [num_ranks] the workload status of each rank after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
             num_com_between_rank:[num_ranks, num_ranks] the communication
-            status between ranks
+                status between ranks
             rev_expert_per_rank:the experts assigned to each rank
-            after reconfiguring redundancy
+                after reconfiguring redundancy
             updated_weights: [num_logical_experts] expert workload status after
-            reconfiguring redundant experts
+                reconfiguring redundant experts
         Returns:
             ranks_deployment_after_swap: [num_ranks, num_experts_per_rank]
-            the deployment status of experts on each rank after the exchange
+                the deployment status of experts on each rank after the exchange
             max_rank_load: the workload of the hottest rank
         """
 
