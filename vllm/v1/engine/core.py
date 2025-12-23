@@ -209,7 +209,8 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
-
+        # Index of the current iteration for recording iteration details.
+        self.iteration_index = 0
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -345,14 +346,16 @@ class EngineCore:
             return
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
+        self.iteration_index += 1
         yield
         logger.info(
-            "Iteration details: "
+            "Iteration(%d): "
             "%d context requests, "
             "%d context tokens, "
             "%d generation requests, "
             "%d generation tokens, "
             "iteration elapsed time: %.2f ms",
+            self.iteration_index,
             iteration_details.num_ctx_requests,
             iteration_details.num_ctx_tokens,
             iteration_details.num_generation_requests,
