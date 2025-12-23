@@ -529,7 +529,8 @@ class RocmPlatform(Platform):
         # gfx94/gfx95 = MI300/MI350 series (CDNA)
         # gfx11 = RDNA 3/3.5 including Strix Halo (gfx1151)
         # gfx12 = RDNA 4
-        return any(gcn_arch.startswith(gfx) for gfx in ["gfx94", "gfx95", "gfx11", "gfx12"])
+        fp8_archs = ["gfx94", "gfx95", "gfx11", "gfx12"]
+        return any(gcn_arch.startswith(gfx) for gfx in fp8_archs)
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
