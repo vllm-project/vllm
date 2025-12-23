@@ -154,11 +154,15 @@ class MemoryProfilingResult:
     non_kv_cache_memory: int = 0
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
-    weights_memory: float = 0
+    weights_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
-    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
-    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __post_init__(self) -> None:
+        device = self.before_create.device
+
+        self.before_profile = MemorySnapshot(device=device, auto_measure=False)
+        self.after_profile = MemorySnapshot(device=device, auto_measure=False)
 
     def __repr__(self) -> str:
         return (
@@ -175,7 +179,8 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-    baseline_snapshot: MemorySnapshot, weights_memory: int
+    baseline_snapshot: MemorySnapshot,
+    weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
     baseline_snapshot: the memory snapshot before the current vLLM instance.
@@ -225,13 +230,13 @@ def memory_profiling(
     """  # noqa
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device)
 
-    result = MemoryProfilingResult()
-
-    result.before_create = baseline_snapshot
-    # the part of memory used for holding the model weights
-    result.weights_memory = weights_memory
+    result = MemoryProfilingResult(
+        before_create=baseline_snapshot,
+        # the part of memory used for holding the model weights
+        weights_memory=weights_memory,
+    )
 
     result.before_profile.measure()
 
