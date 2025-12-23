@@ -990,7 +990,16 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
         current_text=curr_text,
         delta_text=tool_chunk,
         previous_token_ids=[1, 2, 3, section_begin_id],
-        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id],
+        current_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            11,
+            tool_end_id,
+        ],
         delta_token_ids=[tool_begin_id, 10, 11, tool_end_id],
         request=None,
     )
@@ -1002,9 +1011,26 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
         previous_text=curr_text,
         current_text=curr_text + "<|tool_calls_section_end|>",
         delta_text="<|tool_calls_section_end|>",
-        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id],
+        previous_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            11,
+            tool_end_id,
+        ],
         current_token_ids=[
-            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            11,
+            tool_end_id,
+            section_end_id,
         ],
         delta_token_ids=[section_end_id],
         request=None,
@@ -1019,10 +1045,28 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
         current_text=final_text + " Here's the result.",
         delta_text=" Here's the result.",
         previous_token_ids=[
-            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            11,
+            tool_end_id,
+            section_end_id,
         ],
         current_token_ids=[
-            1, 2, 3, section_begin_id, tool_begin_id, 10, 11, tool_end_id, section_end_id, 20, 21
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            11,
+            tool_end_id,
+            section_end_id,
+            20,
+            21,
         ],
         delta_token_ids=[20, 21],
         request=None,
@@ -1118,7 +1162,18 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
         current_text=curr_text,
         delta_text=tool2,
         previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id],
-        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id],
+        current_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            tool_end_id,
+            tool_begin_id,
+            20,
+            tool_end_id,
+        ],
         delta_token_ids=[tool_begin_id, 20, tool_end_id],
         request=None,
     )
@@ -1131,8 +1186,31 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
         previous_text=prev_text,
         current_text=prev_text + "<|tool_calls_section_end|>",
         delta_text="<|tool_calls_section_end|>",
-        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id],
-        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id],
+        previous_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            tool_end_id,
+            tool_begin_id,
+            20,
+            tool_end_id,
+        ],
+        current_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            tool_end_id,
+            tool_begin_id,
+            20,
+            tool_end_id,
+            section_end_id,
+        ],
         delta_token_ids=[section_end_id],
         request=None,
     )
@@ -1145,8 +1223,33 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
         previous_text=final_text,
         current_text=final_text + " Here's the comparison.",
         delta_text=" Here's the comparison.",
-        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id],
-        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id, tool_begin_id, 20, tool_end_id, section_end_id, 30],
+        previous_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            tool_end_id,
+            tool_begin_id,
+            20,
+            tool_end_id,
+            section_end_id,
+        ],
+        current_token_ids=[
+            1,
+            2,
+            3,
+            section_begin_id,
+            tool_begin_id,
+            10,
+            tool_end_id,
+            tool_begin_id,
+            20,
+            tool_end_id,
+            section_end_id,
+            30,
+        ],
         delta_token_ids=[30],
         request=None,
     )
@@ -1159,12 +1262,16 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
     # Check no markers leaked
     forbidden = ["<|tool_call", "<|tool_calls_section"]
     for marker in forbidden:
-        assert marker not in full_content, f"MARKER LEAKED: {marker} in {repr(full_content)}"
+        assert marker not in full_content, (
+            f"MARKER LEAKED: {marker} in {repr(full_content)}"
+        )
 
     # Check no tool call content leaked (both tools)
     assert "get_weather" not in full_content, f"TOOL NAME LEAKED: {repr(full_content)}"
     assert "Tokyo" not in full_content, f"TOOL ARG LEAKED (Tokyo): {repr(full_content)}"
-    assert "New York" not in full_content, f"TOOL ARG LEAKED (NYC): {repr(full_content)}"
+    assert "New York" not in full_content, (
+        f"TOOL ARG LEAKED (NYC): {repr(full_content)}"
+    )
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0

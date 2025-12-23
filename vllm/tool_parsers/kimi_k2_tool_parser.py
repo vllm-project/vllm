@@ -105,7 +105,6 @@ class KimiK2ToolParser(ToolParser):
     def _check_and_strip_markers(self, text: str) -> tuple[str, bool, bool]:
         """
         Check for section begin/end markers in text and strip them.
-        Also strips tool call markers to prevent leakage into content.
         Returns: (cleaned_text, found_section_begin, found_section_end)
         """
         found_begin = False
@@ -254,7 +253,17 @@ class KimiK2ToolParser(ToolParser):
                 # No tool call ending, safe to exit immediately
                 logger.debug("Exiting tool section")
                 self._reset_section_state()
-                # Don't return buffered content as it may contain tool call data
+                # Extract any content AFTER the section end marker in delta_text
+                # (don't use buffered_text as it contains tool call data)
+                post_section_content = ""
+                for variant in self.tool_calls_end_token_variants:
+                    if variant in delta_text:
+                        parts = delta_text.split(variant, 1)
+                        if len(parts) > 1:
+                            post_section_content = parts[1]
+                        break
+                if post_section_content.strip():
+                    return DeltaMessage(content=post_section_content)
                 return DeltaMessage(content="")
         else:
             self.token_buffer = buffered_text
