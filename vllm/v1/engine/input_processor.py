@@ -406,6 +406,20 @@ class InputProcessor:
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
+    def _get_mm_identifier(
+        self,
+        mm_hash: str,
+        lora_request: LoRARequest | None,
+    ) -> str:
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
+        """
+        if lora_request is None or not self.lora_config.enable_tower_connector_lora:
+            return mm_hash
+        return f"{lora_request.lora_name}:{mm_hash}"
+
     def process_inputs(
         self,
         request_id: str,
@@ -457,28 +471,6 @@ class InputProcessor:
                 )
             else:
                 mm_uuids = None
-
-        # When enable_tower_connector_lora is True, multi-modal embeddings
-        # vary depending on the LoRA request. Therefore, the mm_hash must be
-        # generated based on the LoRA request to prevent incorrect cache hits.
-        lora_config = self.lora_config
-        if (
-            mm_uuids
-            and lora_request
-            and lora_config
-            and lora_config.enable_tower_connector_lora
-        ):
-
-            def add_mm_lora_prefix(val):
-                if isinstance(val, list):
-                    return [
-                        f"{lora_request.lora_name}:{v}" if v is not None else None
-                        for v in val
-                    ]
-                else:
-                    return f"{lora_request.lora_name}:{val}"
-
-            mm_uuids = {k: add_mm_lora_prefix(v) for k, v in mm_uuids.items()}
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
@@ -548,7 +540,10 @@ class InputProcessor:
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=decoder_mm_hashes[modality][idx],
+                        identifier=self._get_mm_identifier(
+                            decoder_mm_hashes[modality][idx],
+                            lora_request,
+                        ),
                         mm_position=decoder_mm_positions[modality][idx],
                     )
                 )
