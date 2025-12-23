@@ -728,6 +728,37 @@ def test_preempt_during_execution():
     assert requests[1].output_token_ids[0] == 42
 
 
+def test_scheduler_reset_prefix_cache():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Initial scheduling, requests should be at the running state now
+    _ = scheduler.schedule()
+
+    # Verify requests moved from waiting to running
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == len(requests)
+    for i, request in enumerate(requests):
+        assert scheduler.running[i] == request
+
+    # Reset prefix cache should fail since there are still running requests
+    # and they are taking KV cache
+    assert not scheduler.reset_prefix_cache()
+
+    # Reset prefix cache with reset_running_requests=True. All running requests
+    # Should be pushed back to the waiting queue and kv cache should be freed
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # Verify requests moved from running to waiting
+    assert len(scheduler.waiting) == len(requests)
+    assert len(scheduler.running) == 0
+
+    for i, request in enumerate(requests):
+        assert scheduler.waiting[i] == request
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
@@ -1477,6 +1508,12 @@ def create_scheduler_with_priority(
     Returns:
       {class}`Scheduler` instance with priority scheduling
     """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+    )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -1486,13 +1523,8 @@ def create_scheduler_with_priority(
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
+        is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -1504,7 +1536,7 @@ def create_scheduler_with_priority(
     )
     kv_transfer_config = (
         KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -1520,7 +1552,7 @@ def create_scheduler_with_priority(
 
     ec_transfer_config = (
         ECTransferConfig(
-            ec_connector="ECSharedStorageConnector",
+            ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
@@ -2381,7 +2413,7 @@ def _assert_right_ec_connector_metadata(
     metadata_dict = {mm_data.mm_hash: mm_data for mm_data in metadata.mm_datas}
 
     # Check all required identifiers exist in metadata; and no extra
-    # In ECSharedStorageConnector format
+    # In ECExampleConnector format
     # NOTE: even having same identifier, the mm_features can be different
     # since their mm_position can be in different offsets, etc
     identifiers_dict = {f.identifier for f in mm_features_list}

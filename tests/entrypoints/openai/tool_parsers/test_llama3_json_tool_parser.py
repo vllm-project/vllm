@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
-from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
 
 @pytest.fixture

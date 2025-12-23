@@ -7,18 +7,21 @@
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-if not sys.version_info >= (3, 10):
-    raise RuntimeError("This script requires Python 3.10 or higher.")
+import regex as re
+
+if not sys.version_info >= (3, 12):
+    raise RuntimeError("This script requires Python 3.12 or higher.")
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
+  <!-- {comment} -->
   <meta name="pypi:repository-version" content="1.0">
   <body>
 {items}
@@ -89,7 +92,7 @@ def parse_from_filename(file: str) -> WheelFileInfo:
     )
 
 
-def generate_project_list(subdir_names: list[str]) -> str:
+def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
     """
     Generate project list HTML content linking to each project & variant sub-directory.
     """
@@ -97,11 +100,14 @@ def generate_project_list(subdir_names: list[str]) -> str:
     for name in sorted(subdir_names):
         name = name.strip("/").strip(".")
         href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
-    return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags))
+    return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
 
 
 def generate_package_index_and_metadata(
-    wheel_files: list[WheelFileInfo], wheel_base_dir: Path, index_base_dir: Path
+    wheel_files: list[WheelFileInfo],
+    wheel_base_dir: Path,
+    index_base_dir: Path,
+    comment: str = "",
 ) -> tuple[str, str]:
     """
     Generate package index HTML content for a specific package, linking to actual wheel files.
@@ -112,13 +118,14 @@ def generate_package_index_and_metadata(
         relative_path = (
             wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
         )
-        href_tags.append(
-            f'    <a href="{quote(relative_path.as_posix())}">{file.filename}</a><br/>'
-        )
+        # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
+        # NOTE: this is AWS S3 specific behavior!
+        file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
+        href_tags.append(f'    <a href="{file_path_quoted}">{file.filename}</a><br/>')
         file_meta = asdict(file)
-        file_meta["path"] = relative_path.as_posix()
+        file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
-    index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags))
+    index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
     metadata_str = json.dumps(metadata, indent=2)
     return index_str, metadata_str
 
@@ -129,6 +136,7 @@ def generate_index_and_metadata(
     index_base_dir: Path,
     default_variant: str | None = None,
     alias_to_default: str | None = None,
+    comment: str = "",
 ):
     """
     Generate index for all wheel files.
@@ -139,6 +147,7 @@ def generate_index_and_metadata(
         index_base_dir (Path): Base directory to store index files.
         default_variant (str | None): The default variant name, if any.
         alias_to_default (str | None): Alias variant name for the default variant, if any.
+        comment (str | None): Optional comment to include in the generated HTML files.
 
     First, parse all wheel files to extract metadata.
     We need to collect all wheel files for each variant, and generate an index for it (in a sub-directory).
@@ -185,7 +194,7 @@ def generate_index_and_metadata(
                 "platform_tag": "manylinux2014_aarch64",
                 "variant": "cu129",
                 "filename": "vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl",
-                "path": "../vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl" # to be concatenated with the directory URL
+                "path": "../vllm-0.10.2rc2%2Bcu129-cp38-abi3-manylinux2014_aarch64.whl" # to be concatenated with the directory URL and URL-encoded
             },
             ...
         ]
@@ -232,6 +241,10 @@ def generate_index_and_metadata(
             variant_to_files[alias_to_default] = variant_to_files["default"].copy()
             print(f"Alias variant '{alias_to_default}' created for default variant.")
 
+    # Generate comment in HTML header
+    comment_str = f" ({comment})" if comment else ""
+    comment_tmpl = f"Generated on {datetime.now().isoformat()}{comment_str}"
+
     # Generate index for each variant
     subdir_names = set()
     for variant, files in variant_to_files.items():
@@ -251,7 +264,7 @@ def generate_index_and_metadata(
             subdir_names = subdir_names.union(packages)
         else:
             # generate project list for this variant directly
-            project_list_str = generate_project_list(sorted(packages))
+            project_list_str = generate_project_list(sorted(packages), comment_tmpl)
             with open(variant_dir / "index.html", "w") as f:
                 f.write(project_list_str)
 
@@ -261,7 +274,7 @@ def generate_index_and_metadata(
             package_dir = variant_dir / package
             package_dir.mkdir(parents=True, exist_ok=True)
             index_str, metadata_str = generate_package_index_and_metadata(
-                package_files, wheel_base_dir, package_dir
+                package_files, wheel_base_dir, package_dir, comment
             )
             with open(package_dir / "index.html", "w") as f:
                 f.write(index_str)
@@ -269,7 +282,7 @@ def generate_index_and_metadata(
                 f.write(metadata_str)
 
     # Generate top-level project list index
-    project_list_str = generate_project_list(sorted(subdir_names))
+    project_list_str = generate_project_list(sorted(subdir_names), comment_tmpl)
     with open(index_base_dir / "index.html", "w") as f:
         f.write(project_list_str)
 
@@ -278,9 +291,11 @@ if __name__ == "__main__":
     """
     Arguments:
         --version <version> : version string for the current build (e.g., commit hash)
+        --wheel-dir <wheel_directory> : directory containing wheel files (default to be same as `version`)
         --current-objects <path_to_json> : path to JSON file containing current S3 objects listing in this version directory
         --output-dir <output_directory> : directory to store generated index files
         --alias-to-default <alias_variant_name> : (optional) alias variant name for the default variant
+        --comment <comment_string> : (optional) comment string to include in generated HTML files
     """
 
     parser = argparse.ArgumentParser(
@@ -305,10 +320,22 @@ if __name__ == "__main__":
         help="Directory to store generated index files",
     )
     parser.add_argument(
+        "--wheel-dir",
+        type=str,
+        default=None,
+        help="Directory containing wheel files (default to be same as `version`)",
+    )
+    parser.add_argument(
         "--alias-to-default",
         type=str,
         default=None,
         help="Alias variant name for the default variant",
+    )
+    parser.add_argument(
+        "--comment",
+        type=str,
+        default="",
+        help="Optional comment string to include in generated HTML files",
     )
 
     args = parser.parse_args()
@@ -352,10 +379,22 @@ if __name__ == "__main__":
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
+    # keep only "official" files for a non-nightly version (specified by cli args)
+    PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
+    if PY_VERSION_RE.match(version):
+        # upload-wheels.sh ensures no "dev" is in args.version
+        wheel_files = list(
+            filter(lambda x: version in x and "dev" not in x, wheel_files)
+        )
+        print(f"Non-nightly version detected, wheel files used: {wheel_files}")
+    else:
+        print("Nightly version detected, keeping all wheel files.")
+
     # Generate index and metadata, assuming wheels and indices are stored as:
-    # s3://vllm-wheels/{version}/<wheel files>
+    # s3://vllm-wheels/{wheel_dir}/<wheel files>
     # s3://vllm-wheels/<anything>/<index files>
-    wheel_base_dir = Path(output_dir).parent / version
+    wheel_dir = args.wheel_dir or version
+    wheel_base_dir = Path(output_dir).parent / wheel_dir.strip().rstrip("/")
     index_base_dir = Path(output_dir)
 
     generate_index_and_metadata(
@@ -364,5 +403,6 @@ if __name__ == "__main__":
         index_base_dir=index_base_dir,
         default_variant=None,
         alias_to_default=args.alias_to_default,
+        comment=args.comment.strip(),
     )
     print(f"Successfully generated index and metadata in {output_dir}")

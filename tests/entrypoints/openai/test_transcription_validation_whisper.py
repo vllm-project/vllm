@@ -32,24 +32,20 @@ async def whisper_client(server):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    server_args = ["--enforce-eager"]
-
+async def test_basic_audio(whisper_client, mary_had_lamb):
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=MODEL_NAME,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            temperature=0.0,
-        )
-        out = json.loads(transcription)
-        out_text = out["text"]
-        out_usage = out["usage"]
-        assert "Mary had a little lamb," in out_text
-        assert out_usage["seconds"] == 16, out_usage["seconds"]
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_usage = out["usage"]
+    assert "Mary had a little lamb," in out_text
+    assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
@@ -235,3 +231,48 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
     )
     out_prompt = json.loads(transcription_wprompt)["text"]
     assert prefix in out_prompt
+
+
+@pytest.mark.asyncio
+async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.segments is not None
+    assert len(transcription.segments) > 0
+
+
+@pytest.mark.asyncio
+async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": 1},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1
+    # max_completion_tokens > max_model_len
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": int(1e6)},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) < 450  # ~Whisper max output len

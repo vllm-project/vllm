@@ -13,7 +13,7 @@ from transformers import PretrainedConfig
 from vllm.config.model import ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -399,6 +399,7 @@ class LASTPoolingEmbedModelInfo(EmbedModelInfo):
 @dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
+    chat_template_name: str | None = None
 
 
 @dataclass

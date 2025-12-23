@@ -1003,8 +1003,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
-    merge_by_field_config = True
-
     supports_encoder_tp_data = True
 
     @classmethod
