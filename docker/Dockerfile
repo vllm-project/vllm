@@ -57,6 +57,9 @@ ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 # PyTorch provides its own indexes for standard and nightly builds
 ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
 
+# Flag to install PyTorch nightly instead of stable
+ARG USE_TORCH_NIGHTLY=false
+
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
 # disabled by default, we allow third-party to use keyring authentication for
@@ -128,6 +131,7 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # Install PyTorch and core CUDA dependencies
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 
 WORKDIR /workspace
 
@@ -135,8 +139,15 @@ WORKDIR /workspace
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
@@ -152,6 +163,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -164,8 +176,15 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 WORKDIR /workspace
 
@@ -293,6 +312,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -305,8 +325,15 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 WORKDIR /workspace
 
@@ -355,6 +382,7 @@ FROM base AS dev
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -369,8 +397,15 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -464,11 +499,19 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # Install PyTorch and core CUDA dependencies
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
+        --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG} && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
 # Install FlashInfer pre-compiled kernel cache and binaries
@@ -520,12 +563,20 @@ ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
+ARG USE_TORCH_NIGHTLY
 
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
@@ -546,8 +597,15 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
+    else \
+        PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+        PRERELEASE_FLAG=""; \
+    fi && \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -572,6 +630,7 @@ ARG PYTHON_VERSION
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG USE_TORCH_NIGHTLY
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -589,8 +648,15 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
+        if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+            PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+            PRERELEASE_FLAG="--prerelease=allow"; \
+        else \
+            PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"; \
+            PRERELEASE_FLAG=""; \
+        fi && \
         uv pip install --system -r requirements/dev.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
     fi
 
 # install development dependencies (for testing)
