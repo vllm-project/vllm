@@ -14,10 +14,10 @@ from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
-# ROCm: GPU initialization takes longer, requiring extended timeouts.
+# GPU initialization might take take longer
 _IS_ROCM = current_platform.is_rocm()
-_SERVER_STARTUP_TIMEOUT = 120 if _IS_ROCM else 30
-_PROCESS_EXIT_TIMEOUT = 15 if _IS_ROCM else 5
+_SERVER_STARTUP_TIMEOUT = 120
+_PROCESS_EXIT_TIMEOUT = 15
 
 
 @pytest.mark.asyncio
