@@ -371,11 +371,15 @@ def _update_scheduler_patched(self) -> None:
 # For more context, see https://github.com/vllm-project/vllm/issues/30905.
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
-    import builtins
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-    from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+    # Only apply the patch for torch 2.9.x versions
+    if is_torch_equal_or_newer("2.9.0") and not is_torch_equal_or_newer("2.10.0"):
+        import builtins
 
-    builtins.get_raw_stream = _get_raw_stream
+        from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+
+        builtins.get_raw_stream = _get_raw_stream
 
 
 _patch_get_raw_stream_if_needed()
