@@ -1543,6 +1543,10 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def requires_raw_input_tokens(self) -> bool:
+        return self._model_info.requires_raw_input_tokens
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"

@@ -2457,6 +2457,17 @@ class GPUModelRunner(
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
+    def _prepare_mm_inputs(
+        self, num_tokens: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        if self.model.requires_raw_input_tokens:
+            input_ids = self.input_ids.gpu[:num_tokens]
+        else:
+            input_ids = None
+
+        inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+        return input_ids, inputs_embeds
+
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2499,8 +2510,7 @@ class GPUModelRunner(
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
 
-            input_ids = None
-            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
@@ -4220,8 +4230,8 @@ class GPUModelRunner(
             assert num_tokens_padded <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs(num_tokens_padded)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
+                input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
+
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
