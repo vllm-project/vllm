@@ -254,15 +254,7 @@ class CudagraphDispatcher:
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
-        # When speculative decoding is enabled, always use max_loras for lookup
-        # since we only capture graphs with max_loras
         effective_num_active_loras = num_active_loras
-        if (
-            self.vllm_config.speculative_config is not None
-            and self.vllm_config.lora_config is not None
-            and has_lora
-        ):
-            effective_num_active_loras = self.vllm_config.lora_config.max_loras
 
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
