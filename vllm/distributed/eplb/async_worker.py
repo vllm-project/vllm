@@ -130,7 +130,7 @@ async def transfer_run_periodically(
                             rebalancing_algorithm_executed = True
 
                         layer_idx = model_state.layer_to_transfer
-                        old_layer_indices = model_state.old_physical_to_logical_map[
+                        old_layer_indices = model_state.physical_to_logical_map[
                             layer_idx
                         ]
                         new_layer_indices = model_state.new_physical_to_logical_map[
