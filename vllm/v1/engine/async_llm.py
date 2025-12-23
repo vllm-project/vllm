@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
@@ -26,7 +27,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -111,7 +112,7 @@ class AsyncLLM(EngineClient):
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_config(self.model_config)
+            tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -627,6 +628,9 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         try:
@@ -641,9 +645,19 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
+
+            if truncate_prompt_tokens is not None:
+                warnings.warn(
+                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
+                    "is deprecated and will be removed in v0.15. "
+                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
             _validate_truncation_size(
                 self.model_config.max_model_len,
-                truncate_prompt_tokens,
+                pooling_params.truncate_prompt_tokens,
                 tokenization_kwargs,
             )
 

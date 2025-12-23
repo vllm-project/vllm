@@ -7,7 +7,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import zip_enc_dec_prompts
 from vllm.inputs.parse import parse_raw_prompts
 from vllm.inputs.preprocess import InputPreprocessor
-from vllm.tokenizers import init_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 
 pytestmark = pytest.mark.cpu_test
 
@@ -32,6 +32,13 @@ INPUTS_SLICES = [
     slice(None, None, 2),
     slice(None, None, -2),
 ]
+
+
+# Test that a nested mixed-type list of lists raises a TypeError.
+@pytest.mark.parametrize("invalid_input", [[[1, 2], ["foo", "bar"]]])
+def test_invalid_input_raise_type_error(invalid_input):
+    with pytest.raises(TypeError):
+        parse_raw_prompts(invalid_input)
 
 
 def test_parse_raw_single_batch_empty():
@@ -108,7 +115,7 @@ def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
 )
 def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
-    tokenizer = init_tokenizer_from_config(model_config)
+    tokenizer = cached_tokenizer_from_config(model_config)
     input_preprocessor = InputPreprocessor(model_config, tokenizer)
 
     # HF processor adds sep token

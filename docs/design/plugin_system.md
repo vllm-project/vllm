@@ -109,7 +109,7 @@ Every plugin has three parts:
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spaces`: This function is called to generate the kv cache spaces for the model.
+    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.

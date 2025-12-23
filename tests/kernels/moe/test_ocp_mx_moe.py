@@ -17,7 +17,7 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse("0.8.99")
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
-    current_platform.is_cuda() and current_platform.is_device_capability(100)
+    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
 )
 
 HOPPER_MXFP4_BF16_AVAILABLE = (
@@ -799,7 +799,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
 @pytest.mark.skipif(
     not (
         current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and has_flashinfer()
     ),
     reason="NVIDIA GPU sm100 and flashinfer are required for this test",
