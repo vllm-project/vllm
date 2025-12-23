@@ -42,9 +42,10 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
             "rope_parameters": config.rope_parameters,
         }
@@ -77,9 +78,11 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
+            rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+            config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
-                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": max_position,
                 "rope_parameters": config.rope_parameters,
             }
@@ -113,12 +116,10 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
 
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": rotary_emb_dim,
             "max_position": max_trained_positions,
             "rope_parameters": config.rope_parameters,
         }
@@ -214,7 +215,7 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         tokens = getattr(config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, (
             "Try loading the original Qwen3 Reranker?, see: "
-            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py"
+            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
         )
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
@@ -240,9 +241,10 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
             "rope_parameters": config.rope_parameters,
         }
@@ -306,12 +308,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
 
-        # TODO(tdoublep): remove once cascade attention is supported
-        logger.info(
-            "Disabling cascade attention since it is not supported for hybrid models."
-        )
-        model_config.disable_cascade_attn = True
-
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
@@ -361,7 +357,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kernel_block_alignment_size = 16
             if (
-                current_platform.is_device_capability(100)
+                current_platform.is_device_capability_family(100)
                 and model_config.get_head_size() == 256
                 and (
                     attention_config.backend is None
@@ -405,7 +401,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
             #          attn_1_token = 2kB -> fits ~394 tokens
-            #      then round up to a mulitple of 256 -> 512 tokens
+            #      then round up to a multiple of 256 -> 512 tokens
             # End result:
             #  attn_block_size = 512
             #  mamba_block_size = 512 (aligned to a multiple of chunk_size)

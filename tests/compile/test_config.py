@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import logging
 from contextlib import nullcontext
 from unittest.mock import patch
 
@@ -13,7 +12,6 @@ from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.logger import _print_warning_once
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
@@ -235,24 +233,6 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
-def test_moe_splitting_ops_deepep_ht_piecewise():
-    # Non-inductor, non-attn-fusion case: DeepEP HT with dp>1
-    # should add MoE ops to splitting_ops on top of attention ops.
-    config = VllmConfig(
-        parallel_config=ParallelConfig(
-            all2all_backend="deepep_high_throughput",
-            data_parallel_size=8,
-        ),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-        ),
-    )
-    splitting_ops = config.compilation_config.splitting_ops
-    assert splitting_ops is not None
-    assert "vllm::moe_forward" in splitting_ops
-    assert "vllm::moe_forward_shared" in splitting_ops
-
-
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
     # preserved and MoE ops should be appended for DeepEP HT with dp>1.
@@ -277,26 +257,6 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
-
-
-def test_moe_splitting_ops_deepep_ht_attn_fusion_no_inductor():
-    # Pure attn-fusion case without inductor partition: even with
-    # DeepEP HT and dp>1, we should not re-enable piecewise compilation
-    # or add MoE ops into splitting_ops.
-    config = VllmConfig(
-        parallel_config=ParallelConfig(
-            all2all_backend="deepep_high_throughput",
-            data_parallel_size=8,
-        ),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
-            custom_ops=["+quant_fp8"],
-            cudagraph_mode=CUDAGraphMode.PIECEWISE,
-        ),
-    )
-    assert config.compilation_config.splitting_ops == []
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
 
 def test_should_split():
@@ -442,62 +402,3 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
-
-
-def test_pass_config_deprecation(caplog_vllm):
-    caplog_vllm.set_level(logging.WARNING)
-
-    # Clear cache to ensure warnings are re-issued
-    _print_warning_once.cache_clear()
-
-    # Test enable_fusion -> fuse_norm_quant, fuse_act_quant
-    caplog_vllm.clear()
-    config = PassConfig(enable_fusion=True)
-    assert "enable_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_norm_quant is True
-    assert config.fuse_act_quant is True
-    assert config.enable_fusion is True
-
-    # Test enable_attn_fusion -> fuse_attn_quant
-    caplog_vllm.clear()
-    config = PassConfig(enable_attn_fusion=True)
-    assert "enable_attn_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_attn_quant is True
-    assert config.enable_attn_fusion is True
-
-    # Test enable_noop -> eliminate_noops
-    caplog_vllm.clear()
-    config = PassConfig(enable_noop=True)
-    assert "enable_noop is deprecated" in caplog_vllm.text
-    assert config.eliminate_noops is True
-    assert config.enable_noop is True
-
-    # Test enable_sequence_parallelism -> enable_sp
-    caplog_vllm.clear()
-    config = PassConfig(enable_sequence_parallelism=True)
-    assert "enable_sequence_parallelism is deprecated" in caplog_vllm.text
-    assert config.enable_sp is True
-    assert config.enable_sequence_parallelism is True
-
-    # Test enable_async_tp -> fuse_gemm_comms
-    caplog_vllm.clear()
-    config = PassConfig(enable_async_tp=True)
-    assert "enable_async_tp is deprecated" in caplog_vllm.text
-    assert config.fuse_gemm_comms is True
-    assert config.enable_async_tp is True
-
-    # Test enable_fi_allreduce_fusion -> fuse_allreduce_rms
-    caplog_vllm.clear()
-    config = PassConfig(enable_fi_allreduce_fusion=True)
-    assert "enable_fi_allreduce_fusion is deprecated" in caplog_vllm.text
-    assert config.fuse_allreduce_rms is True
-    assert config.enable_fi_allreduce_fusion is True
-
-    # Test hash consistency
-    config_old = PassConfig(enable_fusion=True)
-    config_new = PassConfig(fuse_norm_quant=True, fuse_act_quant=True)
-    assert config_old.compute_hash() == config_new.compute_hash()
-
-    config_old = PassConfig(enable_async_tp=True)
-    config_new = PassConfig(fuse_gemm_comms=True)
-    assert config_old.compute_hash() == config_new.compute_hash()

@@ -18,12 +18,14 @@ from vllm.config.lora import LoRAConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
+    str_dtype_to_torch_dtype,
     try_match_architecture_defaults,
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
+from vllm.config.profiler import ProfilerConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
@@ -71,6 +73,7 @@ __all__ = [
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",
+    "str_dtype_to_torch_dtype",
     "try_match_architecture_defaults",
     # From vllm.config.multimodal
     "MultiModalConfig",
@@ -89,6 +92,8 @@ __all__ = [
     "SpeechToTextConfig",
     # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
+    # From vllm.config.profiler
+    "ProfilerConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",

@@ -3,7 +3,7 @@
 
 import os
 
-import safetensors.torch
+import safetensors
 import torch
 
 from vllm.logger import init_logger
