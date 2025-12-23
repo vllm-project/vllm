@@ -271,5 +271,3 @@ class CwmToolParser(ToolParser):
             self._in_tool_block = False
 
         return DeltaMessage(tool_calls=tool_deltas)
-
-

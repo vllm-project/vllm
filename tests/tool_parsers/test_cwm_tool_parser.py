@@ -54,7 +54,11 @@ def test_extract_tool_calls_single_terminal_inline(cwm_tool_parser):
             function=FunctionCall(
                 name="terminal",
                 arguments=json.dumps(
-                    {"command": 'find . -name "*.py" | xargs grep -n "def bulk_create"'},
+                    {
+                        "command": (
+                            'find . -name "*.py" | xargs grep -n "def bulk_create"'
+                        )
+                    },
                     ensure_ascii=False,
                 ),
             )
@@ -118,5 +122,3 @@ def test_extract_tool_calls_shorthand_missing_gt_uses_label_as_tool_name(
     ]
     assert_tool_calls(extracted.tool_calls, expected)
     assert extracted.content == "prefix\n</think>"
-
-
