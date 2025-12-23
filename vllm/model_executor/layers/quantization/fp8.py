@@ -852,11 +852,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 (intermediate_size_per_partition + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
-        w13_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
-        w2_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
+        w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
+        w2_weight_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
         # Note: name is weight_scale for tensor, weight_scale_inv for block.
-        layer.register_parameter(f"w13_{self.weight_scale_name}", w13_scale)
-        layer.register_parameter(f"w2_{self.weight_scale_name}", w2_scale)
+        layer.register_parameter(f"w13_{self.weight_scale_name}", w13_weight_scale)
+        layer.register_parameter(f"w2_{self.weight_scale_name}", w2_weight_scale)
 
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
@@ -865,8 +865,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant
             else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w13_scale, extra_weight_attrs)
-        set_weight_attrs(w2_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
@@ -887,63 +887,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        # Allow for accessing weights and scales in standard way.
-        w13_weight = layer.w13_weight
-        w2_weight = layer.w2_weight
-        w13_weight_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_weight_scale = getattr(layer, f"w2_{self.weight_scale_name}")
-
-        # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
-        if current_platform.is_fp8_fnuz():
-            w13_weight, w13_weight_scale, layer.w13_input_scale = (
-                normalize_e4m3fn_to_e4m3fnuz(
-                    w13_weight, w13_weight_scale, layer.w13_input_scale
-                )
-            )
-            w2_weight, w2_weight_scale, layer.w2_input_scale = (
-                normalize_e4m3fn_to_e4m3fnuz(
-                    w2_weight, w2_weight_scale, layer.w2_input_scale
-                )
-            )
-
-        # Per tensor kernels require single activation scale. Use the max.
-        if self.quant_config.activation_scheme == "static":
-            assert not self.block_quant
-            assert layer.w13_input_scale is not None
-            assert layer.w2_input_scale is not None
-            if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
-                layer.w2_input_scale
-            ):
-                logger.warning_once(
-                    "Found input_scales that are not equal for "
-                    "fp8 MoE layer. Using the maximum across experts "
-                    "for each layer."
-                )
-            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
-            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
-
-        # Per tensor kernels require single weight scale for w13 per expert, but
-        # on disk there is a scale for w1 and w3. Use the max to requantize.
-        if not self.block_quant:
-            shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        w13_weight[expert_id][start : start + shard_size, :],
-                        w13_weight_scale[expert_id][shard_id],
-                    )
-                    w13_weight[expert_id][start : start + shard_size, :], _ = (
-                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
-                    )
-                    start += shard_size
-            w13_weight_scale = max_w13_scales
-
+    def _convert_weights_to_kernel_format(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w13_weight_scale: torch.Tensor,
+        w2_weight_scale: torch.Tensor,
+    ) -> None:
         if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             assert self.block_quant
             w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
@@ -998,6 +949,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
+    def _setup_kernel(self, layer: Module) -> None:
+        """Setup Modular Kernel for TP Case"""
         # NOTE(rob): this is a WIP refactor. We are first migrating
         # all of the kernels in the TP case to use mk. Once this is
         # done, then we will initialzie the TP case and DP/EP case
@@ -1078,6 +1031,71 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     ),
                 )
             self.use_inplace = True
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # Allow for accessing weights and scales in standard way.
+        w13_weight = layer.w13_weight
+        w2_weight = layer.w2_weight
+        w13_weight_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_weight_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+
+        # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
+        if current_platform.is_fp8_fnuz():
+            w13_weight, w13_weight_scale, layer.w13_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w13_weight, w13_weight_scale, layer.w13_input_scale
+                )
+            )
+            w2_weight, w2_weight_scale, layer.w2_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w2_weight, w2_weight_scale, layer.w2_input_scale
+                )
+            )
+
+        # Per tensor kernels require single activation scale. Use the max.
+        if self.quant_config.activation_scheme == "static":
+            assert not self.block_quant
+            assert layer.w13_input_scale is not None
+            assert layer.w2_input_scale is not None
+            if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
+                layer.w2_input_scale
+            ):
+                logger.warning_once(
+                    "Found input_scales that are not equal for "
+                    "fp8 MoE layer. Using the maximum across experts "
+                    "for each layer."
+                )
+            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
+            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
+
+        # Per tensor kernels require single weight scale for w13 per expert, but
+        # on disk there is a scale for w1 and w3. Use the max to requantize.
+        if not self.block_quant:
+            shard_size = layer.intermediate_size_per_partition
+            max_w13_scales = w13_weight_scale.max(dim=1).values
+            for expert_id in range(layer.local_num_experts):
+                start = 0
+                for shard_id in range(2):
+                    dq_weight = per_tensor_dequantize(
+                        w13_weight[expert_id][start : start + shard_size, :],
+                        w13_weight_scale[expert_id][shard_id],
+                    )
+                    w13_weight[expert_id][start : start + shard_size, :], _ = (
+                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
+                    )
+                    start += shard_size
+            w13_weight_scale = max_w13_scales
+
+        # Shuffle weights into the runtime format.
+        self._convert_weights_to_kernel_format(
+            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        )
+
+        # Setup modular kernel for TP case.
+        self._setup_kernel(layer)
 
     def maybe_make_prepare_finalize(
         self,
@@ -1398,32 +1416,26 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
-        w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
-        w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
+        w13_weight = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2_weight = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
 
         for expert in range(layer.local_num_experts):
             w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w13_weight.data[expert, :, :])
+                ops.scaled_fp8_quant(layer.w13_weight[expert, :, :])
             )
             w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
+                ops.scaled_fp8_quant(layer.w2_weight[expert, :, :])
             )
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
 
-        # Reshuffle weights for AITER if needed.
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                layer.w13_weight, layer.w2_weight
-            )
-            replace_parameter(layer, "w13_weight", shuffled_w13)
-            replace_parameter(layer, "w2_weight", shuffled_w2)
+        # Shuffle weights into the runtime format.
+        self._convert_weights_to_kernel_format(
+            layer, w13_weight, w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
+        )
 
-        # Rushuffle weights for MARLIN if needed.
-        elif self.fp8_backend == Fp8MoeBackend.MARLIN:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
+        # Setup modular kernel for TP case.
+        self._setup_kernel(layer)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
