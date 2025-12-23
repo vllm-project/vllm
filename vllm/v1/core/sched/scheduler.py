@@ -1415,6 +1415,7 @@ class Scheduler(SchedulerInterface):
 
         if not delay_free_blocks:
             self._free_blocks(request)
+
         return kv_xfer_params
 
     def _free_blocks(self, request: Request):
