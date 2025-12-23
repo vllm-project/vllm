@@ -2090,3 +2090,11 @@ class Qwen3VLForConditionalGeneration(
             connector="visual.merger",
             tower_model="visual.",
         )
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen3LLMForCausalLM, "language_model"

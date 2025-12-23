@@ -160,7 +160,7 @@ def physical_to_logical_mapping(
     └───────────────────────────────────────────┘
 
     If multiple logical blocks map to the same physical block,
-    this function returns the first (minimum) logical block index.
+    this function returns the latest (maximum) logical block index.
 
     If a physical block is not mapped to by any logical block,
     its value in the result will be -1.
@@ -182,6 +182,15 @@ def physical_to_logical_mapping(
 
     To prevent this, we use seq_lens and block_size to mask out unused
     entries, ensuring only valid block references are processed.
+
+    IMPORTANT: Reused physical blocks (sliding-window / hybrid attention)
+    ────────────────────────────────────────────────────────────────────
+    For some attention types, physical cache blocks can be reused over time.
+    This can cause the same physical block id to appear multiple times in a row
+    of `block_table` at different logical block indices. In that case, only the
+    latest logical block index corresponds to the current contents of that
+    physical block. Therefore, the inverse mapping must pick the maximum logical
+    block index for each physical block id.
 
     Args:
         block_table: Tensor of shape [max_reqs, max_num_blocks]
@@ -217,8 +226,8 @@ def physical_to_logical_mapping(
         mask, torch.arange(max_num_blocks, device=device)[None, :], 0
     )
 
-    physical_to_logical.scatter_(
-        -1, valid_block_table.to(torch.int64), valid_logical_indices
+    physical_to_logical.scatter_reduce_(
+        -1, valid_block_table.to(torch.int64), valid_logical_indices, reduce="amax"
     )
     # NB - Seems like block 0 is always empty so we reset it manually
     physical_to_logical[:, 0] = -1
