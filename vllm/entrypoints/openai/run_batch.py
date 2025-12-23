@@ -495,6 +495,7 @@ async def run_batch(
             engine_client,
             openai_serving_models,
             request_logger=request_logger,
+            score_template=None,
         )
         if ("embed" in supported_tasks or enable_serving_reranking)
         else None
