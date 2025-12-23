@@ -72,10 +72,6 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranslation,
 )
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
-from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
@@ -92,7 +88,6 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tasks import POOLING_TASKS
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -1026,12 +1021,6 @@ async def init_app_state(
         if vllm_config.lora_config is not None
         else {}
     )
-
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
     lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
@@ -1098,58 +1087,6 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
-    state.openai_serving_pooling = (
-        (
-            OpenAIServingPooling(
-                engine_client,
-                state.openai_serving_models,
-                supported_tasks=supported_tasks,
-                request_logger=request_logger,
-                chat_template=resolved_chat_template,
-                chat_template_content_format=args.chat_template_content_format,
-                trust_request_chat_template=args.trust_request_chat_template,
-                log_error_stack=args.log_error_stack,
-            )
-        )
-        if any(task in POOLING_TASKS for task in supported_tasks)
-        else None
-    )
-    state.openai_serving_embedding = (
-        OpenAIServingEmbedding(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
-        )
-        if "embed" in supported_tasks
-        else None
-    )
-    state.openai_serving_classification = (
-        ServingClassification(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
-        )
-        if "classify" in supported_tasks
-        else None
-    )
-    state.openai_serving_scores = (
-        ServingScores(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
-        )
-        if ("embed" in supported_tasks or "score" in supported_tasks)
-        else None
-    )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         state.openai_serving_models,
@@ -1213,6 +1150,9 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
+
+    from vllm.entrypoints.pooling import init_pooling_state
+    await init_pooling_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

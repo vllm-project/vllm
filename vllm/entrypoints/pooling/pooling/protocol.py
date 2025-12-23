@@ -10,31 +10,25 @@ from pydantic import (
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
+from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestMixin,
+    ClassificationRequestMixin,
+    CompletionRequestMixin,
+    EmbeddingRequestMixin,
+    PoolingBasicRequestMixin,
 )
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class PoolingCompletionRequest(EmbeddingCompletionRequest):
+class PoolingCompletionRequest(
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    EmbeddingRequestMixin,
+    ClassificationRequestMixin,
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
-    )
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -45,22 +39,13 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
         )
 
 
-class PoolingChatRequest(EmbeddingChatRequest):
+class PoolingChatRequest(
+    PoolingBasicRequestMixin,
+    ChatRequestMixin,
+    EmbeddingRequestMixin,
+    ClassificationRequestMixin,
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
-    )
 
     def to_pooling_params(self):
         return PoolingParams(
