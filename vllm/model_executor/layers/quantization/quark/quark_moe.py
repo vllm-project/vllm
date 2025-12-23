@@ -134,6 +134,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
         self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
+        self.model_type = getattr(
+            get_current_vllm_config().model_config.hf_config, "model_type", None
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -179,9 +183,16 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if self.weight_qscheme == "per_tensor":
             # Allocate 2 scales for w1 and w3 respectively.
             # They are combined to a single scale after weight loading.
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
-            )
+            if self.model_type != "gpt_oss":
+                w13_weight_scale = torch.nn.Parameter(
+                    torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+                )
+            else:
+                # For gpt_oss, the w1(gate) & w3(up) are fused as one.
+                # Therefore, only one weight scale for each expert.
+                w13_weight_scale = torch.nn.Parameter(
+                    torch.ones(num_experts, 1, dtype=torch.float32), requires_grad=False
+                )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
             w2_weight_scale = torch.nn.Parameter(
                 torch.ones(num_experts, dtype=torch.float32), requires_grad=False
@@ -195,14 +206,26 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         elif self.weight_qscheme == "per_channel":
             # quark's scale is 1 dim.
-            w13_weight_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
-            )
+            if self.model_type != "gpt_oss":
+                w13_weight_scale = torch.nn.Parameter(
+                    torch.ones(
+                        num_experts,
+                        2 * intermediate_size_per_partition,
+                        dtype=torch.float32,
+                    ),
+                    requires_grad=False,
+                )
+            else:
+                # For gpt_oss, the w1(gate) & w3(up) are fused as one.
+                # Therefore, only one weight scale for each expert.
+                w13_weight_scale = torch.nn.Parameter(
+                    torch.ones(
+                        num_experts,
+                        intermediate_size_per_partition,
+                        dtype=torch.float32,
+                    ),
+                    requires_grad=False,
+                )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
             w2_weight_scale = torch.nn.Parameter(
                 torch.ones(num_experts, hidden_size, dtype=torch.float32),
@@ -323,10 +346,13 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                         ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
                     )
                     start += shard_size
+                    if self.model_type == "gpt_oss":
+                        break
 
             layer.w13_weight_scale = torch.nn.Parameter(
                 max_w13_scales, requires_grad=False
             )
+
         # quark's scale is 1 dim.
         elif self.weight_qscheme == "per_channel":
             if self.act_quant_group_shape == GroupShape.PER_TOKEN:
@@ -664,9 +690,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
 
-        self.emulate = (
-            True if self.model_type == "gpt_oss" else self._emulate
-        )  # TODO (xuebwang-amd)
+        self.emulate = True if self.model_type == "gpt_oss" else self._emulate
 
         if self.emulate:
             logger.warning_once(
@@ -682,9 +706,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             logger.warning_once(
                 "The current mode supports native MoE MXFP4 computation"
             )
-        self.model_type = getattr(
-            get_current_vllm_config().model_config.hf_config, "model_type", None
-        )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "mxfp4":
