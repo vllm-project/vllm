@@ -436,14 +436,14 @@ class ClientSentinel(BaseSentinel):
                 # Pause can be invoked again during fault-tolerance handling,
                 # so it's unnecessary to track whether all engines are currently
                 # paused.
-                self._submit_fault(
+                self._submit_task(
                     "pause", self.ft_config.gloo_comm_timeout, soft_pause=False
                 )
             except zmq.ZMQError:
                 # Socket is closed.
                 break
 
-    def _submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
+    def _submit_task(self, instruction: str, timeout: int, **kwargs) -> None:
         """
         thread-safe fire-and-forget submission of a fault handling task.
         This method can be called from **any thread**
@@ -529,14 +529,13 @@ class ClientSentinel(BaseSentinel):
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """
-        Async interface for run_method, returns a Future that can be awaited.
-        This method **must be called from the event loop thread** where this
-        FaultHandler was created.
+        Executes fault tolerance methods based on the fault tolerance instructions
+         received from the api_server.
         """
         fut = self._loop.create_future()
         await self._task_queue.put((instruction, timeout, kwargs, fut))
-        result = await fut
-        return result
+        success = await fut
+        return success
 
     def listen_and_publish_fault_status(self):
         try:
@@ -595,12 +594,12 @@ class BackgroundResources:
         """Clean up background resources."""
 
         self.engine_dead = True
+        if self.client_sentinel is not None:
+            self.client_sentinel.shutdown()
         if self.engine_manager is not None:
             self.engine_manager.close()
         if self.coordinator is not None:
             self.coordinator.close()
-        if self.client_sentinel is not None:
-            self.client_sentinel.shutdown()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -924,7 +923,15 @@ class MPClient(EngineCoreClient):
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """handle fault of current instance by instruction"""
-        return await self.client_sentinel.handle_fault(instruction, timeout, **kwargs)
+        success = await self.client_sentinel.handle_fault(
+            instruction, timeout, **kwargs
+        )
+        ft_config = self.vllm_config.fault_tolerance_config
+        if not success and ft_config.shutdown_on_fault_tolerance_failure:
+            logger.error("Fault tolerance failed. Shutting down the application.")
+            self.resources.engine_dead = True
+            self.shutdown()
+        return success
 
     async def fault_reporter(self):
         return self.engine_status_dict.to_dict()

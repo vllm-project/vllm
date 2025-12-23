@@ -83,8 +83,6 @@ async def process_fault_tolerance_instruction(raw_request: Request):
                 }
             )
         else:
-            logger.error("Fault tolerance failed. Shutting down the application.")
-            client.shutdown()
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 detail="Instruction execution failed.",
