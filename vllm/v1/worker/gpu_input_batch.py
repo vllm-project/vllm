@@ -942,18 +942,15 @@ class InputBatch:
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             # Replace placeholder token id(s) with actual sampled id(s).
             if sampled_ids := sampled_token_ids[prev_index]:
-                num_placeholders = 0
-                for t in reversed(req_output_token_ids):
+                num_replace = 0
+                for t in sampled_ids:
                     if t == -1:
-                        num_placeholders += 1
-                    else:
                         break
-                if num_placeholders == 0:
+                    num_replace += 1
+
+                if num_replace == 0:
                     continue
-                assert num_placeholders <= len(sampled_ids)
-                req_output_token_ids[-num_placeholders:] = sampled_ids[
-                    :num_placeholders
-                ]
+                req_output_token_ids[-num_replace:] = sampled_ids[:num_replace]
 
     def update_async_spec_token_ids(
         self,
