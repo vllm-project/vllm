@@ -128,6 +128,7 @@ async def transfer_run_periodically(
                         if not rebalancing_algorithm_executed:
                             run_rebalance_experts(model_state, state)
                             rebalancing_algorithm_executed = True
+                        assert model_state.new_physical_to_logical_map is not None
 
                         layer_idx = model_state.layer_to_transfer
                         old_layer_indices = model_state.physical_to_logical_map[
