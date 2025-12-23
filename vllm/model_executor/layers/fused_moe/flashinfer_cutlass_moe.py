@@ -207,9 +207,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
-        logger.info(
-            f"{hidden_states.dtype=}, {fc1_expert_weights.dtype=}, {fc2_expert_weights.dtype=}, {quant_scales=}, {a1q_scale=}"
-        )
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
