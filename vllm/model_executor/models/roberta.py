@@ -57,12 +57,6 @@ class RobertaEmbedding(nn.Module):
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
 
-        self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type != "absolute":
-            raise ValueError(
-                "Only 'absolute' position_embedding_type" + " is supported"
-            )
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -135,12 +129,12 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
     def _build_model(
         self, vllm_config: VllmConfig, prefix: str = ""
     ) -> BertModel | BertWithRope:
-        if vllm_config.model_config.hf_config.position_embedding_type == "rotary":
-            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
+        hf_config = vllm_config.model_config.hf_config
+        kwargs = dict(vllm_config=vllm_config, prefix=prefix)
+        if getattr(hf_config, "position_embedding_type", "absolute") == "absolute":
+            return BertModel(**kwargs, embedding_class=RobertaEmbedding)
         else:
-            return BertModel(
-                vllm_config=vllm_config, prefix=prefix, embedding_class=RobertaEmbedding
-            )
+            return JinaRobertaModel(**kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)

@@ -1283,7 +1283,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
-                self.input_batch.num_tokens[i] += 1
+                self.input_batch.num_tokens_no_spec[i] += 1
 
         else:
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
@@ -1291,7 +1291,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_sampled_token_ids = [
                 seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
-            self.input_batch.num_tokens[:num_reqs] += gen_lens
+            self.input_batch.num_tokens_no_spec[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
                 target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
                 self.input_batch.token_ids_cpu[i, target_slice] = (
