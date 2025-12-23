@@ -489,11 +489,7 @@ class MockEngine:
 
 
 async def _async_serving_chat_init():
-    engine = MagicMock()
-    engine.model_config = MockModelConfig()
-    engine.processor = MagicMock()
-    engine.io_processor = MagicMock()
-    engine.input_processor = MagicMock()
+    engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
     serving_completion = OpenAIServingChat(
