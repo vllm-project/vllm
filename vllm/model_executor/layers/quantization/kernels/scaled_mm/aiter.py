@@ -42,7 +42,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 + "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
                 + "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
             )
-        
+
         if not c.input_symmetric:
             return (
                 False,

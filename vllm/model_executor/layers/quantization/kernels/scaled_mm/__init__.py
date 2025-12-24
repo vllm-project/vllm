@@ -96,7 +96,7 @@ def is_supported_and_can_implement_kernel(
         _cc = current_platform.get_device_capability()
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
-    
+
     # If the current platform uses compute_capability,
     # make sure the kernel supports the compute cability.
     if compute_capability is not None:

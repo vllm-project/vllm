@@ -46,12 +46,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
-
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
-
-from vllm.platforms import current_platform
 
 from ..utils import TestBlockFP8Layer, TestFP8Layer
 from .backend import TestBackend
