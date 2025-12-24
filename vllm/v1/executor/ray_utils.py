@@ -334,12 +334,15 @@ def initialize_ray_cluster(
                 "placement group allocation failures. For multi-node Ray "
                 "clusters, ensure your cluster has %d GPUs available across "
                 "all nodes. (world_size = tensor_parallel_size=%d × "
-                "pipeline_parallel_size=%d)",
+                "pipeline_parallel_size=%d%s)",
                 parallel_config.world_size,
                 available_gpus,
                 parallel_config.world_size,
                 parallel_config.tensor_parallel_size,
                 parallel_config.pipeline_parallel_size,
+                (f" × prefill_context_parallel_size="
+                 f"{parallel_config.prefill_context_parallel_size}"
+                 if parallel_config.prefill_context_parallel_size > 1 else ""),
             )
 
     if ray.is_initialized():
