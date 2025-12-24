@@ -46,6 +46,7 @@ from .interfaces import (
     has_noops,
     is_attention_free,
     is_hybrid,
+    requires_raw_input_tokens,
     supports_cross_encoding,
     supports_mamba_prefix_caching,
     supports_multimodal,
@@ -203,6 +204,7 @@ _EMBEDDING_MODELS = {
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
+    "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all
@@ -246,6 +248,11 @@ _CROSS_ENCODER_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "LlamaBidirectionalForSequenceClassification": (
+        "llama",
+        "LlamaBidirectionalForSequenceClassification",
+    ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -259,8 +266,6 @@ _CROSS_ENCODER_MODELS = {
         "roberta",
         "RobertaForSequenceClassification",
     ),
-    # [Auto-converted (see adapters.py)]
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),  # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
@@ -418,6 +423,7 @@ _MULTIMODAL_MODELS = {
     ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
+    "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
@@ -535,6 +541,7 @@ class _ModelInfo:
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
+    requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
     has_inner_state: bool
@@ -558,6 +565,7 @@ class _ModelInfo:
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
             ),
+            requires_raw_input_tokens=requires_raw_input_tokens(model),
             supports_multimodal_encoder_tp_data=supports_multimodal_encoder_tp_data(
                 model
             ),

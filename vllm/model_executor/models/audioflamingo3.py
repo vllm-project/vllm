@@ -111,7 +111,7 @@ class AudioFlamingo3EmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         list[torch.Tensor],
-        TensorShape("bn", "naf", "hs"),
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
     ]
 
 

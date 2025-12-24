@@ -57,7 +57,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
+from .interfaces_base import attn_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -698,3 +705,17 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+@attn_type("encoder_only")
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
+
+
+@attn_type("encoder_only")
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
