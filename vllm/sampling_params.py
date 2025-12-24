@@ -26,6 +26,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
+    ENFORCED = 3
 
 
 # maybe make msgspec?
@@ -230,6 +231,9 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
+    enforce_sequence: list[int] | None = None
+    """If provided, the model will output this exact sequence of token IDs,
+    bypassing normal sampling. Used for validation/testing purposes."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -270,6 +274,7 @@ class SamplingParams(
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
+        enforce_sequence: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -310,6 +315,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            enforce_sequence=enforce_sequence,
         )
 
     def __post_init__(self) -> None:
@@ -518,6 +524,8 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforce_sequence:
+            return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
