@@ -1865,7 +1865,7 @@ class TestFindBestGroupSize:
     """
     Tests for the _find_best_group_size function which finds optimal
     KV cache group sizes while preferring larger groups.
-    
+
     Key behaviors:
     - Prefers LARGER group sizes
     - Enforces group_size >= 3 unless overhead exceeds 10%
@@ -1913,12 +1913,12 @@ class TestFindBestGroupSize:
         """
         full_spec = new_kv_cache_spec()
         sw_spec = new_sliding_window_spec(sliding_window=512)
-        
+
         same_type_layers = {
             sw_spec: [f"sw_{i}" for i in range(25)],
             full_spec: [f"full_{i}" for i in range(5)],
         }
-        
+
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # GCD(25, 5) = 5, so group_size=5 gives 0 padding
         # Larger sizes like 25 would give padding for full layers
@@ -1932,12 +1932,12 @@ class TestFindBestGroupSize:
         """
         full_spec = new_kv_cache_spec()
         local_spec = new_sliding_window_spec(sliding_window=256)
-        
+
         same_type_layers = {
             local_spec: [f"local_{i}" for i in range(24)],
             full_spec: [f"full_{i}" for i in range(8)],
         }
-        
+
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # GCD(24, 8) = 8, both 4 and 8 give 0 padding
         # Prefer 8 (larger group size = fewer groups)
@@ -1951,12 +1951,12 @@ class TestFindBestGroupSize:
         """
         full_spec = new_kv_cache_spec()
         sw_spec = new_sliding_window_spec(sliding_window=512)
-        
+
         same_type_layers = {
             full_spec: [f"full_{i}" for i in range(20)],
             sw_spec: [f"sw_{i}" for i in range(30)],
         }
-        
+
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # GCD(20, 30) = 10, both 5 and 10 divide evenly
         # Prefer 10 (larger = fewer groups)
@@ -1970,12 +1970,12 @@ class TestFindBestGroupSize:
         """
         full_spec = new_kv_cache_spec()
         sw_spec = new_sliding_window_spec(sliding_window=512)
-        
+
         same_type_layers = {
             sw_spec: [f"sw_{i}" for i in range(12)],
             full_spec: [f"full_{i}" for i in range(13)],
         }
-        
+
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # group_size=13: 1 padding for sw, 0 for full
         # 1 padding out of 25 total = 4% overhead, well under 10%
@@ -1984,25 +1984,24 @@ class TestFindBestGroupSize:
     def test_fallback_when_overhead_exceeds_threshold(self, vllm_config):
         """
         When enforcing min_group_size >= 3 adds > 10% overhead, fallback to 1.
-        
+
         Example: 1 full + 5 sw layers.
         - group_size=1: 0 padding (optimal baseline)
         - group_size=3: need to pad 2 full layers + 1 sw layer = 3 padding layers
           That's 3 padding out of 6 total = 10% overhead, way over 10%
         - group_size=5: need to pad 4 full layers = 4 padding layers
           That's 4 padding out of 6 total = 67% overhead
-        
+
         So group_size=1 should be chosen as the fallback.
         """
         full_spec = new_kv_cache_spec()
         sw_spec = new_sliding_window_spec(sliding_window=512)
-        
+
         same_type_layers = {
             full_spec: ["full_0"],  # 1 full layer
             sw_spec: [f"sw_{i}" for i in range(5)],  # 5 sw layers
         }
-        
+
         result = kv_cache_utils._find_best_group_size(same_type_layers, vllm_config)
         # group_size >= 3 would add > 10% overhead, so fallback to 1
         assert result == 1
-

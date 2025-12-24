@@ -941,23 +941,24 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 
 def _find_best_group_size(
-        same_type_layers: dict["KVCacheSpec", list[str]],
-        vllm_config: "VllmConfig",
-        min_preferred_group_size: int = 3,
-        overhead_threshold: float = 0.10) -> int:
+    same_type_layers: dict["KVCacheSpec", list[str]],
+    vllm_config: "VllmConfig",
+    min_preferred_group_size: int = 3,
+    overhead_threshold: float = 0.10,
+) -> int:
     """
     Find the optimal group size that minimizes padding memory, preferring
     larger group sizes.
 
     For each layer type, padding = (group_size - count % group_size) % group_size
-    weighted by that layer's max_memory_usage_bytes. Different layer types 
+    weighted by that layer's max_memory_usage_bytes. Different layer types
     contribute differently to total padding based on their actual memory usage
     (e.g., full attention vs sliding window).
 
     This function prefers LARGER group sizes. Empirically, small group sizes (1-2)
     lead to KV cache memory being concentrated in just a few large tensors, which
     can reduce performance due to memory allocation patterns.
-    
+
     The algorithm enforces group_size >= min_preferred_group_size (default 3),
     unless doing so would add more than overhead_threshold (default 10%) extra
     padding memory compared to the optimal unconstrained group size.
@@ -973,7 +974,7 @@ def _find_best_group_size(
 
     Returns:
         The optimal group size (minimizes padding, ties broken by larger group size)
-    
+
     Raises:
         ValueError: If same_type_layers is empty
     """
@@ -999,12 +1000,11 @@ def _find_best_group_size(
 
     def find_best_in_range(start: int, end: int) -> int:
         """Find best group size in [start, end] range.
-        
+
         Prefers larger group sizes when padding is equal.
         Key: (padding_memory, -group_size) so larger group_size wins ties.
         """
-        return min(range(start, end + 1),
-                   key=lambda gs: (calc_padding_memory(gs), -gs))
+        return min(range(start, end + 1), key=lambda gs: (calc_padding_memory(gs), -gs))
 
     # Calculate baseline: optimal group size with no minimum constraint
     baseline_group_size = find_best_in_range(1, max_layers)
@@ -1020,8 +1020,11 @@ def _find_best_group_size(
 
     # Check if enforcing the minimum preference adds too much overhead
     # Overhead is measured relative to total memory
-    overhead = (preferred_padding - baseline_padding) / total_base_memory \
-        if total_base_memory > 0 else 0.0
+    overhead = (
+        (preferred_padding - baseline_padding) / total_base_memory
+        if total_base_memory > 0
+        else 0.0
+    )
 
     if overhead > overhead_threshold:
         # Fallback to baseline (allowing smaller group sizes)
