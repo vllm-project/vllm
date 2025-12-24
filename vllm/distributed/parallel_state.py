@@ -52,8 +52,8 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
-    frombuffer_with_writable_warning_suppressed,
     direct_register_custom_op,
+    frombuffer_with_writable_warning_suppressed,
     supports_custom_op,
 )
 
