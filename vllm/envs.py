@@ -1580,8 +1580,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # persistent caching, and bulk operations for improved LoRA performance.
     # When disabled, falls back to the original LoRA tensor processing method.
     # Default: disabled (0) for compatibility, enable with SLAB_OPTIMIZATION=1
-    "SLAB_OPTIMIZATION": lambda: bool(int(os.getenv("SLAB_OPTIMIZATION", "0"))
-    ),
+    "SLAB_OPTIMIZATION": lambda: bool(int(os.getenv("SLAB_OPTIMIZATION", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
