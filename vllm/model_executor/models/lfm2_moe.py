@@ -35,7 +35,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_expert_weight_name,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Lfm2MoeConfig
 
@@ -536,7 +539,8 @@ class Lfm2MoeModel(nn.Module):
                     if weight_name not in name:
                         continue
 
-                    name = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name = remap_expert_weight_name(name, weight_name, param_name)
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue

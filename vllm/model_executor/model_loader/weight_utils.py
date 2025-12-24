@@ -1178,3 +1178,38 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
 
     # If there were no matches, return the untouched param name
     return name
+
+
+def remap_expert_weight_name(
+    name: str,
+    weight_name: str,
+    param_name: str,
+) -> str:
+    """Remap expert weight names, handling base_layer prefix for LoRA.
+
+    When loading expert weights, this function maps from checkpoint weight
+    names to model parameter names. It handles the special case where
+    LoRA wraps the original layer with a `base_layer` prefix.
+
+    For example:
+        - Input: name="model.layers.0.mlp.experts.0.up_proj.base_layer.weight"
+                 weight_name="experts.0.up_proj."
+                 param_name="experts.w13_"
+        - Output: "model.layers.0.mlp.experts.base_layer.w13_weight"
+
+    Args:
+        name: The full checkpoint weight name.
+        weight_name: The weight name pattern to match (e.g., "experts.0.up_proj.").
+        param_name: The parameter name to substitute (e.g., "experts.w13_").
+
+    Returns:
+        The remapped weight name with proper base_layer handling.
+    """
+    prefix, _, suffix = name.partition(weight_name)
+    middle = param_name
+    base = "base_layer"
+    if suffix.startswith(f"{base}."):
+        param_list = param_name.split(".", 1)
+        param_list.insert(1, base)
+        middle = ".".join(param_list)
+    return prefix + middle + suffix.removeprefix(f"{base}.")

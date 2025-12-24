@@ -22,6 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_expert_weight_name,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -359,7 +360,10 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
                         # Do not modify `name` since the loop may continue here
                         # Instead, create a new variable
-                        name_mapped = chunk_name.replace(weight_name, param_name)
+                        # Remap expert weight name (handles base_layer suffix correctly)
+                        name_mapped = remap_expert_weight_name(
+                            chunk_name, weight_name, param_name
+                        )
 
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or

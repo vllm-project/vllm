@@ -46,6 +46,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_expert_weight_name,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -465,7 +466,7 @@ class Llama4Model(LlamaModel):
                 continue
 
             # Replace the weight name with the parameter name.
-            full_param_name = name.replace(weight_name, param_name)
+            full_param_name = remap_expert_weight_name(name, weight_name, param_name)
 
             # Skip if the current weight corresponds to a parameter that
             # does not exist on the current PP (pipeline parallel) rank.

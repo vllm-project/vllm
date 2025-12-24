@@ -55,7 +55,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_expert_weight_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -524,7 +527,8 @@ class BailingMoeModel(nn.Module):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name = remap_expert_weight_name(name, weight_name, param_name)
 
                     if is_pp_missing_parameter(name, self):
                         continue

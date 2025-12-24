@@ -1366,6 +1366,10 @@ class FusedMoE(CustomOp):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
+        from vllm.model_executor.model_loader.weight_utils import (
+            remap_expert_weight_name,
+        )
+
         if (expert_mapping := self.expert_mapping) is None:
             raise ValueError(
                 "`self.expert_mapping` must be provided to "
@@ -1376,7 +1380,10 @@ class FusedMoE(CustomOp):
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in qual_name:
                     continue
-                weight_name = qual_name.replace(weight_name, param_name)
+                # Remap expert weight name (handles base_layer suffix correctly)
+                weight_name = remap_expert_weight_name(
+                    qual_name, weight_name, param_name
+                )
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
                 success = self.weight_loader(

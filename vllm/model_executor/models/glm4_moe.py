@@ -59,6 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_expert_weight_name,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -554,7 +555,10 @@ class Glm4MoeModel(nn.Module):
 
                     # Do not modify `name` since the loop may continue here
                     # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name_mapped = remap_expert_weight_name(
+                        name, weight_name, param_name
+                    )
 
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
