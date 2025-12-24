@@ -606,6 +606,43 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def _check_enough_kv_cache_memory(
+    available_memory: int,
+    get_needed_memory: Callable[[], int],
+    max_model_len: int,
+    estimate_max_model_len: Callable[[int], int],
+):
+    if available_memory <= 0:
+        raise ValueError(
+            "No available memory for the cache blocks. "
+            "Try increasing `gpu_memory_utilization` when initializing the engine. "
+            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            "for more details."
+        )
+
+    needed_memory = get_needed_memory()
+
+    if needed_memory > available_memory:
+        estimated_max_len = estimate_max_model_len(available_memory)
+        estimated_msg = ""
+        if estimated_max_len > 0:
+            estimated_msg = (
+                "Based on the available memory, "
+                f"the estimated maximum model length is {estimated_max_len}. "
+            )
+
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({available_memory / GiB_bytes:.2f} GiB). {estimated_msg}"
+            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
+            f"when initializing the engine. "
+            f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            f"for more details."
+        )
+
+
 def max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
@@ -688,43 +725,12 @@ def check_enough_kv_cache_memory(
     """
 
     # No need to check for available memory if the kv_cache_spec is empty
-    if not kv_cache_spec:
-        return
-
-    if available_memory <= 0:
-        raise ValueError(
-            "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when "
-            "initializing the engine. "
-            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
-            "for more details."
-        )
-
-    max_model_len = vllm_config.model_config.max_model_len
-    needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
-
-    if needed_memory > available_memory:
-        # Estimate the maximum model length that can fit in the available memory
-        estimated_max_len = estimate_max_model_len(
-            vllm_config, kv_cache_spec, available_memory
-        )
-        estimated_msg = ""
-        if estimated_max_len > 0:
-            estimated_msg = (
-                "Based on the available memory, "
-                f"the estimated maximum model length is {estimated_max_len}."
-            )
-
-        raise ValueError(
-            f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
-            f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB). "
-            f"{estimated_msg} "
-            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
-            f"when initializing the engine. "
-            f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
-            f"for more details."
+    if kv_cache_spec:
+        _check_enough_kv_cache_memory(
+            available_memory,
+            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            vllm_config.model_config.max_model_len,
+            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
 
 
@@ -1505,36 +1511,16 @@ def get_kv_cache_configs(
     # Check if the available memory is enough (using min across all workers).
     # We use the global groups to correctly account for padding.
     if global_kv_cache_groups:
-        min_available_memory = min(available_memory)
-        if min_available_memory <= 0:
-            raise ValueError(
-                "No available memory for the cache blocks. "
-                "Try increasing `gpu_memory_utilization` when "
-                "initializing the engine."
-            )
-        max_model_len = vllm_config.model_config.max_model_len
-        needed_memory = _max_memory_usage_bytes_from_groups(
-            vllm_config, global_kv_cache_groups
+        _check_enough_kv_cache_memory(
+            min(available_memory),
+            lambda: _max_memory_usage_bytes_from_groups(
+                vllm_config, global_kv_cache_groups
+            ),
+            vllm_config.model_config.max_model_len,
+            lambda am: _estimate_max_model_len_from_groups(
+                vllm_config, global_kv_cache_groups, am
+            ),
         )
-        if needed_memory > min_available_memory:
-            estimated_max_len = _estimate_max_model_len_from_groups(
-                vllm_config, global_kv_cache_groups, min_available_memory
-            )
-            estimated_msg = ""
-            if estimated_max_len > 0:
-                estimated_msg = (
-                    f"Based on the available memory, the estimated maximum "
-                    f"model length is {estimated_max_len}. "
-                )
-            raise ValueError(
-                f"To serve at least one request with the models's max seq len "
-                f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
-                f"cache is needed, which is larger than the available KV cache "
-                f"memory ({min_available_memory / GiB_bytes:.2f} GiB). "
-                f"{estimated_msg}"
-                f"Try increasing `gpu_memory_utilization` or decreasing "
-                f"`max_model_len` when initializing the engine."
-            )
 
     kv_cache_configs: list[KVCacheConfig] = []
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
