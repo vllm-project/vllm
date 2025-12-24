@@ -24,6 +24,10 @@ EMBEDDING_MODELS = [
         mteb_score=0.824413164,
         architecture="XLMRobertaModel",
         is_matryoshka=True,
+        pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         dtype="float32",
     )
 ]
@@ -33,6 +37,10 @@ RERANK_MODELS = [
         "jinaai/jina-reranker-v2-base-multilingual",
         mteb_score=0.33643,
         architecture="XLMRobertaForSequenceClassification",
+        pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     )
 ]
 

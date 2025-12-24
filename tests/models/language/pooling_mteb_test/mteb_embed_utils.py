@@ -161,6 +161,22 @@ def mteb_test_embed_models(
         if model_info.architecture:
             assert model_info.architecture in model_config.architectures
 
+        # Confirm whether the important parameters of model_config are correct.
+        if model_info.pooling_type is not None:
+            assert model_config.pooler_config.pooling_type == model_info.pooling_type
+        if model_info.attn_type is not None:
+            assert model_config.attn_type == model_info.attn_type
+        if model_info.is_prefix_caching_supported is not None:
+            assert (
+                model_config.is_prefix_caching_supported
+                == model_info.is_prefix_caching_supported
+            )
+        if model_info.is_chunked_prefill_supported is not None:
+            assert (
+                model_config.is_chunked_prefill_supported
+                == model_info.is_chunked_prefill_supported
+            )
+
         vllm_main_score = run_mteb_embed_task(
             VllmMtebEncoder(vllm_model), MTEB_EMBED_TASKS
         )

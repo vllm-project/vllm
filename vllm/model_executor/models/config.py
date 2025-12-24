@@ -93,10 +93,10 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         from vllm.config.pooler import PoolingTypeStr
 
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = model_config.hf_config
         hf_config.is_causal = False
 
         pooling_type_map: dict[str, PoolingTypeStr] = {
@@ -108,7 +108,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
         pooling_type = pooling_type_map.get(hf_config.pooling, None)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling} not supported")
-        vllm_config.model_config.pooler_config.pooling_type = pooling_type
+        model_config.pooler_config.pooling_type = pooling_type
 
 
 class NomicBertModelConfig(VerifyAndUpdateConfig):

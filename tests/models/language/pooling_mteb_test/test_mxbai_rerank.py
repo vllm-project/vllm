@@ -22,6 +22,10 @@ RERANK_MODELS = [
         architecture="Qwen2ForSequenceClassification",
         hf_overrides=mxbai_rerank_hf_overrides,
         mteb_score=0.273,
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
         enable_test=True,
     ),
     RerankModelInfo(

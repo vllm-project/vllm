@@ -23,6 +23,10 @@ RERANK_MODELS = [
             "classifier_from_token": ["Yes"],
             "method": "no_post_processing",
         },
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
     ),
 ]
 

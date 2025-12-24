@@ -64,7 +64,6 @@ from .interfaces import (
     SupportsLoRA,
     SupportsPP,
 )
-from .interfaces_base import attn_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,

@@ -14,6 +14,10 @@ MODELS = [
         architecture="NomicBertModel",
         mteb_score=0.737568559,
         enable_test=True,
+        pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
     EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v1.5",
@@ -28,6 +32,10 @@ MODELS = [
         architecture="NomicBertModel",
         mteb_score=0.715488912,
         enable_test=True,
+        pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
 ]
 
