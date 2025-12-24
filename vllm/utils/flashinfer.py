@@ -548,18 +548,23 @@ flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
 @functools.cache
 def has_flashinfer_fp8_blockscale_gemm() -> bool:
     """Return `True` if FlashInfer block-scale FP8 GEMM is available."""
-    return has_flashinfer() and hasattr(
-        _get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90"
+    return (
+        has_flashinfer()
+        and current_platform.is_device_capability(90)
+        and hasattr(_get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90")
     )
 
 
 @functools.cache
 def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
     """Return `True` if FlashInfer block-scale FP8 GEMM is supported."""
-    return envs.VLLM_USE_FLASHINFER_FP8_LINEAR and has_flashinfer_fp8_blockscale_gemm()
+    return (
+        envs.VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+        and has_flashinfer_fp8_blockscale_gemm()
+    )
 
 
-def should_use_flashinfer_for_block_scale_fp8_linear(
+def should_use_flashinfer_for_blockscale_fp8_gemm(
     is_flashinfer_supported: bool,
     output_dtype: torch.dtype,
     input: torch.Tensor,
@@ -612,6 +617,6 @@ __all__ = [
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
     "flashinfer_fp8_blockscale_gemm",
-    "should_use_flashinfer_for_block_scale_fp8_linear",
+    "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
 ]
