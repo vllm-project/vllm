@@ -1059,4 +1059,3 @@ def test_skip_tokenizer_init_multimodal_not_allowed():
             "Qwen/Qwen2-VL-2B-Instruct",
             skip_tokenizer_init=True,
         )
-
