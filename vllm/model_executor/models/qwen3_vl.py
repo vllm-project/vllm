@@ -29,6 +29,7 @@ from functools import lru_cache, partial
 from itertools import islice
 from typing import Any
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,6 +54,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
+from vllm.distributed.context_parallel_utils import all_gather_2d
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -104,6 +106,7 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .qwen2_5_vl import (
+    get_rank_world,
     Qwen2_5_VisionAttention,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
@@ -245,6 +248,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        true_seq: int,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -252,6 +256,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            true_seq=true_seq,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -334,6 +339,12 @@ class Qwen3_VisionTransformer(nn.Module):
         self.temporal_patch_size = vision_config.temporal_patch_size
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -568,6 +579,20 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
         cu_seqlens = torch.from_numpy(cu_seqlens)
 
+        seq_len, _ = hidden_states.size()
+        tp_rank, tp_world_size, tp_group = get_rank_world()
+        if self.use_data_parallel == False:
+            merge_size = self.spatial_merge_size ** 2
+            padding_size = math.ceil(math.ceil(seq_len / tp_world_size) / merge_size
+                                 ) * merge_size * tp_world_size - seq_len
+            if padding_size > 0:
+                padding = torch.zeros(padding_size,
+                                  *hidden_states.size()[1:],
+                                  dtype=hidden_states.dtype,
+                                  device=hidden_states.device)
+                hidden_states = torch.cat([hidden_states, padding], dim=0)
+            hidden_states = hidden_states.chunk(tp_world_size, dim=0)[tp_rank % tp_world_size]
+
         hidden_states = hidden_states.unsqueeze(1)
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
@@ -580,6 +605,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                true_seq=seq_len,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
@@ -591,6 +617,13 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
+        
+
+        if self.use_data_parallel == False:
+            hidden_states = all_gather_2d(hidden_states, world_size=tp_world_size, group=tp_group)
+            if padding_size:
+                hidden_states = hidden_states[:-padding_size // merge_size]
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -2090,11 +2123,3 @@ class Qwen3VLForConditionalGeneration(
             connector="visual.merger",
             tower_model="visual.",
         )
-
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return Qwen3LLMForCausalLM, "language_model"

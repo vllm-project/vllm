@@ -34,7 +34,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, Qwen2ForCausalLM
+from transformers import BatchFeature
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
@@ -52,6 +52,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.distributed.context_parallel_utils import (
+    all_gather_2d, 
+    all_to_all_3d,
+    all_to_all_4d)
+
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -113,9 +118,15 @@ from .vision import (
 
 logger = init_logger(__name__)
 
+from vllm.distributed.parallel_state import get_tp_group
+def get_rank_world():
+    rank = get_tp_group().rank
+    tp_size = get_tp_group().world_size
+    tp_group = get_tp_group().device_group
+    return rank, tp_size, tp_group
+
+
 # === Vision Inputs === #
-
-
 class Qwen2_5_VLImagePixelInputs(TensorSchema):
     """
     Dimensions:
@@ -312,23 +323,27 @@ class Qwen2_5_VisionAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = (
+        self.use_data_parallel = (
             multimodal_config.mm_encoder_tp_mode == "data"
             if multimodal_config
             else False
         )
-        self.tp_size = (
-            1
-            if use_data_parallel
-            else parallel_state.get_tensor_model_parallel_world_size()
-        )
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+		
+        if self.use_data_parallel == True :
+            self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+            self.tp_world_size = 1
+            self.tp_group = None
+        else :
+            self.tp_rank, self.tp_world_size, self.tp_group = get_rank_world()
+
+        
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
         self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, self.tp_size
+            num_heads, self.tp_world_size
         )
+         
 
         self.qkv = QKVParallelLinear(
             hidden_size=embed_dim,
@@ -338,17 +353,18 @@ class Qwen2_5_VisionAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv",
-            disable_tp=use_data_parallel,
+            disable_tp=True,
         )
-
+        
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
-            disable_tp=use_data_parallel,
+            disable_tp=True,
         )
-
+ 
+        
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
@@ -364,18 +380,42 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        true_seq: int,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
-        qkv = einops.rearrange(
-            x,
-            "s b (three head head_dim) -> b s three head head_dim",
-            three=3,
-            head=self.num_attention_heads_per_partition,
-        )
+        if self.use_data_parallel == False:
+            x = einops.rearrange(
+                x,
+                "s b (three head head_dim) -> (b three) s head head_dim",
+                b=1,
+                three=3,
+                head=self.num_attention_heads_per_partition*self.tp_world_size,
+            )
 
+            x = all_to_all_4d(x, is_seq_to_head=True, group=self.tp_group, tp_rank=self.tp_rank)
+            cur_seq = x.shape[1]
+            x = x[:, :true_seq, :, :]
+        
+            qkv = einops.rearrange(
+	            x,
+	            '(b three) s head head_dim -> b s three head head_dim',
+	            b=1,
+	            three=3,
+	            head=self.num_attention_heads_per_partition,
+	        )
+            used_len = true_seq
+        else :
+            qkv = einops.rearrange(
+                x,
+                "s b (three head head_dim) -> b s three head head_dim",
+                three=3,
+                head=self.num_attention_heads_per_partition,
+            )
+            used_len = seq_len
+		
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
@@ -390,14 +430,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
-                seq_len,
+                used_len,
                 self.num_attention_heads_per_partition,
                 self.hidden_size_per_attention_head,
             )
             q, k = qk_rotated.unbind(dim=0)
         else:
             q, k, v = qkv.unbind(dim=2)
-
+       
         context_layer = self.attn(
             query=q,
             key=k,
@@ -406,13 +446,22 @@ class Qwen2_5_VisionAttention(nn.Module):
             max_seqlen=max_seqlen,
         )
 
-        context_layer = einops.rearrange(
-            context_layer, "b s h d -> s b (h d)", b=batch_size
-        ).contiguous()
 
+        if self.use_data_parallel == False :
+            padding = (0, 0, 0, 0, 0, cur_seq - true_seq)
+            context_layer = F.pad(context_layer, padding)
+            context_layer = context_layer.reshape(seq_len * self.tp_world_size, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head) 
+            context_layer = all_to_all_3d(context_layer, is_seq_to_head=False, group=self.tp_group)
+            context_layer = einops.rearrange(
+                context_layer, "(b s) h d -> s b (h d)", b=batch_size
+            ).contiguous()
+        else :
+            context_layer = einops.rearrange(
+                context_layer, "b s h d -> s b (h d)", b=batch_size
+            ).contiguous()
+        
         output, _ = self.proj(context_layer)
         return output
-
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -465,6 +514,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        true_seq: int
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -472,6 +522,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            true_seq=true_seq
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -1568,10 +1619,3 @@ class Qwen2_5_VLForConditionalGeneration(
             tower_model="visual.",
         )
 
-    @classmethod
-    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
-        """
-        Return the language model spec:
-        (language model class, language model attr)
-        """
-        return Qwen2ForCausalLM, "language_model"
