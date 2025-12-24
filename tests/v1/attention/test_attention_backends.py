@@ -560,8 +560,10 @@ def test_causal_backend_correctness(
 
     if current_platform.is_rocm():
         SMALL_BLOCK_BACKENDS = [
-            x for x in BACKENDS_TO_TEST if (
-                x not in LARGE_BLOCK_BACKENDS 
+            x
+            for x in BACKENDS_TO_TEST
+            if (
+                x not in LARGE_BLOCK_BACKENDS
                 and x is not AttentionBackendEnum.FLASH_ATTN
             )
         ]
@@ -589,6 +591,7 @@ def test_causal_backend_correctness(
             tensor_parallel_size=tensor_parallel_size,
         )
 
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
@@ -603,6 +606,7 @@ else:
         AttentionBackendEnum.TRITON_ATTN,
         "FLEX_ATTENTION_SLOW",
     ]
+
 
 @pytest.mark.parametrize(
     "batch_spec_name",
