@@ -38,7 +38,7 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
     is_flashinfer_fp8_blockscale_gemm_supported,
-    should_use_flashinfer_for_block_scale_fp8_linear,
+    should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -238,7 +238,7 @@ def _flashinfer_fp8_blockscale_gemm_impl(
     group_size: int,
     use_deep_gemm_e8m0: bool,
 ) -> torch.Tensor:
-    def use_flashinfer(
+    def use_flashinfer_deepgemm_swapAB(
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
@@ -274,11 +274,18 @@ def _flashinfer_fp8_blockscale_gemm_impl(
         )
         return output
 
+    # there is only no benefit of using FlashInfer DeepGEMM for higher batch sizes since
+    # the swapAB optimization is only effective for small batch sizes.
+    # there is slight accuracy loss when using FlashInfer blockscale gemm for all batch
+    # sizes for DeepSeek-V3.
     condition = input.shape[0] < 32
 
-    # Pass all required variables through operands
+    # torch.cond for torch compile compatibility
     return torch.cond(
-        condition, use_flashinfer, use_deepgemm, (input, weight, weight_scale)
+        condition,
+        use_flashinfer_deepgemm_swapAB,
+        use_deepgemm,
+        (input, weight, weight_scale),
     )
 
 
@@ -357,7 +364,7 @@ class W8A8BlockFp8LinearOp:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
 
-        if should_use_flashinfer_for_block_scale_fp8_linear(
+        if should_use_flashinfer_for_blockscale_fp8_gemm(
             self.is_flashinfer_supported, output_dtype, input_2d, weight
         ):
             output = self._run_flashinfer(input_2d, weight, weight_scale)

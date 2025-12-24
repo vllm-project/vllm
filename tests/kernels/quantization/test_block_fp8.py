@@ -211,6 +211,10 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
@@ -239,13 +243,6 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
     Bs = Bs_fp8.to(torch.float32)
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
-    As_fp8 = get_col_major_tma_aligned_tensor(As_fp8)
-
-    # Transpose earlier so that the testing will not trigger transposing kernels
-
-    assert As_fp8.shape == (M, (K + 127) // 128), (
-        f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
-    )
 
     out = flashinfer_fp8_blockscale_gemm(
         input=A_bf16,
