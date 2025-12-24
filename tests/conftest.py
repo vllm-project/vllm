@@ -410,7 +410,7 @@ class HfRunner:
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
