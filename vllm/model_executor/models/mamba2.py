@@ -33,6 +33,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -284,5 +285,8 @@ class Mamba2ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Some Mamba2 checkpoints (e.g., mistralai/Mamba-Codestral-7B-v0.1)
+        # use "model." prefix in weight names, but vLLM uses "backbone.".
+        mapper = WeightsMapper(orig_to_new_prefix={"model.": "backbone."})
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=mapper)
