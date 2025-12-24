@@ -296,6 +296,7 @@ class LinearBase(CustomOp):
                 param.tp_size = self.tp_size
 
 
+# --8<-- [start:replicated_linear]
 @CustomOp.register("replicated_linear")
 class ReplicatedLinear(LinearBase):
     """Replicated linear layer.
@@ -312,6 +313,8 @@ class ReplicatedLinear(LinearBase):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: Take no effect for replicated linear layers.
     """
+
+    # --8<-- [end:replicated_linear]
 
     def __init__(
         self,
@@ -413,6 +416,7 @@ class ReplicatedLinear(LinearBase):
         return s
 
 
+# --8<-- [start:column_parallel_linear]
 @CustomOp.register("column_parallel_linear")
 class ColumnParallelLinear(LinearBase):
     """Linear layer with column parallelism.
@@ -439,6 +443,8 @@ class ColumnParallelLinear(LinearBase):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
+
+    # --8<-- [end:column_parallel_linear]
 
     def __init__(
         self,
@@ -1276,6 +1282,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+# --8<-- [start:row_parallel_linear]
 @CustomOp.register("row_parallel_linear")
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
@@ -1309,6 +1316,8 @@ class RowParallelLinear(LinearBase):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
+
+    # --8<-- [end:row_parallel_linear]
 
     def __init__(
         self,

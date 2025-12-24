@@ -19,12 +19,15 @@ _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
+# --8<-- [start:quant_fp8]
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
     """
     Quantize input tensor to FP8 (per-tensor, per-token, or per-group).
     This CustomOp supports both static and dynamic quantization.
     """
+
+    # --8<-- [end:quant_fp8]
 
     def __init__(
         self,
