@@ -66,7 +66,7 @@ logger = init_logger(__name__)
 temp_dir = tempfile.gettempdir()
 
 
-def enable_hf_transfer():
+def enable_hf_transfer() -> None:
     """automatically activates hf_transfer"""
     if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
         try:
@@ -87,7 +87,9 @@ class DisabledTqdm(tqdm):
         super().__init__(*args, **kwargs)
 
 
-def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
+def get_lock(
+    model_name_or_path: str | Path, cache_dir: str | None = None
+) -> filelock.FileLock:
     lock_dir = cache_dir or temp_dir
     model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
@@ -178,11 +180,11 @@ def maybe_download_from_modelscope(
     return None
 
 
-def _shared_pointers(tensors):
-    ptrs = defaultdict(list)
+def _shared_pointers(tensors: dict[str, torch.Tensor]) -> list[list[str]]:
+    ptrs: dict[int, list[str]] = defaultdict(list)
     for k, v in tensors.items():
         ptrs[v.data_ptr()].append(k)
-    failing = []
+    failing: list[list[str]] = []
     for _, names in ptrs.items():
         if len(names) > 1:
             failing.append(names)
@@ -602,7 +604,7 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 
-def enable_tqdm(use_tqdm_on_load: bool):
+def enable_tqdm(use_tqdm_on_load: bool) -> bool:
     return use_tqdm_on_load and (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
