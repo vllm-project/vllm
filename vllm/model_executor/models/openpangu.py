@@ -29,7 +29,8 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -351,7 +352,6 @@ class OpenPanguMLAAttention(nn.Module):
         }
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=False,
@@ -524,7 +524,6 @@ class OpenPanguEmbeddedAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
@@ -625,7 +624,7 @@ class OpenPanguDecoderLayer(nn.Module):
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
             )
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", None)
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.num_hidden_layers = config.num_hidden_layers
         self.first_k_dense_replace = getattr(
             config, "first_k_dense_replace", self.num_hidden_layers

@@ -47,6 +47,12 @@ QWEN2_CONFIG = GGUFTestConfig(
     gguf_filename="qwen2.5-1.5b-instruct-q6_k.gguf",
 )
 
+QWEN3_CONFIG = GGUFTestConfig(
+    original_model="Qwen/Qwen3-0.6B",
+    gguf_repo="unsloth/Qwen3-0.6B-GGUF",
+    gguf_filename="Qwen3-0.6B-BF16.gguf",
+)
+
 PHI3_CONFIG = GGUFTestConfig(
     original_model="microsoft/Phi-3.5-mini-instruct",
     gguf_repo="bartowski/Phi-3.5-mini-instruct-GGUF",
@@ -87,6 +93,7 @@ GEMMA3_CONFIG = GGUFTestConfig(
 MODELS = [
     # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
     QWEN2_CONFIG,
+    QWEN3_CONFIG,
     PHI3_CONFIG,
     GPT2_CONFIG,
     STABLELM_CONFIG,

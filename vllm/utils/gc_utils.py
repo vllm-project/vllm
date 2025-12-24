@@ -17,7 +17,7 @@ class GCDebugConfig:
     """
     Config for GC Debugger.
     - 0: disable GC debugger
-    - 1: enable GC debugger with gc.collect elpased times
+    - 1: enable GC debugger with gc.collect elapsed times
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 
@@ -53,6 +53,7 @@ class GCDebugger:
         self.config = config
         # Start time in micro second of this GC cycle
         self.start_time_ns: int = time.monotonic_ns()
+        self.num_objects: int = 0
         # If config.top_objects is positive,
         # compute top collected objects by object types
         self.gc_top_collected_objects: str = ""
@@ -68,8 +69,10 @@ class GCDebugger:
             # Before GC started, record GC start time
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
+            objects = gc.get_objects(generation)
+            self.num_objects = len(objects)
             self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation), self.config.top_objects
+                objects, self.config.top_objects
             )
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
@@ -77,9 +80,10 @@ class GCDebugger:
             elpased_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
             logger.info(
                 "GC took %.3fms to complete. "
-                "Collected %s objects in GC generation %d.%s",
+                "Collected %s objects (out of %d) in GC generation %d.%s",
                 elpased_ms,
                 str(info.get("collected", "?")),
+                self.num_objects,
                 generation,
                 (
                     f" Top collected objects: \n{self.gc_top_collected_objects}"

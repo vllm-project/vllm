@@ -290,7 +290,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         hidden_states_d, hidden_states_p = torch.split(
@@ -575,7 +574,6 @@ class Plamo2AttentionMixer(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
         )

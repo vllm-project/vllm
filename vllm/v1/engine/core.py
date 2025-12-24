@@ -43,9 +43,11 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -119,11 +121,12 @@ class EngineCore:
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        if len(kv_cache_config.kv_cache_groups) == 0:
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
-            logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.enable_chunked_prefill = False
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
@@ -203,9 +206,16 @@ class EngineCore:
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
+        self.aborts_queue = queue.Queue[list[str]]()
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -344,6 +354,9 @@ class EngineCore:
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -437,6 +450,9 @@ class EngineCore:
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
 
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -454,6 +470,18 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
+
+    def _process_aborts_queue(self):
+        if not self.aborts_queue.empty():
+            request_ids = []
+            while not self.aborts_queue.empty():
+                ids = self.aborts_queue.get_nowait()
+                if isinstance(ids, str):
+                    # Should be a list here, but also handle string just in case.
+                    ids = (ids,)
+                request_ids.extend(ids)
+            # More efficient to abort all as a single batch.
+            self.abort_requests(request_ids)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -480,8 +508,12 @@ class EngineCore:
 
         self.model_executor.reset_mm_cache()
 
-    def reset_prefix_cache(self):
-        self.scheduler.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.scheduler.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
@@ -644,13 +676,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
-
-        # Enable environment variable cache (e.g. assume no more
-        # environment variable overrides after this point)
-        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(
@@ -871,9 +896,13 @@ class EngineCoreProc(EngineCore):
             and not self.scheduler.has_requests()
             and not self.batch_queue
         ):
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
+            if self.input_queue.empty():
+                # Drain aborts queue; all aborts are also processed via input_queue.
+                with self.aborts_queue.mutex:
+                    self.aborts_queue.queue.clear()
+                if logger.isEnabledFor(DEBUG):
+                    logger.debug("EngineCore waiting for work.")
+                    waited = True
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
@@ -895,6 +924,13 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(output)
         # Post-step hook.
         self.post_step(model_executed)
+
+        # If no model execution happened but there are waiting requests
+        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
+        # background threads (like NIXL handshake) to make progress.
+        # Without this, the tight polling loop can starve background threads.
+        if not model_executed and self.scheduler.has_unfinished_requests():
+            time.sleep(0.001)
 
         return model_executed
 
@@ -1021,11 +1057,23 @@ class EngineCoreProc(EngineCore):
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
+                    request: Any
                     if request_type == EngineCoreRequestType.ADD:
-                        request = add_request_decoder.decode(data_frames)
-                        request = self.preprocess_add_request(request)
+                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        try:
+                            request = self.preprocess_add_request(req)
+                        except Exception:
+                            self._handle_request_preproc_error(req)
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
+
+                        if request_type == EngineCoreRequestType.ABORT:
+                            # Aborts are added to *both* queues, allows us to eagerly
+                            # process aborts while also ensuring ordering in the input
+                            # queue to avoid leaking requests. This is ok because
+                            # aborting in the scheduler is idempotent.
+                            self.aborts_queue.put_nowait(request)
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1099,6 +1147,30 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
+        """Log and return a request-scoped error response for exceptions raised
+        from the add request preprocessing in the input socket processing thread.
+        """
+        logger.exception(
+            "Unexpected error pre-processing request %s", request.request_id
+        )
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                        )
+                    ],
+                ),
+            )
+        )
 
 
 class DPEngineCoreProc(EngineCoreProc):

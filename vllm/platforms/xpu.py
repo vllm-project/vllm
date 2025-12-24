@@ -3,21 +3,21 @@
 
 import contextlib
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -43,14 +43,7 @@ class XPUPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: str | None,
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
@@ -60,9 +53,7 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
@@ -73,11 +64,39 @@ class XPUPlatform(Platform):
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
-                f"with use_mla: {use_mla}"
+                f"with use_mla: {attn_selector_config.use_mla}"
             )
 
         logger.info("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        # XPU only supports FLASH_ATTN for vision attention.
+        return [
+            AttentionBackendEnum.FLASH_ATTN,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: "
+                f"{cls.get_supported_vit_attn_backends()}."
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using backend {AttentionBackendEnum.FLASH_ATTN} for vit attention"
+        )
+        return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -113,14 +132,6 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> "AttentionBackendEnum":
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
-        return AttentionBackendEnum.FLASH_ATTN
-
-    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -145,10 +156,15 @@ class XPUPlatform(Platform):
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
-
+        # decrease triton kernel compilation scratch space for speculative decoding
+        if vllm_config.speculative_config is not None:
+            os.environ["IGC_ForceOCLSIMDWidth"] = "16"  # noqa: SIM112
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        # Only override worker_cls if it's still the default "auto"
+        # This allows custom workers (like vllm-omni workers) to be used on XPU
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
@@ -251,10 +267,6 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # To support TP_ratio, HOST KV might be initiated with HND
-            # while XPU device KV is with NHD
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
@@ -267,8 +279,4 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # XPU device KV is with NHD while HOST KV
-            # might be initiated with HND for TP_ratio support
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
