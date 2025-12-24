@@ -163,8 +163,10 @@ def apply_rotary_pos_emb(
         enable_fp32_compute=True,
     )
 
-    if is_flash_attn_backend and not current_platform.is_cuda():
+    if is_flash_attn_backend and current_platform.is_cuda():
         apply_rotary_emb_func = apply_rotary_emb.forward_cuda
+    elif is_flash_attn_backend and current_platform.is_rocm():
+        apply_rotary_emb_func = apply_rotary_emb.forward_hip
     else:
         apply_rotary_emb_func = apply_rotary_emb.forward_native
 
