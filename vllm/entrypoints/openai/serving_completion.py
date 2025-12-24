@@ -23,8 +23,13 @@ from vllm.entrypoints.openai.protocol import (
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
+    VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -226,6 +231,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(
@@ -242,8 +248,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -300,9 +305,10 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -437,6 +443,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
+                    self._raise_if_error(finish_reason, request_id)
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -498,9 +506,11 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
-            data = self.create_streaming_error_response(str(e))
+            logger.exception("Error in completion stream generator.")
+            data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -530,6 +540,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                self._raise_if_error(output.finish_reason, request_id)
+
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
@@ -646,8 +658,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     token = f"token_id:{token_id}"
                 else:
                     if tokenizer is None:
-                        raise ValueError(
-                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
+                        raise VLLMValidationError(
+                            "Unable to get tokenizer because "
+                            "`skip_tokenizer_init=True`",
+                            parameter="skip_tokenizer_init",
+                            value=True,
                         )
 
                     token = tokenizer.decode(token_id)
@@ -706,6 +721,15 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
         max_input_length: int | None = None,
     ) -> RenderConfig:
+        # Validate max_tokens before using it
+        if request.max_tokens is not None and request.max_tokens > self.max_model_len:
+            raise VLLMValidationError(
+                f"'max_tokens' ({request.max_tokens}) cannot be greater than "
+                f"the model's maximum context length ({self.max_model_len}).",
+                parameter="max_tokens",
+                value=request.max_tokens,
+            )
+
         max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
         return RenderConfig(
             max_length=max_input_tokens_len,
