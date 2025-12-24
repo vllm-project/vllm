@@ -33,8 +33,7 @@
     {
       "test_name": "serving_llama8B_tp1_sharegpt",
       "server_parameters": {
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "dataset_name": "sharegpt",
@@ -44,8 +43,7 @@
     {
       "test_name": "serving_llama8B_tp2_sharegpt",
       "server_parameters": {
-        "tensor_parallel_size": 2,
-        "enforce_eager": ""
+        "tensor_parallel_size": 2
       },
       "client_parameters": {
         "dataset_name": "sharegpt",
@@ -55,8 +53,7 @@
     {
       "test_name": "serving_llama8B_tp1_random_128_128",
       "server_parameters": {
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -67,8 +64,7 @@
     {
       "test_name": "serving_llama8B_tp2_random_128_128",
       "server_parameters": {
-        "tensor_parallel_size": 2,
-        "enforce_eager": ""
+        "tensor_parallel_size": 2
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -79,8 +75,7 @@
     {
       "test_name": "serving_llama8B_tp4_random_128_128",
       "server_parameters": {
-        "tensor_parallel_size": 4,
-        "enforce_eager": ""
+        "tensor_parallel_size": 4
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -91,8 +86,7 @@
     {
       "test_name": "serving_llama8B_tp1_random_128_2048",
       "server_parameters": {
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -103,8 +97,7 @@
     {
       "test_name": "serving_llama8B_tp2_random_128_2048",
       "server_parameters": {
-        "tensor_parallel_size": 2,
-        "enforce_eager": ""
+        "tensor_parallel_size": 2
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -115,8 +108,7 @@
     {
       "test_name": "serving_llama8B_tp4_random_128_2048",
       "server_parameters": {
-        "tensor_parallel_size": 4,
-        "enforce_eager": ""
+        "tensor_parallel_size": 4
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -127,8 +119,7 @@
     {
       "test_name": "serving_llama8B_tp1_random_2048_128",
       "server_parameters": {
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -139,8 +130,7 @@
     {
       "test_name": "serving_llama8B_tp2_random_2048_128",
       "server_parameters": {
-        "tensor_parallel_size": 2,
-        "enforce_eager": ""
+        "tensor_parallel_size": 2
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -151,8 +141,7 @@
     {
       "test_name": "serving_llama8B_tp4_random_2048_128",
       "server_parameters": {
-        "tensor_parallel_size": 4,
-        "enforce_eager": ""
+        "tensor_parallel_size": 4
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -203,8 +192,7 @@
       "test_name": "serving_llama3B_tp1_random_128_128",
       "server_parameters": {
         "model": "meta-llama/Llama-3.2-3B-Instruct",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "meta-llama/Llama-3.2-3B-Instruct",
@@ -217,8 +205,7 @@
       "test_name": "serving_granite2B_tp1_random_128_128",
       "server_parameters": {
         "model": "ibm-granite/granite-3.2-2b-instruct",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "ibm-granite/granite-3.2-2b-instruct",
@@ -231,8 +218,7 @@
       "test_name": "serving_qwen1.7B_tp1_random_128_128",
       "server_parameters": {
         "model": "Qwen/Qwen3-1.7B",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "Qwen/Qwen3-1.7B",
@@ -245,8 +231,7 @@
       "test_name": "serving_qwen4B_tp1_random_128_128",
       "server_parameters": {
         "model": "Qwen/Qwen3-4B",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "Qwen/Qwen3-4B",
@@ -259,8 +244,7 @@
       "test_name": "serving_qwen8B_tp1_random_128_128",
       "server_parameters": {
         "model": "Qwen/Qwen3-8B",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "Qwen/Qwen3-8B",
@@ -273,8 +257,7 @@
       "test_name": "serving_glm9B_tp1_random_128_128",
       "server_parameters": {
         "model": "zai-org/glm-4-9b-hf",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "zai-org/glm-4-9b-hf",
@@ -287,8 +270,7 @@
       "test_name": "serving_gemma7B_tp1_random_128_128",
       "server_parameters": {
         "model": "google/gemma-7b",
-        "tensor_parallel_size": 1,
-        "enforce_eager": ""
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "model": "google/gemma-7b",
