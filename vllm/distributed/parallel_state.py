@@ -28,7 +28,7 @@ import gc
 import pickle
 import weakref
 from collections import namedtuple
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1128,7 +1128,9 @@ def get_pcp_group() -> GroupCoordinator:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(
+    device: torch.device,
+) -> Generator[GraphCaptureContext, None, None]:
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
@@ -1152,7 +1154,7 @@ logger = init_logger(__name__)
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
 
-def set_custom_all_reduce(enable: bool):
+def set_custom_all_reduce(enable: bool) -> None:
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
@@ -1470,7 +1472,7 @@ def ensure_model_parallel_initialized(
     )
 
 
-def prepare_communication_buffer_for_model(model: torch.nn.Module):
+def prepare_communication_buffer_for_model(model: torch.nn.Module) -> None:
     """Prepare the communication buffer for the model.
     Traditional communication libraries like NCCL are almost
     model agnostic. However, emerging new communication libraries like
@@ -1489,7 +1491,7 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
 
 
-def model_parallel_is_initialized():
+def model_parallel_is_initialized() -> bool:
     """Check if tensor and pipeline parallel groups are initialized."""
     return _TP is not None and _PP is not None
 
@@ -1522,22 +1524,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 
@@ -1548,7 +1550,7 @@ def get_node_count() -> int:
     return _NODE_COUNT
 
 
-def destroy_model_parallel():
+def destroy_model_parallel() -> None:
     """Set the groups to none and destroy them."""
     global _TP
 
@@ -1582,7 +1584,7 @@ def destroy_model_parallel():
     _EP = None
 
 
-def destroy_distributed_environment():
+def destroy_distributed_environment() -> None:
     global _WORLD, _NODE_COUNT
     if _WORLD:
         _WORLD.destroy()
@@ -1592,7 +1594,7 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
-def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
     # Reset environment variable cache
     envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup

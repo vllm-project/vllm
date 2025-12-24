@@ -43,21 +43,21 @@ USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
 )
 
 
-def sched_yield():
+def sched_yield() -> None:
     if USE_SCHED_YIELD:
         os.sched_yield()
     else:
         time.sleep(0)
 
 
-def ensure_divisibility(numerator, denominator):
+def ensure_divisibility(numerator: int, denominator: int) -> None:
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, "{} is not divisible by {}".format(
         numerator, denominator
     )
 
 
-def divide(numerator, denominator):
+def divide(numerator: int, denominator: int) -> int:
     """Ensure that numerator is divisible by the denominator and return
     the division value."""
     ensure_divisibility(numerator, denominator)
