@@ -6,10 +6,9 @@ import tempfile
 
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.tokenizers import get_tokenizer
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_PATH = os.path.join(tempfile.gettempdir(), "qwen3_06b")

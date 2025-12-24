@@ -14,7 +14,7 @@ import torch
 from openai import BadRequestError
 from transformers import AutoConfig
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"

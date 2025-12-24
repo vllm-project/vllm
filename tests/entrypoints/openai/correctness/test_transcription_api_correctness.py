@@ -21,7 +21,7 @@ from datasets import load_dataset
 from evaluate import load
 from transformers import AutoTokenizer
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 
 def to_bytes(y, sr):

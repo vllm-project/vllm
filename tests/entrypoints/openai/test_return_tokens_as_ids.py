@@ -7,9 +7,8 @@
 
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 

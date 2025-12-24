@@ -3,9 +3,8 @@
 
 import pytest
 
+from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM
-
-from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 
 @multi_gpu_test(num_gpus=2)

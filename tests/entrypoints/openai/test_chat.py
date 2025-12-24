@@ -13,7 +13,7 @@ import requests
 import torch
 from openai import BadRequestError
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"

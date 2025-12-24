@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",

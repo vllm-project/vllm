@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
+from tests.utils import RemoteOpenAIServer
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.protocol import (
@@ -25,7 +26,6 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from ...utils import RemoteOpenAIServer
 from .utils import (
     accumulate_streaming_response,
     verify_chat_response,

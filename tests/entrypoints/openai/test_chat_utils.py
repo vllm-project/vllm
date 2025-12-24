@@ -9,6 +9,7 @@ import pytest
 import torch
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from tests.utils import VLLM_PATH
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -34,7 +35,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.serial_utils import tensor2base64
 
 from ...models.registry import HF_EXAMPLE_MODELS
-from ...utils import VLLM_PATH
 
 EXAMPLES_DIR = VLLM_PATH / "examples"
 
