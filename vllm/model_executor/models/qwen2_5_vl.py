@@ -367,6 +367,9 @@ class Qwen2_5_VisionAttention(nn.Module):
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
+        x_dim = x.dim()
+        if x_dim == 2:
+            x = x.unsqueeze(1)
         seq_len, batch_size, _ = x.shape
 
         qkv = einops.rearrange(
@@ -409,7 +412,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         context_layer = einops.rearrange(
             context_layer, "b s h d -> s b (h d)", b=batch_size
         ).contiguous()
-
+        if x_dim == 2:
+            context_layer = context_layer.squeeze(1)
         output, _ = self.proj(context_layer)
         return output
 

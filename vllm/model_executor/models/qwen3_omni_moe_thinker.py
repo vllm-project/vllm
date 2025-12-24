@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-Omni-Moe model (thinker part)."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
@@ -31,15 +32,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from packaging.version import Version
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers import __version__ as TRANSFORMERS_VERSION
+from transformers.activations import ACT2FN
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeConfig,
     Qwen3OmniMoeThinkerConfig,
-)
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-    Qwen3OmniMoeAudioEncoder,
 )
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
@@ -50,6 +50,7 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -93,6 +94,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLProcessingInfo,
 )
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
+from .qwen3_omni_config import Qwen3OmniMoeAudioEncoderConfig
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -112,13 +114,309 @@ except (ImportError, ModuleNotFoundError):
 logger = init_logger(__name__)
 
 
-def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
+class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: Qwen3OmniMoeAudioEncoderConfig,
+        quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        embed_dim = config.d_model
+        self.embed_dim = config.d_model
+        self.self_attn = Qwen2_5_VisionAttention(
+            embed_dim=embed_dim,
+            num_heads=config.encoder_attention_heads,
+            projection_size=embed_dim,
+            multimodal_config=multimodal_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.dropout = config.dropout
+        self.activation_fn = ACT2FN[config.activation_function]
+        self.activation_dropout = config.activation_dropout
+        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
+        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
+        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: torch.Tensor,  # Only used for Flash Attention
+    ) -> tuple[torch.Tensor]:
+        residual = hidden_states
+        hidden_states = self.self_attn_layer_norm(hidden_states)
+        hidden_states = self.self_attn(
+            x=hidden_states,
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=None,
+            rotary_pos_emb_sin=None,
+            max_seqlen=max_seqlen,
+        )
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states = self.fc2(hidden_states)
+        hidden_states = residual + hidden_states
+
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+            hidden_states = torch.clamp(
+                hidden_states, min=-clamp_value, max=clamp_value
+            )
+
+        outputs = (hidden_states,)
+
+        return outputs
+
+
+class SinusoidsPositionEmbedding(nn.Module):
+    def __init__(self, length, channels, max_timescale=10000):
+        super().__init__()
+        if channels % 2 != 0:
+            raise ValueError("SinusoidsPositionEmbedding needs even channels input")
+        log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
+        inv_timescales = torch.exp(
+            -log_timescale_increment * torch.arange(channels // 2).float()
+        )
+        scaled_time = (
+            torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+        )
+        self.register_buffer(
+            "positional_embedding",
+            torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1),
+            persistent=False,
+        )
+
+    def forward(self, seqlen: int):
+        return self.positional_embedding[:seqlen, :]
+
+
+def _get_feat_extract_output_lengths(input_lengths):
+    """
+    Computes the output length of the convolutional layers and the output length
+    of the audio encoder
+    """
+
     input_lengths_leave = input_lengths % 100
     feat_lengths = (input_lengths_leave - 1) // 2 + 1
     output_lengths = (
         ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
     )
     return feat_lengths, output_lengths
+
+
+@support_torch_compile(
+    dynamic_arg_dims={
+        "cu_seqlens": 0,
+        "max_seqlen": 0,
+        "hidden_states": 0,
+    }
+)
+class Qwen3OmniMoeAudioEncoder(PreTrainedModel):
+    config: Qwen3OmniMoeAudioEncoderConfig
+    _supports_flash_attn_2 = True
+    _supports_sdpa = True
+
+    def __init__(
+        self,
+        *,
+        config: Qwen3OmniMoeAudioEncoderConfig,
+        quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
+    ):
+        super().__init__(config=config)
+        self.dropout = config.dropout
+
+        embed_dim = config.d_model
+        self.num_mel_bins = config.num_mel_bins
+        self.max_source_positions = config.max_source_positions
+        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
+        self.n_window = config.n_window
+        self.positional_embedding = SinusoidsPositionEmbedding(
+            self.max_source_positions, embed_dim
+        )
+        self.layers = nn.ModuleList(
+            [
+                Qwen3OmniMoeAudioEncoderLayer(
+                    config=config,
+                    quant_config=quant_config,
+                    multimodal_config=multimodal_config,
+                )
+                for _ in range(config.encoder_layers)
+            ]
+        )
+
+        self.attn_backend = self.layers[0].self_attn.attn.attn_backend
+
+        self.ln_post = nn.LayerNorm(config.d_model)
+        self.gradient_checkpointing = False
+        self.conv2d1 = nn.Conv2d(1, config.downsample_hidden_size, 3, 2, padding=1)
+        self.conv2d2 = nn.Conv2d(
+            config.downsample_hidden_size,
+            config.downsample_hidden_size,
+            3,
+            2,
+            padding=1,
+        )
+        self.conv2d3 = nn.Conv2d(
+            config.downsample_hidden_size,
+            config.downsample_hidden_size,
+            3,
+            2,
+            padding=1,
+        )
+        self.conv_out = nn.Linear(
+            config.downsample_hidden_size
+            * ((((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2),
+            config.d_model,
+            bias=False,
+        )
+        self.proj1 = nn.Linear(config.d_model, config.d_model)
+        self.act = ACT2FN[config.activation_function]
+        self.proj2 = nn.Linear(config.d_model, config.output_dim)
+        self.n_window_infer = self.config.n_window_infer
+        self.conv_chunksize = self.config.conv_chunksize
+
+    def _freeze_parameters(self):
+        for param in self.parameters():
+            param.requires_grad = False
+        self._requires_grad = False
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.conv2d1
+
+    def set_input_embeddings(self, value: nn.Module):
+        self.conv2d1 = value
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("attn.qkv.", "attn.q_proj.", "q"),
+            ("attn.qkv.", "attn.k_proj.", "k"),
+            ("attn.qkv.", "attn.v_proj.", "v"),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            name = name.replace(".self_attn.out_proj", ".self_attn.proj")
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+    @torch.inference_mode()
+    def prepare_inputs_for_generation(
+        self,
+        input_features,
+        feature_lens=None,
+        aftercnn_lens=None,
+        **kwargs,
+    ):
+        chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
+        chunk_lengths = torch.tensor(
+            [self.n_window * 2] * chunk_num.sum(),
+            dtype=torch.long,
+            device=feature_lens.device,
+        )
+        tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
+        chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
+        chunk_lengths[chunk_lengths == 0] = self.n_window * 2
+
+        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
+        padded_feature = nn.utils.rnn.pad_sequence(
+            chunk_list, batch_first=True
+        ).transpose(1, 2)
+        _, feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
+        padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
+            [
+                torch.ones(length, dtype=torch.bool, device=padded_feature.device)
+                for length in feature_lens_after_cnn
+            ],
+            batch_first=True,
+        )
+        padded_feature = padded_feature.unsqueeze(1)
+        # Split to chunk to avoid OOM during convolution
+        padded_embeds = []
+        for chunk in padded_feature.split(self.conv_chunksize, dim=0):
+            padded_embed = F.gelu(self.conv2d1(chunk))
+            padded_embed = F.gelu(self.conv2d2(padded_embed))
+            padded_embed = F.gelu(self.conv2d3(padded_embed))
+            padded_embeds.append(padded_embed)
+        padded_embed = torch.cat(padded_embeds, dim=0)
+        b, c, f, t = padded_embed.size()
+        padded_embed = self.conv_out(
+            padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
+        )
+
+        positional_embedding = (
+            self.positional_embedding.positional_embedding[: padded_embed.shape[1], :]
+            .unsqueeze(0)
+            .to(padded_embed.dtype)
+        )
+        padded_embed = padded_embed + positional_embedding
+        hidden_states = padded_embed[padded_mask_after_cnn]
+        cu_chunk_lens = [0]
+        window_aftercnn = padded_mask_after_cnn.shape[-1] * (
+            self.n_window_infer // (self.n_window * 2)
+        )
+        for cnn_len in aftercnn_lens:
+            cu_chunk_lens += [window_aftercnn] * (cnn_len // window_aftercnn)
+            remainder = cnn_len % window_aftercnn
+            if remainder != 0:
+                cu_chunk_lens += [remainder]
+        cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(
+            -1, dtype=torch.int32
+        )
+        return cu_seqlens, hidden_states
+
+    def forward(
+        self,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ):
+        for encoder_layer in self.layers:
+            layer_outputs = encoder_layer(
+                hidden_states, cu_seqlens, max_seqlen=max_seqlen
+            )
+
+            hidden_states = layer_outputs[0]
+
+        hidden_states = self.ln_post(hidden_states)
+        hidden_states = self.proj1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.proj2(hidden_states)
+        return BaseModelOutput(last_hidden_state=hidden_states)
+
+    def compute_attn_mask_seqlen(
+        self,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        max_seqlen = torch.zeros([], device=cu_seqlens.device)
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        }:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return max_seqlen
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -1115,15 +1413,19 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
 
-        audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
+        _, audio_output_lengths = _get_feat_extract_output_lengths(
             audio_feature_lengths
         )
 
-        audio_outputs = self.audio_tower(
+        cu_seqlens, hidden_states = self.audio_tower.prepare_inputs_for_generation(
             input_features.to(self.audio_tower.dtype),
             feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
+            aftercnn_lens=audio_output_lengths,
         )
+
+        max_seqlen = self.audio_tower.compute_attn_mask_seqlen(cu_seqlens)
+        with set_forward_context(None, self.vllm_config):
+            audio_outputs = self.audio_tower(cu_seqlens, max_seqlen, hidden_states)
         audio_features = audio_outputs.last_hidden_state
         return audio_features.split(audio_output_lengths.tolist())
 
@@ -1195,7 +1497,15 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 "in the audio tower part."
             )
 
-        self.audio_tower = Qwen3OmniMoeAudioEncoder(thinker_config.audio_config)
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("audio_tower"):
+            self.audio_tower = Qwen3OmniMoeAudioEncoder(
+                config=thinker_config.audio_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+                multimodal_config=multimodal_config,
+            )
 
         self.visual = Qwen3Omni_VisionTransformer(
             vision_config=thinker_config.vision_config,
