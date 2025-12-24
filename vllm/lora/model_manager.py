@@ -272,6 +272,37 @@ class LoRAModelManager:
                 assert gate_up_proj_lora is not None
                 assert down_proj_lora is not None
                 if self._is_3d_moe_model:
+                    num_experts = module.w13_lora_a_stacked[0].shape[1]
+                    lora_weight_device = gate_up_proj_lora.lora_b.device
+
+                    # (num_experts,rank,input_size)
+                    gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
+                        num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                    )
+                    down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
+                        num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                    )
+
+                    # (output_size,num_experts,rank)
+                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
+                        gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                    )
+                    down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
+                        down_proj_lora.lora_b.shape[0], -1, num_experts
+                    )
+
+                    # (num_experts,output_size,rank)
+                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
+                        1, 0, 2
+                    ).contiguous()
+                    down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
+                        1, 0, 2
+                    ).contiguous()
+
+                    if str(lora_weight_device) == "cpu" and is_pin_memory_available():
+                        gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.pin_memory()
+                        down_proj_lora.lora_b = down_proj_lora.lora_b.pin_memory()
+
                     module_lora.lora_a = [
                         gate_up_proj_lora.lora_a,
                         down_proj_lora.lora_a,
