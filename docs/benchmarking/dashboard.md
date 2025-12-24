@@ -49,6 +49,7 @@ The json version of the table (together with the json version of the benchmark) 
 The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
 
 #### Performance Results Comparison
+
 The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
 When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
 `compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
@@ -58,16 +59,19 @@ Here is an example using the script to compare result_a and result_b with max co
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
 
 ***Output Tput (tok/s) — Model : [ meta-llama/Llama-3.1-8B-Instruct ] , Dataset Name : [ random ] , Input Len : [ 2048.0 ] , Output Len : [ 2048.0 ]***
+
 |    | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
 |----|------|-----|-----------|----------|----------|
-| 0  | 12 | inf | 24.98   | 186.03 | 	7.45 |
-| 1  | 16 | inf| 	25.49  | 246.92 | 9.69 |
-| 2  | 24 | inf| 27.74  | 293.34 | 	10.57 |
+| 0  | 12 | inf | 24.98   | 186.03 |  7.45 |
+| 1  | 16 | inf|  25.49  | 246.92 | 9.69 |
+| 2  | 24 | inf| 27.74  | 293.34 |  10.57 |
 | 3  | 32 | inf| 28.61  |306.69 | 10.72 |
 
 ***compare-json-results.py – Command-Line Parameters***  
+
 compare-json-results.py provides configurable parameters to compare one or more benchmark_results.json files and generate summary tables and plots.  
-In most cases, users only need to specify --file to parse the desired benchmark results. 
+In most cases, users only need to specify --file to parse the desired benchmark results.
+
 | Parameter              | Type               | Default Value           | Description                                                                                           |
 | ---------------------- | ------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------- |
 | `--file`               | `str` (appendable) | *None*                  | Input JSON result file(s). Can be specified multiple times to compare multiple benchmark outputs.     |
@@ -78,17 +82,16 @@ In most cases, users only need to specify --file to parse the desired benchmark 
 | `--ttft-max-ms`        | `float`            | `3000.0`                | Reference upper bound (milliseconds) for TTFT plots, typically used to visualize SLA thresholds.      |
 | `--tpot-max-ms`        | `float`            | `100.0`                 | Reference upper bound (milliseconds) for TPOT plots, typically used to visualize SLA thresholds.      |
 
-
 ***Valid Max Concurrency Summary***  
+
 Based on the configured TTFT and TPOT SLA thresholds, compare-json-results.py computes the maximum valid concurrency for each benchmark result.  
 The “Max # of max concurrency. (Both)” column represents the highest concurrency level that satisfies both TTFT and TPOT constraints simultaneously.  
 This value is typically used in capacity planning and sizing guides.  
+
 | # | Configuration  | Max # of max concurrency. (TTFT ≤ 10000 ms) | Max # of max concurrency. (TPOT ≤ 100 ms) | Max # of max concurrency. (Both) | Output Tput @ Both (tok/s) | TTFT @ Both (ms) | TPOT @ Both (ms) |
 | - | -------------- | ------------------------------------------- | ----------------------------------------- | -------------------------------- | -------------------------- | ---------------- | ---------------- |
 | 0 | results-a      | 128.00                                      | 12.00                                     | 12.00                            | 127.76                     | 3000.82          | 93.24            |
 | 1 | results-b      | 128.00                                      | 32.00                                     | 32.00                            | 371.42                     | 2261.53          | 81.74            |
-
-
 
 More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
 
