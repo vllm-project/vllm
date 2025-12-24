@@ -26,6 +26,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
+    get_default_config,
     modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
@@ -65,6 +67,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
+SPLIT_K_SIZE = [1, 2, 16]
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # AWQ-INT4
@@ -458,6 +461,97 @@ def test_fused_moe_wn16(
         torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, expert_map=e_map)
 
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", [256])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("split_k_size", SPLIT_K_SIZE)
+def test_fused_moe_splitk(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    split_k_size: int,
+    monkeypatch,
+):
+    current_platform.seed_everything(7)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(8192))
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    e_map = None
+
+    #
+    # Setup test functions
+    #
+    quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+
+    def m_fused_moe(
+        a: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        score: torch.Tensor,
+        topk: int,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        return m_fused_moe_fn(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+        )
+
+    fused_moe_fn = functools.partial(fused_moe, renormalize=False)
+
+    #
+    # Run tests
+    #
+    runner = functools.partial(
+        run_moe_test,
+        a=a,
+        w1=w1,
+        w2=w2,
+        score=score,
+        topk=topk,
+        global_num_experts=e,
+        expert_map=e_map,
+    )
+
+    use_compile = False
+
+    use_cudagraph = n >= 1024 and k >= 1024 and current_platform.is_cuda_alike()
+
+    fused_moe_config = get_default_config(m, e, n, k, topk, a.dtype)
+    fused_moe_config["SPLIT_K"] = split_k_size
+
+    with set_current_vllm_config(vllm_config), override_config(fused_moe_config):
+        baseline_output = runner(torch_moe, iterative_moe)
+        runner(
+            baseline_output,
+            fused_moe_fn,
+            use_compile=use_compile,
+            use_cudagraph=use_cudagraph,
+        )
+        runner(
+            baseline_output,
+            m_fused_moe,
+            use_compile=use_compile,
+            use_cudagraph=use_cudagraph,
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])

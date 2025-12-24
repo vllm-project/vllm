@@ -24,6 +24,9 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)  # For multi-GPU
+
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -244,6 +247,7 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
         block_n_range = [32, 64, 128, 256]
         block_k_range = [64, 128, 256]
         num_warps_range = [4, 8]
+        split_k_range = [1, 4, 8, 16]
         group_m_range = [1, 16, 32, 64]
         num_stage_range = [2, 3, 4, 5]
 
@@ -251,6 +255,7 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
             "BLOCK_SIZE_M": block_m_range,
             "BLOCK_SIZE_N": block_n_range,
             "BLOCK_SIZE_K": block_k_range,
+            "SPLIT_K": split_k_range,
             "GROUP_SIZE_M": group_m_range,
             "num_warps": num_warps_range,
             "num_stages": num_stage_range,
@@ -273,6 +278,29 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
             ):
                 configs.remove(config)
     return configs
+
+
+def prune_cuda_search_space(
+    num_tokens, shard_intermediate_size, hidden_size, search_space, is_fp16, topk
+):
+    N1, K1 = shard_intermediate_size, hidden_size
+
+    # Currently we only prune mm1 split_k configs for cuda
+    # We should add more heuristics here in future and
+    # expand original search space
+    pruned_space_1 = prune_cuda_configs(num_tokens * topk, N1, K1, search_space)
+    search_space = merge_unique_dicts(pruned_space_1, [])  # placeholder for mm2
+    return search_space
+
+
+def prune_cuda_configs(M, N, K, configs):
+    pruned_configs = []
+    for config in configs:
+        SPLIT_K = config.get("SPLIT_K", 1)
+        if SPLIT_K != 1 and not need_split_k_cuda(M, N, K):
+            continue
+        pruned_configs.append(config)
+    return pruned_configs
 
 
 def prune_rocm_search_space(
@@ -370,6 +398,10 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
         pruned_configs.append(config)
 
     return pruned_configs
+
+
+def need_split_k_cuda(SIZE_M, SIZE_N, SIZE_K):
+    return (SIZE_M < 64 or SIZE_N < 64) and SIZE_K > 1024
 
 
 def need_split_k(SIZE_M, SIZE_N, SIZE_K):
@@ -475,6 +507,16 @@ class BenchmarkWorker:
                 is_fp16,
                 topk,
             )
+        else:
+            is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
+            search_space = prune_cuda_search_space(
+                num_tokens,
+                shard_intermediate_size,
+                hidden_size,
+                search_space,
+                is_fp16,
+                topk,
+            )
 
         need_device_guard = False
         if current_platform.is_rocm():
@@ -517,6 +559,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
         "BLOCK_SIZE_M": config["BLOCK_SIZE_M"],
         "BLOCK_SIZE_N": config["BLOCK_SIZE_N"],
         "BLOCK_SIZE_K": config["BLOCK_SIZE_K"],
+        "SPLIT_K": config["SPLIT_K"],
         "GROUP_SIZE_M": config["GROUP_SIZE_M"],
         "num_warps": config["num_warps"],
         "num_stages": config["num_stages"],
