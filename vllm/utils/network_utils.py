@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
+def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]) -> None:
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)

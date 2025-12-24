@@ -29,7 +29,7 @@ RESET = "\033[0;0m"
 # Environment variable utilities
 
 
-def update_environment_variables(envs_dict: dict[str, str]):
+def update_environment_variables(envs_dict: dict[str, str]) -> None:
     """Update multiple environment variables with logging."""
     for k, v in envs_dict.items():
         if k in os.environ and os.environ[k] != v:
@@ -57,7 +57,7 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def suppress_stdout():
+def suppress_stdout() -> Iterator[None]:
     """
     Suppress stdout from C libraries at the file descriptor level.
 
@@ -110,7 +110,7 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 # Process management utilities
 
 
-def _maybe_force_spawn():
+def _maybe_force_spawn() -> None:
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
     """
@@ -216,7 +216,7 @@ def decorate_logs(process_name: str | None = None) -> None:
     _add_prefix(sys.stderr, process_name, pid)
 
 
-def kill_process_tree(pid: int):
+def kill_process_tree(pid: int) -> None:
     """
     Kills all descendant processes of the given pid by sending SIGKILL.
 
@@ -245,7 +245,7 @@ def kill_process_tree(pid: int):
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630
-def set_ulimit(target_soft_limit: int = 65535):
+def set_ulimit(target_soft_limit: int = 65535) -> None:
     if sys.platform.startswith("win"):
         logger.info("Windows detected, skipping ulimit adjustment.")
         return
