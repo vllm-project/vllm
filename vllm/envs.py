@@ -847,6 +847,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
     ),
+    # Timeout in seconds for engine core shutdown.
+    # This controls how long to wait for engine core processes to terminate
+    # gracefully before force killing them.
+    "VLLM_ENGINE_SHUTDOWN_TIMEOUT": lambda: int(
+        os.environ.get("VLLM_ENGINE_SHUTDOWN_TIMEOUT", "5")
+    ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
