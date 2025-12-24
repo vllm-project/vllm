@@ -458,25 +458,3 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
-
-
-def test_o_legacy_syntax_deprecation(caplog_vllm):
-    """Test that -O.* dotted syntax emits warnings and converts correctly to -cc syntax."""
-    parser = FlexibleArgumentParser()
-    parser.add_argument("-cc", "--compilation-config", type=json.loads)
-
-    # Test that -O.backend gets converted correctly AND emits warning
-    args = parser.parse_args(["-O.backend=eager"])
-    assert args.compilation_config == {"backend": "eager"}
-
-    # Check that deprecation warning was logged
-    assert len(caplog_vllm.records) >= 1
-    assert (
-        "The -O.* dotted syntax for --compilation-config is deprecated"
-        in caplog_vllm.text
-    )
-
-    # Test that -O.mode gets converted correctly
-    # Note: warning_once won't emit again in same session
-    args = parser.parse_args(["-O.mode=2"])
-    assert args.compilation_config == {"mode": 2}

@@ -9,7 +9,8 @@ from transformers import AutoProcessor
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.utils import fetch_image
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
@@ -47,14 +48,6 @@ def server():
         yield remote_server
 
 
-@pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server) -> dict[str, str]:
-    return {
-        image_url: encode_image_base64(local_asset_server.get_image_asset(image_url))
-        for image_url in TEST_IMAGE_ASSETS
-    }
-
-
 def get_hf_prompt_tokens(model_name, content, image_url):
     processor = AutoProcessor.from_pretrained(
         model_name, trust_remote_code=True, num_crops=4
@@ -62,7 +55,11 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
-    images = [fetch_image(image_url)]
+    image = fetch_image(image_url)
+    # Unwrap MediaWithBytes if present
+    if isinstance(image, MediaWithBytes):
+        image = image.media
+    images = [image]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
 

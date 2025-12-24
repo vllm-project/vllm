@@ -23,31 +23,23 @@ def create_test_prompts(
         # this is an example of using quantization without LoRA
         (
             "My name is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             None,
         ),
         # the next three examples use quantization with LoRA
         (
             "my name is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-1", 1, lora_path),
         ),
         (
             "The capital of USA is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-2", 1, lora_path),
         ),
         (
             "The capital of France is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-3", 1, lora_path),
         ),
     ]

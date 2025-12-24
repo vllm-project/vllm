@@ -703,8 +703,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [

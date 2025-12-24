@@ -15,6 +15,7 @@
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
+/vllm/tool_parsers @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 /vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
@@ -146,10 +147,10 @@ mkdocs.yaml @hmellor
 /requirements/kv_connectors.txt @NickLucche
 
 # Pooling models
-/examples/*/pooling/ @noooop
+/examples/pooling @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
-/vllm/entrypoints/pooling @aarnphm @chaunceyjiang @noooop
+/vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/pooling_params.py @noooop
 /vllm/model_executor/layers/pooler.py @noooop

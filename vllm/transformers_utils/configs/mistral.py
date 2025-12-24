@@ -18,9 +18,31 @@ def adapt_config_dict(
     if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
+    is_moe = bool(config_dict.get("moe"))
+    is_mistral_large_3 = (
+        is_moe and (config_dict["moe"].get("num_shared_experts") or 0) > 0
+    )
     if config_dict.get("model_type") == "mamba":
         config_dict["architectures"] = ["Mamba2ForCausalLM"]
-    elif bool(config_dict.get("moe")):
+    elif is_moe and is_mistral_large_3:
+        config_dict = _remap_moe_args(config_dict)
+        config_dict["model_type"] = "deepseek_v3"
+        config_dict["architectures"] = ["MistralLarge3ForCausalLM"]
+
+        assert "llama_4_scaling" in config_dict, (
+            "MistralLarge3 expect llama4 scaling config."
+        )
+        llama_4_scaling_config_keys = ["original_max_position_embeddings", "beta"]
+        assert all(
+            [
+                key in config_dict["llama_4_scaling"]
+                for key in llama_4_scaling_config_keys
+            ]
+        ), (
+            "llama_4_scaling config should define the keys: "
+            f"{','.join(llama_4_scaling_config_keys)}"
+        )
+    elif is_moe:
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
@@ -140,17 +162,20 @@ def _remap_general_mistral_args(config: dict) -> dict:
 
 
 def _remap_mistral_quantization_args(config: dict) -> dict:
-    quantization = config.get("quantization", {})
-    if quantization.get("qformat_weight") == "fp8_e4m3":
-        # This maps to the FP8 static per-tensor quantization scheme
-        quantization_config = {"quant_method": "fp8", "activation_scheme": "static"}
-    elif quantization.get("quant_method") == "compressed-tensors":
-        # Pass through the quantization config to compressed-tensors
-        quantization_config = quantization
-    else:
-        raise ValueError(f"Found unknown quantization='{quantization}' in config")
-
-    config["quantization_config"] = quantization_config
+    if config.get("quantization"):
+        quantization = config.pop("quantization", {})
+        if quantization.get("qformat_weight") == "fp8_e4m3":
+            qscheme_act = quantization.get("qscheme_act")
+            assert qscheme_act in ("NO_SCALES", "TENSOR", None), (
+                "Only NO_SCALES and TENSOR (default) are supported for qscheme_act"
+            )
+            is_dynamic = qscheme_act == "NO_SCALES"
+            config["quantization_config"] = {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic" if is_dynamic else "static",
+            }
+        else:
+            raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
     return config
 
@@ -159,18 +184,42 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     whisper_args = config["multimodal"].pop("whisper_model_args")
     encoder_args = whisper_args["encoder_args"]
     downsample_args = whisper_args["downsample_args"]
+    downsample_factor = downsample_args["downsample_factor"]
+
+    # make sure that k/v blocks can be allocated with
+    # unified k/v cache class and pool whisper k/v cache blocks
+    # with downsample_factor:1 ratio
+    if encoder_args.get("causal"):
+        block_pool_size = downsample_factor
+        config["projection_size"] = downsample_factor * encoder_args["dim"]
+    else:
+        block_pool_size = 1
+
+    _maybe_sliding_window = encoder_args.get("ragged_attention", None)
+    if _maybe_sliding_window is None:
+        sliding_window = None
+    elif _maybe_sliding_window.isdigit():
+        sliding_window = int(_maybe_sliding_window)
+    else:
+        raise NotImplementedError(f"Unsupported: {_maybe_sliding_window=}")
+
+    architecture = (
+        "VoxtralStreamingGeneration"
+        if encoder_args.get("causal")
+        else "VoxtralForConditionalGeneration"
+    )
 
     quant_config = config.get("quantization_config")
     config = {
-        "model_type": "whixtral",
-        "architectures": ["VoxtralForConditionalGeneration"],
+        "model_type": "voxtral",
+        "architectures": [architecture],
         "text_config": PretrainedConfig.from_dict(config),
         "audio_config": WhisperConfig(
             num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
             window_size=encoder_args["audio_encoding_args"]["window_size"],
             sampling_rate=encoder_args["audio_encoding_args"]["sampling_rate"],
             hop_length=encoder_args["audio_encoding_args"]["hop_length"],
-            downsample_factor=downsample_args["downsample_factor"],
+            downsample_factor=downsample_factor,
             d_model=encoder_args["dim"],
             encoder_layers=encoder_args["n_layers"],
             encoder_ffn_dim=encoder_args["hidden_dim"],
@@ -178,8 +227,37 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             vocab_size=encoder_args["vocab_size"],
             max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
+            is_causal=encoder_args.get("causal", False),
+            sliding_window=sliding_window,
+            block_pool_size=block_pool_size,
+            pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
         ),
     }
     if quant_config:
         config["quantization_config"] = quant_config
+    return config
+
+
+def _remap_moe_args(config: dict) -> dict:
+    moe_config_map = {
+        "route_every_n": "moe_layer_freq",
+        "first_k_dense_replace": "first_k_dense_replace",
+        "num_experts_per_tok": "num_experts_per_tok",
+        "num_experts": "n_routed_experts",
+        "expert_hidden_dim": "moe_intermediate_size",
+        "routed_scale": "routed_scaling_factor",
+        "num_shared_experts": "n_shared_experts",
+        "num_expert_groups": "n_group",
+        "num_expert_groups_per_tok": "topk_group",
+    }
+    moe_config = config.get("moe", {})
+    for old_name, new_name in moe_config_map.items():
+        if old_name in moe_config:
+            value = moe_config.pop(old_name)
+            config[new_name] = value
+
+    config["topk_method"] = None
+    config["norm_topk_prob"] = True
+    config["scoring_func"] = "softmax"
+
     return config

@@ -52,7 +52,6 @@ from vllm.multimodal.evs import (
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalKwargs,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -75,7 +74,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
@@ -454,14 +452,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     @property
@@ -852,17 +848,18 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "image_num_patches" in out_mm_kwargs:
-            image_num_patches = out_mm_kwargs["image_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "image_num_patches" in out_mm_data:
+            image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_kwargs:
+        elif "image_embeds" in out_mm_data:
             # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+            image_num_patches = [None] * len(out_mm_data["image_embeds"])
         else:
             image_num_patches = []
 
@@ -1119,8 +1116,6 @@ class NanoNemotronVLDummyInputsBuilder(
 class NemotronH_Nano_VL_V2(
     nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
 ):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -1179,14 +1174,12 @@ class NemotronH_Nano_VL_V2(
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):

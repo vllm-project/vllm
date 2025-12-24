@@ -172,7 +172,7 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     )
 
     # Call the function
-    result = make_local_attention_virtual_batches(
+    result, _ = make_local_attention_virtual_batches(
         attn_chunk_size, common_attn_metadata, block_size
     )
 
