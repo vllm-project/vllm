@@ -9,12 +9,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from tests.conftest import HfRunner
-from tests.models.utils import RerankModelInfo
-
-from .mteb_score_utils import VllmMtebCrossEncoder, mteb_test_rerank_models
+from tests.models.language.pooling_mteb_test.mteb_utils import (
+    VllmMtebCrossEncoder,
+    mteb_test_rerank_models,
+)
+from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
 
 RERANK_MODELS = [
-    RerankModelInfo(
+    LASTPoolingRerankModelInfo(
         "BAAI/bge-reranker-v2-gemma",
         architecture="GemmaForSequenceClassification",
         mteb_score=0.33757,
@@ -23,10 +25,6 @@ RERANK_MODELS = [
             "classifier_from_token": ["Yes"],
             "method": "no_post_processing",
         },
-        pooling_type="LAST",
-        attn_type="decoder",
-        is_prefix_caching_supported=True,
-        is_chunked_prefill_supported=True,
     ),
 ]
 
