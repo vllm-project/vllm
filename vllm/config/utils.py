@@ -294,6 +294,13 @@ def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFa
     - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
+    field_names = {f.name for f in fields(config)}
+    unknown_ignored = ignored_factors - field_names
+    if unknown_ignored:
+        raise ValueError(
+            f"get_compile_factors: ignored_factors contain unknown fields "
+            f"{sorted(unknown_ignored)} for {type(config).__name__}"
+        )
     factors: dict[str, object] = {}
     for dc_field in fields(config):
         factor = dc_field.name

@@ -185,15 +185,7 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
 
-        ignored_fields: set[str] = {
-            "enable_fusion",
-            "enable_attn_fusion",
-            "enable_noop",
-            "enable_sequence_parallelism",
-            "enable_async_tp",
-            "enable_fi_allreduce_fusion",
-        }
-        return get_compile_factors(self, ignored_fields)
+        return get_compile_factors(self, set())
 
     @field_validator(
         "fuse_norm_quant",
@@ -640,13 +632,9 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "static_forward_context",
-            # handled explicitly below for clarity
-            "pass_config",
         }
 
-        factors = get_compile_factors(self, ignored_factors)
-        factors["pass_config"] = self.pass_config.compile_factors()
-        return factors
+        return get_compile_factors(self, ignored_factors)
 
     def __repr__(self) -> str:
         exclude = {
