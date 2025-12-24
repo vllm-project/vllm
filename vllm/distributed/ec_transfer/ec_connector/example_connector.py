@@ -81,10 +81,7 @@ class ECExampleConnector(ECConnectorBase):
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
-                (
-                    "In connector.start_load_caches, ",
-                    "but the connector metadata is None",
-                )
+                "In connector.start_load_caches, but the connector metadata is None"
             )
             return
         # Load the EC for each mm data
