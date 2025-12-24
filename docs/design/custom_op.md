@@ -29,12 +29,15 @@ When a `CustomOp` is called (i.e., call its `forward()` method), if it is enable
 - **OOT platform:** dispatch to `forward_oot()`. This will only be called on OOT platforms.
 - **Default:** dispatch to `forward_native()` as a final fallback for all platforms.
 
+!!! note
+    Note that the dispatching logic might not be absolute because of class inheritance. Derived class might override the behavior.
+
 Furthur more, vLLM decides whether enable or disable a `CustomOp` by `compilation_config.custom_ops`. To be specific, if a `CustomOp` is not registered (i.e., use default config), it will be enabled if there is a `all` in `compilation_config.custom_ops` or will be disabled if there is a `none`.
 
 !!! note
     Note that `all` and `none` cannot coexist in `compilation_config.custom_ops`.
 
-By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as dafault backend for `torch.compile`) when running with graph mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
+By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as dafault backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
 
 !!! note
     For multi-modal models, vLLM has enforece enabled some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
