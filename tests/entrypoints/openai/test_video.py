@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.utils import encode_video_url, fetch_video
+from vllm.platforms import current_platform
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 MAXIMUM_VIDEOS = 4
@@ -36,7 +37,16 @@ def server():
         json.dumps({"video": MAXIMUM_VIDEOS}),
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Increase timeouts to handle potential network delays and slower
+    # video processing when downloading multiple videos from external sources
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 
@@ -285,6 +295,11 @@ async def test_chat_streaming_video(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "video_urls", [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))]
+)
+@pytest.mark.flaky(
+    reruns=2,
+    reruns_delay=5,
+    condition=current_platform.is_rocm(),
 )
 async def test_multi_video_input(
     client: openai.AsyncOpenAI, model_name: str, video_urls: list[str]
