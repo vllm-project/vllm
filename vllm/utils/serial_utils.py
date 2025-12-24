@@ -107,7 +107,10 @@ def binary2tensor(
     torch_dtype = EMBED_DTYPE_TO_TORCH_DTYPE[embed_dtype]
     np_dtype = EMBED_DTYPE_TO_NUMPY_DTYPE_VIEW[embed_dtype]
 
-    np_array = np.frombuffer(binary, dtype=np_dtype).reshape(shape)
+    # Use bytearray to create a mutable copy of the binary data.
+    # This ensures np.frombuffer returns a writable array, avoiding
+    # UserWarning from torch.from_numpy on read-only arrays.
+    np_array = np.frombuffer(bytearray(binary), dtype=np_dtype).reshape(shape)
 
     if endianness != "native" and endianness != sys_byteorder:
         np_array = np_array.byteswap()
