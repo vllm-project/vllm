@@ -3,23 +3,29 @@
 import pytest
 
 from tests.models.utils import (
-    CLSPoolingRerankModelInfo,
-    LASTPoolingRerankModelInfo,
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         "cross-encoder/ms-marco-TinyBERT-L-2-v2",
         mteb_score=0.32898,
         architecture="BertForSequenceClassification",
+        pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
         mteb_score=0.25736,
         architecture="Qwen3ForSequenceClassification",
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
     ),
 ]
 

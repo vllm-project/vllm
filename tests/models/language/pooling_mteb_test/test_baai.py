@@ -4,90 +4,94 @@ import pytest
 
 from tests.models.language.pooling.embed_utils import correctness_test_embed_models
 from tests.models.utils import (
-    CLSPoolingEmbedModelInfo,
-    CLSPoolingRerankModelInfo,
     EmbedModelInfo,
-    LASTPoolingEmbedModelInfo,
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
+from .mteb_embed_utils import mteb_test_embed_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 MODELS = [
     ########## BertModel
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-base-en",
         architecture="BertModel",
         mteb_score=0.779336792,
+        pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    CLSPoolingEmbedModelInfo(
-        "BAAI/bge-base-zh", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
-        "BAAI/bge-small-en", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
-        "BAAI/bge-small-zh", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
-        "BAAI/bge-large-en", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
-        "BAAI/bge-large-zh", architecture="BertModel", enable_test=False
-    ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo("BAAI/bge-base-zh", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("BAAI/bge-small-en", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("BAAI/bge-small-zh", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("BAAI/bge-large-en", architecture="BertModel", enable_test=False),
+    EmbedModelInfo("BAAI/bge-large-zh", architecture="BertModel", enable_test=False),
+    EmbedModelInfo(
         "BAAI/bge-large-zh-noinstruct", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-base-en-v1.5", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-base-zh-v1.5", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-small-en-v1.5", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-small-zh-v1.5", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-large-en-v1.5", architecture="BertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-large-zh-v1.5", architecture="BertModel", enable_test=False
     ),
     ########## XLMRobertaModel
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-m3",
         architecture="XLMRobertaModel",
         mteb_score=0.787343078,
+        pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
     ########## Qwen2Model
-    LASTPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "BAAI/bge-code-v1",
         architecture="Qwen2Model",
         mteb_score=0.75724465,
         dtype="float32",
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
         enable_test=True,
     ),
 ]
 
 RERANK_MODELS = [
     ########## XLMRobertaForSequenceClassification
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         "BAAI/bge-reranker-base",
         architecture="XLMRobertaForSequenceClassification",
         mteb_score=0.32398,
+        pooling_type="CLS",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         "BAAI/bge-reranker-large",
         architecture="XLMRobertaForSequenceClassification",
         enable_test=False,
     ),
-    CLSPoolingRerankModelInfo(
+    RerankModelInfo(
         "BAAI/bge-reranker-v2-m3",
         architecture="XLMRobertaForSequenceClassification",
         enable_test=False,

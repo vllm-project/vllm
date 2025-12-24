@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
-from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from tests.models.utils import RerankModelInfo
 from tests.utils import multi_gpu_test
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 qwen3_reranker_hf_overrides = {
     "architectures": ["Qwen3ForSequenceClassification"],
@@ -18,14 +18,18 @@ qwen3_reranker_hf_overrides = {
 }
 
 RERANK_MODELS = [
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "Qwen/Qwen3-Reranker-0.6B",
         architecture="Qwen3ForSequenceClassification",
         mteb_score=0.25736,
         hf_overrides=qwen3_reranker_hf_overrides,
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
         enable_test=True,
     ),
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "Qwen/Qwen3-Reranker-4B",
         architecture="Qwen3ForSequenceClassification",
         hf_overrides=qwen3_reranker_hf_overrides,
