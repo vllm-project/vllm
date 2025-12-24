@@ -4,6 +4,7 @@ import functools
 from collections.abc import Callable
 
 import torch
+from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
@@ -24,14 +25,13 @@ def is_aiter_found() -> bool:
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
 
-# Can't use dtypes.fp8 directly inside an op
-# because it returns wrong result on gfx942.
-# This is a workaround to get the correct FP8 dtype.
-# This might because that the get_gfx() is wrapped as a custom op.
-if IS_AITER_FOUND:
-    from aiter import dtypes
 
-    AITER_FP8_DTYPE = dtypes.fp8
+def is_aiter_found_and_supported() -> bool:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_gfx9
+
+        return on_gfx9()
+    return False
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -43,15 +43,22 @@ def if_aiter_supported(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         # checks the platform, device arch and aiter library existence.
 
-        if current_platform.is_rocm() and IS_AITER_FOUND:
-            from vllm.platforms.rocm import on_gfx9
-
-            if on_gfx9():
-                return func(*args, **kwargs)
+        if is_aiter_found_and_supported():
+            return func(*args, **kwargs)
 
         return None
 
     return wrapper
+
+
+# Can't use dtypes.fp8 directly inside an op
+# because it returns wrong result on gfx942.
+# This is a workaround to get the correct FP8 dtype.
+# This might because that the get_gfx() is wrapped as a custom op.
+if is_aiter_found_and_supported():
+    from aiter import dtypes
+
+    AITER_FP8_DTYPE = dtypes.fp8
 
 
 def _rocm_aiter_fused_moe_impl(
@@ -427,16 +434,16 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     from aiter import rmsnorm2d_fwd_with_add
 
     residual_out = torch.empty_like(residual)
-    output = torch.empty_like(x)
+    out = torch.empty_like(x)
     rmsnorm2d_fwd_with_add(
-        output,  # output
+        out,  # output
         x,  # input
         residual,  # residual input
         residual_out,  # residual output
         weight,
         variance_epsilon,
     )
-    return output, residual_out
+    return out, residual_out
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
@@ -445,7 +452,84 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(residual)
+    residual_out = torch.empty_like(residual)
+    out = torch.empty_like(x)
+    return out, residual_out
+
+
+def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    residual_out = torch.empty_like(x)
+
+    rocm_aiter.rmsnorm2d_fwd_with_add_dynamicquant(
+        out,
+        x,
+        residual,
+        residual_out,
+        y_scale,
+        weight,
+        epsilon,
+        use_model_sensitive_rmsnorm=0,
+    )
+
+    return out, residual_out, y_scale
+
+
+def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    residual_out = torch.empty_like(x)
+
+    return out, residual_out, y_scale
+
+
+def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+
+    rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
+        out, x, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
+    )
+
+    return out, y_scale
+
+
+def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+
+    return out, y_scale
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -521,7 +605,11 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         dtype_quant=AITER_FP8_DTYPE,
         res1=residual,
     )
-    return (x_quant, x_quant_scales, res)
+    return (
+        x_quant,
+        res,
+        x_quant_scales,
+    )
 
 
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
@@ -535,8 +623,8 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
         torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
-        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
         torch.empty_like(residual, device=residual.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
 
 
@@ -755,7 +843,7 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_linear_fp8_enaled(cls) -> bool:
+    def is_linear_fp8_enabled(cls) -> bool:
         return cls.is_linear_enabled()
 
     @classmethod
@@ -896,6 +984,20 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
+                op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
+                op_func=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
@@ -930,12 +1032,53 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
-                mutates_args=["scale"],
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
             _OPS_REGISTERED = True
+
+    @staticmethod
+    def get_rmsnorm_fused_add_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+
+    @staticmethod
+    def get_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rms_norm.default
+
+    @staticmethod
+    def get_rmsnorm_fused_add_dynamic_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default
+
+    @staticmethod
+    def get_rmsnorm_fused_dynamic_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default
+
+    @staticmethod
+    def get_rmsnorm_group_fused_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+
+    @staticmethod
+    def get_per_token_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_per_token_quant.default
+
+    @staticmethod
+    def get_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant.default
+
+    @staticmethod
+    def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def rms_norm(
+        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
     def rms_norm2d_with_add(
@@ -947,12 +1090,6 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
             x, residual, weight, variance_epsilon
         )
-
-    @staticmethod
-    def rms_norm(
-        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
     def gemm_a8w8(
