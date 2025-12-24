@@ -11,7 +11,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.get_tokenizer` "
             "has been moved to `vllm.tokenizers.get_tokenizer`. "
-            "The old name will be removed in v0.14.",
+            "The old name will be removed in a future version.",
             DeprecationWarning,
             stacklevel=2,
         )
