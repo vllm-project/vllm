@@ -560,7 +560,10 @@ def test_causal_backend_correctness(
 
     if current_platform.is_rocm():
         SMALL_BLOCK_BACKENDS = [
-            x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS and x is not AttentionBackendEnum.FLASH_ATTN
+            x for x in BACKENDS_TO_TEST if (
+                x not in LARGE_BLOCK_BACKENDS 
+                and x is not AttentionBackendEnum.FLASH_ATTN
+            )
         ]
     else:
         SMALL_BLOCK_BACKENDS = [
