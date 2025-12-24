@@ -235,7 +235,7 @@ class MambaCopySpec:
     num_elements: int
 
 
-MambaCopySpecFunc: TypeAlias = Callable[
+MambaStateCopyFunc: TypeAlias = Callable[
     [torch.Tensor, list[int], int, int], MambaCopySpec
 ]
 
@@ -269,29 +269,29 @@ def get_temporal_copy_spec(
 get_full_copy_spec = get_temporal_copy_spec
 
 
-class MambaCopySpecCalculator:
+class MambaStateCopyFuncCalculator:
     @classmethod
-    def linear_attention_copy_spec_func(cls):
+    def linear_attention_state_copy_func(cls):
         return (get_temporal_copy_spec,)
 
     @classmethod
-    def mamba1_state_copy_spec_func(cls):
+    def mamba1_state_copy_func(cls):
         return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def mamba2_state_copy_spec_func(cls):
+    def mamba2_state_copy_func(cls):
         return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def short_conv_state_copy_spec_func(cls):
+    def short_conv_state_copy_func(cls):
         return (get_conv_copy_spec,)
 
     @classmethod
-    def gated_delta_net_copy_spec_func(cls):
+    def gated_delta_net_state_copy_func(cls):
         return get_conv_copy_spec, get_temporal_copy_spec
 
     @classmethod
-    def kda_state_copy_spec_func(cls):
+    def kda_state_copy_func(cls):
         return (
             get_conv_copy_spec,
             get_conv_copy_spec,

@@ -32,7 +32,6 @@ from .linear import (
 )
 from .mamba.abstract import MambaBase
 from .mamba.mamba_utils import (
-    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -103,9 +102,6 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size, self.num_heads, self.head_dim, conv_kernel_size=self.conv_size
         )
-
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.kda_state_copy_spec_func()
 
     def __init__(
         self,

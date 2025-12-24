@@ -10,7 +10,6 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_utils import MambaCopySpecFunc
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 
@@ -248,7 +247,6 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: int | None = None
     mamba_type: str = "mamba2"
     num_speculative_blocks: int = 0
-    copy_spec_funcs: tuple[MambaCopySpecFunc, ...] | None = None
 
     @property
     def page_size_bytes(self) -> int:

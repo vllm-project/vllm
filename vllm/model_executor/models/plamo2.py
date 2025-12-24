@@ -28,7 +28,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecCalculator,
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -459,9 +460,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             conv_kernel=self.conv_kernel_size,
         )
 
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.mamba2_state_copy_spec_func()
-
     @property
     def mamba_type(self) -> str:
         return "mamba2"
@@ -880,6 +878,10 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
     def compute_logits(
         self,

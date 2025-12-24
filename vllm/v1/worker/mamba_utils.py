@@ -9,7 +9,7 @@ import triton.language as tl
 
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecFunc,
+    MambaStateCopyFunc,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -64,7 +64,7 @@ def collect_mamba_copy_meta(
     dest_state_list: list[int],
     num_elements_list: list[int],
     kv_cache_config: KVCacheConfig,
-    mamba_spec: MambaSpec,
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     mamba_group_ids: list[int],
     src_block_idx: int,
     dest_block_idx: int,
@@ -75,8 +75,6 @@ def collect_mamba_copy_meta(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    copy_spec_funcs: tuple[MambaCopySpecFunc, ...] = mamba_spec.copy_spec_funcs
-    assert copy_spec_funcs is not None
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
@@ -84,8 +82,8 @@ def collect_mamba_copy_meta(
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache[0]
-            for state, copy_spec_func in zip(kv_caches, copy_spec_funcs):
-                copy_spec = copy_spec_func(
+            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+                copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
 
@@ -118,6 +116,7 @@ def preprocess_mamba(
     input_batch: GPUInputBatch,
     requests: dict[str, CachedRequestState],
     forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
 ):
     """
     Copy the mamba state of previous step to the last
@@ -164,7 +163,7 @@ def preprocess_mamba(
                 dest_state_list,
                 num_elements_list,
                 kv_cache_config,
-                mamba_spec,
+                mamba_state_copy_funcs,
                 mamba_group_ids,
                 prev_state_idx,
                 curr_state_idx,
@@ -183,6 +182,7 @@ def postprocess_mamba(
     requests: dict[str, CachedRequestState],
     mamba_state_idx: dict[str, int],
     forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
 ):
     """
     If a blocks is converted from partial block to full block in this step, copy the
@@ -220,7 +220,7 @@ def postprocess_mamba(
                 dest_state_list,
                 num_elements_list,
                 kv_cache_config,
-                mamba_spec,
+                mamba_state_copy_funcs,
                 mamba_group_ids,
                 src_block_idx,
                 dest_block_idx,

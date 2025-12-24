@@ -16,7 +16,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -224,9 +223,6 @@ class ShortConv(MambaBase, CustomOp):
             intermediate_size=self.conv_dim,
             conv_kernel=self.L_cache,
         )
-
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.short_conv_state_copy_spec_func()
 
     @property
     def mamba_type(self) -> str:

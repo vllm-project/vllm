@@ -24,7 +24,6 @@ from vllm.model_executor.layers.lightning_attn import (
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -127,9 +126,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         return MambaStateShapeCalculator.linear_attention_state_shape(
             num_heads=self.num_heads, tp_size=self.tp_size, head_dim=self.head_dim
         )
-
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.linear_attention_copy_spec_func()
 
     def __init__(
         self,

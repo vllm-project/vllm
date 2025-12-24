@@ -1060,6 +1060,7 @@ class GPUModelRunner(
                 self.requests,
                 self.mamba_state_idx,
                 self.compilation_config.static_forward_context,
+                self.model.get_mamba_state_copy_func(),
             )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
@@ -3108,6 +3109,7 @@ class GPUModelRunner(
                         self.input_batch,
                         self.requests,
                         self.compilation_config.static_forward_context,
+                        self.model.get_mamba_state_copy_func(),
                     )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0

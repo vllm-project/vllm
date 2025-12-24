@@ -50,7 +50,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecCalculator,
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -235,9 +236,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             self.conv_kernel_size,
             self.num_spec,
         )
-
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.gated_delta_net_copy_spec_func()
 
     def __init__(
         self,
@@ -1270,6 +1268,10 @@ class Qwen3NextForCausalLM(
             hf_config.linear_conv_kernel_dim,
             num_spec,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def compute_logits(
         self,

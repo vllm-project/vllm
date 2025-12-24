@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaCopySpecCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -444,9 +443,6 @@ class MambaMixer(MambaBase, CustomOp):
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
         )
-
-    def get_copy_spec_func(self):
-        return MambaCopySpecCalculator.mamba1_state_copy_spec_func()
 
     @property
     def mamba_type(self) -> str:
