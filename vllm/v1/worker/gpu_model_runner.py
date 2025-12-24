@@ -237,17 +237,23 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             for i in self._invalid_req_indices:
                 valid_sampled_token_ids[i].clear()
             cu_num_tokens = None
+            logprobs_lists = None
         else:
-            valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                self.sampled_token_ids_cpu,
-                self.vocab_size,
-                self._invalid_req_indices,
-                return_cu_num_tokens=self._logprobs_tensors_cpu is not None,
+            valid_sampled_token_ids, cu_num_tokens, logprobs_lists = (
+                RejectionSampler.parse_output(
+                    self.sampled_token_ids_cpu,
+                    self.vocab_size,
+                    self._invalid_req_indices,
+                    logprobs_tensors=self._logprobs_tensors_cpu,
+                    need_filter_logprobs=True,
+                )
             )
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
-        if self._logprobs_tensors_cpu:
+        if logprobs_lists is not None:
+            output.logprobs = logprobs_lists
+        elif self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
         return output
 
@@ -352,6 +358,9 @@ class GPUModelRunner(
         else:
             self.max_encoder_len = 0
 
+        # Async scheduling
+        self.use_async_scheduling = self.scheduler_config.async_scheduling
+
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -404,7 +413,9 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, is_async=self.use_async_scheduling
+            )
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -456,7 +467,6 @@ class GPUModelRunner(
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
-        self.use_async_scheduling = self.scheduler_config.async_scheduling
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: torch.cuda.Stream | None = None
@@ -2650,11 +2660,13 @@ class GPUModelRunner(
                     valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    return_cu_num_tokens=logprobs_tensors is not None,
+                valid_sampled_token_ids, cu_num_tokens, _ = (
+                    RejectionSampler.parse_output(
+                        sampled_token_ids,
+                        self.input_batch.vocab_size,
+                        discard_sampled_tokens_req_indices,
+                        logprobs_tensors=logprobs_tensors,
+                    )
                 )
         else:
             valid_sampled_token_ids = []

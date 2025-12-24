@@ -69,6 +69,14 @@ class LogprobsTensors(NamedTuple):
             self.selected_token_ranks.to("cpu", non_blocking=True),
         )
 
+    def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
+        """Filter the logprobs tensors with the given bool mask."""
+        return LogprobsTensors(
+            self.logprob_token_ids[mask],
+            self.logprobs[mask],
+            self.selected_token_ranks[mask],
+        )
+
     @staticmethod
     def empty_cpu(
         num_positions: int, num_tokens_per_position: int
