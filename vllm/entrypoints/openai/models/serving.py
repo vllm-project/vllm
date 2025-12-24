@@ -132,10 +132,14 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
-            unique_id = self.lora_id_counter.inc(1)
-            lora_request = LoRARequest(
-                lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
-            )
+            if lora_name in self.lora_requests:
+                lora_request = self.lora_requests[lora_name]
+                lora_request.lora_path = lora_path
+            else:
+                unique_id = self.lora_id_counter.inc(1)
+                lora_request = LoRARequest(
+                    lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
+                )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
 
@@ -183,15 +187,6 @@ class OpenAIServingModels:
         if not request.lora_name or not request.lora_path:
             return create_error_response(
                 message="Both 'lora_name' and 'lora_path' must be provided.",
-                err_type="InvalidUserInput",
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
-
-        # Check if the lora adapter with the given name already exists
-        if request.lora_name in self.lora_requests:
-            return create_error_response(
-                message=f"The lora adapter '{request.lora_name}' has already been "
-                "loaded.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
