@@ -71,6 +71,7 @@ def test_gsm8k_correctness(config_filename):
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
     print(f"Server args: {' '.join(server_args)}")
+    print(f"Environment variables: {env_dict}")
 
     # Launch server and run evaluation
     with RemoteOpenAIServer(

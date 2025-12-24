@@ -106,6 +106,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
