@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.model import ModelConfig, ModelDType, RunnerOption
+from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -375,7 +375,10 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    default_pooling_type: str = ""
+    pooling_type: str | None = None
+    attn_type: AttnTypeStr | None = None
+    is_prefix_caching_supported: bool | None = None
+    is_chunked_prefill_supported: bool | None = None
     enable_test: bool = True
 
 
@@ -387,29 +390,9 @@ class EmbedModelInfo(ModelInfo):
 
 
 @dataclass
-class CLSPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "LAST"
-
-
-@dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
     chat_template_name: str | None = None
-
-
-@dataclass
-class CLSPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "LAST"
 
 
 @dataclass

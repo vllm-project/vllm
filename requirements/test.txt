@@ -441,7 +441,7 @@ lightning-utilities==0.14.3
     #   torchmetrics
 llvmlite==0.44.0
     # via numba
-lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
+lm-eval==0.4.9.2
     # via -r requirements/test.in
 lxml==5.3.0
     # via
