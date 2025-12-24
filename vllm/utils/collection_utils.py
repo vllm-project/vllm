@@ -7,7 +7,14 @@ This is similar in concept to the `collections` module.
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Generator, Hashable, Iterable, Mapping
+from collections.abc import (
+    Callable,
+    Generator,
+    Hashable,
+    ItemsView,
+    Iterable,
+    Mapping,
+)
 from typing import Generic, Literal, TypeVar
 
 from typing_extensions import TypeIs, assert_never
@@ -85,7 +92,9 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     return [item for sublist in lists for item in sublist]
 
 
-def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+def full_groupby(
+    values: Iterable[_V], *, key: Callable[[_V], _K]
+) -> ItemsView[_K, list[_V]]:
     """
     Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
