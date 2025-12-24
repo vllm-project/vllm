@@ -246,20 +246,23 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 f"({self._adapter_manager.lora_slots})."
             )
         for lora in loras_map.values():
-            self.add_adapter(lora)
+            self.add_adapter(lora, force_load=False)
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(self, lora_request: LoRARequest, force_load: bool = True) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if lora_request.lora_int_id not in self.list_adapters() or force_load:
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
+
+            # Remove the existing adapter if it exists
+            self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
