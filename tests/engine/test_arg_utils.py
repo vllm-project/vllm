@@ -511,6 +511,16 @@ def test_human_readable_model_len():
     args = parser.parse_args(["--max-model-len", "10.2123451234567t"])
     assert args.max_model_len == 10212345123456
 
+    # Special value -1 for auto-fit to GPU memory
+    args = parser.parse_args(["--max-model-len", "-1"])
+    assert args.max_model_len == -1
+
+    # 'auto' is an alias for -1
+    args = parser.parse_args(["--max-model-len", "auto"])
+    assert args.max_model_len == -1
+    args = parser.parse_args(["--max-model-len", "AUTO"])
+    assert args.max_model_len == -1
+
     # Invalid (do not allow decimals with binary multipliers)
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):

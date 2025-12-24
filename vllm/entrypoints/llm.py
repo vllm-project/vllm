@@ -1621,7 +1621,7 @@ class LLM:
                 added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
-                self.llm_engine.abort_request(added_request_ids)
+                self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
     def _validate_mm_data_and_uuids(
@@ -1731,7 +1731,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
-        return request_id
+        return engine_request.request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True
