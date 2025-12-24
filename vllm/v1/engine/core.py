@@ -1498,9 +1498,11 @@ class EngineCoreActorMixin:
         local_dp_rank: int = 0,
     ):
         # Initialize tracer for distributed tracing if configured.
-        from vllm.tracing import maybe_init_worker_tracer
-
-        maybe_init_worker_tracer(f"vllm.engine_core.dp{dp_rank}")
+        maybe_init_worker_tracer(
+            instrumenting_module_name="vllm.engine_core",
+            process_kind="engine_core",
+            process_name=f"DPEngineCoreActor_DP{dp_rank}",
+        )
 
         self.addresses = addresses
         vllm_config.parallel_config.data_parallel_index = dp_rank
