@@ -535,7 +535,6 @@ class WhisperEncoder(nn.Module):
                 self.embed_positions.weight.copy_(
                     sinusoids(*self.embed_positions.weight.shape)
                 )
-        # TODO check raise ValueError(f"Unknown pos_embed_type: {self.pos_embed_type}")
 
     def forward_conv(
         self, input_features: torch.Tensor | list[torch.Tensor]
