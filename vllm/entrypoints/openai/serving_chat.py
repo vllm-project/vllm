@@ -361,9 +361,9 @@ class OpenAIServingChat(OpenAIServing):
                             tokens = [
                                 int(t["token"]) for t in tokens["tokens"]
                             ]
-                        sampling_params.enforce_sequence = (
-                            [int(t) for t in tokens] + [tokenizer.eos_token_id]
-                        )
+                        # Don't add EOS - the tokens already include the full
+                        # sequence from the original response
+                        sampling_params.enforce_sequence = [int(t) for t in tokens]
                     elif request.enforced_str:
                         toks = tokenizer(
                             request.enforced_str, add_special_tokens=False
