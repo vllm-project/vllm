@@ -2043,7 +2043,6 @@ def _raise_unsupported_error(feature_name: str):
 def human_readable_int(value: str) -> int:
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    Also accepts -1 or 'auto' as a special value for auto-detection.
 
     Examples:
     - '1k' -> 1,000
@@ -2100,7 +2099,6 @@ def human_readable_int_or_auto(value: str) -> int:
     """
     value = value.strip()
 
-    # Handle -1 or 'auto' as a special value for auto-detection
     if value == "-1" or value.lower() == "auto":
         return -1
 
