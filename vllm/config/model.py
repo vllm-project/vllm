@@ -11,7 +11,6 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +28,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -71,7 +71,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -843,12 +843,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
@@ -1088,11 +1094,10 @@ class ModelConfig:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
         # embedding models like CLIP and SigLIP
-        for target_attr in ("projection_dim", "projection_size"):
-            if hasattr(self.hf_text_config, target_attr):
-                return getattr(self.hf_text_config, target_attr)
-
-        return self.get_hidden_size()
+        names = ("projection_dim", "projection_size")
+        return getattr_iter(
+            self.hf_text_config, names, default_factory=self.get_hidden_size
+        )
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1225,14 +1230,12 @@ class ModelConfig:
             # For ChatGLM:
             "multi_query_group_num",
         ]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_text_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_text_config.num_attention_heads
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
@@ -1535,6 +1538,10 @@ class ModelConfig:
     @property
     def is_multimodal_raw_input_only_model(self) -> bool:
         return self._model_info.supports_multimodal_raw_input_only
+
+    @property
+    def requires_raw_input_tokens(self) -> bool:
+        return self._model_info.requires_raw_input_tokens
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -1849,6 +1856,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
+
+def str_dtype_to_torch_dtype(type: str):
+    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
+
 # model_type -> reason
 _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
@@ -2114,9 +2126,7 @@ def _get_and_verify_max_len(
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
-    ):
+    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
