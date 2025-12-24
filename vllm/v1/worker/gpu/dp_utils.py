@@ -12,13 +12,7 @@ def get_batch_metadata_across_dp(
     dp_size: int,
     dp_rank: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if dp_size <= 1:
-        raise RuntimeError(
-            f"Data Parallel size must be greater than 1 for collective "
-            f"operations in get_batch_metadata_across_dp(), but got "
-            f"dp_size={dp_size}. Ensure data parallelism is properly "
-            f"configured with multiple ranks."
-        )
+    assert dp_size > 1
     # Use CPU group to avoid CPU-GPU synchronization.
     group = get_dp_group().cpu_group
     tensor = torch.zeros(2, dp_size, dtype=torch.int32, device="cpu")

@@ -20,16 +20,8 @@ class CPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
-        if device != torch.device("cpu"):
-            raise RuntimeError(
-                f"CPUModelRunner requires a CPU device, but got device={device}. "
-                f"Ensure you are using the CPU backend for inference."
-            )
-        if self.speculative_config is not None:
-            raise RuntimeError(
-                "Speculative decoding is not supported on the CPU backend. "
-                "Please disable speculative decoding or use a GPU backend."
-            )
+        assert device == torch.device("cpu")
+        assert self.speculative_config is None, "spec decode is not supported."
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
@@ -42,18 +34,8 @@ class CPUModelRunner(GPUModelRunner):
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
             if cpu_tensor is not None and device_tensor is not None:
-                if not isinstance(cpu_tensor, torch.Tensor):
-                    raise TypeError(
-                        f"Expected cpu_tensor to be a torch.Tensor, but got "
-                        f"{type(cpu_tensor).__name__}. This indicates an "
-                        f"internal error in tensor attribute handling."
-                    )
-                if not isinstance(device_tensor, torch.Tensor):
-                    raise TypeError(
-                        f"Expected device_tensor to be a torch.Tensor, but got "
-                        f"{type(device_tensor).__name__}. This indicates an "
-                        f"internal error in tensor attribute handling."
-                    )
+                assert isinstance(cpu_tensor, torch.Tensor)
+                assert isinstance(device_tensor, torch.Tensor)
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
