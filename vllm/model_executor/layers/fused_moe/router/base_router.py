@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 
@@ -94,6 +95,14 @@ else:
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
+
+
+@dataclass(frozen=True)
+class MOEExpertMixSpec:
+    mix_placement: bool = False
+    routed_scaling_factor: float = 1.0
+    logical_num_experts: int = 1
+    num_fused_shared_experts: int = 1
 
 
 class BaseRouter(FusedMoERouter):
@@ -200,10 +209,32 @@ class BaseRouter(FusedMoERouter):
         """
         raise NotImplementedError
 
+    def _cat_shared_experts(moe_expert_spec: MOEExpertMixSpec):
+        if moe_expert_spec.mix_placement:
+            if moe_expert_spec.routed_scaling_factor != 1.0:
+                topk_weights *= moe_expert_spec.routed_scaling_factor
+            shared_expert_routing_factor = 1.0
+            batch_size = topk_ids.shape[0]
+            shared_expert_ids = torch.arrange(
+                moe_expert_spec.logical_num_experts,
+                moe_expert_spec.logical_num_experts + moe_expert_spec.num_fused_shared_experts,
+                dtype=topk_ids.dtype,
+                device=topk_ids.device,
+            ).repeat(batch_size, 1)
+            shared_expert_weights = torch.full(
+                (batch_size, moe_expert_spec.num_fused_shared_experts),
+                shared_expert_routing_factor,
+                dtype=topk_ids.dtype,
+                device=topk_ids.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
+            topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
+
     def select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        moe_expert_spec: MOEExpertMixSpec = MOEExpertMixSpec(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -235,6 +266,9 @@ class BaseRouter(FusedMoERouter):
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, indices_type
         )
+
+        # Apply mix placement.
+        self._cat_shared_experts(moe_expert_spec)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:

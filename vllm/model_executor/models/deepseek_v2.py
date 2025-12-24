@@ -266,10 +266,20 @@ class DeepseekV2MoE(nn.Module):
         eplb_config = parallel_config.eplb_config
         self.enable_eplb = parallel_config.enable_eplb
 
+        additional_config = get_current_vllm_config().additional_config
+        if isinstance(additional_config, dict):
+            self.mix_placement = additional_config.get("mix_placement", False)
+
         self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        num_physical_routed_experts = self.n_routed_experts + self.n_redundant_experts
+        num_fused_shared_experts = self.n_shared_experts if self.mix_placement else 0
+        self.n_logical_experts = self.n_routed_experts + num_fused_shared_experts
+        self.n_physical_experts = (
+            num_physical_routed_experts + self.ep_size * num_fused_shared_experts
+        )
+        self.n_local_physical_experts = (
+            num_physical_routed_experts // self.ep_size + num_fused_shared_experts
+        )
 
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
         self.physical_expert_end = (
@@ -277,10 +287,9 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            self.mix_placement = True
+        if config.n_shared_experts is None or self.mix_placement:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -320,16 +329,14 @@ class DeepseekV2MoE(nn.Module):
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
-            routed_scaling_factor=1.0
-            if not self.is_rocm_aiter_moe_enabled
-            else self.routed_scaling_factor,
+            routed_scaling_factor=self.routed_scaling_factor
+            if self.is_rocm_aiter_moe_enabled or self.mix_placement
+            else 1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=config.n_shared_experts
-            if self.is_fusion_moe_shared_experts_enabled
-            else None,
+            n_shared_experts=config.n_shared_experts if self.mix_placement else None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -362,7 +369,7 @@ class DeepseekV2MoE(nn.Module):
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
-            if not self.is_rocm_aiter_moe_enabled:
+            if not (self.is_rocm_aiter_moe_enabled or self.mix_placement):
                 final_hidden_states *= self.routed_scaling_factor
         elif self.shared_experts is not None:
             assert shared_output is not None
@@ -1191,6 +1198,7 @@ class DeepseekV2ForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.additional_config = vllm_config.additional_config
         self.quant_config = quant_config
 
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
@@ -1293,9 +1301,14 @@ class DeepseekV2ForCausalLM(
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if isinstance(self.additional_config, dict):
+            mix_placement = self.additional_config.get("mix_placement", False)
+
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
+        if rocm_aiter_moe_shared_expert_enabled:
+            mix_placement = True
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1323,12 +1336,10 @@ class DeepseekV2ForCausalLM(
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if mix_placement else 0),
             num_redundant_experts=self.num_redundant_experts,
+            num_shared_experts=self.config.n_shared_experts,
+            mix_placement=mix_placement,
         )
 
         params_dict = dict(self.named_parameters())
@@ -1341,8 +1352,8 @@ class DeepseekV2ForCausalLM(
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+            is_fusion_moe_shared_experts_layer = mix_placement and (
+                "mlp.shared_experts" in name
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
