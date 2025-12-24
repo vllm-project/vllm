@@ -947,7 +947,7 @@ def _find_best_group_size(
         overhead_threshold: float = 0.10) -> int:
     """
     Find the optimal group size that minimizes padding memory, preferring
-    larger group sizes (fewer tensors).
+    larger group sizes.
 
     For each layer type, padding = (group_size - count % group_size) % group_size
     weighted by that layer's max_memory_usage_bytes. Different layer types 
@@ -1000,7 +1000,7 @@ def _find_best_group_size(
     def find_best_in_range(start: int, end: int) -> int:
         """Find best group size in [start, end] range.
         
-        Prefers larger group sizes (fewer tensors) when padding is equal.
+        Prefers larger group sizes when padding is equal.
         Key: (padding_memory, -group_size) so larger group_size wins ties.
         """
         return min(range(start, end + 1),
@@ -1110,7 +1110,7 @@ def _get_kv_cache_groups_uniform_page_size(
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
     # Find optimal group_size by trying all options and choosing the one with
     # minimal padding (weighted by layer memory size). Prefers larger group sizes
-    # (fewer tensors) and enforces group_size >= 3 unless overhead exceeds 20%.
+    # and enforces group_size >= 3 unless overhead exceeds the threshold.
     group_size = _find_best_group_size(same_type_layers, vllm_config)
     grouped_layers = []
     for layers in same_type_layers.values():
