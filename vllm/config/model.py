@@ -595,7 +595,7 @@ class ModelConfig:
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
-
+        self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -1007,6 +1007,23 @@ class ModelConfig:
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled."
             )
+
+    def _try_verify_and_update_model_config(self):
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self, "config_updated", False):
+            return
+
+        architecture = self.architecture
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+        )
+
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_model_config(self)
 
     def verify_dual_chunk_attention_config(
         self,
