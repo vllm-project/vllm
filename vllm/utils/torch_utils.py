@@ -4,7 +4,7 @@ import contextlib
 import importlib.metadata
 import os
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -64,7 +64,7 @@ T = TypeVar("T")
 
 
 @contextlib.contextmanager
-def set_default_torch_dtype(dtype: torch.dtype):
+def set_default_torch_dtype(dtype: torch.dtype) -> Iterator[None]:
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -73,7 +73,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 @contextlib.contextmanager
-def set_default_torch_num_threads(num_threads: int):
+def set_default_torch_num_threads(num_threads: int) -> Iterator[None]:
     """Sets the default number of threads for PyTorch to the given value."""
     old_num_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads)
@@ -82,7 +82,7 @@ def set_default_torch_num_threads(num_threads: int):
 
 
 @contextlib.contextmanager
-def guard_cuda_initialization():
+def guard_cuda_initialization() -> Iterator[None]:
     """Avoid unexpected CUDA initialization."""
     from vllm.platforms import current_platform
 
@@ -118,7 +118,7 @@ def _get_precision_level(dtype: torch.dtype) -> int:
     return (dtype != torch.bool) + dtype.is_floating_point + dtype.is_complex * 2
 
 
-def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
+def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype) -> bool:
     """
     Test whether it is lossless to cast a tensor from
     `src_dtype` to `tgt_dtype`.
@@ -150,7 +150,7 @@ def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
     )
 
 
-def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]) -> torch.dtype:
     """
     Get the common `dtype` where all of the other `dtypes` can be
     cast to it without losing any information.
