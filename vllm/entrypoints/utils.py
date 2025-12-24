@@ -6,6 +6,7 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,7 @@ async def listen_for_disconnect(request: Request) -> None:
             break
 
 
-def with_cancellation(handler_func):
+def with_cancellation(handler_func: Callable) -> Callable:
     """Decorator that allows a route handler to be cancelled by client
     disconnections.
 
@@ -103,11 +104,11 @@ def with_cancellation(handler_func):
     return wrapper
 
 
-def decrement_server_load(request: Request):
+def decrement_server_load(request: Request) -> None:
     request.app.state.server_load_metrics -= 1
 
 
-def load_aware_call(func):
+def load_aware_call(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
@@ -155,7 +156,7 @@ def load_aware_call(func):
     return wrapper
 
 
-def cli_env_setup():
+def cli_env_setup() -> None:
     # The safest multiprocessing method is `spawn`, as the default `fork` method
     # is not compatible with some accelerators. The default method will be
     # changing in future versions of Python, so we should use it explicitly when
@@ -225,7 +226,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Namespace | EngineArgs):
+def log_non_default_args(args: Namespace | EngineArgs) -> None:
     non_default_args = {}
 
     # Handle Namespace
