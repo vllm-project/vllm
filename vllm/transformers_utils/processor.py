@@ -3,6 +3,7 @@
 
 import importlib
 import inspect
+from collections.abc import Callable
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
@@ -49,7 +50,9 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
+def _get_processor_factory_fn(
+    processor_cls: type | tuple[type, ...],
+) -> Callable[..., Any]:
     if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
         return AutoProcessor.from_pretrained
     if hasattr(processor_cls, "from_pretrained"):
@@ -80,7 +83,7 @@ def _merge_mm_kwargs(
     processor_cls: type | tuple[type, ...],
     /,
     **kwargs,
-):
+) -> dict[str, Any]:
     mm_config = model_config.get_multimodal_config()
     merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
@@ -263,7 +266,7 @@ def get_feature_extractor(
     revision: str | None = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
-):
+) -> FeatureExtractionMixin:
     """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
@@ -299,7 +302,7 @@ cached_get_feature_extractor = lru_cache(get_feature_extractor)
 def cached_feature_extractor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
-):
+) -> FeatureExtractionMixin:
     return cached_get_feature_extractor(
         model_config.model,
         revision=model_config.revision,
@@ -314,7 +317,7 @@ def get_image_processor(
     revision: str | None = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
-):
+) -> BaseImageProcessor:
     """Load an image processor for the given model name via HuggingFace."""
     try:
         processor_name = convert_model_repo_to_path(processor_name)
@@ -350,7 +353,7 @@ cached_get_image_processor = lru_cache(get_image_processor)
 def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
-):
+) -> BaseImageProcessor:
     if is_gguf(model_config.model):
         assert not is_gguf(model_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
@@ -376,7 +379,7 @@ def get_video_processor(
     trust_remote_code: bool = False,
     processor_cls_overrides: type[_V] | None = None,
     **kwargs: Any,
-):
+) -> BaseVideoProcessor:
     """Load a video processor for the given model name via HuggingFace."""
     try:
         processor_name = convert_model_repo_to_path(processor_name)
@@ -414,7 +417,7 @@ def cached_video_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: type[_V] | None = None,
     **kwargs: Any,
-):
+) -> BaseVideoProcessor:
     return cached_get_video_processor(
         model_config.model,
         revision=model_config.revision,

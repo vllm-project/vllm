@@ -260,7 +260,9 @@ def get_config_parser(config_format: str) -> ConfigParserBase:
     return _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format]()
 
 
-def register_config_parser(config_format: str):
+def register_config_parser(
+    config_format: str,
+) -> Callable[[type[ConfigParserBase]], type[ConfigParserBase]]:
     """Register a customized vllm config parser.
      When a config format is not supported by vllm, you can register a customized
     config parser to support it.
@@ -472,7 +474,9 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
-def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
+def _maybe_update_auto_config_kwargs(
+    kwargs: dict[str, Any], model_type: str
+) -> dict[str, Any]:
     """
     Update kwargs for AutoConfig initialization based on model_type
     """
@@ -982,7 +986,7 @@ def get_hf_image_processor_config(
     )
 
 
-def get_hf_text_config(config: PretrainedConfig):
+def get_hf_text_config(config: PretrainedConfig) -> PretrainedConfig:
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """

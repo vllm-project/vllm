@@ -183,7 +183,7 @@ def file_or_path_exists(
     )
 
 
-def get_model_path(model: str | Path, revision: str | None = None):
+def get_model_path(model: str | Path, revision: str | None = None) -> str | Path:
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
