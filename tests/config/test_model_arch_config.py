@@ -27,7 +27,8 @@ BASE_MODELS_TO_TEST = [
     # (NonGeoDataset import error). Tested in model initialization tests.
     # "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
     "Zyphra/Zamba2-7B-instruct",
-    "mosaicml/mpt-7b",
+    # FIXME: mosaicml/mpt-7b has been deleted
+    # "mosaicml/mpt-7b",
     "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
