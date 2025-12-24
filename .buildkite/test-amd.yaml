@@ -775,7 +775,7 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
-  # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
+  - bash tools/install_torchcodec_rocm.sh || exit 1
   - pytest -s entrypoints/openai/correctness/
 
 
