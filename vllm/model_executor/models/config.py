@@ -88,6 +88,26 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             }
 
 
+class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.config.pooler import PoolingTypeStr
+
+        hf_config = vllm_config.model_config.hf_config
+        hf_config.is_causal = False
+
+        pooling_type_map: dict[str, PoolingTypeStr] = {
+            "avg": "MEAN",
+            "cls": "CLS",
+            "last": "LAST",
+        }
+
+        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        if pooling_type is None:
+            raise ValueError(f"pool_type {hf_config.pooling} not supported")
+        vllm_config.model_config.pooler_config.pooling_type = pooling_type
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -509,6 +529,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
+    "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
