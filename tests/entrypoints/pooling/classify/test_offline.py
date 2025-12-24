@@ -61,11 +61,8 @@ def test_pooling_params(llm: LLM):
 
 
 @pytest.mark.skip_global_cleanup
-def test_encode_api(llm: LLM):
-    # chunked prefill does not support all pooling
-    err_msg = "pooling_task must be one of.+"
-    with pytest.raises(ValueError, match=err_msg):
-        llm.encode(prompts, pooling_task="token_classify", use_tqdm=False)
+def test_token_classify(llm: LLM):
+    llm.encode(prompts, pooling_task="token_classify", use_tqdm=False)
 
 
 def test_score_api(llm: LLM):

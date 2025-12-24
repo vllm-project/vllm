@@ -13,7 +13,7 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library
+from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 
@@ -24,10 +24,15 @@ else:
     ModelConfig = object
     IntermediateTensors = object
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
+    "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
@@ -47,6 +52,13 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int64: np.int64,
 }
 
+
+MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
+    # TODO: Add more modelopt kv cache dtype
+    # mappings here when it supported by some attention backend
+    # (for example supports nvfp4).
+    "fp8": "fp8_e4m3",
+}
 
 T = TypeVar("T")
 
@@ -78,7 +90,6 @@ def guard_cuda_initialization():
         yield
         return
 
-    had_key = "CUDA_VISIBLE_DEVICES" in os.environ
     old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     try:
@@ -90,10 +101,10 @@ def guard_cuda_initialization():
             err_msg = str(e)
         raise RuntimeError(err_msg) from e
     finally:
-        if had_key:
-            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        if old_value is None:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
         else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES")
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -192,6 +203,70 @@ def get_kv_cache_torch_dtype(
     else:
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     return torch_dtype
+
+
+def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
+    """Get the KV cache quantization algorithm string from the quantization config.
+
+    Maps various FP8 format names to vLLM's standard cache dtype strings.
+    Returns None if no kv_cache_quant_algo is specified.
+    Returns "auto" if the value is not recognized/supported.
+    """
+    # Mapping from model config values to vLLM cache_dtype strings
+
+    quant_method = quant_cfg.get("quant_method", "")
+    if quant_method.startswith("modelopt"):
+        quantization_inner = quant_cfg.get("quantization", quant_cfg)
+        # Check if quant config is specified and use kv cache quant algo
+        kv_algo = quantization_inner.get("kv_cache_quant_algo") or quant_cfg.get(
+            "kv_cache_quant_algo"
+        )
+        if isinstance(kv_algo, str):
+            kv_algo_lower = kv_algo.lower()
+
+            # Try to map to vLLM's standard format
+            if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
+                return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    kv_algo,
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
+    return None
+
+
+def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
+    """Get the KV cache quantization algorithm dtype from the quantization config."""
+    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+    if kv_algo_str is not None and kv_algo_str != "auto":
+        # Only convert if we have a valid dtype string (not "auto" fallback)
+        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
+    return None
+
+
+def resolve_kv_cache_dtype_string(
+    kv_cache_dtype: str, model_config: ModelConfig
+) -> str:
+    """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
+    Returns the resolved cache_dtype string.
+    """
+    if kv_cache_dtype != "auto":
+        return kv_cache_dtype
+
+    hf_cfg = getattr(model_config, "hf_config", None)
+    if hf_cfg is not None:
+        quant_cfg = getattr(hf_cfg, "quantization_config", None)
+        if quant_cfg is not None:
+            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+            if kv_algo_str is not None:
+                return kv_algo_str
+
+    # Default to auto (will be handled by downstream code)
+    return "auto"
 
 
 def kv_cache_dtype_str_to_dtype(
@@ -525,8 +600,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
 
 # Helper function used in testing.
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    torch_version = version.parse(torch_version)
-    return torch_version >= version.parse(target)
+    return version.parse(torch_version) >= version.parse(target)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
@@ -640,15 +714,8 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    import torch.library
+    schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

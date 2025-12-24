@@ -31,7 +31,8 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -56,7 +57,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
+from .interfaces_base import attn_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -148,8 +156,6 @@ class LlamaAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -260,11 +266,9 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -527,7 +531,6 @@ class LlamaForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -702,3 +705,17 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+@attn_type("encoder_only")
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
+
+
+@attn_type("encoder_only")
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass

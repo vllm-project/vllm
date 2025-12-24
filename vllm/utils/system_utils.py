@@ -204,6 +204,10 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 
 def decorate_logs(process_name: str | None = None) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
+    # Respect VLLM_CONFIGURE_LOGGING environment variable
+    if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
     if process_name is None:
         process_name = get_mp_context().current_process().name
 

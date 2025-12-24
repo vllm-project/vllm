@@ -16,6 +16,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from .modular_kernel_tools.common import (
     Config,
@@ -77,6 +78,10 @@ def rank_worker(
     weights: WeightTensors,
     verbose: bool,
 ):
+    # Initialize workspace manager in child process
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
     current_platform.seed_everything(pgi.rank)
 
     # sanity check
@@ -300,6 +305,7 @@ def test_modular_kernel_combinations_singlegpu(
     chunk_size: int | None,
     world_size: int,
     pytestconfig,
+    workspace_init,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""

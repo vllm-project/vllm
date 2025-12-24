@@ -352,9 +352,16 @@ Supported models:
 * `zai-org/GLM-4.5`
 * `zai-org/GLM-4.5-Air`
 * `zai-org/GLM-4.6`
-* `zai-org/GLM-4.6-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### GLM-4.7 Models (`glm47`)
+
+Supported models:
+
+* `zai-org/GLM-4.7`
+
+Flags: `--tool-call-parser glm47`
 
 ### Qwen3-Coder Models (`qwen3_xml`)
 
@@ -371,9 +378,23 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 
 Supported models:
 
-* TODO (will be updated after Olmo 3 release)
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
 
 Flags: `--tool-call-parser olmo3`
+
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -406,7 +427,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py](../../vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py).
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -421,7 +442,7 @@ Here is a summary of a plugin file:
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens
@@ -454,7 +475,7 @@ Here is a summary of a plugin file:
     # register the tool parser to ToolParserManager
     ToolParserManager.register_lazy_module(
         name="example",
-        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        module_path="vllm.tool_parsers.example",
         class_name="ExampleToolParser",
     )
 
