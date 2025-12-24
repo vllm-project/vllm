@@ -59,74 +59,96 @@ For example:
 
 **1. Attention:**
 
---8<-- "../../vllm/attention/layers/mm_encoder_attention.py:mm_encoder_attn"
---8<-- "../../vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+```python
+--8<-- "vllm/attention/layers/mm_encoder_attention.py:mm_encoder_attn"
+--8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+```
 
 **2. Activation:**
 
---8<-- "../../vllm/model_executor/layers/activation.py:silu_and_mul"
---8<-- "../../vllm/model_executor/layers/activation.py:mul_and_silu"
---8<-- "../../vllm/model_executor/layers/activation.py:gelu_new"
---8<-- "../../vllm/model_executor/layers/activation.py:gelu_fast"
---8<-- "../../vllm/model_executor/layers/activation.py:quick_gelu"
---8<-- "../../vllm/model_executor/layers/activation.py:gelu_and_mul"
---8<-- "../../vllm/model_executor/layers/activation.py:gelu_and_mul_sparse"
---8<-- "../../vllm/model_executor/layers/activation.py:relu2"
---8<-- "../../vllm/model_executor/layers/activation.py:xielu"
---8<-- "../../vllm/model_executor/layers/activation.py:swigluoai_and_mul"
---8<-- "../../vllm/model_executor/layers/activation.py:fatrelu_and_mul"
+```python
+--8<-- "vllm/model_executor/layers/activation.py:silu_and_mul"
+--8<-- "vllm/model_executor/layers/activation.py:mul_and_silu"
+--8<-- "vllm/model_executor/layers/activation.py:gelu_new"
+--8<-- "vllm/model_executor/layers/activation.py:gelu_fast"
+--8<-- "vllm/model_executor/layers/activation.py:quick_gelu"
+--8<-- "vllm/model_executor/layers/activation.py:gelu_and_mul"
+--8<-- "vllm/model_executor/layers/activation.py:gelu_and_mul_sparse"
+--8<-- "vllm/model_executor/layers/activation.py:relu2"
+--8<-- "vllm/model_executor/layers/activation.py:xielu"
+--8<-- "vllm/model_executor/layers/activation.py:swigluoai_and_mul"
+--8<-- "vllm/model_executor/layers/activation.py:fatrelu_and_mul"
+```
 
 **3. MM-Conv:**
 
---8<-- "../../vllm/model_executor/layers/conv.py:conv2d"
---8<-- "../../vllm/model_executor/layers/conv.py:conv3d"
+```python
+--8<-- "vllm/model_executor/layers/conv.py:conv2d"
+--8<-- "vllm/model_executor/layers/conv.py:conv3d"
+```
 
 **4. Embedding:**
 
---8<-- "../../vllm/model_executor/layers/vocab_parallel_embedding.py:vocab_parallel_embedding"
---8<-- "../../vllm/model_executor/layers/vocab_parallel_embedding.py:parallel_lm_head"
+```python
+--8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:vocab_parallel_embedding"
+--8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:parallel_lm_head"
+```
 
 **5. Linear:**
 
---8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear"
---8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear:column_parallel_linear"
---8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear:replicated_linear"
+```python
+--8<-- "vllm/model_executor/layers/linear.py:row_parallel_linear"
+--8<-- "vllm/model_executor/layers/linear.py:row_parallel_linear:column_parallel_linear"
+--8<-- "vllm/model_executor/layers/linear.py:row_parallel_linear:replicated_linear"
+```
 
 **6. Logits Processor:**
 
---8<-- "../../vllm/model_executor/layers/logits_processor.py:logits_processor"
+```python
+--8<-- "vllm/model_executor/layers/logits_processor.py:logits_processor"
+```
 
 **7. Mamba:**
 
---8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
---8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
---8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
---8<-- "../../vllm/model_executor/models/plamo2.py:plamo2_mamba_mixer"
---8<-- "../../vllm/model_executor/layers/mamba/short_conv.py:short_conv"
+```python
+--8<-- "vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
+--8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
+--8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
+--8<-- "vllm/model_executor/models/plamo2.py:plamo2_mamba_mixer"
+--8<-- "vllm/model_executor/layers/mamba/short_conv.py:short_conv"
+```
 
 **8. MoE:**
 
---8<-- "../../vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
---8<-- "../../vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
---8<-- "../../vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:unquantized_fused_moe"
---8<-- "../../vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
---8<-- "../../vllm/model_executor/layers/fused_moe/fused_moe.py:grouped_topk"
+```python
+--8<-- "vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
+--8<-- "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
+--8<-- "vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:unquantized_fused_moe"
+--8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
+--8<-- "vllm/model_executor/layers/fused_moe/fused_moe.py:grouped_topk"
+```
 
 **9. Norm:**
 
---8<-- "../../vllm/model_executor/layers/layernorm.py:rms_norm"
---8<-- "../../vllm/model_executor/layers/layernorm.py:rms_norm_gated"
---8<-- "../../vllm/model_executor/layers/layernorm.py:gemma_rms_norm"
+```python
+--8<-- "vllm/model_executor/layers/layernorm.py:rms_norm"
+--8<-- "vllm/model_executor/layers/layernorm.py:rms_norm_gated"
+--8<-- "vllm/model_executor/layers/layernorm.py:gemma_rms_norm"
+```
 
 **10. Quantization:**
 
---8<-- "../../vllm/model_executor/layers/quantization/input_quant_fp8.py:quant_fp8"
+```python
+--8<-- "vllm/model_executor/layers/quantization/input_quant_fp8.py:quant_fp8"
+```
 
 **11. Rope:**
 
---8<-- "../../vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
---8<-- "../../vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
---8<-- "../../vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
+```python
+--8<-- "vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
+--8<-- "vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
+--8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
+```
 
 ## Guidelines for Implementing a New CustomOp
 
