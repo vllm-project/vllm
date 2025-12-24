@@ -55,6 +55,7 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
+        self.chat_template: str | None = getattr(vllm_model, "chat_template", None)
 
     def predict(
         self,
@@ -67,7 +68,11 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         corpus = [text for batch in inputs2 for text in batch["text"]]
 
         outputs = self.llm.score(
-            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
+            queries,
+            corpus,
+            truncate_prompt_tokens=-1,
+            use_tqdm=False,
+            chat_template=self.chat_template,
         )
         scores = np.array(outputs)
         return scores
@@ -210,7 +215,7 @@ def mteb_test_rerank_models(
             chat_template = (template_home / model_info.chat_template_name).read_text()
         vllm_model.chat_template = chat_template
 
-        # Confirm whether the important parameters of model_config are correct.
+        # Confirm whether the important configs in model_config are correct.
         if model_info.pooling_type is not None:
             assert model_config.pooler_config.pooling_type == model_info.pooling_type
         if model_info.attn_type is not None:
