@@ -588,6 +588,14 @@ class ModelConfig:
                 "repo name or path using the --tokenizer argument."
             )
 
+        # Multimodal models require the tokenizer for processor initialization
+        if self.skip_tokenizer_init and self.is_multimodal_model:
+            raise ValueError(
+                "skip_tokenizer_init=True is not supported for multimodal "
+                "models. The tokenizer is required to initialize the "
+                "multimodal processor (e.g., to obtain image_token_id)."
+            )
+
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
