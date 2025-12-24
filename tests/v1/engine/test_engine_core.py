@@ -40,10 +40,16 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request() -> EngineCoreRequest:
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=PROMPT_TOKENS,
         mm_features=None,
         sampling_params=SamplingParams(),
