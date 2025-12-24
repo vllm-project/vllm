@@ -718,6 +718,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
+    @override
+    def reset_after_sleep(self) -> None:
+        """
+        Reset FlashInfer wrappers after sleep mode.
+
+        FlashInfer wrappers cache internal buffers that may be freed during
+        sleep mode. By resetting them to None, they will be lazily recreated
+        with fresh buffers on next use.
+        """
+        self._workspace_buffer = None
+        self._prefill_wrapper = None
+        self._decode_wrapper = None
+        self._cascade_wrapper = None
+        if self.enable_cuda_graph:
+            self._decode_wrappers_cudagraph.clear()
+
     def _compute_flashinfer_kv_metadata(
         self,
         num_blocks_np: np.ndarray,
