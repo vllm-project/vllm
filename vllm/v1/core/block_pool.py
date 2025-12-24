@@ -270,10 +270,8 @@ class BlockPool:
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
-                parent_block = blocks[num_cached_blocks - 1]
-                assert parent_block.block_hash is not None
                 parent_block_hash = maybe_convert_block_hash(
-                    get_block_hash(parent_block.block_hash)
+                    block_hashes[num_cached_blocks - 1]
                 )
 
             self.kv_event_queue.append(
