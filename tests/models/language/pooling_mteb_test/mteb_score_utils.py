@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from pathlib import Path
 
 import mteb
 import numpy as np
@@ -18,6 +19,11 @@ from tests.models.utils import (
 MTEB_RERANK_TASKS = ["NFCorpus"]
 MTEB_RERANK_LANGS = ["eng"]
 MTEB_RERANK_TOL = 2e-3
+
+template_home = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "examples/pooling/score/template"
+)
 
 _empty_model_meta = ModelMeta(
     loader=None,
@@ -197,6 +203,11 @@ def mteb_test_rerank_models(
 
         # Score API is only enabled for num_labels == 1
         assert model_config.hf_config.num_labels == 1
+
+        chat_template: str | None = None
+        if model_info.chat_template_name is not None:
+            chat_template = (template_home / model_info.chat_template_name).read_text()
+        vllm_model.chat_template = chat_template
 
         vllm_main_score = run_mteb_rerank(
             vllm_mteb_encoder(vllm_model),

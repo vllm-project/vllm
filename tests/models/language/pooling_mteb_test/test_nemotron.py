@@ -3,17 +3,15 @@
 
 import pytest
 
+from tests.models.language.pooling_mteb_test.mteb_embed_utils import mteb_test_embed_models
+from tests.models.language.pooling_mteb_test.mteb_score_utils import mteb_test_rerank_models
 from tests.models.utils import (
     EmbedModelInfo,
-    LASTPoolingEmbedModelInfo,
-    LASTPoolingRerankModelInfo,
     RerankModelInfo,
 )
 
-from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
-
 EMBEDDING_MODELS = [
-    LASTPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "nvidia/llama-nemotron-embed-1b-v2",
         architecture="LlamaBidirectionalModel",
         mteb_score=0.689164662128673,
@@ -21,7 +19,7 @@ EMBEDDING_MODELS = [
 ]
 
 RERANK_MODELS = [
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "nvidia/llama-nemotron-rerank-1b-v2",
         architecture="LlamaBidirectionalForSequenceClassification",
         chat_template_name="nemotron-rerank.jinja",
