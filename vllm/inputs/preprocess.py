@@ -223,12 +223,32 @@ class InputPreprocessor:
         tokenizer = self.get_tokenizer()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
+        has_user_truncation = (
+            "truncation" in tokenization_kwargs or "max_length" in tokenization_kwargs
+        )
+        default_truncation_applied = False
+        if not has_user_truncation:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = self.model_config.max_model_len + 1
+            default_truncation_applied = True
+        elif tokenization_kwargs.get("truncation") and "max_length" not in tokenization_kwargs:
+            tokenization_kwargs["max_length"] = self.model_config.max_model_len
+
         encoder_config = self.model_config.encoder_config
 
         if encoder_config and encoder_config.get("do_lower_case", False):
             prompt = prompt.lower()
 
-        return tokenizer.encode(prompt, **tokenization_kwargs)
+        token_ids = tokenizer.encode(prompt, **tokenization_kwargs)
+
+        if default_truncation_applied and len(token_ids) >= self.model_config.max_model_len:
+            raise ValueError(
+                f"This model's maximum context length is "
+                f"{self.model_config.max_model_len} tokens. The input text is too "
+                "long. Please shorten it or set `truncate_prompt_tokens`."
+            )
+
+        return token_ids
 
     def _get_mm_processor(self) -> BaseMultiModalProcessor:
         if not hasattr(self, "_mm_processor"):
