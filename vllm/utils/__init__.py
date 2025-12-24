@@ -12,6 +12,11 @@ _DEPRECATED_MAPPINGS = {
     "cprofile_context": "profiling",
     # Used by lm-eval
     "get_open_port": "network_utils",
+    "get_reserved_port": "network_utils",
+    "get_reserved_ports_list": "network_utils",
+    "get_reserved_ports_as_int_list": "network_utils",
+    "release_reserved_port": "network_utils",
+    "ReservedPort": "network_utils",
 }
 
 

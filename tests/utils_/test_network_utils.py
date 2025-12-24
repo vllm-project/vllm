@@ -7,6 +7,8 @@ import zmq
 
 from vllm.utils.network_utils import (
     get_open_port,
+    get_reserved_port,
+    get_reserved_ports_list,
     get_tcp_uri,
     join_host_port,
     make_zmq_path,
@@ -124,3 +126,66 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_reserved_port_basic():
+    """Test that ReservedPort holds a port and releases it correctly."""
+    reserved = get_reserved_port()
+    assert isinstance(reserved.port, int)
+    assert 1 <= reserved.port <= 65535
+    assert reserved._socket is not None
+
+    # Port should NOT be bindable while reserved
+    with pytest.raises(OSError), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", reserved.port))
+
+    released_port = reserved.release()
+    assert released_port == reserved.port
+    assert reserved._socket is None
+
+
+def test_reserved_port_context_manager():
+    """Test that ReservedPort works as a context manager."""
+    with get_reserved_port() as reserved:
+        port = reserved.port
+        assert isinstance(port, int)
+        assert reserved._socket is not None
+    assert reserved._socket is None
+
+
+def test_reserved_port_prevents_race_condition():
+    """Test for GitHub issue #28498."""
+    reserved = get_reserved_port()
+    port = reserved.port
+
+    # Port should fail to bind while reserved
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_sock:
+            test_sock.bind(("", port))
+            pytest.fail("Port was not properly reserved")
+    except OSError:
+        pass
+
+    reserved.release()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_sock:
+        test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        test_sock.bind(("", port))
+
+
+def test_get_reserved_ports_list():
+    """Test getting a list of reserved ports."""
+    reservations = get_reserved_ports_list(3)
+    assert len(reservations) == 3
+    ports = [r.port for r in reservations]
+    assert len(set(ports)) == 3
+    for r in reservations:
+        assert r._socket is not None
+        r.release()
+
+
+def test_reserved_port_double_release():
+    """Test that releasing a port twice is safe."""
+    reserved = get_reserved_port()
+    port1 = reserved.release()
+    port2 = reserved.release()
+    assert port1 == port2

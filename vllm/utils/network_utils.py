@@ -10,6 +10,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -22,6 +23,43 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Module-level tracking of reserved port sockets to avoid pydantic serialization issues
+# Maps port number -> socket object
+_reserved_port_sockets: dict[int, socket.socket] = {}
+
+
+@dataclass
+class ReservedPort:
+    """A port reservation that holds the socket open until explicitly released.
+
+    This prevents race conditions where a port is discovered as free but then
+    claimed by another process before it can be used. The socket remains bound
+    until release() is called or the context manager exits.
+
+    See GitHub issue #28498 for details on the race condition this solves.
+    """
+
+    port: int
+    _socket: socket.socket | None = None
+
+    def release(self) -> int:
+        """Release the port reservation and return the port number."""
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+        return self.port
+
+    def __enter__(self) -> "ReservedPort":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        if self._socket is not None:
+            with contextlib.suppress(Exception):
+                self._socket.close()
 
 
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
@@ -172,6 +210,106 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
+
+
+def get_reserved_port() -> ReservedPort:
+    """Get a reserved port that stays held until explicitly released.
+
+    Unlike get_open_port(), this function returns a ReservedPort object
+    that keeps the underlying socket bound, preventing other processes
+    from claiming the port until release() is called.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
+        while True:
+            reserved = _get_reserved_port()
+            if reserved.port not in reserved_port_range:
+                return reserved
+            reserved.release()
+    return _get_reserved_port()
+
+
+def get_reserved_ports_list(count: int = 5) -> list[ReservedPort]:
+    """Get a list of reserved ports."""
+    reservations: list[ReservedPort] = []
+    seen_ports: set[int] = set()
+    while len(reservations) < count:
+        reserved = get_reserved_port()
+        if reserved.port not in seen_ports:
+            seen_ports.add(reserved.port)
+            reservations.append(reserved)
+        else:
+            reserved.release()
+    return reservations
+
+
+def get_reserved_ports_as_int_list(count: int = 5) -> list[int]:
+    """Get a list of reserved port numbers.
+
+    Unlike get_reserved_ports_list(), this returns plain integers.
+    The sockets are tracked internally and must be released via
+    release_reserved_port(). This is designed for use with pydantic
+    dataclasses that cannot serialize socket objects.
+    """
+    ports: list[int] = []
+    seen_ports: set[int] = set()
+    while len(ports) < count:
+        reserved = get_reserved_port()
+        if reserved.port not in seen_ports:
+            seen_ports.add(reserved.port)
+            ports.append(reserved.port)
+            # Transfer socket ownership to module-level tracking
+            if reserved._socket is not None:
+                _reserved_port_sockets[reserved.port] = reserved._socket
+                reserved._socket = None  # Prevent double-close
+        else:
+            reserved.release()
+    return ports
+
+
+def release_reserved_port(port: int) -> int:
+    """Release a port reserved via get_reserved_ports_as_int_list().
+
+    Args:
+        port: The port number to release.
+
+    Returns:
+        The port number that was released.
+    """
+    sock = _reserved_port_sockets.pop(port, None)
+    if sock is not None:
+        with contextlib.suppress(Exception):
+            sock.close()
+    return port
+
+
+def _get_reserved_port() -> ReservedPort:
+    """Internal function to get a reserved port with socket held open."""
+    port_env = envs.VLLM_PORT
+    if port_env is not None:
+        port = port_env
+        while True:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("", port))
+                return ReservedPort(port=port, _socket=sock)
+            except OSError:
+                port += 1
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", 0))
+        port = sock.getsockname()[1]
+        return ReservedPort(port=port, _socket=sock)
+    except OSError:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", 0))
+        port = sock.getsockname()[1]
+        return ReservedPort(port=port, _socket=sock)
 
 
 def _get_open_port() -> int:
