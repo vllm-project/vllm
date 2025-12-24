@@ -438,6 +438,7 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A")
 
 
+@functools.cache
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
@@ -453,6 +454,7 @@ def use_flashinfer_prefill() -> bool:
     )
 
 
+@functools.cache
 def use_cudnn_prefill() -> bool:
     from vllm.config import get_current_vllm_config
 
@@ -465,6 +467,7 @@ def use_cudnn_prefill() -> bool:
     )
 
 
+@functools.cache
 def use_trtllm_ragged_deepseek_prefill() -> bool:
     """Check if TRT-LLM ragged DeepSeek prefill should be used."""
     from vllm.config import get_current_vllm_config
@@ -475,6 +478,21 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
     )
+
+
+@functools.cache
+def backend_supports_prefill_query_quantization() -> bool:
+    """Check if the selected MLA backend supports prefill query quantization.
+
+    Currently supported backends:
+    - FlashInfer prefill
+    - TRT-LLM ragged DeepSeek prefill
+
+    Not supported:
+    - cuDNN prefill
+    - FlashAttention fallback
+    """
+    return use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -558,6 +576,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             if (
                 kv_cache_spec.cache_dtype_str.startswith("fp8")
                 and vllm_config.attention_config.use_prefill_query_quantization
+                and backend_supports_prefill_query_quantization()
             )
             else self.model_config.dtype
         )
@@ -1303,13 +1322,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.supports_prefill_query_quantization = False
+
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
-            self.supports_prefill_query_quantization = True
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
             self._run_prefill_context_chunk = (
@@ -1317,7 +1335,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
-            self.supports_prefill_query_quantization = True
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
@@ -1764,9 +1781,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
             # To Do: Use epilogue to generate fp8 kv_nope.
-            kv_nope = self.kv_b_proj(
-                kv_c_normed.to(attn_metadata.prefill.output_dtype)
-            )[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
+                kv_c_normed = kv_c_normed.to(attn_metadata.prefill.output_dtype)
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
             if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
                 kv_nope = kv_nope.to(attn_metadata.prefill.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
