@@ -556,22 +556,26 @@ class OpenAISpeechToText(OpenAIServing):
                         text_parts.append(output.text)
 
                     # Collect token_ids and logprobs for logprobs response
-                    if request.logprobs is not None and output.logprobs is not None:
+                    # Use getattr since TranslationRequest doesn't have logprobs
+                    req_logprobs = getattr(request, "logprobs", None)
+                    if req_logprobs is not None and output.logprobs is not None:
                         all_token_ids.extend(output.token_ids)
                         all_logprobs.extend(output.logprobs)
             text = "".join(text_parts)
 
             # Create logprobs response if requested
+            # Use getattr since TranslationRequest doesn't have logprobs
             logprobs_response: TranscriptionLogProbs | None = None
+            req_logprobs = getattr(request, "logprobs", None)
             if (
-                request.logprobs is not None
+                req_logprobs is not None
                 and all_logprobs
                 and self.task_type == "transcribe"
             ):
                 logprobs_response = self._create_transcription_logprobs(
                     token_ids=all_token_ids,
                     top_logprobs=all_logprobs,
-                    num_output_top_logprobs=request.logprobs,
+                    num_output_top_logprobs=req_logprobs,
                 )
 
             if self.task_type == "transcribe":
@@ -647,11 +651,9 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         # Check if logprobs are requested (only for transcription)
-        include_logprobs = (
-            self.task_type == "transcribe"
-            and hasattr(request, "logprobs")
-            and request.logprobs is not None
-        )
+        # Use getattr since TranslationRequest doesn't have logprobs
+        req_logprobs = getattr(request, "logprobs", None)
+        include_logprobs = self.task_type == "transcribe" and req_logprobs is not None
 
         try:
             for result_generator in list_result_generator:
@@ -678,13 +680,11 @@ class OpenAISpeechToText(OpenAIServing):
                     # Create logprobs for this chunk if requested
                     chunk_logprobs: TranscriptionLogProbs | None = None
                     if include_logprobs and output.logprobs is not None:
-                        assert (
-                            request.logprobs is not None
-                        )  # Checked in include_logprobs
+                        assert req_logprobs is not None  # Checked in include_logprobs
                         chunk_logprobs = self._create_transcription_logprobs(
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
-                            num_output_top_logprobs=request.logprobs,
+                            num_output_top_logprobs=req_logprobs,
                         )
 
                     if output.finish_reason is None:
