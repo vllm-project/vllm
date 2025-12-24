@@ -3,6 +3,7 @@
 
 import time
 from collections import defaultdict
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -235,7 +236,7 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
-):
+) -> ForwardContext:
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
@@ -248,7 +249,9 @@ def create_forward_context(
 
 
 @contextmanager
-def override_forward_context(forward_context: ForwardContext | None):
+def override_forward_context(
+    forward_context: ForwardContext | None,
+) -> Generator[None, None, None]:
     """A context manager that overrides the current forward context.
     This is used to override the forward context for a specific
     forward pass.
@@ -272,7 +275,7 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
-):
+) -> Generator[None, None, None]:
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.

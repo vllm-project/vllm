@@ -65,7 +65,7 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     return plugins
 
 
-def load_general_plugins():
+def load_general_plugins() -> None:
     """WARNING: plugins can be loaded for multiple times in different
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
