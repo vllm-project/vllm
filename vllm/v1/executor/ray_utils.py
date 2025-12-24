@@ -329,14 +329,15 @@ def initialize_ray_cluster(
         available_gpus = cuda_device_count_stateless()
         if parallel_config.world_size > available_gpus:
             logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
+                "Total GPU requirement (world_size=%d) exceeds locally "
+                "visible GPUs (%d). For multi-node Ray clusters, this may be "
+                "expected if the total cluster has enough GPUs. "
+                "If running single-node, consider reducing "
+                "tensor_parallel_size (%d) or pipeline_parallel_size (%d).",
                 parallel_config.world_size,
                 available_gpus,
-                available_gpus,
-                parallel_config.world_size,
+                parallel_config.tensor_parallel_size,
+                parallel_config.pipeline_parallel_size,
             )
 
     if ray.is_initialized():
