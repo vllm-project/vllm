@@ -145,7 +145,7 @@ def test_shared_storage_connector_hashes(tmp_path):
 
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import AutoProcessor
 
     # Create processor to handle the chat prompt
     processor = AutoProcessor.from_pretrained(MODEL_NAME)
