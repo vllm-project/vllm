@@ -139,7 +139,7 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
     image_embeds: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "ns", "hs"),
+        TensorShape("bn", "ns", "hs", dynamic_dims={"ns"}),
     ]
 
 
