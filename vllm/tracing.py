@@ -10,9 +10,6 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
-from opentelemetry.propagate import inject
-from opentelemetry.sdk.resources import Resource
-
 from vllm.logger import init_logger
 from vllm.utils.func_utils import run_once
 
@@ -29,9 +26,11 @@ try:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
         OTLPSpanExporter as OTLPHttpExporter,
     )
+    from opentelemetry.propagate import inject
     from opentelemetry.sdk.environment_variables import (
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
+    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
@@ -51,6 +50,8 @@ except ImportError:
     trace = None  # type: ignore
     Context = Any  # type: ignore
     Tracer = Any  # type: ignore
+    inject = None  # type: ignore
+    Resource = None  # type: ignore
 
 
 def is_otel_available() -> bool:
