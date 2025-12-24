@@ -15,11 +15,6 @@ from tests.models.language.pooling_mteb_test.mteb_utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -29,6 +24,10 @@ st_main_score = 0.33457
 @pytest.fixture(scope="module")
 def server():
     args = ["--runner", "pooling", "--enforce-eager", "--disable-uvicorn-access-log"]
+
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

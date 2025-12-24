@@ -28,14 +28,18 @@ from vllm.utils.serial_utils import (
     decode_pooling_output,
 )
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
+
+
+if current_platform.is_rocm():
+    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +56,10 @@ def server():
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
     ]
+
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
