@@ -235,6 +235,39 @@ class MicroGemm<cpu_utils::ISA::AMX, scalar_t> {
     }
   }
 
+  static void pack_weight(const scalar_t* __restrict__ weight,
+                          scalar_t* __restrict__ packed_weight,
+                          const int32_t output_size, const int32_t input_size) {
+    constexpr int32_t elem_num_per_group = 4 / sizeof(scalar_t);
+    TORCH_CHECK_EQ(output_size % 16, 0);
+    TORCH_CHECK_EQ(input_size % (16 * elem_num_per_group), 0);
+
+    const int32_t output_group_num = output_size / 16;
+    const int32_t input_32b_num = input_size / elem_num_per_group;
+    for (int32_t output_group_idx = 0; output_group_idx < output_group_num;
+         ++output_group_idx) {
+      const int32_t* __restrict__ weight_32b =
+          reinterpret_cast<const int32_t*>(weight);
+      int32_t* __restrict__ packed_weight_32b =
+          reinterpret_cast<int32_t*>(packed_weight);
+      for (int32_t output_idx = 0; output_idx < 16; ++output_idx) {
+        for (int32_t weight_offset = 0, packed_offset = 0;
+             weight_offset < input_32b_num;
+             ++weight_offset, packed_offset += 16) {
+          packed_weight_32b[packed_offset] = weight_32b[weight_offset];
+        }
+
+        // update
+        weight_32b += input_32b_num;
+        packed_weight_32b += 1;
+      }
+
+      // update
+      weight += 16 * input_size;
+      packed_weight += 16 * input_size;
+    }
+  }
+
  private:
   alignas(64) __tilecfg amx_tile_config_;
   int32_t curr_m_;

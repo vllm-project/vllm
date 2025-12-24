@@ -574,7 +574,7 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
+            "Total token throughput (tok/s):", metrics.total_token_throughput
         )
     )
 
@@ -963,8 +963,7 @@ def create_argument_parser():
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--result-dir",

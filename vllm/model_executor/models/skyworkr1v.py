@@ -647,8 +647,6 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[SkyworkR1VProcessing
     dummy_inputs=SkyworkR1VDummyInputsBuilder,
 )
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

@@ -140,16 +140,21 @@ function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
   run_python(_VLLM_TORCH_GOMP_PATH
     "
 import os, glob
-try:
-  import torch
-  torch_pkg = os.path.dirname(torch.__file__)
-  site_root = os.path.dirname(torch_pkg)
-  torch_libs = os.path.join(site_root, 'torch.libs')
-  print(glob.glob(os.path.join(torch_libs, 'libgomp-*.so*'))[0])
-except:
-  print('')
+import torch
+torch_pkg = os.path.dirname(torch.__file__)
+site_root = os.path.dirname(torch_pkg)
+
+# Search both torch.libs and torch/lib
+roots = [os.path.join(site_root, 'torch.libs'), os.path.join(torch_pkg, 'lib')]
+candidates = []
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    candidates.extend(glob.glob(os.path.join(root, 'libgomp*.so*')))
+
+print(candidates[0] if candidates else '')
 "
-    "failed to probe torch.libs for libgomp")
+    "failed to probe for libgomp")
 
   if(_VLLM_TORCH_GOMP_PATH STREQUAL "" OR NOT EXISTS "${_VLLM_TORCH_GOMP_PATH}")
     return()

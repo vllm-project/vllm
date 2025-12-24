@@ -1074,8 +1074,6 @@ class InternVLMultiModalProcessor(
     dummy_inputs=InternVLDummyInputsBuilder,
 )
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    merge_by_field_config = True
-
     supports_encoder_tp_data = True
 
     @classmethod

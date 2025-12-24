@@ -22,6 +22,9 @@ class TokenizerLike(Protocol):
     ) -> "TokenizerLike":
         raise NotImplementedError
 
+    def num_special_tokens_to_add(self) -> int:
+        raise NotImplementedError
+
     @property
     def all_special_tokens(self) -> list[str]:
         raise NotImplementedError
@@ -94,7 +97,7 @@ class TokenizerLike(Protocol):
         messages: list["ChatCompletionMessageParam"],
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
-    ) -> list[int]:
+    ) -> str | list[int]:
         raise NotImplementedError
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:

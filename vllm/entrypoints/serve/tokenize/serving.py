@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -80,11 +81,8 @@ class OpenAIServingTokenization(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+
+                _, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,
@@ -141,7 +139,10 @@ class OpenAIServingTokenization(OpenAIServing):
         tokenizer = await self.engine_client.get_tokenizer()
 
         self._log_inputs(
-            request_id, request.tokens, params=None, lora_request=lora_request
+            request_id,
+            TokensPrompt(prompt_token_ids=request.tokens),
+            params=None,
+            lora_request=lora_request,
         )
 
         prompt_input = await self._tokenize_prompt_input_async(

@@ -17,7 +17,6 @@ def test_idefics_multimodal(
     with vllm_runner(
         model_name="HuggingFaceM4/Idefics3-8B-Llama3",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="dummy",
         max_model_len=512,
@@ -86,7 +85,6 @@ def test_gemma_multimodal(
     with vllm_runner(
         model_name="google/gemma-3-4b-it",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="auto",
         hf_overrides=update_config,

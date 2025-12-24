@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -342,6 +343,9 @@ def _deep_ep_moe(
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
     if not low_latency_mode:
         assert not use_fp8_dispatch, (
             "FP8 dispatch interface is available only in low-latency mode"
@@ -437,6 +441,7 @@ def test_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
+    workspace_init,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
@@ -492,6 +497,7 @@ def test_low_latency_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     use_fp8_dispatch: bool,
+    workspace_init,
 ):
     low_latency_mode = True
 

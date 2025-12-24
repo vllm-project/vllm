@@ -18,16 +18,19 @@ Compute Resources:
 - Alibaba Cloud
 - AMD
 - Anyscale
+- Arm
 - AWS
 - Crusoe Cloud
 - Databricks
 - DeepInfra
 - Google Cloud
+- IBM
 - Intel
 - Lambda Lab
 - Nebius
 - Novita AI
 - NVIDIA
+- Red Hat
 - Replicate
 - Roblox
 - RunPod

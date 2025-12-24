@@ -48,7 +48,7 @@ def query_marlin_supported_quant_types(
             -1 if capability_tuple is None else capability_tuple.to_int()
         )
 
-    if device_capability < 80:
+    if device_capability < 75:
         return []
 
     # - has_zp is True: return quant_types that has zero points
@@ -179,6 +179,8 @@ def check_marlin_supports_shape(
 
 
 def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+    if current_platform.is_rocm():
+        return False
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
     )
@@ -195,6 +197,8 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+    if current_platform.is_rocm():
+        return False
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
     # apply_router_weight_on_input is not supported for moe marlin
@@ -590,9 +594,15 @@ def apply_awq_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
+        assert quant_type == scalar_types.uint4, (
+            "W8A8-INT8 is not supported by marlin kernel."
+        )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
+        assert quant_type == scalar_types.uint4, (
+            "INT8 weight + FP8 activation is not supported."
+        )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
     output = ops.gptq_marlin_gemm(
@@ -645,9 +655,15 @@ def apply_rtn_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
+        assert quant_type == scalar_types.uint4b8, (
+            "W8A8-INT8 is not supported by marlin kernel."
+        )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
+        assert quant_type == scalar_types.uint4b8, (
+            "INT8 weight + FP8 activation is not supported."
+        )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
     output = ops.gptq_marlin_gemm(

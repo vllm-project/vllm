@@ -31,7 +31,7 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -255,7 +255,7 @@ class Llama4VisionAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_local_heads, self.head_dim, self.scaling
         )
 
@@ -295,11 +295,11 @@ class Llama4VisionAttention(nn.Module):
         rope_parameters = {
             "rope_type": "mllama4",
             "rope_theta": config.rope_parameters["rope_theta"],
+            "partial_rotary_factor": 0.5,
         }
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=config.hidden_size // config.num_attention_heads // 2,
             # number of image patches
             max_position=(config.image_size // config.patch_size) ** 2,
             rope_parameters=rope_parameters,
@@ -741,8 +741,6 @@ class Llama4ForConditionalGeneration(
     SupportsEagle3,
     SupportsLoRA,
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

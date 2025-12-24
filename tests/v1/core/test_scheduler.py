@@ -1536,7 +1536,7 @@ def create_scheduler_with_priority(
     )
     kv_transfer_config = (
         KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -1552,7 +1552,7 @@ def create_scheduler_with_priority(
 
     ec_transfer_config = (
         ECTransferConfig(
-            ec_connector="ECSharedStorageConnector",
+            ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
@@ -2413,7 +2413,7 @@ def _assert_right_ec_connector_metadata(
     metadata_dict = {mm_data.mm_hash: mm_data for mm_data in metadata.mm_datas}
 
     # Check all required identifiers exist in metadata; and no extra
-    # In ECSharedStorageConnector format
+    # In ECExampleConnector format
     # NOTE: even having same identifier, the mm_features can be different
     # since their mm_position can be in different offsets, etc
     identifiers_dict = {f.identifier for f in mm_features_list}

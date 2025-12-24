@@ -45,7 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
-from .rebalance_algo import rebalance_experts
+from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
@@ -213,18 +213,23 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
+        """
+        Selected EPLB algorithm class
+        """
+        self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
 
         Different from `expert_rearrangement_step`, 
         each EP rank may have its own `expert_load_window_step`.
         """
-        self.expert_load_window_step: int = 0
+        self.expert_load_window_size: int = 0
         """
         Size of the expert load sliding window.
         This is a constant and is taken from the config.
         """
-        self.expert_load_window_size: int = 0
+        self.expert_rearrangement_step: int = 0
         """
         Steps after last rearrangement.
         Will trigger a rearrangement if it exceeds the threshold.
@@ -415,6 +420,10 @@ class EplbState:
         )
         self.expert_rearrangement_step_interval = eplb_step_interval
 
+        # Set the policy based on the selected eplb algorithm type.
+        policy_type = self.parallel_config.eplb_config.policy
+        self.policy = EPLB_POLICIES[policy_type]
+        logger.debug("Selected EPLB policy: %d", policy_type)
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (
@@ -441,7 +450,7 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = rebalance_experts(
+            ) = self.policy.rebalance_experts(
                 global_expert_load,
                 num_replicas,
                 num_groups,
@@ -776,6 +785,7 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
@@ -784,7 +794,7 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = rebalance_experts(
+            ) = self.policy.rebalance_experts(
                 global_expert_load_window,
                 num_replicas,
                 num_groups,
