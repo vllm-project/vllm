@@ -33,6 +33,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -188,6 +189,14 @@ class Mamba2Model(nn.Module):
 class Mamba2ForCausalLM(
     nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
 ):
+    # Map HuggingFace weight names to vLLM weight names.
+    # Some Mamba2 models (e.g., mistralai/Mamba-Codestral-7B-v0.1) use
+    # "model." prefix in checkpoint weights, while vLLM uses "backbone.".
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.": "backbone."},
+        orig_to_new_substr={"A_log": "A"},
+    )
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
@@ -285,4 +294,4 @@ class Mamba2ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

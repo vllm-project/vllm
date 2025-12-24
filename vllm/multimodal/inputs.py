@@ -20,7 +20,7 @@ from typing import (
 )
 
 import numpy as np
-from typing_extensions import NotRequired, TypeVar, deprecated
+from typing_extensions import NotRequired, TypeVar
 
 from vllm.utils.collection_utils import full_groupby, is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -983,62 +983,6 @@ MultiModalKwargsOptionalItems: TypeAlias = (
     MultiModalKwargsItems[MultiModalKwargsItem]
     | MultiModalKwargsItems[MultiModalKwargsItem | None]
 )
-
-
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
-class MultiModalKwargs(UserDict[str, NestedTensors]):
-    """
-    A dictionary that represents the keyword arguments to
-    [`torch.nn.Module.forward`][].
-    """
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_hf_inputs` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_hf_inputs(
-        hf_inputs: "BatchFeature",
-        config_by_key: Mapping[str, MultiModalFieldConfig],
-    ):
-        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key).get_data()
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_seq` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_items(
-        items: Sequence[MultiModalKwargsItem],
-        *,
-        pin_memory: bool = False,
-    ):
-        return MultiModalKwargsItems.from_seq(items).get_data(pin_memory=pin_memory)
-
-    def __getitem__(self, key: str):
-        if key not in self:
-            raise KeyError(
-                f"Keyword argument {key!r} not found. "
-                f"Available keys: {set(self.keys())}"
-            )
-
-        return super().__getitem__(key)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, self.__class__):
-            return False
-
-        for k in self:
-            if k not in other:
-                return False
-            if not nested_tensors_equal(self[k], other[k]):
-                return False
-
-        return True
 
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
