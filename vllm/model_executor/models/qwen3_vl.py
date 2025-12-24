@@ -581,7 +581,7 @@ class Qwen3_VisionTransformer(nn.Module):
 
         seq_len, _ = hidden_states.size()
         tp_rank, tp_world_size, tp_group = get_rank_world()
-        if self.use_data_parallel == False:
+        if not self.use_data_parallel:
             merge_size = self.spatial_merge_size ** 2
             padding_size = math.ceil(math.ceil(seq_len / tp_world_size) / merge_size
                                  ) * merge_size * tp_world_size - seq_len
@@ -2123,3 +2123,11 @@ class Qwen3VLForConditionalGeneration(
             connector="visual.merger",
             tower_model="visual.",
         )
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen3LLMForCausalLM, "language_model"

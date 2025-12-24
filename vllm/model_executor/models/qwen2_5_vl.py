@@ -34,7 +34,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, Qwen2ForCausalLM
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
@@ -328,15 +328,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             if multimodal_config
             else False
         )
-		
-        if self.use_data_parallel == True :
+
+        if self.use_data_parallel:
             self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
             self.tp_world_size = 1
             self.tp_group = None
         else :
             self.tp_rank, self.tp_world_size, self.tp_group = get_rank_world()
 
-        
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
@@ -386,7 +385,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
-        if self.use_data_parallel == False:
+        if not self.use_data_parallel:
             x = einops.rearrange(
                 x,
                 "s b (three head head_dim) -> (b three) s head head_dim",
@@ -395,7 +394,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                 head=self.num_attention_heads_per_partition*self.tp_world_size,
             )
 
-            x = all_to_all_4d(x, is_seq_to_head=True, group=self.tp_group, tp_rank=self.tp_rank)
+            x = all_to_all_4d(x, is_seq_to_head=True, group=self.tp_group)
             cur_seq = x.shape[1]
             x = x[:, :true_seq, :, :]
         
@@ -1619,3 +1618,10 @@ class Qwen2_5_VLForConditionalGeneration(
             tower_model="visual.",
         )
 
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen2ForCausalLM, "language_model"

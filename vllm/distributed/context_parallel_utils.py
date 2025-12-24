@@ -2,11 +2,10 @@ import torch
 import torch.distributed as dist
 import os
 
-def all_to_all_4d(input_tensor: torch.tensor,
+def all_to_all_4d(input_tensor: torch.Tensor,
                   is_seq_to_head: bool,
                   group=None,
-                  tp_rank: int = 0,
-                  use_sync: bool = False) -> torch.tensor:
+                  use_sync: bool = False) -> torch.Tensor:
     seq_world_size = dist.get_world_size(group)
     
     if is_seq_to_head:
@@ -21,9 +20,7 @@ def all_to_all_4d(input_tensor: torch.tensor,
 
         output = torch.empty_like(input_t)
         if seq_world_size > 1:
-            print(f"----start all_to_all_single: input_t={input_t.shape}, output={output.shape}")
             dist.all_to_all_single(output, input_t, group=group)
-            print("----finish all_to_all_single")
             if use_sync:
                 platform = input_tensor.device.type
                 sync_func = getattr(torch, f"{platform}.synchronize")
