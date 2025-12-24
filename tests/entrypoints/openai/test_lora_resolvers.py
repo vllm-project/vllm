@@ -61,13 +61,13 @@ class MockLoRAResolver(LoRAResolver):
             return LoRARequest(
                 lora_name="test-lora",
                 lora_int_id=1,
-                lora_local_path="/fake/path/test-lora",
+                lora_path="/fake/path/test-lora",
             )
         elif lora_name == "invalid-lora":
             return LoRARequest(
                 lora_name="invalid-lora",
                 lora_int_id=2,
-                lora_local_path="/fake/path/invalid-lora",
+                lora_path="/fake/path/invalid-lora",
             )
         return None
 

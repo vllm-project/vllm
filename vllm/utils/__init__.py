@@ -2,38 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import uuid
-import warnings
-from typing import Any
 
 import torch
-
-_DEPRECATED_MAPPINGS = {
-    "cprofile": "profiling",
-    "cprofile_context": "profiling",
-    # Used by lm-eval
-    "get_open_port": "network_utils",
-}
-
-
-def __getattr__(name: str) -> Any:  # noqa: D401 - short deprecation docstring
-    """Module-level getattr to handle deprecated utilities."""
-    if name in _DEPRECATED_MAPPINGS:
-        submodule_name = _DEPRECATED_MAPPINGS[name]
-        warnings.warn(
-            f"vllm.utils.{name} is deprecated and will be removed in a future version. "
-            f"Use vllm.utils.{submodule_name}.{name} instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        module = __import__(f"vllm.utils.{submodule_name}", fromlist=[submodule_name])
-        return getattr(module, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    # expose deprecated names in dir() for better UX/tab-completion
-    return sorted(list(globals().keys()) + list(_DEPRECATED_MAPPINGS.keys()))
-
 
 MASK_64_BITS = (1 << 64) - 1
 
