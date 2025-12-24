@@ -5,11 +5,10 @@ import pytest
 
 from vllm import LLM
 
-from ...utils import create_new_process_for_each_test
-
-pytestmark = pytest.mark.multi_gpu_test(num_gpus=2)
+from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()
