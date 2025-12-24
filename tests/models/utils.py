@@ -392,6 +392,7 @@ class EmbedModelInfo(ModelInfo):
 @dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
+    chat_template_name: str | None = None
 
 
 @dataclass
