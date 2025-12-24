@@ -57,46 +57,76 @@ For example:
 
 ## Types of Supported CustomOp in vLLM
 
-| Category | OP Name | OP Class |
-|----------|---------|----------|
-| Attention | `mm_encoder_attn` | `MMEncoderAttention` |
-| Attention | `multi_head_latent_attention` | `MultiHeadLatentAttentionWrapper` |
-| Activation | `fatrelu_and_mul` | `FatreluAndMul` |
-| Activation | `silu_and_mul` | `SiluAndMul` |
-| Activation | `mul_and_silu` | `MulAndSilu` |
-| Activation | `gelu_and_mul_sparse` | `GeluAndMulSparse` |
-| Activation | `gelu_and_mul` | `GeluAndMul` |
-| Activation | `swigluoai_and_mul` | `SwigluOAIAndMul` |
-| Activation | `gelu_new` | `NewGELU` |
-| Activation | `gelu_fast` | `FastGELU` |
-| Activation | `quick_gelu` | `QuickGELU` |
-| Activation | `relu2` | `ReLUSquaredActivation` |
-| Activation | `xielu` | `XIELU` |
-| Conv | `conv2d` | `Conv2dLayer` |
-| Conv | `conv3d` | `Conv3dLayer` |
-| Conv | `short_conv` | `ShortConv` |
-| Embedding | `vocab_parallel_embedding` | `VocabParallelEmbedding` |
-| Embedding | `parallel_lm_head` | `ParallelLMHead` |
-| Linear | `row_parallel_linear` | `RowParallelLinear` |
-| Linear | `column_parallel_linear` | `ColumnParallelLinear` |
-| Linear | `replicated_linear` | `ReplicatedLinear` |
-| Logits Processor | `logits_processor` | `LogitsProcessor` |
-| Mamba | `mamba_mixer` | `MambaMixer` |
-| Mamba | `mamba_mixer2` | `MambaMixer2` |
-| Mamba | `plamo2_mamba_mixer` | `Plamo2MambaMixer` |
-| Mamba | `mixer2_gated_rms_norm` | `Mixer2RMSNormGated` |
-| MoE | `fused_moe` | `FusedMoE` |
-| MoE | `modular_fused_moe` | `FusedMoEModularMethod` |
-| MoE | `unquantized_fused_moe` | `UnquantizedFusedMoEMethod` |
-| MoE | `transformers_fused_moe` | `TransformersFusedMoE` |
-| MoE | `grouped_topk` | `GroupedTopk` |
-| Norm | `rms_norm` | `RMSNorm` |
-| Norm | `gemma_rms_norm` | `GemmaRMSNorm` |
-| Norm | `rms_norm_gated` | `RMSNormGated` |
-| Quantization | `quant_fp8` | `QuantFP8` |
-| Rope | `rotary_embedding` | `RotaryEmbeddingBase` |
-| Rope | `dual_chunk_rotary_embedding` | `DualChunkRotaryEmbedding` |
-| Rope | `apply_rotary_emb` | `ApplyRotaryEmb` |
+**1. Attention:**
+
+--8<-- "../../vllm/attention/layers/mm_encoder_attention.py:mm_encoder_attn"
+--8<-- "../../vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+
+**2. Activation:**
+
+--8<-- "../../vllm/model_executor/layers/activation.py:silu_and_mul"
+--8<-- "../../vllm/model_executor/layers/activation.py:mul_and_silu"
+--8<-- "../../vllm/model_executor/layers/activation.py:gelu_new"
+--8<-- "../../vllm/model_executor/layers/activation.py:gelu_fast"
+--8<-- "../../vllm/model_executor/layers/activation.py:quick_gelu"
+--8<-- "../../vllm/model_executor/layers/activation.py:gelu_and_mul"
+--8<-- "../../vllm/model_executor/layers/activation.py:gelu_and_mul_sparse"
+--8<-- "../../vllm/model_executor/layers/activation.py:relu2"
+--8<-- "../../vllm/model_executor/layers/activation.py:xielu"
+--8<-- "../../vllm/model_executor/layers/activation.py:swigluoai_and_mul"
+--8<-- "../../vllm/model_executor/layers/activation.py:fatrelu_and_mul"
+
+**3. MM-Conv:**
+
+--8<-- "../../vllm/model_executor/layers/conv.py:conv2d"
+--8<-- "../../vllm/model_executor/layers/conv.py:conv3d"
+
+**4. Embedding:**
+
+--8<-- "../../vllm/model_executor/layers/vocab_parallel_embedding.py:vocab_parallel_embedding"
+--8<-- "../../vllm/model_executor/layers/vocab_parallel_embedding.py:parallel_lm_head"
+
+**5. Linear:**
+
+--8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear"
+--8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear:column_parallel_linear"
+--8<-- "../../vllm/model_executor/layers/linear.py:row_parallel_linear:replicated_linear"
+
+**6. Logits Processor:**
+
+--8<-- "../../vllm/model_executor/layers/logits_processor.py:logits_processor"
+
+**7. Mamba:**
+
+--8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
+--8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
+--8<-- "../../vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
+--8<-- "../../vllm/model_executor/models/plamo2.py:plamo2_mamba_mixer"
+--8<-- "../../vllm/model_executor/layers/mamba/short_conv.py:short_conv"
+
+**8. MoE:**
+
+--8<-- "../../vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
+--8<-- "../../vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
+--8<-- "../../vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:unquantized_fused_moe"
+--8<-- "../../vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
+--8<-- "../../vllm/model_executor/layers/fused_moe/fused_moe.py:grouped_topk"
+
+**9. Norm:**
+
+--8<-- "../../vllm/model_executor/layers/layernorm.py:rms_norm"
+--8<-- "../../vllm/model_executor/layers/layernorm.py:rms_norm_gated"
+--8<-- "../../vllm/model_executor/layers/layernorm.py:gemma_rms_norm"
+
+**10. Quantization:**
+
+--8<-- "../../vllm/model_executor/layers/quantization/input_quant_fp8.py:quant_fp8"
+
+**11. Rope:**
+
+--8<-- "../../vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
+--8<-- "../../vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
+--8<-- "../../vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
 
 ## Guidelines for Implementing a New CustomOp
 
