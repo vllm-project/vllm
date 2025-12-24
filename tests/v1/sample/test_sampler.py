@@ -447,3 +447,178 @@ def test_sampler_bad_words(
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")
+
+
+# ==============================================================================
+# Tests for compute_tracked_logprobs
+# ==============================================================================
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+@pytest.mark.parametrize("num_tracked_tokens", [1, 5, 20])
+def test_compute_tracked_logprobs_from_logits(
+    device: str, batch_size: int, num_tracked_tokens: int
+):
+    """
+    Test computing tracked logprobs from raw logits (is_logprobs=False).
+
+    Verifies that:
+    1. Output shape is correct [batch_size, num_tracked_tokens]
+    2. Logprobs are computed correctly via log_softmax
+    3. Token IDs are preserved in the output
+    """
+    torch.set_default_device(device)
+
+    # Create random logits
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+
+    # Create track_token_ids (sorted, unique)
+    track_ids = torch.tensor(
+        sorted(
+            np.random.choice(VOCAB_SIZE, num_tracked_tokens, replace=False).tolist()
+        ),
+        device=device,
+        dtype=torch.int64,
+    )
+
+    # Compute tracked logprobs
+    result = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    # Verify shape
+    assert result.logprobs.shape == (batch_size, num_tracked_tokens)
+    assert result.token_ids.shape == (num_tracked_tokens,)
+
+    # Verify values match manual extraction
+    expected_logprobs = logits.log_softmax(dim=-1)[:, track_ids]
+    torch.testing.assert_close(result.logprobs, expected_logprobs)
+
+    # Verify token_ids are preserved
+    torch.testing.assert_close(result.token_ids, track_ids)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+def test_compute_tracked_logprobs_from_logprobs(device: str, batch_size: int):
+    """
+    Test computing tracked logprobs when input is already log probabilities.
+
+    When is_logprobs=True, the function should NOT apply log_softmax again.
+    """
+    torch.set_default_device(device)
+    num_tracked_tokens = 10
+
+    # Create log probabilities (already normalized)
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+    logprobs = logits.log_softmax(dim=-1)
+
+    # Create track_token_ids
+    track_ids = torch.tensor(
+        sorted(
+            np.random.choice(VOCAB_SIZE, num_tracked_tokens, replace=False).tolist()
+        ),
+        device=device,
+        dtype=torch.int64,
+    )
+
+    # Compute tracked logprobs with is_logprobs=True
+    result = Sampler.compute_tracked_logprobs(logprobs, track_ids, is_logprobs=True)
+
+    # Should directly index without additional log_softmax
+    expected = logprobs[:, track_ids]
+    torch.testing.assert_close(result.logprobs, expected)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_compute_tracked_logprobs_single_token(device: str):
+    """Test tracking a single token ID."""
+    torch.set_default_device(device)
+    batch_size = 4
+
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+    track_ids = torch.tensor([42], device=device, dtype=torch.int64)
+
+    result = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    assert result.logprobs.shape == (batch_size, 1)
+    assert result.token_ids.shape == (1,)
+
+    expected = logits.log_softmax(dim=-1)[:, 42:43]
+    torch.testing.assert_close(result.logprobs, expected)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_compute_tracked_logprobs_boundary_tokens(device: str):
+    """Test tracking tokens at vocabulary boundaries (0 and vocab_size-1)."""
+    torch.set_default_device(device)
+    batch_size = 4
+
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+
+    # Track first and last token IDs
+    track_ids = torch.tensor([0, VOCAB_SIZE - 1], device=device, dtype=torch.int64)
+
+    result = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    assert result.logprobs.shape == (batch_size, 2)
+
+    expected_logprobs = logits.log_softmax(dim=-1)
+    torch.testing.assert_close(result.logprobs[:, 0], expected_logprobs[:, 0])
+    torch.testing.assert_close(
+        result.logprobs[:, 1], expected_logprobs[:, VOCAB_SIZE - 1]
+    )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_compute_tracked_logprobs_many_tokens(device: str):
+    """Test tracking many tokens (e.g., 100-class classification)."""
+    torch.set_default_device(device)
+    batch_size = 8
+    num_tracked = 100
+
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+    track_ids = torch.tensor(
+        sorted(np.random.choice(VOCAB_SIZE, num_tracked, replace=False).tolist()),
+        device=device,
+        dtype=torch.int64,
+    )
+
+    result = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    assert result.logprobs.shape == (batch_size, num_tracked)
+    assert len(result.token_ids) == num_tracked
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_compute_tracked_logprobs_values_are_valid(device: str):
+    """Test that all returned logprobs are valid (not NaN, not positive)."""
+    torch.set_default_device(device)
+    batch_size = 8
+    num_tracked = 20
+
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+    track_ids = torch.tensor(list(range(num_tracked)), device=device, dtype=torch.int64)
+
+    result = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    # Check no NaN values
+    assert not torch.isnan(result.logprobs).any(), "Found NaN in tracked logprobs"
+
+    # Check all values are <= 0 (log probabilities)
+    assert (result.logprobs <= 0).all(), "Log probabilities should be <= 0"
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_compute_tracked_logprobs_deterministic(device: str):
+    """Test that the function is deterministic."""
+    torch.set_default_device(device)
+    batch_size = 4
+
+    logits = torch.randn(batch_size, VOCAB_SIZE)
+    track_ids = torch.tensor([10, 20, 30], device=device, dtype=torch.int64)
+
+    result1 = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+    result2 = Sampler.compute_tracked_logprobs(logits, track_ids, is_logprobs=False)
+
+    torch.testing.assert_close(result1.logprobs, result2.logprobs)
+    torch.testing.assert_close(result1.token_ids, result2.token_ids)

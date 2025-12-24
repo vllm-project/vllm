@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.outputs import LogprobsTensors, SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput, TrackedLogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
@@ -118,6 +118,18 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
+        # Compute tracked logprobs if requested
+        tracked_logprobs_tensors = None
+        if sampling_metadata.track_token_ids is not None:
+            # If num_logprobs is set, we already have raw_logprobs computed.
+            # Otherwise, we need to compute log_softmax from logits.
+            use_logprobs = num_logprobs is not None
+            tracked_logprobs_tensors = self.compute_tracked_logprobs(
+                raw_logprobs if use_logprobs else logits,
+                sampling_metadata.track_token_ids,
+                is_logprobs=use_logprobs,
+            )
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -125,6 +137,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            tracked_logprobs_tensors=tracked_logprobs_tensors,
         )
         return sampler_output
 
@@ -205,6 +218,36 @@ class Sampler(nn.Module):
     @staticmethod
     def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
+
+    @staticmethod
+    def compute_tracked_logprobs(
+        logits_or_logprobs: torch.Tensor,
+        track_token_ids: torch.Tensor,
+        is_logprobs: bool = False,
+    ) -> TrackedLogprobsTensors:
+        """Compute logprobs for specific tracked token IDs.
+
+        Args:
+            logits_or_logprobs: [batch_size, vocab_size] tensor.
+                If is_logprobs=True, this should be log probabilities.
+                Otherwise, this should be raw logits.
+            track_token_ids: [num_tracked_tokens] tensor of token IDs to track
+            is_logprobs: If True, the input is already log probabilities.
+                If False, compute log_softmax first.
+
+        Returns:
+            TrackedLogprobsTensors with logprobs for tracked tokens.
+        """
+        if is_logprobs:
+            logprobs = logits_or_logprobs
+        else:
+            logprobs = logits_or_logprobs.log_softmax(dim=-1, dtype=torch.float32)
+        # Index into the specific token columns we care about
+        tracked_logprobs = logprobs[:, track_token_ids]
+        return TrackedLogprobsTensors(
+            logprobs=tracked_logprobs,
+            token_ids=track_token_ids,
+        )
 
     @staticmethod
     def gather_logprobs(

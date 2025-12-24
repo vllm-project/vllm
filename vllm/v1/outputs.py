@@ -44,6 +44,42 @@ class LogprobsLists(NamedTuple):
         )
 
 
+class TrackedLogprobsLists(NamedTuple):
+    """CPU-side representation of tracked logprobs for efficient inter-process transfer.
+
+    This class enables the `track_token_ids` feature in SamplingParams.
+
+    This is the numpy/list form used for serialization between GPU worker and
+    scheduler processes (torch.Tensor serialization is expensive). Converted
+    from TrackedLogprobsTensors via the tolists() method.
+    """
+
+    # [num_reqs x num_generated_tokens, num_tracked_tokens] - logprobs
+    logprobs: np.ndarray
+    # [num_tracked_tokens] - the token IDs being tracked
+    token_ids: list[int]
+    # [num_reqs] - cumulative token counts for slicing in spec decoding
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(
+        self, req_idx: int, num_positions: int = 1
+    ) -> "TrackedLogprobsLists":
+        """Slice tracked logprobs for a single request.
+
+        Args:
+            req_idx: The request index.
+            num_positions: Number of generated tokens for this request.
+        """
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
+        return TrackedLogprobsLists(
+            self.logprobs[req_idx:end_idx],
+            self.token_ids,
+            None,
+        )
+
+
 class LogprobsTensors(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
@@ -89,6 +125,39 @@ class LogprobsTensors(NamedTuple):
         )
 
 
+class TrackedLogprobsTensors(NamedTuple):
+    """GPU-side representation of tracked logprobs for efficient computation.
+
+    This class enables the `track_token_ids` feature in SamplingParams.
+
+    This is the torch.Tensor form produced during sampling on GPU. It is
+    converted to TrackedLogprobsLists (numpy/list form) via tolists() before
+    being sent to the scheduler process for output processing.
+    """
+
+    # [num_reqs x num_generated_tokens, num_tracked_tokens] - logprobs
+    logprobs: torch.Tensor
+    # [num_tracked_tokens] - the token IDs being tracked
+    token_ids: torch.Tensor
+
+    def tolists(
+        self, cu_num_generated_tokens: list[int] | None = None
+    ) -> TrackedLogprobsLists:
+        return TrackedLogprobsLists(
+            self.logprobs.cpu().numpy(),
+            self.token_ids.cpu().tolist(),
+            cu_num_generated_tokens,
+        )
+
+    def to_cpu_nonblocking(self) -> "TrackedLogprobsTensors":
+        if self.logprobs.device.type == "cpu":
+            return self
+        return TrackedLogprobsTensors(
+            self.logprobs.to("cpu", non_blocking=True),
+            self.token_ids.to("cpu", non_blocking=True),
+        )
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
@@ -102,6 +171,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    tracked_logprobs_tensors: TrackedLogprobsTensors | None = None
 
 
 @dataclass
@@ -166,6 +236,10 @@ class ModelRunnerOutput:
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None]
+
+    # [num_reqs, num_tracked_tokens]
+    # Tracked logprobs for specific token IDs
+    tracked_logprobs: TrackedLogprobsLists | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 
@@ -241,5 +315,6 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     logprobs=None,
     prompt_logprobs_dict={},
     pooler_output=[],
+    tracked_logprobs=None,
     num_nans_in_logits=None,
 )

@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.engine import EngineCoreOutput, FinishReason
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, TrackedLogprobsLists
 
 GeneralTokenizerType: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
@@ -303,6 +303,29 @@ def generate_dummy_prompt_logprobs_tensors(
     )
 
 
+def generate_dummy_tracked_logprobs(
+    num_tokens: int,
+    track_token_ids: list[int],
+) -> TrackedLogprobsLists:
+    """Generate dummy tracked logprobs for testing.
+
+    Args:
+        num_tokens: Number of generated tokens (rows in logprobs matrix)
+        track_token_ids: List of token IDs being tracked (columns in matrix)
+
+    Returns:
+        TrackedLogprobsLists with random logprob values
+    """
+    num_tracked = len(track_token_ids)
+    # Generate random logprobs (negative values as they are log probabilities)
+    logprobs = np.random.uniform(-10.0, -0.1, size=(num_tokens, num_tracked))
+    return TrackedLogprobsLists(
+        logprobs=logprobs,
+        token_ids=track_token_ids,
+        cu_num_generated_tokens=None,  # Will be set per-request by MockEngineCore
+    )
+
+
 @dataclass
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
@@ -340,6 +363,9 @@ class MockEngineCore:
         # each matrix has dimensions
         # (num prompt toks) x (num prompt logprobs+1)
         prompt_logprobs_raw: list[LogprobsTensors] | None = None,
+        # For each request, tracked logprobs as TrackedLogprobsLists
+        # with shape [num_generation_tokens, num_tracked_tokens]
+        tracked_logprobs_raw: list[TrackedLogprobsLists] | None = None,
         eos_token_id: int | None = None,
         stop_token_ids: list[int] | None = None,
         ignore_eos: bool = False,
@@ -352,6 +378,8 @@ class MockEngineCore:
         self.do_logprobs = generated_logprobs_raw is not None
         self.prompt_logprobs_raw = prompt_logprobs_raw
         self.do_prompt_logprobs = prompt_logprobs_raw is not None
+        self.tracked_logprobs_raw = tracked_logprobs_raw
+        self.do_tracked_logprobs = tracked_logprobs_raw is not None
         self.request_finished = [False for _ in range(self.num_requests)]
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
@@ -365,6 +393,7 @@ class MockEngineCore:
     def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
         do_prompt_logprobs = self.do_prompt_logprobs
+        do_tracked_logprobs = self.do_tracked_logprobs
         token_idx = self.current_idx
 
         outputs = []
@@ -390,12 +419,27 @@ class MockEngineCore:
                         prompt_logprobs = None
                 else:
                     prompt_logprobs = None
+
+                # Handle tracked logprobs
+                tracked_logprobs = None
+                if do_tracked_logprobs:
+                    assert self.tracked_logprobs_raw is not None
+                    raw_tracked = self.tracked_logprobs_raw[req_idx]
+                    # Extract the row for this token_idx
+                    if token_idx < raw_tracked.logprobs.shape[0]:
+                        tracked_logprobs = TrackedLogprobsLists(
+                            logprobs=raw_tracked.logprobs[token_idx : token_idx + 1],
+                            token_ids=raw_tracked.token_ids,
+                            cu_num_generated_tokens=None,
+                        )
+
                 new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
                     request_id=self.request_ids[req_idx],
                     new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
+                    new_tracked_logprobs=tracked_logprobs,
                 )
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = FinishReason.LENGTH
