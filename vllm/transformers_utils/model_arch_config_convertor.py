@@ -74,12 +74,12 @@ class ModelArchConfigConvertorBase:
             # For ChatGLM:
             "multi_query_group_num",
         ]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_text_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-
-        return self.hf_text_config.num_attention_heads
+        # For non-grouped-query attention models, the number of KV heads is
+        # equal to the number of attention heads.
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
