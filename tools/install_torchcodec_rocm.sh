@@ -23,7 +23,7 @@ echo "TorchCodec not found. Installing from source..."
 install_system_deps() {
     if command -v apt-get &> /dev/null; then
         echo "Installing system dependencies..."
-        apt-get update && apt-get install -y \
+        apt-get update && apt-get install -y --no-install-recommends \
             pkg-config \
             ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
             libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev
@@ -68,8 +68,7 @@ trap cleanup EXIT
 # Clone and build
 cd "$BUILD_DIR"
 echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
-git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec || \
-    git clone --depth 1 "$TORCHCODEC_REPO" torchcodec
+git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec
 
 cd torchcodec
 
