@@ -40,14 +40,13 @@ def cutlass_w8a8_scaled_mm_fp8(
 
 class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "CUDA"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "CutlassScaledMM requires running on CUDA."
-
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -162,14 +161,13 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
-            return (
-                False,
-                "CutlassFP8ScaledMMLinearKernel is supported "
-                + "on CUDA platforms Only.",
-            )
+            return False, "CUDA"
+        return True, None
 
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:

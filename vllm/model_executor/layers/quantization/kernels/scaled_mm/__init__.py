@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
-    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
+    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
@@ -79,12 +79,24 @@ _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
 
 
-def can_implement_scaled_mm_linear_kernel(
+def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
 ) -> tuple[bool, str]:
     if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
         return False, f" {kernel.__name__} disabled by environment variable"
 
+    platform_supported, requires_platform = kernel.is_platform_supported()
+    if not platform_supported:
+        return (
+            False,
+            f"{kernel.__name__} is not supported as it requires {requires_platform}.",
+        )
+
+    if compute_capability is None:
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+    
     # If the current platform uses compute_capability,
     # make sure the kernel supports the compute cability.
     if compute_capability is not None:
@@ -101,7 +113,10 @@ def can_implement_scaled_mm_linear_kernel(
             )
     can_implement, failure_reason = kernel.can_implement(config)
     if not can_implement:
-        return (False, f" {kernel.__name__} cannot implement due to: {failure_reason}")
+        return (
+            False,
+            f" {kernel.__name__} cannot be implement because: {failure_reason}",
+        )
 
     return True, ""
 
@@ -136,15 +151,10 @@ def choose_scaled_mm_linear_kernel(
         _KernelT: Chosen kernel.
     """
 
-    if compute_capability is None:
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc[0] * 10 + _cc[1]
-
     failure_reason_list = []
 
     if force_kernel is not None:
-        can_implement, failure_reason = can_implement_scaled_mm_linear_kernel(
+        can_implement, failure_reason = is_supported_and_can_implement_kernel(
             force_kernel, config, compute_capability
         )
         if can_implement:
@@ -157,10 +167,10 @@ def choose_scaled_mm_linear_kernel(
         )
 
     for kernel in possible_kernels[current_platform._enum]:
-        can_implement, failure_reason = can_implement_scaled_mm_linear_kernel(
-            kernel, config, compute_capability
+        is_supported_and_can_implement, failure_reason = (
+            is_supported_and_can_implement_kernel(kernel, config, compute_capability)
         )
-        if can_implement:
+        if is_supported_and_can_implement:
             return kernel
         failure_reason_list.append(failure_reason)
 

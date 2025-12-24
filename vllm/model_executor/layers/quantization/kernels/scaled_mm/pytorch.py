@@ -133,6 +133,14 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     get_min_capability() separately for each.
     """
 
+    @classmethod
+    def is_platform_supported(
+        cls,
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return False, "ROCm or CUDA"
+        return True, None
+
     def get_ouput_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -171,6 +179,12 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         return 94
 
     @classmethod
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "ROCm"
+        return True, None
+
+    @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
@@ -189,13 +203,6 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
                 False,
                 "RowWiseTorchScaledMMLinearKernel cannot be used with "
                 + "per tensor activation and weight scales.",
-            )
-
-        if not current_platform.is_rocm():
-            return (
-                False,
-                "RowWiseTorchScaledMMLinearKernel is only supported "
-                + "on ROCm platforms.",
             )
 
         if not version.parse(torch.__version__) >= version.parse("2.7"):

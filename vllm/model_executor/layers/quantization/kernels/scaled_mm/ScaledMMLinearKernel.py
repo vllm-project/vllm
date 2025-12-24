@@ -56,7 +56,7 @@ _ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
 class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     @classmethod
     @abstractmethod
-    def get_min_capability(cls) -> int:
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
         raise NotImplementedError
 
     @classmethod
@@ -66,6 +66,7 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
 
     def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
         assert self.can_implement(c)
+        assert self.is_platform_supported()
         self.config = c
         self.layer_param_names = layer_param_names
 
@@ -85,6 +86,10 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     # return a covariant type in the subclass
     @abstractmethod
     def _get_layer_params(self, layer) -> _ParamsT:
+        raise NotImplementedError
+
+    @classmethod
+    def get_min_capability(cls) -> int:
         raise NotImplementedError
 
 
@@ -171,6 +176,10 @@ class FP8ScaledMMLinearKernel(
 class Int8ScaledMMLinearKernel(
     ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
 ):
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
     def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (

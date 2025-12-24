@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 
 import pytest
 import torch
@@ -47,8 +46,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
+
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_supported,
+)
+
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from ..utils import TestBlockFP8Layer, TestFP8Layer
 from .backend import TestBackend
@@ -58,6 +61,59 @@ FP8_DTYPE = current_platform.fp8_dtype()
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
+# Kernel and group_shape combinations: (kernel, group_shape)
+# CUDA kernels
+CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
+    # FlashInferScaledMMLinearKernel supports both per-tensor and per-token
+    (FlashInferScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    (FlashInferScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # CutlassFP8ScaledMMLinearKernel supports both per-tensor and per-token
+    (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # PerTensorTorchScaledMMLinearKernel only supports per-tensor
+    (PerTensorTorchScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # ChannelWiseTorchScaledMMLinearKernel only supports per-token
+    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # Blockwise group shapes (no kernel abstraction)
+    (None, GroupShape(1, 128)),
+    (None, GroupShape(1, 64)),
+]
+
+# ROCm kernels
+ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
+    # ROCmScaledMMLinearKernel supports both per-tensor and per-token
+    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    (ROCmScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # RowWiseTorchScaledMMLinearKernel only supports per-token
+    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # ChannelWiseTorchScaledMMLinearKernel only supports per-token
+    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # Blockwise group shapes (no kernel abstraction)
+    (None, GroupShape(1, 128)),
+    (None, GroupShape(1, 64)),
+]
+
+KERNEL_GROUPSHAPE_COMBINATIONS = (
+    CUDA_KERNEL_GROUPSHAPE_COMBINATIONS
+    if current_platform.is_cuda()
+    else ROCM_KERNEL_GROUPSHAPE_COMBINATIONS
+)
+
+# For Aiter tests we toggle use_aiter_quant_op
+AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
+    # Per-token with ROCmScaledMMLinearKernel
+    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (ROCmScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with RowWiseTorchScaledMMLinearKernel
+    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (RowWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with ChannelWiseTorchScaledMMLinearKernel
+    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
+    (ChannelWiseTorchScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Blockwise (no kernel abstraction)
+    (None, GroupShape(1, 128), True),
+]
+
 
 class TestModel(torch.nn.Module):
     def __init__(
@@ -66,14 +122,39 @@ class TestModel(torch.nn.Module):
         eps: float,
         force_kernel: FP8ScaledMMLinearKernel | None,
         group_shape: GroupShape,
+        use_aiter_fusion: bool = False,
+        use_aiter_quant: bool = False,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.fp8_linear_layers: list[torch.nn.Module]
         self.group_shape = group_shape
+        self.use_aiter_quant_op = use_aiter_quant
+        self.use_aiter_fusion = use_aiter_fusion
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
 
+        # Determine if blockwise based on group_shape
+        is_blockwise = group_shape.is_per_group()
+
+        if is_blockwise:
+            self._init_blockwise(
+                hidden_size, group_shape, use_aiter_fusion, use_aiter_quant
+            )
+        else:
+            self._init_nonblockwise(
+                hidden_size, group_shape, force_kernel, use_aiter_quant
+            )
+
+    def _init_nonblockwise(
+        self,
+        hidden_size: int,
+        group_shape: GroupShape,
+        force_kernel: FP8ScaledMMLinearKernel | None,
+        use_aiter_quant: bool,
+    ):
+        """Initialize non-blockwise (per-tensor/per-token) FP8 layers."""
         is_static = group_shape == GroupShape.PER_TENSOR
         act_quant_scale_desc = ScaleDesc(torch.float32, is_static, group_shape)
         w_quant_scale_desc = ScaleDesc(torch.float32, True, group_shape)
@@ -84,20 +165,9 @@ class TestModel(torch.nn.Module):
             dtype=FP8_DTYPE, scale=w_quant_scale_desc, symmetric=True
         )
 
-        if group_shape.is_per_tensor():
-            self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        elif group_shape.is_per_group():
-            self.wscale = [
-                torch.rand(
-                    (hidden_size // group_shape[1], hidden_size // group_shape[1]),
-                    dtype=torch.float32,
-                )
-                for _ in range(3)
-            ]
-        else:  # PER_TOKEN
-            self.wscale = [
-                torch.rand((hidden_size, 1), dtype=torch.float32) for _ in range(3)
-            ]
+        # Setup weight scales
+        wscale_shape = (1,) if group_shape.is_per_tensor() else (hidden_size, 1)
+        self.wscale = [torch.rand(wscale_shape, dtype=torch.float32) for _ in range(3)]
 
         self.act_scale = (
             [torch.rand(1, dtype=torch.float32) for _ in range(3)]
@@ -105,39 +175,80 @@ class TestModel(torch.nn.Module):
             else [None for _ in range(3)]
         )
 
-        # Initialize weights
+        # Initialize weights (transposed for non-blockwise)
         self.w = [
-            torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE) for _ in range(3)
+            torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
+            for _ in range(3)
         ]
-        if not group_shape.is_per_group():
-            self.w = [self.w[0].t() for _ in range(3)]
 
-        if group_shape.is_per_group():
-            self.fp8_linear_layers = [
-                TestBlockFP8Layer(
-                    group_shape=group_shape,
-                    weight=self.w[i],
-                    weight_scale=self.wscale[i],
-                    input_scale=self.act_scale[i],
-                )
-                for i in range(3)
-            ]
-        else:
-            self.fp8_linear_layers = [
-                TestFP8Layer(
-                    self.activation_quant_key,
-                    self.weight_quant_key,
-                    self.w[i],
-                    self.wscale[i],
-                    input_scale=self.act_scale[i],
-                    force_kernel=force_kernel,
-                )
-                for i in range(3)
-            ]
+        # Setup FP8 linear layers with kernel abstraction
+        self.fp8_linear_layers = [
+            TestFP8Layer(
+                self.activation_quant_key,
+                self.weight_quant_key,
+                self.w[i],
+                self.wscale[i],
+                input_scale=self.act_scale[i],
+                force_kernel=force_kernel,
+            )
+            for i in range(3)
+        ]
+
+        # Enable aiter quantization if requested
+        for layer in self.fp8_linear_layers:
+            layer.kernel.quant_fp8.use_aiter = use_aiter_quant
 
         self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
             0
         ].is_quant_fp8_enabled()
+
+    def _init_blockwise(
+        self,
+        hidden_size: int,
+        group_shape: GroupShape,
+        use_aiter_fusion: bool,
+        use_aiter_quant: bool,
+    ):
+        """Initialize blockwise FP8 layers."""
+        act_quant_scale_desc = ScaleDesc(torch.float32, False, group_shape)
+        self.activation_quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=act_quant_scale_desc, symmetric=True
+        )
+
+        # Setup weight scales (for blockwise quantization)
+        # Use aiter block size if aiter fusion is enabled
+        scale_size = (
+            (hidden_size + 128 - 1) // 128
+            if use_aiter_fusion
+            else hidden_size // group_shape[1]
+        )
+        wscale_shape = (scale_size, scale_size)
+        self.wscale = [torch.rand(wscale_shape, dtype=torch.float32) for _ in range(3)]
+
+        # Initialize weights (transposed if using aiter, otherwise not)
+        self.w = [
+            torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE) for _ in range(3)
+        ]
+        if use_aiter_fusion:
+            self.w = [w.t() for w in self.w]
+
+        self.fp8_linear_layers = [
+            TestBlockFP8Layer(
+                group_shape=group_shape,
+                weight=self.w[i],
+                weight_scale=self.wscale[i],
+                input_scale=None,  # Dynamic quantization for blockwise
+                cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
+                use_aiter_and_is_supported=use_aiter_quant,
+            )
+            for i in range(3)
+        ]
+
+        self.enable_quant_fp8_custom_op = (
+            False
+            if use_aiter_quant
+            else self.fp8_linear_layers[0].linear_op.input_quant_op.enabled()
+        )
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
@@ -157,18 +268,54 @@ class TestModel(torch.nn.Module):
         y4, resid = self.norm[3](x4, resid)  # use resid here
         return y4
 
-    def ops_in_model_after(self):
-        return [
-            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, True)],
-            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, False)],
-        ]
-
     def ops_in_model_before(self):
+        if self.group_shape.is_per_group():
+            # Blockwise path
+            if self.use_aiter_fusion and self.use_aiter_quant_op:
+                return [rocm_aiter_ops.get_group_quant_op()]
+            if self.use_aiter_fusion:
+                return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
+        else:
+            if self.use_aiter_quant_op:
+                return [rocm_aiter_ops.get_per_token_quant_op()]
+
+        # Common path
         return (
             [QUANT_OPS[self.activation_quant_key]]
             if self.enable_quant_fp8_custom_op
             else [torch.ops.aten.reciprocal]
         )
+
+    def ops_in_model_after(self):
+        if self.use_aiter_fusion:
+            if self.group_shape.is_per_group():
+                # Blockwise aiter fusion
+                from vllm.compilation.rocm_aiter_fusion import (
+                    AiterFusedAddRMSFp8GroupQuantPattern,
+                    AiterRMSFp8GroupQuantPattern,
+                )
+
+                return [
+                    AiterFusedAddRMSFp8GroupQuantPattern.FUSED_OP,
+                    AiterRMSFp8GroupQuantPattern.FUSED_OP,
+                ]
+            else:
+                # Per-token aiter fusion
+                from vllm.compilation.rocm_aiter_fusion import (
+                    AiterFusedAddRMSNormDynamicQuantPattern,
+                    AiterRMSNormDynamicQuantPattern,
+                )
+
+                return [
+                    AiterFusedAddRMSNormDynamicQuantPattern.FUSED_OP,
+                    AiterRMSNormDynamicQuantPattern.FUSED_OP,
+                ]
+
+        # Regular fusion
+        return [
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, True)],
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, False)],
+        ]
 
     def ops_in_model_before_partial(self):
         return (
@@ -178,136 +325,45 @@ class TestModel(torch.nn.Module):
         )
 
 
-ROCM_FP8_KERNELS = [
-    ROCmScaledMMLinearKernel,
-    PerTensorTorchScaledMMLinearKernel,
-    RowWiseTorchScaledMMLinearKernel,
-    ChannelWiseTorchScaledMMLinearKernel,
-]
+def _run_fusion_test(
+    model,
+    fusion_pass,
+    vllm_config,
+    dtype,
+    hidden_size,
+    num_tokens,
+):
+    """Helper function for common fusion test logic.
 
-CUDA_FP8_KERNELS = [
-    FlashInferScaledMMLinearKernel,
-    CutlassFP8ScaledMMLinearKernel,
-    PerTensorTorchScaledMMLinearKernel,
-    ChannelWiseTorchScaledMMLinearKernel,
-]
-
-
-BLOCKWISE_GROUP_SHAPES = [
-    GroupShape(1, 128),
-    GroupShape(1, 64),
-]
-
-NON_BLOCKWISE_GROUP_SHAPES = [
-    GroupShape.PER_TOKEN,
-    GroupShape.PER_TENSOR,
-]
-
-
-def _generate_kernel_groupshape_combinations():
+    Must be called within vllm_config context.
     """
-    Generate valid (kernel, group_shape) combinations for testing.
-    """
-    combinations = []
+    noop_pass = NoOpEliminationPass(vllm_config)
+    cleanup_pass = PostCleanupPass(vllm_config)
 
-    kernels = CUDA_FP8_KERNELS if current_platform.is_cuda() else ROCM_FP8_KERNELS
+    backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+    backend2 = TestBackend(noop_pass, cleanup_pass)
 
-    for kernel in kernels:
-        for group_shape in NON_BLOCKWISE_GROUP_SHAPES:
-            if (
-                kernel == PerTensorTorchScaledMMLinearKernel
-                and group_shape != GroupShape.PER_TENSOR
-            ):
-                continue
-            if (
-                kernel == ChannelWiseTorchScaledMMLinearKernel
-                and group_shape != GroupShape.PER_TOKEN
-            ):
-                continue
-            if (
-                kernel == RowWiseTorchScaledMMLinearKernel
-                and group_shape != GroupShape.PER_TOKEN
-            ):
-                continue
-            combinations.append((kernel, group_shape))
+    x = torch.rand(num_tokens, hidden_size)
+    torch._dynamo.mark_dynamic(x, 0)
 
-    # Blockwise group shapes don't use FP8ScaledMMLinearKernel, so kernel is None
-    for group_shape in BLOCKWISE_GROUP_SHAPES:
-        combinations.append((None, group_shape))
+    model_fused = torch.compile(model, backend=backend)
+    result_fused = model_fused(x)
 
-    return combinations
+    model_unfused = torch.compile(model, backend=backend2)
+    result_unfused = model_unfused(x)
 
+    if dtype == torch.float16:
+        ATOL, RTOL = (2e-3, 2e-3)
+    else:
+        ATOL, RTOL = (1e-2, 1e-2)
 
-KERNEL_GROUPSHAPE_COMBINATIONS = _generate_kernel_groupshape_combinations()
+    torch.testing.assert_close(result_fused, result_unfused, atol=ATOL, rtol=RTOL)
 
+    assert fusion_pass.matched_count == 3
+    backend.check_before_ops(model.ops_in_model_before())
+    backend.check_after_ops(model.ops_in_model_after())
 
-class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
-    def __init__(self, hidden_size: int, eps: float, **kwargs):
-        super().__init__()
-
-        self.w = [
-            torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
-            for _ in range(3)
-        ]
-
-        scale_hidden_size = (hidden_size + 128 - 1) // 128
-        self.wscale = [
-            torch.rand((scale_hidden_size, scale_hidden_size), dtype=torch.float32)
-            for _ in range(3)
-        ]
-
-        self.norm_weight = [torch.ones(hidden_size) for _ in range(4)]
-        self.eps = eps
-
-        self.w8a8_block_fp8_linear = [
-            TestBlockFP8Layer(
-                GroupShape(128, 128),
-                self.w[i],
-                self.wscale[i],
-                cutlass_block_fp8_supported=False,
-                use_aiter_and_is_supported=True,
-            )
-            for i in range(3)
-        ]
-
-    def forward(self, x):
-        # avoid having graph input be an arg to a pattern directly
-        x = resid = torch.relu(x)
-        y = rocm_aiter_ops.rms_norm(x, self.norm_weight[0], self.eps)
-
-        x2 = self.w8a8_block_fp8_linear[0](y)
-        # make sure resid is used for replacement to work
-        y2, resid = rocm_aiter_ops.rms_norm2d_with_add(
-            x2, resid, self.norm_weight[1], self.eps
-        )
-
-        x3 = self.w8a8_block_fp8_linear[1](y2)
-
-        y3, resid = rocm_aiter_ops.rms_norm2d_with_add(
-            x3, resid, self.norm_weight[2], self.eps
-        )
-
-        x4 = self.w8a8_block_fp8_linear[2](y3)
-
-        y4, resid = rocm_aiter_ops.rms_norm2d_with_add(
-            x4, resid, self.norm_weight[3], self.eps
-        )
-        return y4
-
-    def ops_in_model_before(self):
-        return [
-            torch.ops.vllm.rocm_aiter_rms_norm,
-            torch.ops.vllm.rocm_aiter_group_fp8_quant,
-        ]
-
-    def ops_in_model_before_partial(self):
-        return []
-
-    def ops_in_model_after(self):
-        return [
-            torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant,
-            torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant,
-        ]
+    return backend, backend2
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -315,11 +371,8 @@ class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("kernel_groupshape", KERNEL_GROUPSHAPE_COMBINATIONS)
-@pytest.mark.parametrize(
-    "model_class, enable_rms_norm_custom_op, enable_quant_fp8_custom_op",
-    list(itertools.product([TestModel], [True, False], [True, False]))
-    + [(TestRmsnormGroupFp8QuantModel, False, False)],
-)
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
 )
@@ -329,24 +382,14 @@ def test_fusion_rmsnorm_quant(
     num_tokens,
     eps,
     kernel_groupshape,
-    model_class,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
 ):
-    if model_class is TestRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
-        pytest.skip("AITER is not supported on this GPU.")
-
-    torch.set_default_device("cuda")
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(1)
-
-    # Unpack the (kernel, group_shape) combination
     force_kernel, group_shape = kernel_groupshape
 
     if not enable_quant_fp8_custom_op and group_shape.is_per_group():
         pytest.skip("Unsupported unwrapped quant fp8 op for blockwise quantization")
 
-    # Skip test for 64-bit group shape when running with cutlass or deepgemm
     if group_shape == GroupShape(1, 64) and (
         cutlass_block_fp8_supported() or is_deep_gemm_supported()
     ):
@@ -357,6 +400,7 @@ def test_fusion_rmsnorm_quant(
         custom_ops.append("+rms_norm")
     if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
+
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
@@ -367,56 +411,93 @@ def test_fusion_rmsnorm_quant(
             ),
         ),
     )
+
     with vllm.config.set_current_vllm_config(vllm_config):
-        # Reshape pass is needed for the fusion pass to work
-        noop_pass = NoOpEliminationPass(vllm_config)
-        if model_class is TestRmsnormGroupFp8QuantModel:
-            from vllm.compilation.rocm_aiter_fusion import (
-                RocmAiterRMSNormFp8GroupQuantFusionPass,
-            )
+        # Setup device before model creation
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
 
-            fusion_pass = RocmAiterRMSNormFp8GroupQuantFusionPass(vllm_config)
-        else:
-            fusion_pass = RMSNormQuantFusionPass(vllm_config)
-        cleanup_pass = PostCleanupPass(vllm_config)
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
 
-        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
-        backend2 = TestBackend(noop_pass, cleanup_pass)
-        model = TestModel(hidden_size, eps, force_kernel, group_shape)
+        model = TestModel(
+            hidden_size=hidden_size,
+            eps=eps,
+            force_kernel=force_kernel,
+            group_shape=group_shape,
+            use_aiter_fusion=False,
+            use_aiter_quant=False,
+        )
 
-        # First dimension dynamic
-        x = torch.rand(num_tokens, hidden_size)
-        torch._dynamo.mark_dynamic(x, 0)
-
-        model_fused = torch.compile(model, backend=backend)
-        result_fused = model_fused(x)
-
-        model_unfused = torch.compile(model, backend=backend2)
-        result_unfused = model_unfused(x)
-
-        if dtype == torch.float16:
-            ATOL, RTOL = (2e-3, 2e-3)
-        else:
-            ATOL, RTOL = (1e-2, 1e-2)
-
-        torch.testing.assert_close(result_fused, result_unfused, atol=ATOL, rtol=RTOL)
-
-        assert fusion_pass.matched_count == 3
-        backend.check_before_ops(model.ops_in_model_before())
+        backend, _ = _run_fusion_test(
+            model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
+        )
         backend.check_before_ops(
             model.ops_in_model_before_partial(), fully_replaced=False
         )
-        backend.check_after_ops(model.ops_in_model_after())
 
         # If RMSNorm custom op is disabled (native/torch impl used),
         # there's a risk that the fused add doesn't get included in the
         # replacement and only the rms part gets fused with quant.
         # Hence, we check only 2 add nodes are left (final fused rmsnorm add).
-        if (
-            not enable_rms_norm_custom_op
-            and model_class is not TestRmsnormGroupFp8QuantModel
-        ):
+        if not enable_rms_norm_custom_op:
             n_add_nodes = lambda g: sum(1 for _ in find_op_nodes(torch.ops.aten.add, g))
             # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)
             assert n_add_nodes(backend.graph_pre_pass) == 7
             assert n_add_nodes(backend.graph_post_pass) == 2
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [256])
+@pytest.mark.parametrize("num_tokens", [257])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize(
+    "kernel_groupshape_quant", AITER_KERNEL_GROUPSHAPE_COMBINATIONS
+)
+@pytest.mark.skipif(
+    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    reason="Only test on ROCm with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_quant(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    kernel_groupshape_quant: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    force_kernel, group_shape, use_aiter_quant_op = kernel_groupshape_quant
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm", "+quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormFusionPass
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RocmAiterRMSNormFusionPass(vllm_config)
+
+        model = TestModel(
+            hidden_size=hidden_size,
+            eps=eps,
+            force_kernel=force_kernel,
+            group_shape=group_shape,
+            use_aiter_fusion=True,  # Always use aiter fusion ops in aiter test
+            use_aiter_quant=use_aiter_quant_op,  # Toggle aiter quantization
+        )
+
+        _run_fusion_test(
+            model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
+        )

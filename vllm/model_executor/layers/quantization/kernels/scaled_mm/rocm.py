@@ -89,25 +89,24 @@ if current_platform.is_rocm():
 
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "ROCm"
+
         from vllm.platforms.rocm import on_mi3xx
 
+        if not on_mi3xx():
+            return False, "ROCm MI3xx"
+
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
-        if not current_platform.is_rocm():
-            return (
-                False,
-                "ROCmScaledMMLinearFP8Kernel is supported " + "on ROCm platforms Only.",
-            )
-        if not on_mi3xx():
-            return (
-                False,
-                "ROCmScaledMMLinearFP8Kernel is supported "
-                + "on MI3xx architures only.",
-            )
         if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
             return (
                 False,

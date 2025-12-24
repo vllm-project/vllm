@@ -23,13 +23,20 @@ from .ScaledMMLinearKernel import (
 class CPUScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        # current_platform.get_device_capability() returns None
+        # so the check will be ignored
+        return -1
+
+    @classmethod
+    def is_platform_supported(
+        cls,
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "CPU"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_cpu():
-            return False, "CPUScaledMM requires running on CPU."
-
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

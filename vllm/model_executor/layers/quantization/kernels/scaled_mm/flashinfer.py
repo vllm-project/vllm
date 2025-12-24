@@ -31,18 +31,17 @@ def flashinfer_w8a8_scaled_mm(
 
 class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "CUDA"
+        return True, None
+
+    @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
-
-        if not current_platform.is_cuda():
-            return (
-                False,
-                "FlashInferScaledMMLinearKernel is supported "
-                + "on CUDA platforms Only.",
-            )
 
         if not has_flashinfer():
             return (

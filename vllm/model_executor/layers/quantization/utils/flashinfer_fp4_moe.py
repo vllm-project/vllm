@@ -50,7 +50,7 @@ def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
     )
 
 
@@ -238,7 +238,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
 def flashinfer_trtllm_fp4_moe(
     layer: torch.nn.Module,
-    x: torch.Tensor,
+    x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
     global_num_experts: int,
@@ -269,12 +269,16 @@ def flashinfer_trtllm_fp4_moe(
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # Quantize input to FP4
-    a1_gscale = layer.w13_input_scale_quant
-    (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-        x,
-        a1_gscale,
-        is_sf_swizzled_layout=False,
-    )
+    if isinstance(x, tuple):
+        hidden_states_fp4, hidden_states_scale_linear_fp4 = x
+    else:
+        # hidden_states is the already quantized
+        a1_gscale = layer.w13_input_scale_quant
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
+            x,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
 
     # Determine routing method type
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
@@ -301,18 +305,14 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
         ).flatten(),
-        gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
-        gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm1_weights=layer.w13_weight.data,
+        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
         gemm1_alpha=None,
         gemm1_beta=None,
         gemm1_clamp_limit=None,
-        gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
-        gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm2_weights=layer.w2_weight.data,
+        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
         gemm2_bias=None,
         output1_scale_scalar=layer.g1_scale_c.data,
         output1_scale_gate_scalar=layer.g1_alphas.data,
@@ -327,6 +327,85 @@ def flashinfer_trtllm_fp4_moe(
         routed_scaling_factor=None,
         tile_tokens_dim=None,
         routing_method_type=routing_method_type,
+        do_finalize=True,
+    )[0]
+
+    return out
+
+
+def flashinfer_trtllm_fp4_routed_moe(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    top_k: int,
+    global_num_experts: int,
+) -> torch.Tensor:
+    """
+    Apply FlashInfer TensorRT-LLM FP4 MoE kernel. Uses packed
+    input top k expert indices and scores rather than computing
+    top k expert indices from scores.
+
+    Args:
+        layer: The MoE layer with weights and scales
+        x: Input tensor
+        topk_ids: Ids of selected experts
+        top_k: Number of experts to select per token
+        global_num_experts: Total number of experts across all ranks
+
+    Returns:
+        Output tensor from the MoE layer
+    """
+    import flashinfer
+
+    # Pack top k ids and expert weights into a single int32 tensor, as
+    # required by TRT-LLM
+    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+        torch.bfloat16
+    ).view(torch.int16)
+
+    if isinstance(x, tuple):
+        # Hidden_states is the already quantized
+        hidden_states_fp4, hidden_states_scale_linear_fp4 = x
+    else:
+        # Quantize input to FP4
+        a1_gscale = layer.w13_input_scale_quant
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
+            x,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
+
+    # Call TRT-LLM FP4 block-scale MoE kernel
+    out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        topk_ids=packed_tensor,
+        routing_bias=None,
+        hidden_states=hidden_states_fp4,
+        hidden_states_scale=hidden_states_scale_linear_fp4.view(
+            torch.float8_e4m3fn
+        ).flatten(),
+        gemm1_weights=layer.w13_weight.data,
+        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
+        gemm1_bias=None,
+        gemm1_alpha=None,
+        gemm1_beta=None,
+        gemm1_clamp_limit=None,
+        gemm2_weights=layer.w2_weight.data,
+        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
+        gemm2_bias=None,
+        output1_scale_scalar=layer.g1_scale_c.data,
+        output1_scale_gate_scalar=layer.g1_alphas.data,
+        output2_scale_scalar=layer.g2_alphas.data,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        n_group=0,
+        topk_group=0,
+        intermediate_size=layer.intermediate_size_per_partition,
+        local_expert_offset=layer.ep_rank * layer.local_num_experts,
+        local_num_experts=layer.local_num_experts,
+        routed_scaling_factor=None,
+        tile_tokens_dim=None,
+        routing_method_type=1,
         do_finalize=True,
     )[0]
 
