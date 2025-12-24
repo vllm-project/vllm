@@ -10,6 +10,7 @@ from transformers import AutoProcessor
 
 from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
@@ -43,6 +44,27 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
 ]
 
+EXPECTED_MM_BEAM_SEARCH_RES_ROCM = [
+    # MultiHeadAttention attn_backend: FLASH_ATTN
+    # with Triton Attention backend
+    [
+        "The image shows a wooden boardwalk leading through a",
+        "The image shows a wooden boardwalk extending into a",
+    ],
+    [
+        "The image shows two parrots perched on",
+        "The image shows two birds perched on a cur",
+    ],
+    [
+        "The image shows a Venn diagram with three over",
+        "The image contains a Venn diagram with three over",
+    ],
+    [
+        "This image displays a gradient of colors ranging from",
+        "This image displays a gradient of colors transitioning from",
+    ],
+]
+
 
 @pytest.fixture(scope="module")
 def server():
@@ -59,7 +81,16 @@ def server():
         json.dumps({"image": MAXIMUM_IMAGES}),
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Increase timeouts to handle potential network delays and slower
+    # video processing when downloading multiple videos from external sources
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 
@@ -288,9 +319,16 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     image_idx: int,
     url_encoded_image: dict[str, str],
 ):
+    # ROCm: Switch expected results based on platform
+    from vllm.platforms import current_platform
+
     # NOTE: This test also validates that we pass MM data through beam search
     raw_image_url = TEST_IMAGE_ASSETS[image_idx]
-    expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
+
+    if current_platform.is_rocm():
+        expected_res = EXPECTED_MM_BEAM_SEARCH_RES_ROCM[image_idx]
+    else:
+        expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = dummy_messages_from_image_url(url_encoded_image[raw_image_url])
 
