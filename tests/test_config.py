@@ -1050,3 +1050,13 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+def test_skip_tokenizer_init_multimodal_not_allowed():
+    """Test that skip_tokenizer_init=True is not allowed for multimodal models."""
+    with pytest.raises(ValueError, match="skip_tokenizer_init=True is not supported"):
+        ModelConfig(
+            "Qwen/Qwen2-VL-2B-Instruct",
+            skip_tokenizer_init=True,
+        )
+
