@@ -3472,10 +3472,20 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs,
             )
+            # Broadcast draft tokens from rank 0 to ensure consistency across
+            # TP ranks. Without this, rare non-determinism in the proposer can
+            # cause draft tokens to diverge, leading to NCCL hangs.
+            draft_token_ids = get_tp_group().broadcast_object(
+                draft_token_ids, src=0)
         elif spec_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
             draft_token_ids = self.drafter.propose(self.input_batch, sampled_token_ids)
+            # Broadcast draft tokens from rank 0 to ensure consistency across
+            # TP ranks. Without this, rare non-determinism in the proposer can
+            # cause draft tokens to diverge, leading to NCCL hangs.
+            draft_token_ids = get_tp_group().broadcast_object(
+                draft_token_ids, src=0)
         elif spec_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
