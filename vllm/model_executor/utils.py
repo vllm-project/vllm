@@ -19,7 +19,7 @@ def set_random_seed(seed: int | None) -> None:
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,
-):
+) -> None:
     """Set attributes on a weight tensor.
 
     This method is used to set attributes on a weight tensor. This method
@@ -50,7 +50,9 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def replace_parameter(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor):
+def replace_parameter(
+    layer: torch.nn.Module, param_name: str, new_data: torch.Tensor
+) -> None:
     """
     Replace a parameter of a layer while maintaining the ability to reload the weight.
     Called within implementations of the `process_weights_after_loading` method.
