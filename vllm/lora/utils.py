@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 _GLOBAL_LORA_ID = 0
 
 
-def get_lora_id():
+def get_lora_id() -> int:
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
