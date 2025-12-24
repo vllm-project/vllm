@@ -28,7 +28,7 @@ async def test_run_eagle_dp():
         data_parallel_size=DP_SIZE,
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
-        max_model_len=16384,
+        max_model_len=4096,
     )
 
     eagle_engine_args = replace(
