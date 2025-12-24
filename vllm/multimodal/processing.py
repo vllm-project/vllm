@@ -1046,10 +1046,19 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
+        # Only pass tokenizer if not None to allow the processor to
+        # load its own tokenizer from the model path when skip_tokenizer_init
+        # is True. Passing tokenizer=None would override the processor's
+        # tokenizer loading and cause crashes in multimodal models that
+        # require a tokenizer during processor initialization.
+        tokenizer_kwargs = {}
+        if self.tokenizer is not None:
+            tokenizer_kwargs["tokenizer"] = self.tokenizer
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
-            tokenizer=self.tokenizer,
+            **tokenizer_kwargs,
             **kwargs,
         )
 
