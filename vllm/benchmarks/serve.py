@@ -1281,12 +1281,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Repetition penalty sampling parameter. Only has effect on "
         "openai-compatible backends.",
     )
-    sampling_group.add_argument(
-        "--common-prefix-len",
-        type=int,
-        default=None,
-        help="Common prefix length shared by all prompts (used by random dataset)",
-    )
 
     parser.add_argument(
         "--served-model-name",
