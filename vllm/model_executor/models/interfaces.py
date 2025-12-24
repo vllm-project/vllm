@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
+from collections.abc import Callable, Iterable, Mapping, MutableSequence
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -98,17 +98,6 @@ class SupportsMultiModal(Protocol):
     """
     A flag that indicates this model processes input id tokens
     in their raw form and not input embeddings.
-    """
-
-    merge_by_field_config: ClassVar[bool | None] = None
-    """
-    [DEPRECATED] A flag that indicates which implementation of
-    `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
-    """
-
-    multimodal_cpu_fields: ClassVar[Set[str] | None] = None
-    """
-    [DEPRECATED] A set indicating CPU-only multimodal fields.
     """
 
     _processor_factory: ClassVar[_ProcessorFactories]
@@ -277,35 +266,7 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
-    res = getattr(model, "supports_multimodal", False)
-
-    if res:
-        # We can remove this starting from v0.14
-        merge_by_field_config = getattr(model, "merge_by_field_config", None)
-        if merge_by_field_config is False:
-            raise ValueError(
-                "`merge_by_field_config=False` is no longer effective, "
-                "please update your model to consider the new batching logic "
-                "in `group_mm_kwargs_by_modality` (refer to "
-                "https://github.com/vllm-project/vllm/issues/26149), "
-                "and then remove the override from your model."
-            )
-        if merge_by_field_config is True:
-            logger.warning_once(
-                "`merge_by_field_config=True` is redundant, "
-                "please remove the override from your model."
-            )
-
-        multimodal_cpu_fields = getattr(model, "multimodal_cpu_fields", None)
-        if multimodal_cpu_fields is not None:
-            raise ValueError(
-                "`multimodal_cpu_fields` is no longer effective, "
-                "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
-                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
-                "and then remove the override from your model."
-            )
-
-    return res
+    return getattr(model, "supports_multimodal", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
