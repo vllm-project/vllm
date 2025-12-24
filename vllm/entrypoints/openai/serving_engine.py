@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
+import aiohttp
 import numpy as np
 from fastapi import Request
 from openai.types.responses import (
@@ -1210,7 +1211,10 @@ class OpenAIServing:
                 **_chat_template_kwargs,
             )
 
-        mm_data = await mm_data_future
+        try:
+            mm_data = await mm_data_future
+        except aiohttp.ClientError as e:
+            raise ValueError(f"{e.__class__.__name__} - {e}") from None
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
