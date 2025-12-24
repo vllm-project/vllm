@@ -218,7 +218,7 @@ class AsyncMicrobatchTokenizer:
             loop.call_soon_threadsafe(cancel_tasks)
 
 
-def cancel_task_threadsafe(task: Task):
+def cancel_task_threadsafe(task: Task) -> None:
     if task and not task.done():
         run_in_loop(task.get_loop(), task.cancel)
 
@@ -243,7 +243,7 @@ def make_async(
     return _async_wrapper
 
 
-def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args) -> None:
     if in_loop(loop):
         function(*args)
     elif not loop.is_closed():
