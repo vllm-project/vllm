@@ -225,7 +225,7 @@ class P2PAFDConnector(AFDConnectorBase):
         src: int,
         process_group: GroupCoordinator,
         tensor_metadata: TensorMetadata,
-    ) -> tuple[torch.Tensor, list]:
+    ) -> torch.Tensor:
         if not torch.distributed.is_initialized() or process_group.world_size == 1:
             return {}, []
         assert src < process_group.world_size, f"Invalid src rank ({src})"
@@ -240,7 +240,7 @@ class P2PAFDConnector(AFDConnectorBase):
             src=process_group.ranks[src],
             group=process_group.device_group,
         )
-        return hidden_states, []
+        return hidden_states
 
     # -------------------------------------------------------------------------
     #                                attn -> ffn
@@ -262,7 +262,7 @@ class P2PAFDConnector(AFDConnectorBase):
         except Exception as e:
             raise RuntimeError(f"Communication error: {e}")
 
-    def recv_ffn_output(self) -> tuple[torch.Tensor, AFDConnectorMetadata]:
+    def recv_ffn_output(self) -> torch.Tensor:
         """
         Called by the ATTN side to receive MOE output intermediate tensors,
         possibly dispatching from the receiver to other GPUs.
@@ -272,16 +272,15 @@ class P2PAFDConnector(AFDConnectorBase):
             self.recv_ffn_output_counter
             % self._current_afd_connector_metadata.num_of_stages
         )
-        hidden_states, work_list = self._recv_hidden_states(
+        hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,
             self._tensor_metadata_list[stage_idx],
         )
-        self._current_afd_connector_metadata.recv_handle_list = work_list
         self.recv_ffn_output_counter = (
             self.recv_ffn_output_counter + 1
         ) % self._current_afd_connector_metadata.num_of_stages
-        return hidden_states, self._current_afd_connector_metadata
+        return hidden_states
 
     # -------------------------------------------------------------------------
     #                                ffn -> attn
@@ -328,12 +327,11 @@ class P2PAFDConnector(AFDConnectorBase):
             self.recv_attn_output_counter
             // self._current_afd_connector_metadata.num_of_stages
         )
-        hidden_states, work_list = self._recv_hidden_states(
+        hidden_states = self._recv_hidden_states(
             src,
             self.a2e_group,
             self._tensor_metadata_list[stage_idx],
         )
-        self._current_afd_connector_metadata.recv_handle_list = work_list
         self._current_afd_connector_metadata.layer_idx = layer_idx
         self._current_afd_connector_metadata.stage_idx = stage_idx
         return hidden_states, self._current_afd_connector_metadata

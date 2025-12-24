@@ -385,7 +385,6 @@ class Step3TextModel(nn.Module):
         afd_metadata: AFDMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         forward_conext = get_forward_context()
-        recv_handle = None
 
         ubatch_hidden_states = []
         ubatch_residual = []
@@ -409,15 +408,9 @@ class Step3TextModel(nn.Module):
                 residual = ubatch_residual[stage_i]
 
                 if layer.layer_idx > 0:
-                    hidden_states, recv_metadata = afd_connector.recv_ffn_output()
-                    if recv_metadata.recv_handle_list is not None:
-                        recv_handle = recv_metadata.recv_handle_list
+                    hidden_states = afd_connector.recv_ffn_output()
                 else:
                     hidden_states = ubatch_hidden_states[stage_i]
-
-                if recv_handle is not None:
-                    for work in recv_handle:
-                        work.wait()
 
                 current_positions = afd_metadata.positions_list[stage_i]
                 hidden_states, residual = layer(
@@ -439,9 +432,7 @@ class Step3TextModel(nn.Module):
 
         # Recv last layer FFN output.
         for stage_i in range(afd_metadata.num_of_stages):
-            ubatch_hidden_states[stage_i], recv_metadata = (
-                afd_connector.recv_ffn_output()
-            )
+            ubatch_hidden_states[stage_i] = afd_connector.recv_ffn_output()
 
         # Re-assemble the batch
         hidden_states = torch.cat(ubatch_hidden_states, dim=0)
