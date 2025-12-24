@@ -164,7 +164,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, gt=0)
+    max_model_len: int = Field(default=None, ge=-1)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
