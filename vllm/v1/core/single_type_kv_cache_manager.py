@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -19,8 +18,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -92,8 +89,7 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        req_blocks = self.req_to_blocks.get(request_id)
-        num_req_blocks = len(req_blocks) if req_blocks is not None else 0
+        num_req_blocks = len(self.req_to_blocks.get(request_id, []))
 
         # Fast-path for the common case when no new prefix-cache hits.
         if request_id in self.num_cached_block:
@@ -799,14 +795,8 @@ class MambaManager(SingleTypeKVCacheManager):
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
     ) -> int:
-        # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
-        if total_computed_tokens > 0:
-            logger.warning_once(
-                "Currently Mamba GPU memory allocator may cause"
-                " memory waste when total_computed_tokens"
-                " is greater than 0."
-            )
-
+        # Allocate extra `num_speculative_blocks` blocks for
+        # speculative decoding (MTP/EAGLE) with linear attention.
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (

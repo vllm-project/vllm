@@ -222,7 +222,7 @@ class KVCacheManager:
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed
-                tokens, groups as a tuple by kv cache groups.
+                tokens, grouped as a tuple by kv cache groups.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
@@ -380,16 +380,18 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
-    def remove_skipped_blocks(self, request_id: str, num_tokens_need_slot: int) -> None:
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
         """Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
 
         Args:
             request_id: The request ID.
-            num_tokens_need_slot: The number of tokens that need a slot, including
-                tokens already computed and tokens to be computed.
+            total_computed_tokens: The total number of computed tokens, including
+                local computed tokens and external computed tokens.
         """
-        self.coordinator.remove_skipped_blocks(request_id, num_tokens_need_slot)
+        self.coordinator.remove_skipped_blocks(request_id, total_computed_tokens)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

@@ -1585,7 +1585,7 @@ class Scheduler(SchedulerInterface):
         # the connector.
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            num_tokens_need_slot=request.num_tokens,
+            total_computed_tokens=request.num_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
