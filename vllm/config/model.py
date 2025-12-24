@@ -588,6 +588,19 @@ class ModelConfig:
                 "repo name or path using the --tokenizer argument."
             )
 
+        # Multimodal models require a tokenizer for processor initialization
+        # unless embedded inputs are enabled (enable_mm_embeds=True)
+        if self.skip_tokenizer_init and self.is_multimodal_model:
+            mm_config = getattr(self, "multimodal_config", None)
+            if mm_config is None or not mm_config.enable_mm_embeds:
+                raise ValueError(
+                    "Multimodal models require a tokenizer for processing. "
+                    "Please set skip_tokenizer_init=False when using multimodal "
+                    f"models like {self.model}. Alternatively, enable embedded "
+                    "inputs with enable_mm_embeds=True if your inputs are "
+                    "pre-embedded."
+                )
+
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
