@@ -248,14 +248,14 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
 
 
-def get_default_cache_root():
+def get_default_cache_root() -> str:
     return os.getenv(
         "XDG_CACHE_HOME",
         os.path.join(os.path.expanduser("~"), ".cache"),
     )
 
 
-def get_default_config_root():
+def get_default_config_root() -> str:
     return os.getenv(
         "XDG_CONFIG_HOME",
         os.path.join(os.path.expanduser("~"), ".config"),
