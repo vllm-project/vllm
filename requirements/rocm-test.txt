@@ -74,10 +74,6 @@ torchgeo==0.7.0
 # MTEB Benchmark Test
 mteb==2.1.2
 
-# Data processing
-xgrammar==0.1.29
-# Test async scheduling
-
 # Utilities
 num2words==0.5.14
     # via lm-eval
