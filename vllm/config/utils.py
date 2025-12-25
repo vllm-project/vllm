@@ -205,7 +205,7 @@ def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
     return replace(config, **processed_overrides)
 
 
-def normalize_value(x):
+def normalize_value(x: Any) -> Any:
     """Return a stable, JSON-serializable canonical form for hashing.
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
     generic containers (Mapping/Set/Sequence) with recursion.
