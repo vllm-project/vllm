@@ -140,6 +140,14 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    use_fips_hashing: bool | None = None
+    """Enable FIPS 140-3 compliant hashing for multimodal content cache keys.
+
+    - `None` (default): Use the `VLLM_USE_FIPS_HASHING` environment variable,
+        or auto-detect based on blake3 availability.
+    - `True`: Force FIPS-compliant SHA-256 hashing (required for government,
+        healthcare, and financial environments).
+    - `False`: Use blake3 for faster hashing (if available)."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

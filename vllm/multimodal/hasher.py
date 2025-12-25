@@ -8,8 +8,16 @@ blake3 hashing and FIPS 140-3 compliant SHA-256 hashing.
 
 FIPS Compliance:
     blake3 is not FIPS 140-3 approved. For environments requiring FIPS
-    compliance (government, healthcare, finance), set the environment
-    variable VLLM_USE_FIPS_HASHING=1 to use SHA-256 instead.
+    compliance (government, healthcare, finance), use one of these methods:
+
+    1. Config (recommended): Set `use_fips_hashing=True` in MultiModalConfig
+    2. Environment variable: Set VLLM_USE_FIPS_HASHING=1
+
+Configuration:
+    MultiModalConfig.use_fips_hashing:
+        - None (default): Use environment variable or auto-detect
+        - True: Force FIPS-compliant SHA-256 hashing
+        - False: Use blake3 for faster hashing (if available)
 
 Environment Variables:
     VLLM_USE_FIPS_HASHING: Set to "1", "true", or "yes" to enable
@@ -43,8 +51,8 @@ except ImportError:
     _HAS_BLAKE3 = False
 
 
-def _use_fips_hashing() -> bool:
-    """Determine whether to use FIPS-compliant hashing.
+def _get_fips_hashing_default() -> bool:
+    """Determine the default FIPS hashing setting from environment.
 
     Returns True if:
     - VLLM_USE_FIPS_HASHING environment variable is set to a truthy value
@@ -64,7 +72,37 @@ def _use_fips_hashing() -> bool:
     return use_fips or not _HAS_BLAKE3
 
 
-_USE_FIPS_HASHING = _use_fips_hashing()
+_USE_FIPS_HASHING = _get_fips_hashing_default()
+
+
+def configure_fips_hashing(use_fips: bool | None) -> None:
+    """Configure FIPS-compliant hashing based on MultiModalConfig.
+
+    This function should be called during engine initialization when
+    the MultiModalConfig is available.
+
+    Args:
+        use_fips: If True, force FIPS-compliant SHA-256 hashing.
+            If False, use blake3 (if available).
+            If None, use the environment variable or auto-detect.
+    """
+    global _USE_FIPS_HASHING
+
+    if use_fips is None:
+        # Use environment variable / auto-detection (already set at module load)
+        return
+
+    if use_fips:
+        logger.info("FIPS-compliant hashing enabled via MultiModalConfig")
+        _USE_FIPS_HASHING = True
+    elif _HAS_BLAKE3:
+        logger.info("Using blake3 hashing (configured via MultiModalConfig)")
+        _USE_FIPS_HASHING = False
+    else:
+        logger.warning(
+            "blake3 requested but not available, using FIPS-compliant SHA-256"
+        )
+        _USE_FIPS_HASHING = True
 
 
 class _Blake3Hasher:
@@ -93,9 +131,6 @@ class _Sha256Hasher:
         self._hasher = hashlib.sha256()
 
     def update(self, data: bytes | memoryview) -> None:
-        # hashlib requires bytes, not memoryview
-        if isinstance(data, memoryview):
-            data = bytes(data)
         self._hasher.update(data)
 
     def hexdigest(self) -> str:

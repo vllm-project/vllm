@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .hasher import MultiModalHasher
+from .hasher import MultiModalHasher, configure_fips_hashing
 from .inputs import (
     BatchedTensorInputs,
     ModalityData,
@@ -26,6 +26,7 @@ Info:
 
 __all__ = [
     "BatchedTensorInputs",
+    "configure_fips_hashing",
     "ModalityData",
     "MultiModalDataBuiltins",
     "MultiModalDataDict",
