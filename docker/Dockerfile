@@ -474,9 +474,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # https://docs.flashinfer.ai/installation.html
 ARG FLASHINFER_VERSION=0.5.3
 RUN --mount=type=cache,target=/root/.cache/uv \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}" CUDA_MINOR="${CUDA_MINOR%%.*}"; \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 8 ]; }; then \
+      echo "Skipping flashinfer-jit-cache installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"; \
+    else \
+      uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi \
     && flashinfer show-config
 
 # ============================================================
