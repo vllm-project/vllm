@@ -104,7 +104,8 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
+    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
+    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
