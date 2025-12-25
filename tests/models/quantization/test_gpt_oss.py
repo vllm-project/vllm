@@ -63,7 +63,6 @@ class EvaluationConfig:
         }
 
 
-
 EXPECTED_ACCURACIES = {"gsm8k_platinum": 0.89}
 
 
