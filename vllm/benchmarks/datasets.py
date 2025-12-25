@@ -1306,7 +1306,22 @@ def _infer_dataset_name_from_path(dataset_path: str) -> str | None:
     """
     path_lower = dataset_path.lower()
 
-    # Check for sharegpt patterns (most common case)
+    # Check if it looks like a HuggingFace dataset ID first (highest priority)
+    # HuggingFace IDs look like "org/dataset-name" - contains '/' but no
+    # file extension and doesn't look like a file path
+    # This must come first to correctly handle HF datasets with names like
+    # "Aeala/ShareGPT_Vicuna_unfiltered" that contain keyword patterns
+    if (
+        "/" in dataset_path
+        and not dataset_path.startswith(("/", ".", "~"))
+        and not any(
+            path_lower.endswith(ext)
+            for ext in [".json", ".jsonl", ".txt", ".csv", ".parquet"]
+        )
+    ):
+        return "hf"
+
+    # Check for sharegpt patterns in local file paths
     if "sharegpt" in path_lower:
         return "sharegpt"
 
@@ -1317,19 +1332,6 @@ def _infer_dataset_name_from_path(dataset_path: str) -> str | None:
     # Check for burstgpt patterns
     if "burstgpt" in path_lower:
         return "burstgpt"
-
-    # Check if it looks like a HuggingFace dataset ID (contains '/' but no
-    # file extension and doesn't look like a file path)
-    # Likely a HuggingFace dataset ID like "org/dataset-name"
-    if (
-        "/" in dataset_path
-        and not dataset_path.startswith(("/", ".", "~"))
-        and not any(
-            path_lower.endswith(ext)
-            for ext in [".json", ".jsonl", ".txt", ".csv", ".parquet"]
-        )
-    ):
-        return "hf"
 
     # For .json/.jsonl files without a clear pattern, default to sharegpt
     # as this was the legacy behavior
