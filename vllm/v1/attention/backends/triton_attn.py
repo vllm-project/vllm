@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
+from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
@@ -379,6 +380,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_metadata: TritonAttentionMetadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with Paged Attention impl. in Triton.
@@ -418,30 +420,74 @@ class TritonAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
+        # positions is not None entails that Q and K are not RoPE embedded yet, therefore, either fused_qk_rope_reshape_and_cache or self.rotary_emb is called
 
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if self.kv_cache_dtype.startswith("fp8"):
+        if positions is not None and query.shape[0] <= 256:
+            assert self.kv_sharing_target_layer_name is None, (
+                "self.kv_sharing_target_layer_name cannot be None"
+            )
+            assert hasattr(self, "rotary_emb"), f"rotary_emb not found in {self}"
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            is_neox = self.rotary_emb.is_neox_style
+            cos, sin = cos_sin_cache.chunk(2, dim=-1)
+            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+            if is_fp8_kv_cache:
+                key_cache_og_dtype = key_cache.dtype
+                value_cache_og_dtype = value_cache.dtype
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-                # triton kernel does not support uint8 kv_cache
-                #  (because some explicit casts (e.g. float8_e4m3fnuz)
-                #   are not supported)
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+            query, key, key_cache, value_cache, output = (
+                fused_qk_rope_reshape_and_cache(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    layer._v_scale,
+                    is_neox,
+                    flash_layout=True,
+                    apply_scale=is_fp8_kv_cache,
+                    offs=None,
+                    q_out=query,
+                    k_out=key,
+                    output_zeros=True,
+                    zeros_out=output,
+                )
             )
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(key_cache_og_dtype)
+                value_cache = value_cache.view(value_cache_og_dtype)
+        else:
+            if positions is not None:
+                query, key = self.rotary_emb(positions, query, key)
+            if (
+                self.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
+            ):
+                # Reshape the input keys and values and store them in the cache.
+                # Skip this if sharing KV cache with an earlier attention layer.
+                if self.kv_cache_dtype.startswith("fp8"):
+                    key_cache = key_cache.view(self.fp8_dtype)
+                    value_cache = value_cache.view(self.fp8_dtype)
+                    # triton kernel does not support uint8 kv_cache
+                    #  (because some explicit casts (e.g. float8_e4m3fnuz)
+                    #   are not supported)
+                triton_reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             if key_cache.dtype != self.fp8_dtype:

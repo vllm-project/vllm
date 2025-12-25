@@ -31,6 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -55,6 +56,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .adapters import as_embedding_model, as_seq_cls_model
@@ -225,6 +227,9 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            rotary_emb=self.rotary_emb
+            if current_platform.is_rocm() and rocm_aiter_ops.is_enabled()
+            else None,
         )
 
     def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
@@ -245,7 +250,7 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        # q, k = self.rotary_emb(positions, q, k)
         if self.do_llama_4_scaling:
             attn_scale = self._get_llama_4_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)

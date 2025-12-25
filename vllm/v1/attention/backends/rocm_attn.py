@@ -31,6 +31,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
+if current_platform.is_rocm():
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    if rocm_aiter_ops.is_enabled():
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
 
 @dataclass
 class RocmAttentionMetadata:
@@ -268,6 +274,7 @@ class RocmAttentionImpl(AttentionImpl):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -310,19 +317,57 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+        if positions is not None and query.shape[0] <= 256 and rocm_aiter_ops.is_enabled():
+            assert self.kv_sharing_target_layer_name is None
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            is_neox = self.rotary_emb.is_neox_style
+            cos, sin = cos_sin_cache.chunk(2, dim=-1)
+            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            query, key, key_cache, value_cache, output = (
+                fused_qk_rope_reshape_and_cache(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    layer._v_scale,
+                    is_neox,
+                    flash_layout=False,
+                    apply_scale=is_fp8_kv_cache,
+                    offs=None,
+                    q_out=query,
+                    k_out=key,
+                    output_zeros=True,
+                    zeros_out=output,
+                )
             )
+        else:
+            if positions is not None:
+                if current_platform.is_rocm():
+                    query, key = self.rotary_emb.forward_cuda(positions, query, key)
+                else:
+                    query, key = self.rotary_emb(positions, query, key)
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # Skip this if sharing KV cache with an earlier attention layer.
+                PagedAttention.write_to_paged_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
