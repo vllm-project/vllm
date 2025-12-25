@@ -41,13 +41,10 @@ except ImportError:
 
 def _is_hopper_gpu() -> bool:
     """Check if running on Hopper GPU."""
-    if not torch.cuda.is_available():
+    if not current_platform.is_cuda():
         return False
-    try:
-        major, _ = torch.cuda.get_device_capability()
-        return major >= 9
-    except Exception:
-        return False
+    # Sonic MoE is only supported on Hopper (SM90)
+    return current_platform.is_device_capability(90)
 
 
 # Skip entire module if requirements not met

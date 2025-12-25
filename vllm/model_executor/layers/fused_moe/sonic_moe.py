@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -48,13 +49,10 @@ def _check_sonicmoe_available() -> bool:
 
 def _is_hopper_gpu() -> bool:
     """Check if the current GPU is a Hopper architecture GPU."""
-    if not torch.cuda.is_available():
+    if not current_platform.is_cuda():
         return False
-    try:
-        major, _ = torch.cuda.get_device_capability()
-        return major >= 9  # Hopper is compute capability 9.0
-    except Exception:
-        return False
+    # Sonic MoE is only supported on Hopper (SM90)
+    return current_platform.is_device_capability(90)
 
 
 def is_sonic_moe_supported(
