@@ -625,7 +625,8 @@ class Scheduler(SchedulerInterface):
                     else None
                 )
                 if (
-                    partial_prefill_metadata is not None
+                    self.enable_concurrent_partial_prefill_scheduling
+                    and partial_prefill_metadata is not None
                     and prefill_state is not None
                     and prefill_state.is_prefill
                     and (
