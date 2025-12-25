@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-def is_ray_initialized():
+def is_ray_initialized() -> bool:
     """Check if Ray is initialized."""
     try:
         import ray
@@ -14,7 +14,7 @@ def is_ray_initialized():
         return False
 
 
-def is_in_ray_actor():
+def is_in_ray_actor() -> bool:
     """Check if we are in a Ray actor."""
 
     try:

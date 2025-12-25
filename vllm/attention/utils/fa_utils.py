@@ -96,7 +96,7 @@ def flash_attn_supports_sinks() -> bool:
         return get_flash_attn_version() == 3
 
 
-def flash_attn_supports_mla():
+def flash_attn_supports_mla() -> bool:
     from vllm.platforms import current_platform
 
     if current_platform.is_cuda():
