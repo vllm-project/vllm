@@ -267,7 +267,7 @@ def run_embedding_input_test(
     """Inference result should be the same between
     original image/video input and image/video embeddings input.
     """
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model)
 

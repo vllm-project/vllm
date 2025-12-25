@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
