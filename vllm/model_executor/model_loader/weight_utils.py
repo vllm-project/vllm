@@ -66,7 +66,7 @@ logger = init_logger(__name__)
 temp_dir = tempfile.gettempdir()
 
 
-def enable_hf_transfer():
+def enable_hf_transfer() -> None:
     """automatically activates hf_transfer"""
     if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
         try:

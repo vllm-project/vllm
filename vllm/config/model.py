@@ -1806,7 +1806,7 @@ class ModelConfig:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
 
-def get_served_model_name(model: str, served_model_name: str | list[str] | None):
+def get_served_model_name(model: str, served_model_name: str | list[str] | None) -> str:
     """
     If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
@@ -1877,7 +1877,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-def str_dtype_to_torch_dtype(type: str):
+def str_dtype_to_torch_dtype(type: str) -> torch.dtype | None:
     return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
 
 
