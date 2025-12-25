@@ -1024,7 +1024,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
         if mm_data["videos"] and not supports_video_metadata:
             # Old HF processor, unwrap tuple to pure frames
-            logger.warning(
+            logger.warning_once(
                 "HF processor doesn't support video metadata. "
                 "Timestamps will NOT be rendered. Please upgrade the model."
             )
