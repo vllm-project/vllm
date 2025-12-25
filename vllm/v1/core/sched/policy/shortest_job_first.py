@@ -129,11 +129,6 @@ class WeightedScoreSorter:
         self.__update_stats()
         return self.weighted_score > other_request_weighted_score.weighted_score
 
-    def __eq__(self, other_request_weighted_score: object) -> bool:
-        if not isinstance(other_request_weighted_score, WeightedScoreSorter):
-            return NotImplemented
-        return self.request.request_id == other_request_weighted_score.request.request_id
-
     def __update_stats(self):
         self.wait_time = time.time() - self.request_arrival_time
         self.weighted_score = self.scorer.score(self.wait_time, self.request_length)
