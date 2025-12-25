@@ -83,16 +83,16 @@ class PartialPrefillMetadata:
     active_prefills: int
 
     # The maximum number of long prefill requests allowed
+    # hard limit
     max_long_prefills: int
 
     # The maximum number of active prefill requests allowed
+    # soft limit that only speculates how many prefills to schedule
+    # in _build_partial_prefill_metadata step
     max_prefills: int
 
     # The threshold (in tokens) for a prefill request to be considered long
     long_prefill_threshold: int
-
-    def has_available_slot(self) -> bool:
-        return self.active_prefills < self.max_prefills
 
     def can_schedule(self, remaining_tokens: int) -> bool:
         """When concurrent partial prefills are enabled,
@@ -107,10 +107,9 @@ class PartialPrefillMetadata:
     def record_new_prefill(self, remaining_tokens: int) -> None:
         """Record that a new prefill has been scheduled.
         Increment long_prefills if it's a long request."""
-        if self.active_prefills < self.max_prefills:
-            self.active_prefills += 1
-        else:
-            raise RuntimeError("Exceeded max active prefills")
+        # it's okay if we exceed the max_prefills here, since
+        # the max_prefills is only speculative
+        self.active_prefills += 1
         if remaining_tokens > self.long_prefill_threshold:
             self.long_prefills += 1
 
@@ -629,11 +628,8 @@ class Scheduler(SchedulerInterface):
                     and partial_prefill_metadata is not None
                     and prefill_state is not None
                     and prefill_state.is_prefill
-                    and (
-                        not partial_prefill_metadata.has_available_slot()
-                        or not partial_prefill_metadata.can_schedule(
-                            prefill_state.remaining_tokens
-                        )
+                    and not partial_prefill_metadata.can_schedule(
+                        prefill_state.remaining_tokens
                     )
                 ):
                     # if we enabled concurrent partial prefill scheduling, and we decide
