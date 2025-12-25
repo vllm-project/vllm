@@ -250,6 +250,7 @@ class KVCacheManager:
 
         Returns:
             A list of new allocated blocks.
+            None if the allocation fails.
         """
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
