@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TypeVar
 
 import huggingface_hub
 from huggingface_hub import (
@@ -241,7 +241,7 @@ def try_get_local_file(
 
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
-) -> dict[str, Any] | None:
+):
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
