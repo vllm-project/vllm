@@ -322,7 +322,7 @@ If you see an error like `RuntimeError: CUDA error: the provided PTX was compile
 
 ## ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'
 
-If you use triton kernels on Thor device, you might see an error like `ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'`:
+If you use triton kernels with cuda 13, you might see an error like `ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'`:
 ```text
 (EngineCore_0 pid=9492) triton.runtime.errors.PTXASError: PTXAS error: Internal Triton PTX codegen error
 (EngineCore_0 pid=9492) `ptxas` stderr:
