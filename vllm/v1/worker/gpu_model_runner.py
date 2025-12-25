@@ -148,7 +148,12 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import (
+    DPCoordinationHandle,
+    coordinate_batch_across_dp,
+    finish_dp_coordination,
+    start_dp_coordination_async,
+)
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -2801,6 +2806,82 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    def _start_dp_coordination_async(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> DPCoordinationHandle | None:
+        """
+        Start DP coordination asynchronously before GPU sync points.
+
+        This computes the DP sync inputs from scheduler_output and current
+        state, then starts the all_reduce async. The result should be retrieved
+        later using finish_dp_coordination() or by passing the handle to
+        _determine_batch_execution_and_padding().
+
+        This allows the all_reduce to overlap with GPU synchronization,
+        reducing GPU idle time.
+        """
+        if self.parallel_config.data_parallel_size <= 1:
+            return None
+
+        # Compute values from scheduler_output (available before _update_states)
+        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        if num_tokens_unpadded == 0:
+            return None
+
+        # Compute num_scheduled_tokens_np from scheduler_output
+        tokens = list(scheduler_output.num_scheduled_tokens.values())
+        num_reqs = len(tokens)
+        max_num_scheduled_tokens = int(max(tokens)) if tokens else 0
+
+        # Compute padding
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens_unpadded)
+
+        # Compute uniform_decode using the new static method
+        uniform_decode = self._is_uniform_decode(
+            max_num_scheduled_tokens,
+            self.uniform_decode_query_len,
+            num_tokens_unpadded,
+            num_reqs,
+        )
+
+        # Check lora from current state (before _update_states updates it)
+        # This may miss new lora requests being added, but that's a rare edge
+        # case that only affects cudagraph mode selection slightly.
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
+
+        # Dispatch cudagraph to get cudagraph_mode
+        # Note: use_cascade_attn is False here as a conservative default
+        cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+            num_tokens=num_tokens_padded,
+            has_lora=has_lora,
+            uniform_decode=uniform_decode,
+            disable_full=False,
+        )
+        num_tokens_padded = batch_descriptor.num_tokens
+
+        # Determine if we should attempt ubatching
+        from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
+
+        should_attempt_ubatching = check_ubatch_thresholds(
+            self.parallel_config,
+            num_tokens_unpadded,
+            uniform_decode=uniform_decode,
+        )
+
+        # Determine allow_dp_padding
+        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
+        # Start the async all_reduce
+        return start_dp_coordination_async(
+            num_tokens_unpadded=num_tokens_unpadded,
+            num_tokens_padded=num_tokens_padded,
+            should_attempt_ubatching=should_attempt_ubatching,
+            should_attempt_dp_padding=allow_dp_padding,
+            cudagraph_mode=cudagraph_mode.value,
+            parallel_config=self.parallel_config,
+        )
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -2815,6 +2896,7 @@ class GPUModelRunner(
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
         num_encoder_reqs: int = 0,
+        dp_coordination_handle: DPCoordinationHandle | None = None,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -2879,18 +2961,26 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
-                    cudagraph_mode=cudagraph_mode.value,
+            # If we have a pre-started async handle, wait for it instead of
+            # starting a new sync. This allows overlapping the all_reduce with
+            # earlier GPU sync points.
+            if dp_coordination_handle is not None:
+                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+                    finish_dp_coordination(dp_coordination_handle)
                 )
-            )
+            else:
+                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+                    coordinate_batch_across_dp(
+                        num_tokens_unpadded=num_tokens,
+                        parallel_config=self.parallel_config,
+                        allow_microbatching=allow_microbatching,
+                        allow_dp_padding=allow_dp_padding,
+                        num_tokens_padded=num_tokens_padded,
+                        uniform_decode=uniform_decode,
+                        num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                        cudagraph_mode=cudagraph_mode.value,
+                    )
+                )
 
             # Extract DP-synced values
             if num_tokens_across_dp is not None:
@@ -2985,6 +3075,11 @@ class GPUModelRunner(
             scheduler_output = deepcopy(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Start DP coordination async BEFORE _update_states to overlap with
+        # GPU sync. This reduces GPU idle time during the all_reduce.
+        dp_coordination_handle = self._start_dp_coordination_async(scheduler_output)
+
         with record_function_or_nullcontext("gpu_model_runner: preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -3062,6 +3157,7 @@ class GPUModelRunner(
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                    dp_coordination_handle=dp_coordination_handle,
                 )
 
                 logger.debug(
