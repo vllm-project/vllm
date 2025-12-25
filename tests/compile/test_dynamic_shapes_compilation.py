@@ -36,7 +36,7 @@ def get_test_models():
         DynamicShapesType.BACKED_SIZE_OBLIVIOUS,
     ],
 )
-@pytest.mark.parametrize("use_aot_compile", ["0"])
+@pytest.mark.parametrize("use_aot_compile", ["0", "1"])
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
 @pytest.mark.parametrize("evaluate_guards", [False, True])
 @pytest.mark.skipif(
@@ -53,6 +53,12 @@ def test_dynamic_shapes_compilation(
     """Test that all dynamic shapes types compile successfully"""
     if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
         pytest.skip("UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0")
+
+    if evaluate_guards and shapes_type == DynamicShapesType.UNBACKED:
+        pytest.skip("unbacked dynamic shapes do not add guards")
+
+    if evaluate_guards and use_aot_compile:
+        pytest.skip("evaluate_guards requires use_aot_compile=0")
 
     monkeypatch.setenv("VLLM_USE_AOT_COMPILE", use_aot_compile)
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
@@ -71,6 +77,7 @@ def test_dynamic_shapes_compilation(
                 "evaluate_guards": evaluate_guards,
             },
         },
+        max_model_len=1024,
     )
 
     output = model.generate(prompt)
@@ -120,7 +127,7 @@ def test_model_specialization_with_evaluate_guards(
         and dynamic_shapes_type == DynamicShapesType.BACKED
         and evaluate_guards
     ):
-        pytest.skip("evaluate_guards for backed does not work with aot_compile =1")
+        pytest.skip("evaluate_guards for backed does not work with aot_compile=1")
 
     @support_torch_compile
     class ModelWithSizeCheck(torch.nn.Module):

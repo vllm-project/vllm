@@ -61,7 +61,7 @@ class WorkerProfiler(ABC):
         """Call _stop with error handling but no safeguards."""
         try:
             self._stop()
-            logger.info("Profiler stopped successfully.")
+            logger.info_once("Profiler stopped successfully.", scope="local")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
@@ -91,7 +91,7 @@ class WorkerProfiler(ABC):
             and self._delay_iters > 0
             and self._active_iteration_count == self._delay_iters
         ):
-            logger.info("Starting profiler after delay...")
+            logger.info_once("Starting profiler after delay...", scope="local")
             self._call_start()
 
         if self._running:
@@ -105,7 +105,9 @@ class WorkerProfiler(ABC):
             # Automatically stop the profiler after max iters
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
-            logger.info("Max profiling iterations reached. Stopping profiler...")
+            logger.info_once(
+                "Max profiling iterations reached. Stopping profiler...", scope="local"
+            )
             self._call_stop()
             return
 
@@ -125,7 +127,7 @@ class WorkerProfiler(ABC):
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
-        logger.info_once("Shutting down profiler")
+        logger.info_once("Shutting down profiler", scope="local")
         if self._running:
             self.stop()
 
@@ -156,9 +158,10 @@ class TorchProfilerWrapper(WorkerProfiler):
         self.profiler_config = profiler_config
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
         if local_rank in (None, 0):
-            logger.info(
+            logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
+                scope="local",
             )
             logger.debug(
                 "Profiler config: record_shapes=%s,"

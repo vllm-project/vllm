@@ -24,6 +24,10 @@ else:
     ModelConfig = object
     IntermediateTensors = object
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
@@ -48,6 +52,13 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int64: np.int64,
 }
 
+
+MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
+    # TODO: Add more modelopt kv cache dtype
+    # mappings here when it supported by some attention backend
+    # (for example supports nvfp4).
+    "fp8": "fp8_e4m3",
+}
 
 T = TypeVar("T")
 
@@ -194,7 +205,15 @@ def get_kv_cache_torch_dtype(
     return torch_dtype
 
 
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
+def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
+    """Get the KV cache quantization algorithm string from the quantization config.
+
+    Maps various FP8 format names to vLLM's standard cache dtype strings.
+    Returns None if no kv_cache_quant_algo is specified.
+    Returns "auto" if the value is not recognized/supported.
+    """
+    # Mapping from model config values to vLLM cache_dtype strings
+
     quant_method = quant_cfg.get("quant_method", "")
     if quant_method.startswith("modelopt"):
         quantization_inner = quant_cfg.get("quantization", quant_cfg)
@@ -203,24 +222,59 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
             "kv_cache_quant_algo"
         )
         if isinstance(kv_algo, str):
-            return STR_DTYPE_TO_TORCH_DTYPE[kv_algo.lower()]
+            kv_algo_lower = kv_algo.lower()
+
+            # Try to map to vLLM's standard format
+            if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
+                return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    kv_algo,
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
     return None
+
+
+def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
+    """Get the KV cache quantization algorithm dtype from the quantization config."""
+    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+    if kv_algo_str is not None and kv_algo_str != "auto":
+        # Only convert if we have a valid dtype string (not "auto" fallback)
+        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
+    return None
+
+
+def resolve_kv_cache_dtype_string(
+    kv_cache_dtype: str, model_config: ModelConfig
+) -> str:
+    """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
+    Returns the resolved cache_dtype string.
+    """
+    if kv_cache_dtype != "auto":
+        return kv_cache_dtype
+
+    hf_cfg = getattr(model_config, "hf_config", None)
+    if hf_cfg is not None:
+        quant_cfg = getattr(hf_cfg, "quantization_config", None)
+        if quant_cfg is not None:
+            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+            if kv_algo_str is not None:
+                return kv_algo_str
+
+    # Default to auto (will be handled by downstream code)
+    return "auto"
 
 
 def kv_cache_dtype_str_to_dtype(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> torch.dtype:
-    # Model config may not be specified for unit tests, default to float16
-    dtype = model_config.dtype if model_config else torch.half
     if kv_cache_dtype == "auto":
-        hf_cfg = getattr(model_config, "hf_config", None)
-        if hf_cfg is not None:
-            quant_cfg = getattr(hf_cfg, "quantization_config", None)
-            if quant_cfg is not None:
-                kv_algo_dtype = get_kv_cache_quant_algo_dtype(quant_cfg)
-                return kv_algo_dtype if kv_algo_dtype is not None else dtype
-        return dtype
-
+        # Model config may not be specified for unit tests, default to float16
+        return model_config.dtype if model_config else torch.half
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
@@ -411,9 +465,13 @@ def current_stream() -> torch.cuda.Stream:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
+        # is hurting performance.
+        # On CUDA, we capture and replay cudagraph on the same stream,
+        # so we need to avoid using the default stream as well. The default
+        # stream cannot be used for cudagraph capture, see
+        # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
+        # for more details. Therefore, we create a dedicated stream per process.
+        if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():

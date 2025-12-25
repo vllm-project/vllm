@@ -20,8 +20,8 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import outlines_core as oc
+    import transformers.convert_slow_tokenizer as convert_slow_tokenizer
     import transformers.file_utils as file_utils
-    import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
     import xgrammar as xgr
 
     from vllm.tokenizers import TokenizerLike
@@ -30,10 +30,8 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
-    tokenization_gpt2 = LazyLoader(
-        "tokenization_gpt2",
-        globals(),
-        "transformers.models.gpt2.tokenization_gpt2",
+    convert_slow_tokenizer = LazyLoader(
+        "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
 
     TokenizerLike = object
@@ -204,7 +202,9 @@ def _reduced_vocabulary(
         A Dict of token string -> equivalent token ids
     """
 
-    unicode_to_bytes = {v: k for k, v in tokenization_gpt2.bytes_to_unicode().items()}
+    unicode_to_bytes = {
+        v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
+    }
 
     def convert_token_to_string(token: str) -> str:
         string = tokenizer.convert_tokens_to_string([token])
