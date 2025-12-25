@@ -3,32 +3,33 @@
 r"""Benchmark multimodal processor latency.
 
 This benchmark measures the latency of the mm processor module
-using randomly generated multimodal prompts with synthetic images.
+using multimodal prompts from datasets.
 MM processor stats are automatically enabled.
 
 Run:
     vllm bench mm-processor \
         --model <your_model> \
+        --dataset-name random-mm \
         --num-prompts 10 \
-        --input-len 1024 \
-        --output-len 128 \
-        --num-images 1
 """
 
 import argparse
 import dataclasses
 import json
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import numpy as np
 
+from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
 from vllm.multimodal.processing import (
     get_timing_stats_from_engine_client,
 )
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -36,22 +37,6 @@ try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
-
-
-@dataclass
-class MultimodalProcessorBenchmarkMetrics:
-    """Metrics for multimodal processor benchmark."""
-
-    completed: int
-    failed: int
-    mean_e2el_ms: float
-    median_e2el_ms: float
-    std_e2el_ms: float
-    percentiles_e2el_ms: list[tuple[float, float]]
-
-    """Per-stage timing stats: mean, median, std, percentiles for each stage."""
-    mm_processor_stats: dict[str, dict[str, float]]
-
 
 def collect_mm_processor_stats(
     llm_engine: Any,
@@ -118,55 +103,18 @@ def calculate_mm_processor_metrics(
     return metrics
 
 
-def generate_random_multimodal_prompts(
-    num_prompts: int,
-    input_len: int,
-    output_len: int,
-    tokenizer: Any,
-    num_images: int = 1,
-    image_width: int = 256,
-    image_height: int = 256,
-    seed: int = 0,
-) -> tuple[list[list[dict]], list[int]]:
+def validate_args(args):
     """
-    Generate random multimodal prompts with synthetic images and text tokens.
-
-    Returns:
-        tuple: (prompts, expected_output_lens)
-            - prompts: List of OpenAI chat format messages with text and images
-            - expected_output_lens: List of expected output lengths
+    Validate command-line arguments for mm_processor benchmark.
     """
-    from PIL import Image
-
-    from vllm.benchmarks.datasets import process_image
-
-    rng = np.random.default_rng(seed)
-
-    prompts = []
-    expected_output_lens = []
-
-    for i in range(num_prompts):
-        vocab_size = tokenizer.vocab_size
-        prompt_token_ids = rng.integers(0, vocab_size, size=input_len).tolist()
-
-        text_prompt = tokenizer.decode(prompt_token_ids)
-
-        mm_items = []
-        for _ in range(num_images):
-            random_pixels = rng.integers(
-                0, 256, (image_height, image_width, 3), dtype=np.uint8
-            )
-            image = Image.fromarray(random_pixels)
-            mm_item = process_image(image)
-            mm_items.append(mm_item)
-
-        content = [{"type": "text", "text": text_prompt}]
-        content.extend(mm_items)
-        prompts.append([{"role": "user", "content": content}])
-        expected_output_lens.append(output_len)
-
-    return prompts, expected_output_lens
-
+    if not getattr(args, "tokenizer", None):
+        args.tokenizer = args.model
+    if not hasattr(args, "dataset_path"):
+        args.dataset_path = None
+    if not hasattr(args, "lora_path"):
+        args.lora_path = None
+    if not hasattr(args, "max_loras"):
+        args.max_loras = None
 
 def benchmark_multimodal_processor(
     args: argparse.Namespace,
@@ -176,28 +124,33 @@ def benchmark_multimodal_processor(
     """
     from vllm import LLM, SamplingParams
 
+    validate_args(args)
+    
+    if args.seed is None:
+        args.seed = 0
+
+    tokenizer = get_tokenizer(
+        args.tokenizer,
+        tokenizer_mode=getattr(args, "tokenizer_mode", "auto"),
+        trust_remote_code=getattr(args, "trust_remote_code", False),
+    )
+
+    requests = get_requests(args, tokenizer)
+
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    assert llm.llm_engine.model_config.max_model_len >= (
-        args.input_len + args.output_len
+    assert all(
+        llm.llm_engine.model_config.max_model_len
+        >= (request.prompt_len + request.expected_output_len)
+        for request in requests
     ), (
-        "Please ensure that max_model_len is greater than "
-        "the sum of input_len and output_len."
+        "Please ensure that max_model_len is greater than the sum of "
+        "prompt_len and expected_output_len for all requests."
     )
 
-    seed = getattr(args, "seed", 0)
-    tokenizer = llm.get_tokenizer()
-    prompts, expected_output_lens = generate_random_multimodal_prompts(
-        num_prompts=args.num_prompts,
-        input_len=args.input_len,
-        output_len=args.output_len,
-        tokenizer=tokenizer,
-        num_images=args.num_images,
-        image_width=args.image_width,
-        image_height=args.image_height,
-        seed=seed,
-    )
+    prompts = [request.prompt for request in requests]
+    expected_output_lens = [request.expected_output_len for request in requests]
 
     sampling_params = [
         SamplingParams(
@@ -298,41 +251,26 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(enable_mm_processor_stats=True)
 
     parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="random-mm",
+        choices=["random-mm", "random-rerank"],
+        help="Name of the dataset to benchmark on. Defaults to 'random-mm'.",
+    )
+    parser.add_argument(
         "--num-prompts",
         type=int,
         default=10,
         help="Number of prompts to process.",
     )
-    parser.add_argument(
-        "--input-len",
-        type=int,
-        default=1024,
-        help="Number of input tokens per request.",
+
+    from vllm.benchmarks.datasets import (
+        add_random_dataset_base_args,
+        add_random_multimodal_dataset_args,
     )
-    parser.add_argument(
-        "--output-len",
-        type=int,
-        default=128,
-        help="Number of output tokens per request.",
-    )
-    parser.add_argument(
-        "--num-images",
-        type=int,
-        default=1,
-        help="Number of images per prompt.",
-    )
-    parser.add_argument(
-        "--image-width",
-        type=int,
-        default=256,
-        help="Width of generated images in pixels.",
-    )
-    parser.add_argument(
-        "--image-height",
-        type=int,
-        default=256,
-        help="Height of generated images in pixels.",
-    )
+
+    add_random_dataset_base_args(parser)
+    add_random_multimodal_dataset_args(parser)
 
     parser.add_argument(
         "--output-json",
@@ -414,11 +352,8 @@ def main(args: argparse.Namespace) -> None:
         result["config"] = {
             "model": args.model,
             "num_prompts": args.num_prompts,
-            "input_len": args.input_len,
-            "output_len": args.output_len,
-            "num_images": args.num_images,
-            "image_width": args.image_width,
-            "image_height": args.image_height,
+            "input_len": getattr(args, "random_input_len", None),
+            "output_len": getattr(args, "random_output_len", None),
         }
         result["timestamp"] = datetime.now().isoformat()
 
