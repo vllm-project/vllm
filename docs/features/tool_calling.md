@@ -317,6 +317,15 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
+### OpenAI OSS Models ('openai`)
+
+Supported models:
+
+* `openai/gpt-oss-20b`
+* `openai/gpt-oss-120b`
+
+Flags: `--tool-call-parser openai`
+
 ### Kimi-K2 Models (`kimi_k2`)
 
 Supported models:
