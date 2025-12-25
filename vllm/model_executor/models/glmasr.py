@@ -512,11 +512,25 @@ class GlmAsrForConditionalGeneration(
         )
         audio_features = self.multi_modal_projector(audio_hidden_states)
 
-        # Calculate output lengths using encoder's method
-        audio_lengths = feature_attention_mask.sum(-1)
-        _, audio_output_lengths = self.audio_tower._get_feat_extract_output_lengths(
-            audio_lengths
-        )
+        # Calculate output lengths using encoder's method if available,
+        # otherwise use our calculation
+        merge_factor = getattr(self.config, "merge_factor", DEFAULT_MERGE_FACTOR)
+        conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
+
+        if hasattr(self.audio_tower, "_get_feat_extract_output_lengths"):
+            # Use encoder's built-in method
+            audio_lengths = feature_attention_mask.sum(-1)
+            _, audio_output_lengths = self.audio_tower._get_feat_extract_output_lengths(
+                audio_lengths
+            )
+        else:
+            # Fallback to manual calculation
+            audio_lengths = feature_attention_mask.sum(-1)
+            for padding, kernel_size, stride in conv_params:
+                audio_lengths = _calculate_conv_output_length(
+                    audio_lengths, padding, kernel_size, stride
+                )
+            audio_output_lengths = (audio_lengths - merge_factor) // merge_factor + 1
 
         num_chunks, max_audio_tokens, embed_dim = audio_features.shape
         audio_output_lengths = audio_output_lengths.unsqueeze(1)
