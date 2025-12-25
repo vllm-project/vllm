@@ -3,7 +3,7 @@
 """Test attention quantization of gpt-oss model.
 The qkv_proj and o_proj in self_attention can be either quantized or excluded.
 
-Run `pytest tests/models/quantization/test_gpt_oss_attn_quantization.py`.
+Run `pytest tests/models/quantization/test_gpt_oss.py`.
 
 """
 
@@ -16,7 +16,9 @@ import lm_eval
 import pytest
 from packaging import version
 
-MODEL_NAMES = ["amd/gpt-oss-20b-customized-attention-quantization"]
+MODEL_NAMES = [
+    "amd/gpt-oss-20b-MoE-WMXFP4-AMXFP4-Attention-WFP8-AFP8-KV-FP8",
+]
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
@@ -46,14 +48,23 @@ class ModelCase:
 class EvaluationConfig:
     model_name: str
 
-    def get_model_args(self) -> str:
-        return (
-            f"pretrained={self.model_name},"
-            "tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.9,trust_remote_code=False"
-        )
+    def get_model_args(self):
+        return {
+            "pretrained": self.model_name,
+            "chat_template_args": {"reasoning_effort": "low"},
+            "enable_thinking": True,
+            "think_end_token": "200008",
+            "tensor_parallel_size": 1,
+            "dtype": "auto",
+            "gpu_memory_utilization": 0.95,
+            "trust_remote_code": False,
+            "enable_prefix_caching": False,
+            "enforce_eager": False,
+        }
 
 
-EXPECTED_ACCURACIES = {"arc_challenge": 0.20}
+
+EXPECTED_ACCURACIES = {"gsm8k_platinum": 0.89}
 
 
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
@@ -66,11 +77,21 @@ EXPECTED_ACCURACIES = {"arc_challenge": 0.20}
 def test_gpt_oss_attention_quantization(
     model_name: str, task_name: str, expected_accuracy: float
 ):
+    model_args = EvaluationConfig(model_name).get_model_args()
+
+    extra_run_kwargs = {
+        "gen_kwargs": {"max_gen_toks": 8000},
+        "apply_chat_template": True,
+        "fewshot_as_multiturn": True,
+        "num_fewshot": 5,
+    }
+
     measured_accuracy = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=EvaluationConfig(model_name).get_model_args(),
+        model_args=model_args,
         tasks=task_name,
         batch_size="auto",
+        **extra_run_kwargs,
     )["results"][task_name]["acc,none"]
 
     rtol = 0.05
