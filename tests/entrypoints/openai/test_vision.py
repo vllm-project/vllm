@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import logging
 
 import openai
 import pytest
@@ -14,8 +13,6 @@ from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
-
-logger = logging.getLogger(__name__)
 
 MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2
@@ -331,12 +328,9 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     content_1 = chat_completion.choices[1].message.content
 
     # Emit beam search outputs for debugging
-    logger.info(
-        "Beam search outputs for image %d (%s): Output 0: %r, Output 1: %r",
-        image_idx,
-        raw_image_url,
-        content_0,
-        content_1,
+    print(
+        f"Beam search outputs for image {image_idx} ({raw_image_url}): "
+        f"Output 0: {content_0!r}, Output 1: {content_1!r}"
     )
 
     assert content_0, "First beam search output should not be empty"
