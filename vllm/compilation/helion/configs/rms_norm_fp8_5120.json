@@ -1,0 +1,42 @@
+{
+  "block_sizes": [
+    1
+  ],
+  "reduction_loops": [
+    1024
+  ],
+  "range_unroll_factors": [
+    0
+  ],
+  "range_num_stages": [
+    0
+  ],
+  "range_multi_buffers": [
+    null
+  ],
+  "range_flattens": [
+    null
+  ],
+  "load_eviction_policies": [
+    "last",
+    "last",
+    "first",
+    "first",
+    "",
+    ""
+  ],
+  "num_warps": 8,
+  "num_stages": 7,
+  "indexing": [
+    "tensor_descriptor",
+    "pointer",
+    "tensor_descriptor",
+    "tensor_descriptor",
+    "pointer",
+    "pointer",
+    "tensor_descriptor",
+    "pointer"
+  ],
+  "pid_type": "flat",
+  "range_warp_specializes": []
+}
