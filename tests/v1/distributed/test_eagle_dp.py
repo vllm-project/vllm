@@ -16,7 +16,12 @@ DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 
 @pytest.mark.asyncio
-async def test_run_eagle_dp():
+async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch):
+    # This test checks that running a model with and without eagle
+    # leads to identical tokens. This is only true in batch invariant mode
+    # (because the target model verifies all draft tokens in one big forward pass)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
     draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 
@@ -29,6 +34,7 @@ async def test_run_eagle_dp():
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
         max_model_len=16384,
+        attention_config={"backend": "FLASH_ATTN"},
     )
 
     eagle_engine_args = replace(
