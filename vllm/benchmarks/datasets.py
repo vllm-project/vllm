@@ -1294,6 +1294,27 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
+def _is_local_hf_dataset(path: str) -> bool:
+    """Check if a local path is a downloaded HuggingFace dataset.
+
+    HuggingFace datasets when downloaded locally typically contain:
+    - dataset_info.json file
+    - Arrow files (.arrow) or parquet files
+    """
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        return False
+
+    # Check for HF dataset markers
+    if (p / "dataset_info.json").exists():
+        return True
+
+    # Check for arrow files (common in HF datasets)
+    return any(p.glob("*.arrow")) or any(p.glob("**/*.arrow"))
+
+
 def _infer_dataset_name_from_path(dataset_path: str) -> str | None:
     """Try to infer dataset type from the path.
 
@@ -1306,11 +1327,15 @@ def _infer_dataset_name_from_path(dataset_path: str) -> str | None:
     """
     path_lower = dataset_path.lower()
 
-    # Check if it looks like a HuggingFace dataset ID first (highest priority)
+    # Check if it's a locally downloaded HuggingFace dataset first
+    # This handles cases like "/data/Aeala/ShareGPT_Vicuna_unfiltered/"
+    # where the path contains keyword patterns but is actually an HF dataset
+    if _is_local_hf_dataset(dataset_path):
+        return "hf"
+
+    # Check if it looks like a HuggingFace dataset ID (remote)
     # HuggingFace IDs look like "org/dataset-name" - contains '/' but no
     # file extension and doesn't look like a file path
-    # This must come first to correctly handle HF datasets with names like
-    # "Aeala/ShareGPT_Vicuna_unfiltered" that contain keyword patterns
     if (
         "/" in dataset_path
         and not dataset_path.startswith(("/", ".", "~"))
