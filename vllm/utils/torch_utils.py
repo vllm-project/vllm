@@ -470,7 +470,7 @@ def current_stream() -> torch.cuda.Stream:
         # so we need to avoid using the default stream as well. The default
         # stream cannot be used for cudagraph capture, see
         # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
-        # for more details). Therefore, we create a dedicated stream per process.
+        # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
