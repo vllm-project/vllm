@@ -38,7 +38,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
@@ -152,7 +152,9 @@ class KVConnectorBase_V1(ABC):
             Defaults to False.
     """
 
-    prefer_cross_layer_blocks: ClassVar[bool] = False
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return False
 
     def __init__(
         self,
