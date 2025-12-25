@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
@@ -13,6 +15,13 @@ TransferType = tuple[str, str]
 TransferResult = tuple[int, bool]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class TransferStats:
+    num_blocks: int
+    time: float  # Can be start_time or duration
+    transfer_type: TransferType
 
 
 class OffloadingHandler(ABC):
@@ -75,6 +84,8 @@ class OffloadingWorker:
     def __init__(self):
         self.handlers: set[OffloadingHandler] = set()
         self.transfer_type_to_handler: dict[TransferType, OffloadingHandler] = {}
+        # _transfer_stats: job_id -> num_blocks, time, transfer type
+        self._transfer_stats: dict[int, TransferStats] = {}
 
     def register_handler(
         self,
@@ -111,7 +122,7 @@ class OffloadingWorker:
         transfer_type = (src.medium(), dst.medium())
         handler = self.transfer_type_to_handler.get(transfer_type)
         assert handler is not None
-
+        start_time = time.perf_counter()
         try:
             success = handler.transfer_async(job_id, spec)
         except Exception as e:
@@ -128,7 +139,10 @@ class OffloadingWorker:
             logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
             logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
-
+        num_blocks = src.num_blocks
+        self._transfer_stats[job_id] = TransferStats(
+            num_blocks, start_time, transfer_type
+        )
         return success
 
     def get_finished(self) -> list[TransferResult]:
@@ -139,6 +153,17 @@ class OffloadingWorker:
             A list of (job_id, success) of transfers.
         """
         finished = []
+        finish_time = time.perf_counter()
         for handler in self.handlers:
             finished.extend(handler.get_finished())
+        for job_id, success in finished:
+            start_time = self._transfer_stats[job_id].time
+            self._transfer_stats[job_id].time = finish_time - start_time
         return finished
+
+    def get_stats(self, job_id: int) -> tuple[int, float, TransferType]:
+        stats = self._transfer_stats.pop(job_id)
+        num_blocks = stats.num_blocks
+        transfer_time = stats.time
+        transfer_type = stats.transfer_type
+        return num_blocks, transfer_time, transfer_type
