@@ -29,7 +29,8 @@ BASE_MODELS_TO_TEST = [
     "Zyphra/Zamba2-7B-instruct",
     # FIXME: mosaicml/mpt-7b has been deleted
     # "mosaicml/mpt-7b",
-    "databricks/dbrx-instruct",
+    # FIXME: databricks/dbrx-instruct has been deleted
+    # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
     "luccafong/deepseek_mtp_main_random",
