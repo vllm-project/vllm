@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import wraps
 from typing import Any
 
 
 @contextlib.contextmanager
-def cprofile_context(save_file: str | None = None):
+def cprofile_context(save_file: str | None = None) -> Iterator[None]:
     """Run a cprofile
 
     Args:
@@ -32,7 +32,9 @@ def cprofile_context(save_file: str | None = None):
             prof.print_stats(sort="cumtime")
 
 
-def cprofile(save_file: str | None = None, enabled: bool = True):
+def cprofile(
+    save_file: str | None = None, enabled: bool = True
+) -> Callable[[Callable], Callable]:
     """Decorator to profile a Python method using cProfile.
 
     Args:

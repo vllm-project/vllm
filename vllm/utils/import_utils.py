@@ -34,7 +34,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-def import_pynvml():
+def import_pynvml() -> ModuleType:
     """
     Historical comments:
 
@@ -67,7 +67,7 @@ def import_pynvml():
 
 
 @cache
-def import_triton_kernels():
+def import_triton_kernels() -> None:
     """
     For convenience, prioritize triton_kernels that is available in
     `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
@@ -95,7 +95,7 @@ def import_triton_kernels():
         )
 
 
-def import_from_path(module_name: str, file_path: str | os.PathLike):
+def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleType:
     """
     Import a Python file according to its file path.
 
@@ -124,7 +124,7 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 
 @cache
-def get_vllm_optional_dependencies():
+def get_vllm_optional_dependencies() -> dict[str, list[str]]:
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
     extras = metadata.get_all("Provides-Extra", [])
