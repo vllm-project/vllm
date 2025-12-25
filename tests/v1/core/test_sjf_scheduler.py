@@ -80,7 +80,7 @@ def create_scheduler_with_sjf(
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
-        cache_config=cache_config
+        cache_config=cache_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -116,7 +116,9 @@ def create_requests_for_sjf(
     block_size: int = 16,
     req_ids: list[str] | None = None,
 ):
-    """Create requests with specified prompt lengths and arrival times for SJF testing."""
+    """Create requests with specified prompt lengths and arrival times for
+    SJF testing.
+    """
     assert len(prompt_lengths) == num_requests
     if arrival_times is not None:
         assert len(arrival_times) == num_requests
@@ -193,33 +195,30 @@ def test_sjf_scheduling_basic_ordering():
 
 
 def test_sjf_scheduling_waiting_time_tiebreaker_fixed():
-    """Test that waiting time is used as tiebreaker when lengths are equal.
-    """
+    """Test that waiting time is used as tiebreaker when lengths are equal."""
     scheduler = create_scheduler_with_sjf()
-    
+
     # Mock current time, fixed at 10.0 seconds
     current_time = 10.0
     time_patch = Mock(return_value=current_time)
-    
-    with patch('time.time', time_patch):
+
+    with patch("time.time", time_patch):
         # Create 3 requests with same length but different arrival times
         prompt_lengths = [64, 64, 64]  # All requests have same length
         # Arrival times: req1 earliest, req2 second, req0 latest
         arrival_times = [3.0, 1.0, 2.0]
-        
+
         requests = create_requests_for_sjf(
-            num_requests=3, 
-            prompt_lengths=prompt_lengths, 
-            arrival_times=arrival_times
+            num_requests=3, prompt_lengths=prompt_lengths, arrival_times=arrival_times
         )
 
-        # Add requests to scheduler (order of addition doesn't affect final scheduling order)
+        # Add requests to scheduler
         for request in requests:
             scheduler.add_request(request)
 
         # Execute scheduling
         output = scheduler.schedule()
-        
+
         # Verify all requests are scheduled (resources are sufficient)
         assert len(output.scheduled_new_reqs) == 3
 
