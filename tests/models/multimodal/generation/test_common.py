@@ -513,6 +513,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        num_logprobs=10 if current_platform.is_rocm() else 5,
     ),
     "intern_vl-hf": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],

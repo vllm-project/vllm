@@ -58,7 +58,7 @@ schemathesis==3.39.15
     # OpenAI schema test
 
 # Evaluation and benchmarking
-lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
+lm-eval[api]>=0.4.9.2
 jiwer==4.0.0
 
 # Required for multiprocessed tests that use spawn method, Datasets and Evaluate Test

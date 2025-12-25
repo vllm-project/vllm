@@ -219,6 +219,7 @@ class OpenAISpeechToText(OpenAIServing):
             dummy_params = SamplingParams(
                 max_tokens=1,
                 temperature=0.0,
+                skip_clone=True,  # Internal warmup, safe to skip clone
             )
 
             # Process the dummy input through the input processor
