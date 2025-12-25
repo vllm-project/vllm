@@ -804,7 +804,8 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         )
 
         phy_to_log_map, log_to_phy_map, log_replica_count = self.gen_result(
-            new_deployment)
+            new_deployment
+        )
 
         phy2log = torch.tensor(phy_to_log_map, dtype=torch.int32, device=weight.device)
         log2phy = torch.tensor(log_to_phy_map, dtype=torch.int32, device=weight.device)
