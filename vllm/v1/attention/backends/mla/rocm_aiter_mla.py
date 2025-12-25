@@ -95,7 +95,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.paged_kv_indices = torch.zeros(
                 max_num_pages, dtype=torch.int32, device=device
             )
-            self.paged_kv_last_page_len = torch.zeros(
+            self.paged_kv_last_page_len = torch.ones(
                 max_num_reqs, dtype=torch.int32, device=device
             )
 
@@ -155,7 +155,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.paged_kv_last_page_len[:num_reqs].copy_(
                 paged_kv_last_page_len, non_blocking=True
             )
-            self.paged_kv_last_page_len[num_reqs:].fill_(1)
+            # No need to fill with 1 - buffer is already initialized to 1s
             paged_kv_last_page_len = self.paged_kv_last_page_len[:num_reqs]
 
             self.qo_indptr[: 1 + num_reqs].copy_(
