@@ -108,14 +108,14 @@ async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI, qwen3_lora_files
 async def test_load_lora_adapter_with_same_name_replaces_inplace(
     client: openai.AsyncOpenAI, qwen3_meowing_lora_files, qwen3_woofing_lora_files
 ):
-    """Test that loading a LoRA adapter with the same name replaces the path."""
+    """Test that loading a LoRA adapter with the same name replaces it inplace."""
     adapter_name = "replaceable-adapter"
     messages = [
         {"content": "Follow the instructions to make animal noises", "role": "system"},
         {"content": "Make your favorite animal noise.", "role": "user"},
     ]
 
-    # Load the adapter for the first time
+    # Load LoRA that makes model meow
     response = await client.post(
         "load_lora_adapter",
         cast_to=str,
@@ -128,10 +128,9 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
         messages=messages,
         max_tokens=10,
     )
-
     assert "Meow Meow Meow" in completion.choices[0].message.content
 
-    # Load the adapter again with the same name (same path in this case)
+    # Load LoRA that makes model woof
     response = await client.post(
         "load_lora_adapter",
         cast_to=str,
@@ -144,7 +143,6 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
         messages=messages,
         max_tokens=10,
     )
-
     assert "Woof Woof Woof" in completion.choices[0].message.content
 
 
