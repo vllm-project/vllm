@@ -1113,38 +1113,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
             weight_current_rows = weight.shape[0]
 
-            # Pad weight to match swizzled scale dimensions,
-            #  weight rows must be divisible by 32
+            #  weight rows/cols must be divisible by 32 since CUTLASS FP4 kernel
+            # requires both K and N matrix dimensions to be divisible by 32
+            #  for aligned memory access and efficient tensor core operations.
             if weight_current_rows % 32 != 0:
-                weight_scale_rows_padded = swizzled_weight_scale.shape[0]
-                # weight_scale_rows_padded is multiple of 128 therefore
-                # it divisible by 32 --> pad weight rows to match scales rows.
-                pad_rows = weight_scale_rows_padded - weight_current_rows
-                assert pad_rows > 0, (
-                    f"Weight scale rows ({weight_scale_rows_padded}) < "
-                    f"weight rows ({weight_current_rows})."
-                )
+                total_rows = round_up(weight_current_rows, 32)
+                pad_rows = total_rows - weight_current_rows
                 weight = torch.nn.functional.pad(
                     weight, (0, 0, 0, pad_rows)
                 ).contiguous()
 
-            # Calculate the number of k blocks padded to satisfy alignment
-            # constraints for the weight (K must be divisible by 32 FP4 elements)
             layer.weights_padding_cols = 0
-            group_size = self.quant_config.group_size
-            num_k_blocks_padded = swizzled_weight_scale.shape[1]
-            weight_scale_col_padded = (num_k_blocks_padded * group_size) // 2
             weight_current_col_bytes = weight.shape[1]
             # 2 fp4 items are packed in the input dimension
             weight_current_col_elements = weight_current_col_bytes * 2
 
             # Check if K dimension (in FP4 elements) is divisible by 32
             if weight_current_col_elements % 32 != 0:
-                pad_cols = weight_scale_col_padded - weight_current_col_bytes
-                assert pad_cols > 0, (
-                    f"Weight scale cols ({weight_scale_col_padded} bytes) < "
-                    f"weight cols ({weight_current_col_bytes} bytes)."
-                )
+                total_cols = round_up(weight_current_col_elements, 32)
+                pad_cols = total_cols - weight_current_col_elements
                 weight = torch.nn.functional.pad(
                     weight, (0, pad_cols, 0, 0)
                 ).contiguous()
