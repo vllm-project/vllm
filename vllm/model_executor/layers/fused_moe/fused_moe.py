@@ -117,7 +117,6 @@ def fused_moe_kernel_gptq_awq(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -196,7 +195,7 @@ def fused_moe_kernel_gptq_awq(
         )
         return
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (
         offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
@@ -222,8 +221,21 @@ def fused_moe_kernel_gptq_awq(
         b_zp_num = 8
     if not has_zp and use_int8_w8a16:
         b_zp_num = 128
-    elif has_zp and use_int4_w4a16:
-        b_zp_shifter = (offs_bn[None, :] % 2) * 4
+
+    b_scale_base = (
+        b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
+    )
+
+    if has_zp and use_int4_w4a16:
+        b_zp_base = (
+            b_zp_ptr + off_experts * stride_bze + (offs_bn[None, :] >> 1) * stride_bzn
+        )
+        b_zp_is_high = (offs_bn[None, :] & 1).to(tl.int1)  # 1 if high nibble
+    elif has_zp and use_int8_w8a16:
+        b_zp_base = b_zp_ptr + off_experts * stride_bze + offs_bn[None, :] * stride_bzn
+
+    NUM_K_GROUPS: tl.constexpr = K // group_size
+    K_ITERS_PER_GROUP: tl.constexpr = group_size // BLOCK_SIZE_K
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -231,70 +243,39 @@ def fused_moe_kernel_gptq_awq(
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the
-        # K dimension.
 
-        if not block_k_diviable:
-            k_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
-            k_other = 0.0
-        else:
-            k_mask = None
-            k_other = None
-
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs)
-        if use_int4_w4a16:
-            b = (b >> b_shifter) & 0xF
-
-        b_scale_ptrs = (
-            b_scale_ptr
-            + off_experts * stride_bse
-            + offs_bn[None, :] * stride_bsn
-            + ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bsk
-        )
-        b_scale = tl.load(b_scale_ptrs, mask=k_mask, other=k_other)
-        b_scale = b_scale.to(tl.float32)
+    for k_group in range(NUM_K_GROUPS):
+        b_scale = tl.load(b_scale_base + k_group * stride_bsk)
 
         if has_zp and use_int4_w4a16:
-            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
-            b_zp_ptrs = (
-                b_zp_ptr
-                + off_experts * stride_bze
-                + (offs_bn[None, :] // 2) * stride_bzn
-                + offs_k_true * stride_bzk
-            )
-            b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = (b_zp >> b_zp_shifter) & 0xF
-            b_zp = b_zp.to(tl.float32)
+            b_zp_raw = tl.load(b_zp_base + k_group * stride_bzk)
+            b_zp_lo = b_zp_raw & 0xF
+            b_zp_hi = (b_zp_raw >> 4) & 0xF
+            b_zp = tl.where(b_zp_is_high, b_zp_hi, b_zp_lo)
         elif has_zp and use_int8_w8a16:
-            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
-            b_zp_ptrs = (
-                b_zp_ptr
-                + off_experts * stride_bze
-                + offs_bn[None, :] * stride_bzn
-                + offs_k_true * stride_bzk
+            b_zp = tl.load(b_zp_base + k_group * stride_bzk)
+
+        for k_inner in range(K_ITERS_PER_GROUP):
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None]
+                & (offs_k[None, :] < K - k_inner * BLOCK_SIZE_K),
+                other=0.0,
             )
-            b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = b_zp.to(tl.float32)
+            b = tl.load(b_ptrs)
+            if use_int4_w4a16:
+                b = (b >> b_shifter) & 0xF
 
-        # We accumulate along the K dimension.
-        if has_zp:
-            b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
-        else:
-            b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
-        accumulator = tl.dot(a, b, acc=accumulator)
+            # We accumulate along the K dimension.
+            b = (b - b_zp) * b_scale if has_zp else (b - b_zp_num) * b_scale
+            accumulator = tl.dot(a, b, acc=accumulator)
 
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        if use_int4_w4a16:
-            b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
-        else:
-            b_ptrs += BLOCK_SIZE_K * stride_bk
+            # Advance the ptrs to the next K block.
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            if use_int4_w4a16:
+                b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
+            else:
+                b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
