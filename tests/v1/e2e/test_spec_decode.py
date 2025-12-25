@@ -23,12 +23,11 @@ MTP_SIMILARITY_RATE = 0.8
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
-    if current_platform.is_rocm():
-        available_gpus = torch.cuda.device_count()
-        if available_gpus < tp_size:
-            pytest.skip(
-                f"Test requires {tp_size} GPUs, but only {available_gpus} available"
-            )
+    available_gpus = torch.cuda.device_count()
+    if available_gpus < tp_size:
+        pytest.skip(
+            f"Test requires {tp_size} GPUs, but only {available_gpus} available"
+        )
 
 
 def get_test_prompts(mm_enabled: bool, quiet: bool = False):
@@ -679,10 +678,11 @@ def test_draft_model_tensor_parallelism():
 def test_draft_model_engine_args_tensor_parallelism():
     """Ensure the vllm_config for the draft model is created correctly,
     and independently of the target model (quantization, TP, etc.)"""
+    _skip_if_insufficient_gpus_for_tp(2)
 
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B-FP8",  # <<< tgt quantized
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         speculative_config={
             "model": "Qwen/Qwen3-0.6B",  # <<< draft not quantized
             "method": "draft_model",
@@ -691,7 +691,7 @@ def test_draft_model_engine_args_tensor_parallelism():
         },
     )
     tgt_vllm_config: VllmConfig = engine_args.create_engine_config()
-    assert tgt_vllm_config.parallel_config.tensor_parallel_size == 4
+    assert tgt_vllm_config.parallel_config.tensor_parallel_size == 2
     assert tgt_vllm_config.quant_config.get_name() == "fp8"
 
     draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(tgt_vllm_config)

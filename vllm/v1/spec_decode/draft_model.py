@@ -54,6 +54,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         This function processes the inputs first before calling the .propose()
@@ -82,6 +83,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             next_token_ids=None,
             last_token_indices=None,
             mm_embed_inputs=None,
+            # used with padded drafter batch
+            num_rejected_tokens_gpu=None,
         )
         return draft_token_ids
 

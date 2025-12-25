@@ -1237,12 +1237,14 @@ class SpecDecodeBaseProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
-                self.model(
+                kwargs = dict(
                     input_ids=input_ids,
                     positions=self._get_positions(num_input_tokens),
-                    hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=inputs_embeds,
                 )
+                if self.pass_hidden_states_to_model:
+                    kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+                self.model(**kwargs)
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
