@@ -44,6 +44,33 @@ def assert_tool_calls(
         )
 
 
+def run_streaming_sequence(parser, deltas):
+    """Helper to simulate a streaming sequence and return results."""
+    previous_text = ""
+    previous_token_ids: list[int] = []
+    results = []
+
+    for delta_text, delta_token_ids in deltas:
+        current_text = previous_text + delta_text
+        current_token_ids = previous_token_ids + delta_token_ids
+
+        result = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=previous_token_ids,
+            current_token_ids=current_token_ids,
+            delta_token_ids=delta_token_ids,
+            request=None,
+        )
+        results.append(result)
+
+        previous_text = current_text
+        previous_token_ids = current_token_ids
+
+    return results
+
+
 def test_extract_tool_calls_no_tools(kimi_k2_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = kimi_k2_tool_parser.extract_tool_calls(
@@ -346,61 +373,32 @@ def test_token_leak_between_section_and_tool_begin(kimi_k2_tool_parser):
     tool_call_begin_token_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
 
     # Simulate streaming sequence:
+    deltas = [
+        ("I'll help you with that. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_token_id]),
+        (" spurious text ", [4, 5]),
+        ("<|tool_call_begin|>", [tool_call_begin_token_id]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
     # Delta 1: "I'll help you with that. "
-    result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="I'll help you with that. ",
-        delta_text="I'll help you with that. ",
-        previous_token_ids=[],
-        current_token_ids=[1, 2, 3],  # Regular tokens
-        delta_token_ids=[1, 2, 3],
-        request=None,
-    )
-    assert result1 is not None
-    assert result1.content == "I'll help you with that. "
+    assert results[0] is not None
+    assert results[0].content == "I'll help you with that. "
 
     # Delta 2: "<|tool_calls_section_begin|>"
-    prev_ids = [1, 2, 3]
-    curr_ids = prev_ids + [section_begin_token_id]
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="I'll help you with that. ",
-        current_text="I'll help you with that. <|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=prev_ids,
-        current_token_ids=curr_ids,
-        delta_token_ids=[section_begin_token_id],
-        request=None,
-    )
     # Section marker should be stripped and suppressed
-    assert result2 is None or (result2.content is None or result2.content == "")
+    assert results[1] is None or (
+        results[1].content is None or results[1].content == ""
+    )
 
     # Delta 3: " spurious text or tokens " (THE LEAK SCENARIO)
-    prev_ids = curr_ids
-    curr_ids = curr_ids + [4, 5]
-    result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="I'll help you with that. <|tool_calls_section_begin|>",
-        current_text="I'll help you with that. <|tool_calls_section_begin|> spurious text ",
-        delta_text=" spurious text ",
-        previous_token_ids=prev_ids,
-        current_token_ids=curr_ids,
-        delta_token_ids=[4, 5],
-        request=None,
-    )
     # CRITICAL: This text should be suppressed, NOT returned as reasoning_delta
-    assert result3 is None or (result3.content is None or result3.content == "")
+    assert results[2] is None or (
+        results[2].content is None or results[2].content == ""
+    )
 
     # Delta 4: "<|tool_call_begin|>..."
-    prev_ids = curr_ids
-    curr_ids = curr_ids + [tool_call_begin_token_id]
-    _result4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="I'll help you with that. <|tool_calls_section_begin|> spurious text ",
-        current_text="I'll help you with that. <|tool_calls_section_begin|> spurious text <|tool_call_begin|>",
-        delta_text="<|tool_call_begin|>",
-        previous_token_ids=prev_ids,
-        current_token_ids=curr_ids,
-        delta_token_ids=[tool_call_begin_token_id],
-        request=None,
-    )
     # Now we're in tool call mode, result depends on internal state
     # The key is that the spurious text from Delta 3 was not leaked
 
@@ -416,31 +414,15 @@ def test_split_markers_across_deltas(kimi_k2_tool_parser):
         "<|tool_calls_section_begin|>"
     )
 
-    # Delta 1: "...reasoning<|tool_calls_sec"
-    _result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="Some reasoning",
-        current_text="Some reasoning<|tool_calls_sec",
-        delta_text="<|tool_calls_sec",
-        previous_token_ids=[1, 2],
-        current_token_ids=[1, 2, 3],  # Partial token
-        delta_token_ids=[3],
-        request=None,
-    )
-    # Partial token not recognized yet, might be buffered
-    # Should return as content or None (depends on implementation)
+    # Delta 1: partial token, Delta 2: complete marker
+    deltas = [
+        ("<|tool_calls_sec", [3]),
+        ("tion_begin|> ", [section_begin_token_id, 4]),
+    ]
 
-    # Delta 2: "tion_begin|> "  (completes the marker)
-    _result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="Some reasoning<|tool_calls_sec",
-        current_text="Some reasoning<|tool_calls_section_begin|> ",
-        delta_text="tion_begin|> ",
-        previous_token_ids=[1, 2, 3],
-        current_token_ids=[1, 2, section_begin_token_id, 4],
-        delta_token_ids=[section_begin_token_id, 4],
-        request=None,
-    )
+    _results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
     # Now the complete marker should be detected via buffer
-    # The parser should enter tool section mode
     assert kimi_k2_tool_parser.in_tool_section is True
 
 
@@ -475,42 +457,17 @@ def test_reentry_to_reasoning_after_tool_section(kimi_k2_tool_parser):
     section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
     section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
 
-    # Enter tool section
-    _result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="<|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[],
-        current_token_ids=[section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    assert kimi_k2_tool_parser.in_tool_section is True
+    deltas = [
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" More reasoning", [10, 11]),
+    ]
 
-    # Exit tool section
-    _result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="<|tool_calls_section_begin|>",
-        current_text="<|tool_calls_section_begin|><|tool_calls_section_end|>",
-        delta_text="<|tool_calls_section_end|>",
-        previous_token_ids=[section_begin_id],
-        current_token_ids=[section_begin_id, section_end_id],
-        delta_token_ids=[section_end_id],
-        request=None,
-    )
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
     assert kimi_k2_tool_parser.in_tool_section is False
-
-    # Subsequent reasoning text should be returned normally
-    result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="<|tool_calls_section_begin|><|tool_calls_section_end|>",
-        current_text="<|tool_calls_section_begin|><|tool_calls_section_end|> More reasoning",
-        delta_text=" More reasoning",
-        previous_token_ids=[section_begin_id, section_end_id],
-        current_token_ids=[section_begin_id, section_end_id, 10, 11],
-        delta_token_ids=[10, 11],
-        request=None,
-    )
-    assert result3 is not None
-    assert result3.content == " More reasoning"
+    assert results[2] is not None
+    assert results[2].content == " More reasoning"
 
 
 def test_empty_tool_section(kimi_k2_tool_parser):
@@ -819,109 +776,32 @@ def test_tool_call_end_and_section_end_same_chunk(kimi_k2_tool_parser):
     tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
 
     # Simulate a streaming sequence for a SHORT tool call (all in one chunk):
-    # 1. Reasoning text
-    result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="Let me help. ",
-        delta_text="Let me help. ",
-        previous_token_ids=[],
-        current_token_ids=[1, 2],
-        delta_token_ids=[1, 2],
-        request=None,
-    )
-    assert result1 is not None
-    assert result1.content == "Let me help. "
-
-    # 2. Section begin
-    _result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="Let me help. ",
-        current_text="Let me help. <|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[1, 2],
-        current_token_ids=[1, 2, section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    assert kimi_k2_tool_parser.in_tool_section is True
-
-    # 3. Tool call begin + full content + tool_end + section_end ALL IN ONE CHUNK
-    # This is the critical scenario for short tool calls
     combined = (
         '<|tool_call_begin|>get_weather:0 <|tool_call_argument_begin|> {"city": "Paris"} '
         "<|tool_call_end|><|tool_calls_section_end|>"
     )
 
-    # Build up the previous text gradually to simulate realistic streaming
-    prev_text = "Let me help. <|tool_calls_section_begin|>"
-    curr_text = prev_text + combined
+    deltas = [
+        ("Let me help. ", [1, 2]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (combined, [tool_begin_id, 10, 11, 12, tool_end_id, section_end_id]),
+        (" Done", [20]),
+    ]
 
-    result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=curr_text,
-        delta_text=combined,
-        previous_token_ids=[1, 2, section_begin_id],
-        current_token_ids=[
-            1,
-            2,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            12,
-            tool_end_id,
-            section_end_id,
-        ],
-        delta_token_ids=[tool_begin_id, 10, 11, 12, tool_end_id, section_end_id],
-        request=None,
-    )
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
 
     # CRITICAL: Parser should have exited section AFTER processing tool
     assert kimi_k2_tool_parser.in_tool_section is False
 
     # Tool call should have been emitted (not dropped)
-    # The result might be the tool name or None depending on state, but
-    # importantly, it shouldn't be returning the literal tokens as content
-
-    if result3 is not None and result3.content is not None:
+    if results[2] is not None and results[2].content is not None:
         # Verify no special tokens leaked into content
-        assert "<|tool_call_end|>" not in result3.content
-        assert "<|tool_calls_section_end|>" not in result3.content
-
-    # 4. Verify subsequent content streams normally
-    result4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=curr_text,
-        current_text=curr_text + " Done",
-        delta_text=" Done",
-        previous_token_ids=[
-            1,
-            2,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            12,
-            tool_end_id,
-            section_end_id,
-        ],
-        current_token_ids=[
-            1,
-            2,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            12,
-            tool_end_id,
-            section_end_id,
-            20,
-        ],
-        delta_token_ids=[20],
-        request=None,
-    )
+        assert "<|tool_call_end|>" not in results[2].content
+        assert "<|tool_calls_section_end|>" not in results[2].content
 
     # Content after tool section should stream normally
-    assert result4 is not None
-    assert result4.content == " Done"
+    assert results[3] is not None
+    assert results[3].content == " Done"
 
 
 def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
@@ -951,128 +831,24 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
 
     all_content = []
 
-    # Step 1: Normal reasoning text
-    result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="I'll check the weather. ",
-        delta_text="I'll check the weather. ",
-        previous_token_ids=[],
-        current_token_ids=[1, 2, 3],
-        delta_token_ids=[1, 2, 3],
-        request=None,
-    )
-    if result1 and result1.content:
-        all_content.append(result1.content)
-
-    # Step 2: Section begin
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="I'll check the weather. ",
-        current_text="I'll check the weather. <|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[1, 2, 3],
-        current_token_ids=[1, 2, 3, section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    if result2 and result2.content:
-        all_content.append(result2.content)
-
-    # Step 3: Tool call with all markers in a single chunk
+    # Steps: reasoning, section begin, tool call, section end, more reasoning
     tool_chunk = (
         "<|tool_call_begin|> functions.get_weather:0 "
         '<|tool_call_argument_begin|> {"city": "Tokyo"} <|tool_call_end|>'
     )
-    prev_text = "I'll check the weather. <|tool_calls_section_begin|>"
-    curr_text = prev_text + tool_chunk
+    deltas = [
+        ("I'll check the weather. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool_chunk, [tool_begin_id, 10, 11, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" Here's the result.", [20, 21]),
+    ]
 
-    result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=curr_text,
-        delta_text=tool_chunk,
-        previous_token_ids=[1, 2, 3, section_begin_id],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            tool_end_id,
-        ],
-        delta_token_ids=[tool_begin_id, 10, 11, tool_end_id],
-        request=None,
-    )
-    if result3 and result3.content:
-        all_content.append(result3.content)
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
 
-    # Step 4: Section end
-    result4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=curr_text,
-        current_text=curr_text + "<|tool_calls_section_end|>",
-        delta_text="<|tool_calls_section_end|>",
-        previous_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            tool_end_id,
-        ],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            tool_end_id,
-            section_end_id,
-        ],
-        delta_token_ids=[section_end_id],
-        request=None,
-    )
-    if result4 and result4.content:
-        all_content.append(result4.content)
-
-    # Step 5: Post-section content
-    final_text = curr_text + "<|tool_calls_section_end|>"
-    result5 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=final_text,
-        current_text=final_text + " Here's the result.",
-        delta_text=" Here's the result.",
-        previous_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            tool_end_id,
-            section_end_id,
-        ],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            11,
-            tool_end_id,
-            section_end_id,
-            20,
-            21,
-        ],
-        delta_token_ids=[20, 21],
-        request=None,
-    )
-    if result5 and result5.content:
-        all_content.append(result5.content)
+    for res in results:
+        if res and res.content:
+            all_content.append(res.content)
 
     # CRITICAL ASSERTIONS: No forbidden markers in any content
     full_content = "".join(all_content)
@@ -1110,151 +886,23 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     all_content = []
 
-    # Step 1: Normal reasoning text
-    r1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="I'll compare the weather. ",
-        delta_text="I'll compare the weather. ",
-        previous_token_ids=[],
-        current_token_ids=[1, 2, 3],
-        delta_token_ids=[1, 2, 3],
-        request=None,
-    )
-    if r1 and r1.content:
-        all_content.append(r1.content)
-
-    # Step 2: Section begin
-    prev_text = "I'll compare the weather. "
-    r2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=prev_text + "<|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[1, 2, 3],
-        current_token_ids=[1, 2, 3, section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    if r2 and r2.content:
-        all_content.append(r2.content)
-
-    # Step 3: First tool call (Tokyo)
     tool1 = '<|tool_call_begin|> get_weather:0 <|tool_call_argument_begin|> {"city": "Tokyo"} <|tool_call_end|>'
-    prev_text = "I'll compare the weather. <|tool_calls_section_begin|>"
-    curr_text = prev_text + tool1
-    r3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=curr_text,
-        delta_text=tool1,
-        previous_token_ids=[1, 2, 3, section_begin_id],
-        current_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id],
-        delta_token_ids=[tool_begin_id, 10, tool_end_id],
-        request=None,
-    )
-    if r3 and r3.content:
-        all_content.append(r3.content)
-
-    # Step 4: Second tool call (NYC)
     tool2 = ' <|tool_call_begin|> get_weather:1 <|tool_call_argument_begin|> {"city": "New York"} <|tool_call_end|>'
-    prev_text = curr_text
-    curr_text = prev_text + tool2
-    r4 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=curr_text,
-        delta_text=tool2,
-        previous_token_ids=[1, 2, 3, section_begin_id, tool_begin_id, 10, tool_end_id],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            tool_end_id,
-            tool_begin_id,
-            20,
-            tool_end_id,
-        ],
-        delta_token_ids=[tool_begin_id, 20, tool_end_id],
-        request=None,
-    )
-    if r4 and r4.content:
-        all_content.append(r4.content)
 
-    # Step 5: Section end
-    prev_text = curr_text
-    r5 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=prev_text,
-        current_text=prev_text + "<|tool_calls_section_end|>",
-        delta_text="<|tool_calls_section_end|>",
-        previous_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            tool_end_id,
-            tool_begin_id,
-            20,
-            tool_end_id,
-        ],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            tool_end_id,
-            tool_begin_id,
-            20,
-            tool_end_id,
-            section_end_id,
-        ],
-        delta_token_ids=[section_end_id],
-        request=None,
-    )
-    if r5 and r5.content:
-        all_content.append(r5.content)
+    deltas = [
+        ("I'll compare the weather. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool1, [tool_begin_id, 10, tool_end_id]),
+        (tool2, [tool_begin_id, 20, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" Here's the comparison.", [30]),
+    ]
 
-    # Step 6: Post-section content
-    final_text = prev_text + "<|tool_calls_section_end|>"
-    r6 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text=final_text,
-        current_text=final_text + " Here's the comparison.",
-        delta_text=" Here's the comparison.",
-        previous_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            tool_end_id,
-            tool_begin_id,
-            20,
-            tool_end_id,
-            section_end_id,
-        ],
-        current_token_ids=[
-            1,
-            2,
-            3,
-            section_begin_id,
-            tool_begin_id,
-            10,
-            tool_end_id,
-            tool_begin_id,
-            20,
-            tool_end_id,
-            section_end_id,
-            30,
-        ],
-        delta_token_ids=[30],
-        request=None,
-    )
-    if r6 and r6.content:
-        all_content.append(r6.content)
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    for res in results:
+        if res and res.content:
+            all_content.append(res.content)
 
     # Assertions
     full_content = "".join(all_content)
