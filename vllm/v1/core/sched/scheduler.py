@@ -776,6 +776,7 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens = num_computed_tokens
                 if (
                     self.enable_concurrent_partial_prefill_scheduling
+                    and partial_prefill_metadata is not None
                     and prefill_state is not None
                     and prefill_state.is_prefill
                     and prefill_state.remaining_tokens > 0
