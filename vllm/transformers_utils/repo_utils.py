@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import (
@@ -183,7 +183,7 @@ def file_or_path_exists(
     )
 
 
-def get_model_path(model: str | Path, revision: str | None = None):
+def get_model_path(model: str | Path, revision: str | None = None) -> str | Path:
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
@@ -241,7 +241,7 @@ def try_get_local_file(
 
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
-):
+) -> dict[str, Any] | None:
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
