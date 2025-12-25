@@ -287,6 +287,12 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
+            if cache_config.mamba_cache_mode == "none":
+                cache_config.mamba_cache_mode = "align"
+                logger.warning(
+                    "Mamba cache mode is set to 'align' defaultly when prefix "
+                    "caching is enabled"
+                )
             if cache_config.mamba_cache_mode == "all":
                 if model_config.supports_mamba_prefix_caching:
                     logger.info(
@@ -313,8 +319,14 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 raise ValueError(
                     f"unknown mamba cache mode: {cache_config.mamba_cache_mode}"
                 )
-        elif cache_config.mamba_block_size is None:
-            cache_config.mamba_block_size = model_config.max_model_len
+        else:
+            if cache_config.mamba_cache_mode != "none":
+                cache_config.mamba_cache_mode = "none"
+                logger.warning(
+                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
+                )
+            if cache_config.mamba_block_size is None:
+                cache_config.mamba_block_size = model_config.max_model_len
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):

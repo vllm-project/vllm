@@ -239,18 +239,3 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-    def __post_init__(self) -> None:
-        if self.enable_prefix_caching:
-            if self.mamba_cache_mode == "none":
-                self.mamba_cache_mode = "align"
-                logger.warning(
-                    "mamba_cache_mode set to 'align' defaultly when prefix "
-                    "caching is enabled"
-                )
-        else:
-            if self.mamba_cache_mode != "none":
-                self.mamba_cache_mode = "none"
-                logger.warning(
-                    "mamba_cache_mode set to 'none' when prefix caching is disabled"
-                )
