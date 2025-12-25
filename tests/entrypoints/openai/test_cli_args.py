@@ -221,9 +221,7 @@ def test_default_chat_template_kwargs_parsing(serve_parser):
 def test_default_chat_template_kwargs_complex(serve_parser):
     """Ensure complex default_chat_template_kwargs JSON is parsed correctly"""
     kwargs_json = '{"enable_thinking": false, "custom_param": "value", "num": 42}'
-    args = serve_parser.parse_args(
-        args=["--default-chat-template-kwargs", kwargs_json]
-    )
+    args = serve_parser.parse_args(args=["--default-chat-template-kwargs", kwargs_json])
     assert args.default_chat_template_kwargs == {
         "enable_thinking": False,
         "custom_param": "value",
