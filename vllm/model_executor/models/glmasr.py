@@ -48,6 +48,17 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 DEFAULT_MAX_AUDIO_LEN_S = 655
 DEFAULT_MERGE_FACTOR = 4
+# Default convolution parameters: (padding, kernel_size, stride)
+# These correspond to the two conv layers in GlmAsrEncoder
+DEFAULT_CONV_PARAMS = [(1, 3, 1), (1, 3, 2)]
+
+
+def _calculate_conv_output_length(
+    input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
+) -> torch.Tensor:
+    """Calculate Conv1d output length using standard formula."""
+    # Standard formula: floor((input + 2*padding - kernel_size) / stride) + 1
+    return (input_length + 2 * padding - kernel_size) // stride + 1
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -61,11 +72,11 @@ class GlmAsrFeatureInputs(TensorSchema):
     type: Literal["audio_features"]
     input_features: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("num_chunks", "nmb", 3000),
+        TensorShape("num_chunks", "nmb", "chunk_length", dynamic_dims={"chunk_length"}),
     ]
     feature_attention_mask: Annotated[
         torch.Tensor,
-        TensorShape("num_chunks", 3000),
+        TensorShape("num_chunks", "chunk_length", dynamic_dims={"chunk_length"}),
     ]
     chunk_counts: Annotated[
         torch.Tensor,
@@ -199,6 +210,26 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         feature_extractor = self.info.get_feature_extractor()
         return GlmAsrMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
+    def _calculate_chunk_counts(
+        self,
+        audio_list: list[Any],
+        feature_extractor: WhisperFeatureExtractor,
+        processor: GlmAsrProcessor,
+    ) -> list[int]:
+        """Calculate chunk counts for each audio."""
+        sampling_rate = feature_extractor.sampling_rate
+        chunk_length = feature_extractor.chunk_length
+        max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
+        window_size = int(sampling_rate * chunk_length)
+        max_windows = int(max_audio_len // chunk_length)
+
+        chunk_counts = []
+        for audio in audio_list:
+            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
+            n_chunks = max(1, (n_samples + window_size - 1) // window_size)
+            chunk_counts.append(min(n_chunks, max_windows))
+        return chunk_counts
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -206,36 +237,29 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
+        # Handle deprecated "audios" key
+        if "audios" in mm_data:
+            mm_data["audio"] = mm_data.pop("audios")
 
-        if not mm_data.get("audio", []):
+        # Text-only input
+        audio_list = mm_data.get("audio", [])
+        if not audio_list:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        # Normalize audio_list to list format
+        if not isinstance(audio_list, list):
+            audio_list = [audio_list]
 
         processor = self.info.get_hf_processor(**mm_kwargs)
         feature_extractor = processor.feature_extractor
         mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
 
-        audio_list = mm_data.get("audio")
-        if not isinstance(audio_list, list):
-            audio_list = [audio_list]
-
-        chunk_counts = []
-        sampling_rate = feature_extractor.sampling_rate
-        chunk_length = feature_extractor.chunk_length
-        max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
-        window_size = int(sampling_rate * chunk_length)
-        max_windows = int(max_audio_len // chunk_length)
-
-        for audio in audio_list:
-            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
-            n_win = max(1, (n_samples + window_size - 1) // window_size)
-            if n_win > max_windows:
-                n_win = max_windows
-            chunk_counts.append(n_win)
+        # Calculate chunk counts
+        chunk_counts = self._calculate_chunk_counts(
+            audio_list, feature_extractor, processor
+        )
 
         outputs = super()._call_hf_processor(
             prompt=prompt,
@@ -244,10 +268,11 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
             tok_kwargs=tok_kwargs,
         )
 
+        # Rename mask key and add chunk_counts
         if "input_features_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+
         return outputs
 
     def _get_mm_fields_config(
@@ -256,6 +281,75 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _glmasr_field_config(hf_inputs)
+
+    def _normalize_to_tensor(
+        self, mask: torch.Tensor | list[torch.Tensor]
+    ) -> torch.Tensor:
+        """Convert mask to tensor, handling both list and tensor formats."""
+        if isinstance(mask, list):
+            return (
+                torch.stack(mask)
+                if mask and isinstance(mask[0], torch.Tensor)
+                else torch.tensor(mask)
+            )
+        return mask
+
+    def _extract_mask_for_item(
+        self,
+        feature_attention_mask: torch.Tensor | list[torch.Tensor],
+        chunk_counts: torch.Tensor | list[int] | None,
+        item_idx: int,
+    ) -> torch.Tensor:
+        """Extract attention mask for a specific audio item."""
+        if chunk_counts is None:
+            # Single item per audio
+            mask = feature_attention_mask[item_idx]
+            return (
+                mask.unsqueeze(0)
+                if isinstance(feature_attention_mask, torch.Tensor)
+                else self._normalize_to_tensor(mask)
+            )
+
+        # Multiple chunks per audio: calculate slice indices
+        counts = (
+            chunk_counts.tolist()
+            if isinstance(chunk_counts, torch.Tensor)
+            else chunk_counts
+        )
+        start_idx = sum(counts[:item_idx])
+        end_idx = start_idx + counts[item_idx]
+
+        # Extract slice
+        if isinstance(feature_attention_mask, torch.Tensor):
+            return feature_attention_mask[start_idx:end_idx]
+        return self._normalize_to_tensor(feature_attention_mask[start_idx:end_idx])
+
+    def _calculate_audio_output_lengths(
+        self,
+        mask: torch.Tensor,
+        merge_factor: int,
+        conv_params: list[tuple[int, int, int]] | None = None,
+    ) -> torch.Tensor:
+        """
+        Calculate output lengths after convolution and merge operations.
+
+        Args:
+            mask: Attention mask tensor
+            merge_factor: Factor for merge operation
+            conv_params: List of (padding, kernel_size, stride) tuples for
+                        each conv layer. Defaults to [(1, 3, 1), (1, 3, 2)] if
+                        not provided.
+        """
+        if conv_params is None:
+            conv_params = DEFAULT_CONV_PARAMS
+
+        audio_lengths = mask.sum(-1)
+        for padding, kernel_size, stride in conv_params:
+            audio_lengths = _calculate_conv_output_length(
+                audio_lengths, padding, kernel_size, stride
+            )
+        # Apply merge operation
+        return (audio_lengths - merge_factor) // merge_factor + 1
 
     def _get_prompt_updates(
         self,
@@ -273,49 +367,21 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         if audio_token_id is None:
             audio_token_id = processor.audio_token_id
 
-        # Get merge_factor from config, fallback to default
         merge_factor = getattr(config, "merge_factor", DEFAULT_MERGE_FACTOR)
-
         out_mm_data = out_mm_kwargs.get_data()
         feature_attention_mask = out_mm_data.get("feature_attention_mask")
         chunk_counts = out_mm_data.get("chunk_counts")
 
         def get_replacement_glmasr(item_idx: int):
             if feature_attention_mask is not None:
-                if chunk_counts is not None:
-                    counts = (
-                        chunk_counts.tolist()
-                        if isinstance(chunk_counts, torch.Tensor)
-                        else chunk_counts
-                    )
-                    start_idx = sum(counts[:item_idx])
-                    count = counts[item_idx]
-                    end_idx = start_idx + count
-
-                    if isinstance(feature_attention_mask, list):
-                        mask_list = feature_attention_mask[start_idx:end_idx]
-                        if len(mask_list) > 0 and isinstance(
-                            mask_list[0], torch.Tensor
-                        ):
-                            mask = torch.stack(mask_list)
-                        else:
-                            mask = torch.tensor(mask_list)
-                    else:
-                        mask = feature_attention_mask[start_idx:end_idx]
-                else:
-                    if isinstance(feature_attention_mask, list):
-                        mask = feature_attention_mask[item_idx]
-                    else:
-                        mask = feature_attention_mask[item_idx].unsqueeze(0)
-
-                audio_lengths = mask.sum(-1)
-                for padding, kernel_size, stride in [(1, 3, 1), (1, 3, 2)]:
-                    audio_lengths = (
-                        audio_lengths + 2 * padding - (kernel_size - 1) - 1
-                    ) // stride + 1
-                audio_output_lengths = (
-                    audio_lengths - merge_factor
-                ) // merge_factor + 1
+                mask = self._extract_mask_for_item(
+                    feature_attention_mask, chunk_counts, item_idx
+                )
+                # Get conv params from config if available
+                conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
+                audio_output_lengths = self._calculate_audio_output_lengths(
+                    mask, merge_factor, conv_params
+                )
                 num_features = audio_output_lengths.sum().item()
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
@@ -446,15 +512,26 @@ class GlmAsrForConditionalGeneration(
         )
         audio_features = self.multi_modal_projector(audio_hidden_states)
 
-        # Get merge_factor from config, fallback to default
+        # Get merge_factor and conv_params from config, fallback to defaults
         merge_factor = getattr(self.config, "merge_factor", DEFAULT_MERGE_FACTOR)
+        conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
 
-        audio_lengths = feature_attention_mask.sum(-1)
-        for padding, kernel_size, stride in [(1, 3, 1), (1, 3, 2)]:
-            audio_lengths = (
-                audio_lengths + 2 * padding - (kernel_size - 1) - 1
-            ) // stride + 1
-        audio_output_lengths = (audio_lengths - merge_factor) // merge_factor + 1
+        # Calculate output lengths using encoder's method if available,
+        # otherwise use our calculation
+        if hasattr(self.audio_tower, "_get_feat_extract_output_lengths"):
+            # Use encoder's built-in method
+            audio_lengths = feature_attention_mask.sum(-1)
+            _, audio_output_lengths = self.audio_tower._get_feat_extract_output_lengths(
+                audio_lengths
+            )
+        else:
+            # Fallback to manual calculation
+            audio_lengths = feature_attention_mask.sum(-1)
+            for padding, kernel_size, stride in conv_params:
+                audio_lengths = _calculate_conv_output_length(
+                    audio_lengths, padding, kernel_size, stride
+                )
+            audio_output_lengths = (audio_lengths - merge_factor) // merge_factor + 1
 
         num_chunks, max_audio_tokens, embed_dim = audio_features.shape
         audio_output_lengths = audio_output_lengths.unsqueeze(1)
