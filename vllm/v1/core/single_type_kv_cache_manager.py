@@ -91,8 +91,8 @@ class SingleTypeKVCacheManager(ABC):
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_req_blocks = len(self.req_to_blocks.get(request_id, []))
 
-        # Fast-path for the common case when no new prefix-cache hits.
         if request_id in self.num_cached_block:
+            # Fast-path: a running request won't have any new prefix-cache hits.
             assert len(new_computed_blocks) == 0
             return max(num_required_blocks - num_req_blocks, 0)
 
@@ -147,7 +147,8 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         if request_id in self.num_cached_block:
-            # Fast-path: a running request. Should not have any new computed blocks.
+            # Fast-path: a running request won't have any new prefix-cache hits.
+            # It should not have any new computed blocks.
             assert len(new_computed_blocks) == 0
             return
 

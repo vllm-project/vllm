@@ -282,8 +282,6 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    ## TODO(Yifan): here token_ids may be over-estimated for
-                    ## sliding window layers
                     token_ids=request.all_token_ids[
                         num_cached_blocks * block_size : num_full_blocks * block_size
                     ],
