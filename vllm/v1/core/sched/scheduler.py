@@ -41,7 +41,12 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -49,7 +54,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, AbortRequest
+from vllm.v1.request import AbortRequest, Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -462,12 +467,17 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
                     try:
-                        grammar_ready = structured_output_req and structured_output_req.grammar
+                        grammar_ready = (
+                            structured_output_req is not None
+                            and structured_output_req.grammar is not None
+                        )
                     except Exception as e:
+                        # Grammar compilation failed - abort the request
                         error_msg = f"Structured output grammar compilation failed: {e}"
-                        logger.warning(f"{error_msg} for request {request.request_id}")
+                        logger.warning(
+                            "%s for request %s", error_msg, request.request_id
+                        )
 
-                        # 2. Add to local list
                         aborted_requests.append(
                             AbortRequest(
                                 client_index=request.client_index,
@@ -476,14 +486,12 @@ class Scheduler(SchedulerInterface):
                                 events=request.take_events(),
                                 trace_headers=request.trace_headers,
                                 num_cached_tokens=request.num_cached_tokens,
-                                num_nans_in_logits=request.num_nans_in_logits
-                                )
+                                num_nans_in_logits=request.num_nans_in_logits,
                             )
-
-                        # 3. Finish the request (clean up resources)
-                        if self.finished_req_ids_dict is None:
-                            self.finished_req_ids_dict = defaultdict(set)
-                        self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                        )
+                        self.finish_requests(
+                            request.request_id, RequestStatus.FINISHED_ERROR
+                        )
                         continue
 
                     if grammar_ready:
@@ -1209,26 +1217,6 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # 1. Process Aborted Requests
-            for aborted_req in scheduler_output.aborted_reqs:
-                # Construct the error output
-                outputs[aborted_req.client_index].append(
-                        EngineCoreOutput(
-                                request_id=aborted_req.request_id,
-                                new_token_ids=[],
-                                finish_reason=FinishReason.STOP,
-                                new_logprobs=None,
-                                new_prompt_logprobs_tensors=None,
-                                pooling_output=None,
-                                stop_reason=aborted_req.error_message,
-                                events=aborted_req.events,
-                                kv_transfer_params=None,
-                                trace_headers=aborted_req.trace_headers,
-                                num_cached_tokens=aborted_req.num_cached_tokens,
-                                num_nans_in_logits=aborted_req.num_nans_in_logits,
-                                )
-                        )
-
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
@@ -1259,6 +1247,21 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+
+        # Process aborted requests (e.g., structured output compilation errors)
+        for aborted_req in scheduler_output.aborted_reqs:
+            outputs[aborted_req.client_index].append(
+                EngineCoreOutput(
+                    request_id=aborted_req.request_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.ERROR,
+                    stop_reason=aborted_req.error_message,
+                    events=aborted_req.events,
+                    trace_headers=aborted_req.trace_headers,
+                    num_cached_tokens=aborted_req.num_cached_tokens,
+                    num_nans_in_logits=aborted_req.num_nans_in_logits,
+                )
+            )
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
