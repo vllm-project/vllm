@@ -83,7 +83,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
@@ -161,7 +161,7 @@ def test_compressed_tensors_w8a8_logprobs(
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
@@ -231,7 +231,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
         current_platform.is_rocm()
         and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL
     ):
-        pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
+        pytest.skip(f"Skip model {model_path} as it is not supported on ROCm.")
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:

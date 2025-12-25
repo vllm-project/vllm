@@ -19,10 +19,8 @@
       "block_size": 128,
       "trust_remote_code": "",
       "disable_log_stats": "",
-      "enforce_eager": "",
       "max_num_batched_tokens": 2048,
-      "max_num_seqs": 256,
-      "load_format": "dummy"
+      "max_num_seqs": 256
     },
     "client_parameters": {
       "model": "meta-llama/Llama-3.1-8B-Instruct",
@@ -148,6 +146,45 @@
       "client_parameters": {
         "dataset_name": "random",
         "random-input-len": 2048,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int4_tp1_random_128_128",
+      "server_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int4_tp2_random_128_128",
+      "server_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int4_tp4_random_128_128",
+      "server_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "tensor_parallel_size": 4
+      },
+      "client_parameters": {
+        "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "dataset_name": "random",
+        "random-input-len": 128,
         "random-output-len": 128
       }
     },

@@ -186,6 +186,7 @@ class DPMetadata:
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
+    attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
     """
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
@@ -193,7 +194,6 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
-    attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -292,7 +292,7 @@ def set_forward_context(
         if num_tokens_across_dp is None:
             assert ubatch_slices is None
             assert num_tokens is not None
-            _, num_tokens_across_dp = coordinate_batch_across_dp(
+            _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,

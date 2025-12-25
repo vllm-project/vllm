@@ -82,7 +82,7 @@ DOCKER_BUILDKIT=1 docker build . \
 
 ## Building for Arm64/aarch64
 
-A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
 
 !!! note
     Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
@@ -102,6 +102,25 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
     --build-arg nvcc_threads=2 \
     --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
     --build-arg RUN_WHEEL_CHECK=false
+    ```
+
+For (G)B300, we recommend using CUDA 13, as shown in the following command.
+
+??? console "Command"
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+    --build-arg CUDA_VERSION=13.0.1 \
+    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 \
+    --build-arg max_jobs=256 \
+    --build-arg nvcc_threads=2 \
+    --build-arg RUN_WHEEL_CHECK=false \
+    --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
+    --platform "linux/arm64" \
+    --tag vllm/vllm-gb300-openai:latest \
+    --target vllm-openai \
+    -f docker/Dockerfile \
+    .
     ```
 
 !!! note
