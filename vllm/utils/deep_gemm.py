@@ -389,7 +389,7 @@ def should_use_deepgemm_for_fp8_linear(
 
     # Verify DeepGEMM N/K dims requirements
     # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
-    # test inside kernels/quatization/test_block_fp8.py
+    # test inside kernels/quantization/test_block_fp8.py
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
