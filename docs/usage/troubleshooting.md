@@ -340,7 +340,7 @@ vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See 
 It means that the ptxas in triton bundle not compatible with your device. You need to set `TRITON_PTXAS_PATH` environment variable to use cuda toolkit's ptxas manually instead:
 ```shell
 export CUDA_HOME=/usr/local/cuda
-export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxa"
+export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
