@@ -4301,12 +4301,12 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if (
-                self.speculative_config
-                and self.speculative_config.use_eagle()
+            if self.speculative_config and (
+                self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
             ):
                 assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
