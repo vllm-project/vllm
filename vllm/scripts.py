@@ -9,7 +9,7 @@ logger = init_logger(__name__)
 
 # Backwards compatibility for the move from vllm.scripts to
 # vllm.entrypoints.cli.main
-def main():
+def main() -> None:
     logger.warning(
         "vllm.scripts.main() is deprecated. Please re-install "
         "vllm or use vllm.entrypoints.cli.main.main() instead."

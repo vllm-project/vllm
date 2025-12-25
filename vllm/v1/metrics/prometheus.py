@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 _prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None
 
 
-def setup_multiprocess_prometheus():
+def setup_multiprocess_prometheus() -> None:
     """Set up prometheus multiprocessing directory if not already configured."""
     global _prometheus_multiproc_dir
 
@@ -52,7 +52,7 @@ def get_prometheus_registry() -> CollectorRegistry:
     return REGISTRY
 
 
-def unregister_vllm_metrics():
+def unregister_vllm_metrics() -> None:
     """Unregister any existing vLLM collectors from the prometheus registry.
 
     This is useful for testing and CI/CD where metrics may be registered
@@ -68,7 +68,7 @@ def unregister_vllm_metrics():
             registry.unregister(collector)
 
 
-def shutdown_prometheus():
+def shutdown_prometheus() -> None:
     """Shutdown prometheus metrics."""
 
     path = _prometheus_multiproc_dir
