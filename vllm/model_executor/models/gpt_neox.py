@@ -26,7 +26,7 @@ import torch
 from torch import nn
 from transformers import GPTNeoXConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -89,17 +89,13 @@ class GPTNeoXAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.dense",
         )
-        scaling = self.head_size**-0.5
-        rotary_dim = int(self.head_size * config.rotary_pct)
-        assert rotary_dim % 2 == 0
-        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
         )
+        scaling = self.head_size**-0.5
         self.attn = Attention(
             self.num_heads,
             self.head_size,

@@ -7,15 +7,15 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files):
+def default_server_args(qwen3_lora_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -28,7 +28,7 @@ def default_server_args(zephyr_lora_files):
         # lora config
         "--enable-lora",
         "--lora-modules",
-        f"zephyr-lora={zephyr_lora_files}",
+        f"qwen3-lora={qwen3_lora_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -37,7 +37,7 @@ def default_server_args(zephyr_lora_files):
 
 
 @pytest.fixture(scope="module")
-def server_fixture(request, default_server_args):  # noqa: F811
+def server_fixture(request, default_server_args):
     use_server_flag = request.param
     if use_server_flag:
         args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]

@@ -19,7 +19,7 @@
 # This code is based off the following work:
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/modeling_stablelm_epoch.py
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
-"""Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
+"""Inference-only StableLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import StableLmConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -119,9 +119,6 @@ class StablelmAttention(nn.Module):
         self.num_key_value_heads = max(1, self.total_num_key_value_heads // tp_size)
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.partial_rotary_factor = getattr(
-            config, "rope_pct", getattr(config, "partial_rotary_factor", 1)
-        )
         self.scaling = self.head_dim**-0.5
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_key_value_heads * self.head_dim
@@ -151,10 +148,8 @@ class StablelmAttention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.config.max_position_embeddings,
-            base=self.config.rope_theta,
-            partial_rotary_factor=self.partial_rotary_factor,
+            rope_parameters=self.config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,

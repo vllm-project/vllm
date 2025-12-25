@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (
-    BatchedTritonOrDeepGemmExperts,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -287,16 +284,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         needs_deep_gemm=True,
     )
     register_experts(
-        BatchedTritonOrDeepGemmExperts,
-        batched_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        supports_chunking=False,
-        supports_expert_map=False,
-        needs_matching_quant=True,
-        needs_deep_gemm=True,
-    )
-    register_experts(
         TritonOrDeepGemmExperts,
         standard_format,
         common_float_and_int_types,
@@ -457,10 +444,6 @@ def make_fused_experts(
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedTritonExperts {kwargs} ...")
         experts = BatchedTritonExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonOrDeepGemmExperts:
-        kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
-        print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
-        experts = BatchedTritonOrDeepGemmExperts(**kwargs)
     elif fused_experts_type == DeepGemmExperts:
         print(f"Making DeepGemmExperts {quant_config} ...")
         experts = DeepGemmExperts(quant_config)

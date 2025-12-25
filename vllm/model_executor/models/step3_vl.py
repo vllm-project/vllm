@@ -15,11 +15,12 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -42,8 +43,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs import Step3VisionEncoderConfig
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -320,7 +321,7 @@ class Step3VLProcessor:
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ) -> None:
         super().__init__()
 
@@ -667,7 +668,7 @@ class Step3VisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -752,8 +753,8 @@ class Step3VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with automatic backend selection
+        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
 
     def forward(
         self,
@@ -766,7 +767,7 @@ class Step3VisionAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
-        # Use unified MultiHeadAttention with automatic backend selection
+        # Use unified MMEncoderAttention with automatic backend selection
         attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)
@@ -915,8 +916,6 @@ class Step3VisionTransformer(nn.Module):
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
 class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -950,13 +949,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                 prefix=maybe_prefix(prefix, "vision_model"),
                 use_data_parallel=self.use_data_parallel,
             )
-            self.vit_downsampler = nn.Conv2d(
+            self.vit_downsampler = Conv2dLayer(
                 config.vision_config.hidden_size,
                 config.vision_config.output_hidden_size,
                 kernel_size=2,
                 stride=config.understand_projector_stride,
             )
-            self.vit_downsampler2 = nn.Conv2d(
+            self.vit_downsampler2 = Conv2dLayer(
                 config.vision_config.output_hidden_size,
                 config.vision_config.output_hidden_size * 2,
                 kernel_size=3,

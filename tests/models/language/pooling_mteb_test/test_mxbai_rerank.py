@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
-from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from tests.models.utils import RerankModelInfo
 
-from .mteb_utils import mteb_test_rerank_models
+from .mteb_score_utils import mteb_test_rerank_models
 
 mxbai_rerank_hf_overrides = {
     "architectures": ["Qwen2ForSequenceClassification"],
@@ -17,14 +17,18 @@ mxbai_rerank_hf_overrides = {
 }
 
 RERANK_MODELS = [
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "mixedbread-ai/mxbai-rerank-base-v2",
         architecture="Qwen2ForSequenceClassification",
         hf_overrides=mxbai_rerank_hf_overrides,
         mteb_score=0.273,
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
         enable_test=True,
     ),
-    LASTPoolingRerankModelInfo(
+    RerankModelInfo(
         "mixedbread-ai/mxbai-rerank-large-v2",
         architecture="Qwen2ForSequenceClassification",
         hf_overrides=mxbai_rerank_hf_overrides,
@@ -70,8 +74,9 @@ class MxbaiRerankerHfRunner(HfRunner):
             return scores
 
         scores = []
-        for prompt in prompts:
-            inputs = process_inputs([prompt])
+        for query, doc, *_ in prompts:
+            pairs = [(query, doc)]
+            inputs = process_inputs(pairs)
             score = compute_logits(inputs)
             scores.append(score[0].item())
         return torch.Tensor(scores)

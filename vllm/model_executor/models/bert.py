@@ -32,7 +32,7 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -55,7 +55,9 @@ class BertEmbedding(nn.Module):
             "position_ids",
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
-        self.position_embedding_type = config.position_embedding_type
+        self.position_embedding_type = getattr(
+            config, "position_embedding_type", "absolute"
+        )
         if self.position_embedding_type != "absolute":
             raise ValueError(
                 "Only 'absolute' position_embedding_type" + " is supported"
@@ -432,7 +434,6 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-@default_pooling_type("ALL")
 class BertPoolingModel(BertModel):
     is_pooling_model = True
 
@@ -864,6 +865,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         )
 
 
+@attn_type("encoder_only")
 @default_pooling_type("ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True

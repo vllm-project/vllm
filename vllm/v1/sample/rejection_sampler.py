@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from dataclasses import replace
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -119,8 +119,14 @@ class RejectionSampler(nn.Module):
         raw_target_logits = logits[target_logits_indices]
         # Use float32 for the target_logits.
         raw_target_logits = raw_target_logits.to(torch.float32)
+        target_logits = raw_target_logits
+        if not self.is_processed_logprobs_mode:
+            # Clone raw_target_logits before applying processors to preserve
+            # the original raw logits for logprobs computation, since
+            # apply_logits_processors modifies the tensor in-place.
+            target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(
-            raw_target_logits, sampling_metadata, metadata
+            target_logits, sampling_metadata, metadata
         )
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
@@ -145,7 +151,7 @@ class RejectionSampler(nn.Module):
         )
 
         logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs:
+        if sampling_metadata.max_num_logprobs is not None:
             logprobs_tensors = self._get_logprobs_tensors(
                 sampling_metadata.max_num_logprobs,
                 metadata,
@@ -205,7 +211,9 @@ class RejectionSampler(nn.Module):
     def parse_output(
         output_token_ids: torch.Tensor,
         vocab_size: int,
-    ) -> list[np.ndarray]:
+        discard_req_indices: Sequence[int] = (),
+        return_cu_num_tokens: bool = False,
+    ) -> tuple[list[list[int]], list[int] | None]:
         """Parse the output of the rejection sampler.
         Args:
             output_token_ids: The sampled token IDs in shape
@@ -213,6 +221,8 @@ class RejectionSampler(nn.Module):
                 replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
                 and will be filtered out in this function.
             vocab_size: The size of the vocabulary.
+            discard_req_indices: Optional row indices to discard tokens in.
+            return_cu_num_tokens: Whether to also return cumulative token counts.
         Returns:
             A list of lists of token IDs.
         """
@@ -221,7 +231,15 @@ class RejectionSampler(nn.Module):
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
-        return [row[valid_mask[i]] for i, row in enumerate(output_token_ids_np)]
+        cu_num_tokens = None
+        if return_cu_num_tokens:
+            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
+        if len(discard_req_indices) > 0:
+            valid_mask[discard_req_indices] = False
+        outputs = [
+            row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
+        ]
+        return outputs, cu_num_tokens
 
     def apply_logits_processors(
         self,

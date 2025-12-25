@@ -19,11 +19,12 @@ from transformers import BatchFeature, PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -78,7 +79,7 @@ class GLMVImagePixelInputs(TensorSchema):
 class EVA2CLIPPatchEmbedding(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             config.in_channels,
             config.hidden_size,
             kernel_size=config.patch_size,
@@ -134,7 +135,7 @@ class EVA2CLIPAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads_per_rank, self.head_dim, self.scale
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
@@ -333,7 +334,7 @@ class EVA2CLIPModel(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_proj",
         )
-        self.conv = nn.Conv2d(
+        self.conv = Conv2dLayer(
             in_channels=vision_config.hidden_size,
             out_channels=config.hidden_size,
             kernel_size=2,
@@ -560,8 +561,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],

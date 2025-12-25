@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -24,6 +24,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -51,7 +52,7 @@ class InternVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=3,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -206,7 +207,7 @@ class InternParallelAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 

@@ -101,7 +101,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         list[torch.Tensor],
-        TensorShape("bn", "naf", "hs"),
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
     ]
 
 
@@ -313,8 +313,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
     dummy_inputs=Qwen2AudioDummyInputsBuilder,
 )
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):

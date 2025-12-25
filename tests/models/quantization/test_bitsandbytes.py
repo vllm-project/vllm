@@ -14,10 +14,13 @@ from vllm.platforms import current_platform
 from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="bitsandbytes quantization not supported on ROCm (CUDA-only kernels)",
-)
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    pytestmark = pytest.mark.skipif(
+        on_gfx9(),
+        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+    )
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
@@ -256,6 +259,9 @@ def validate_generated_texts(
         tensor_parallel_size=vllm_tp_size,
         enforce_eager=False,
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
+        load_format="hf",
+        config_format="hf",
     ) as llm:
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")

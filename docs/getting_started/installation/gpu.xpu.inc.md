@@ -2,9 +2,6 @@
 
 vLLM initially supports basic model inference and serving on Intel GPU platform.
 
-!!! warning
-    There are no pre-built wheels for this device, so you need build vLLM from source. Or you can use pre-built images which are based on vLLM released versions.
-
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
