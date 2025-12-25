@@ -55,6 +55,7 @@ def create_scheduler(
     async_scheduling: bool = False,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    max_num_partial_prefills: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -87,6 +88,7 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        max_num_partial_prefills=max_num_partial_prefills,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -162,7 +164,7 @@ _none_hash_initialized = False
 
 def create_requests(
     num_requests: int,
-    num_tokens: int = 10,
+    num_tokens: int | list[int] = 10,
     mm_hashes_list: list[list[str]] | None = None,
     mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
@@ -233,8 +235,12 @@ def create_requests(
                 modality="image",
             )
             mm_features.append(mm_feature)
-
-        prompt_token_ids = [0] * num_tokens if same_prompt else [i] * num_tokens
+        if isinstance(num_tokens, list):
+            prompt_token_ids = (
+                [0] * num_tokens[i] if same_prompt else [i] * num_tokens[i]
+            )
+        else:
+            prompt_token_ids = [0] * num_tokens if same_prompt else [i] * num_tokens
         request = Request(
             request_id=req_ids[i],
             prompt_token_ids=prompt_token_ids,

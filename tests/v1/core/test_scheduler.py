@@ -15,6 +15,8 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.llm_engine import LLMEngine
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -3323,4 +3325,160 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 
 # ==============================================================================
 # EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
+# ==============================================================================
+
+
+# ==============================================================================
+# Concurrent Partial Prefill tests start
+# ==============================================================================
+def test_concurrent_partial_prefill():
+    """Verify prefills are chunked properly when
+    --max-num-partial-prefills is > 1"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=100,
+        max_model_len=200,
+    )
+
+    requests = create_requests(
+        num_tokens=48,  # both are short prefills
+        num_requests=2,
+        block_size=4,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # Verify both requests are chunked with half of max_num_batched_tokens each
+    assert len(scheduler.running) == 2
+    for request in requests:
+        scheduled_tokens = output.num_scheduled_tokens[request.request_id]
+        assert scheduled_tokens == 32  # 32 tokens per prefill
+
+    # test tail case
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    for request in requests:
+        scheduled_tokens = output.num_scheduled_tokens[request.request_id]
+        assert scheduled_tokens == 16
+
+
+def test_concurrent_partial_prefill_long_requests():
+    """Verify large prefills are run one at a time"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=100,
+        max_model_len=200,
+    )
+    long_requests = create_requests(
+        num_tokens=200,  # both are long prefill
+        num_requests=2,
+        block_size=4,
+    )
+    for request in long_requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    scheduled_tokens = output.num_scheduled_tokens[long_requests[0].request_id]
+    assert scheduled_tokens == 64  # only one request scheduled with full batch size
+
+
+def test_concurrent_partial_prefill_mixed_requests():
+    """Verify large prefill requests are punted behind smaller ones if
+    another large prefill request is already running"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=75,
+        max_model_len=200,
+    )
+    mixed_requests = create_requests(
+        num_tokens=[200, 200, 48, 48],  # mixed long and short prefill
+        num_requests=4,
+        block_size=4,
+        req_ids=["long_1", "long_2", "short_1", "short_2"],
+    )
+    long_requests = mixed_requests[:2]
+    short_requests = mixed_requests[2:]
+
+    for request in long_requests:
+        scheduler.add_request(request)
+        print(request.num_computed_tokens)
+    for request in short_requests:
+        scheduler.add_request(request)
+        print(request.num_computed_tokens)
+    print(
+        scheduler._get_request_prefill_state(
+            short_requests[0], short_requests[0].num_computed_tokens
+        ).remaining_tokens
+    )
+    # first iteration
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[0].request_id] == 32
+
+    # second iteration
+    # short_requests[0] only has 16 tokens left, so should finish
+    # short_requests[1] should start prefill
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[0].request_id] == 16
+    assert output.num_scheduled_tokens[short_requests[1].request_id] == 16
+
+    # third iteration
+    # short_requests[0] should be finished
+    # short_requests[1] should continue prefill
+    output = scheduler.schedule()
+    print(output.num_scheduled_tokens)
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[1].request_id] == 32
+
+    # forth iteration
+    # short_requests[1] should be finished
+    # long_requests[0] gets all the budget
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 64
+
+
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+@pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
+def test_concurrent_partial_prefill_with_engine(
+    model: str, max_num_partial_prefills: int
+):
+    engine_args = EngineArgs(
+        model=model,
+        max_num_partial_prefills=max_num_partial_prefills,
+        max_num_batched_tokens=40,
+        enable_chunked_prefill=True,
+        max_model_len=1024,
+    )
+    engine = LLMEngine.from_engine_args(engine_args)
+    prompt = "hello" * 40
+    sampling_params = SamplingParams()
+    for req_num in range(max_num_partial_prefills):
+        engine.add_request(f"request_{req_num}", prompt, sampling_params)
+    request_outputs = engine.step()
+    assert len(request_outputs) == 0
+    assert (
+        len(engine.engine_core.engine_core.scheduler.running)
+        == max_num_partial_prefills
+    )
+
+
+# ==============================================================================
+# Concurrent Partial Prefill tests end
 # ==============================================================================
