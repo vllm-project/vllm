@@ -140,7 +140,6 @@ class _HfExamplesInfo:
             msg += f"<={max_version}` is required to run this model."
         else:
             is_version_valid = True
-        print("is_version_valid", is_version_valid)
 
         # check if Transformers version breaks the corresponding model runner,
         # skip test when model runner not compatible
