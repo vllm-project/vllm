@@ -323,6 +323,7 @@ If you see an error like `RuntimeError: CUDA error: the provided PTX was compile
 ## ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'
 
 If you use triton kernels with cuda 13, you might see an error like `ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'`:
+
 ```text
 (EngineCore_0 pid=9492) triton.runtime.errors.PTXASError: PTXAS error: Internal Triton PTX codegen error
 (EngineCore_0 pid=9492) `ptxas` stderr:
@@ -338,6 +339,7 @@ vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See 
 ```
 
 It means that the ptxas in triton bundle not compatible with your device. You need to set `TRITON_PTXAS_PATH` environment variable to use cuda toolkit's ptxas manually instead:
+
 ```shell
 export CUDA_HOME=/usr/local/cuda
 export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
