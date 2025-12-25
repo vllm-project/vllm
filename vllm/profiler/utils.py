@@ -11,7 +11,7 @@ from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 #
 
 
-def trim_string_front(string, width):
+def trim_string_front(string: str, width: int) -> str:
     if len(string) > width:
         offset = len(string) - width + 3
         string = string[offset:]
@@ -20,7 +20,7 @@ def trim_string_front(string, width):
     return string
 
 
-def trim_string_back(string, width):
+def trim_string_back(string: str, width: int) -> str:
     if len(string) > width:
         offset = len(string) - width + 3
         string = string[:-offset]
