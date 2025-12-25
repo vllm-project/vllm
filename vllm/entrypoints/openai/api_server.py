@@ -866,12 +866,26 @@ def _log_non_streaming_response(response_body: list) -> None:
 
 
 def build_app(args: Namespace) -> FastAPI:
+    # Use served model name for Swagger docs title, falling back to model path
+    if args.served_model_name is not None:
+        if isinstance(args.served_model_name, list):
+            model_name = args.served_model_name[0]
+        else:
+            model_name = args.served_model_name
+    else:
+        model_name = args.model
+    docs_title = f"vLLM - {model_name}"
+
     if args.disable_fastapi_docs:
         app = FastAPI(
-            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
+            title=docs_title,
+            openapi_url=None,
+            docs_url=None,
+            redoc_url=None,
+            lifespan=lifespan,
         )
     else:
-        app = FastAPI(lifespan=lifespan)
+        app = FastAPI(title=docs_title, lifespan=lifespan)
     app.state.args = args
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
