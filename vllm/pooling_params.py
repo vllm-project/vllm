@@ -108,6 +108,15 @@ class PoolingParams(
     def _merge_default_parameters(
         self, model_config: Optional["ModelConfig"] = None
     ) -> None:
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of all pooling may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            if self.task in ["token_embed", "token_classify"]:
+                self.skip_reading_prefix_cache = True
+            else:
+                self.skip_reading_prefix_cache = False
+
         if model_config is None:
             return
 
@@ -124,15 +133,6 @@ class PoolingParams(
 
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
-
-        if self.skip_reading_prefix_cache is None:
-            # If prefix caching is enabled,
-            # the output of all pooling may less than n_prompt_tokens,
-            # we need to skip reading cache at this request.
-            if self.task in ["token_embed", "token_classify"]:
-                self.skip_reading_prefix_cache = True
-            else:
-                self.skip_reading_prefix_cache = False
 
         self._verify_step_pooling(pooler_config, valid_parameters)
 
