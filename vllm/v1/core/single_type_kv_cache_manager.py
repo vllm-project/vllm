@@ -89,12 +89,14 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_req_blocks = len(self.req_to_blocks.get(request_id, []))
+        num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
-            assert len(new_computed_blocks) == 0
-            return max(num_required_blocks - num_req_blocks, 0)
+            assert (
+                len(new_computed_blocks) == 0 and num_required_blocks >= num_req_blocks
+            )
+            return num_required_blocks - num_req_blocks
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
