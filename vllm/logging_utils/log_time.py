@@ -6,9 +6,13 @@ Provides a timeslice logging decorator
 
 import functools
 import time
+from collections.abc import Callable
+from typing import TypeVar
+
+T = TypeVar("T", bound=Callable)
 
 
-def logtime(logger, msg=None):
+def logtime(logger, msg: str | None = None) -> Callable[[T], T]:
     """
     Logs the execution time of the decorated function.
     Always place it beneath other decorators.

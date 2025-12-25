@@ -16,6 +16,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    NoReturn,
     TypeAlias,
     TypeVar,
     Union,
@@ -2032,7 +2033,7 @@ class AsyncEngineArgs(EngineArgs):
         return parser
 
 
-def _raise_unsupported_error(feature_name: str):
+def _raise_unsupported_error(feature_name: str) -> NoReturn:
     msg = (
         f"{feature_name} is not supported. We recommend to "
         f"remove {feature_name} from your config."

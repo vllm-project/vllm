@@ -50,7 +50,7 @@ def set_runtime_usage_data(key: str, value: str | int | bool) -> None:
     _GLOBAL_RUNTIME_DATA[key] = value
 
 
-def is_usage_stats_enabled():
+def is_usage_stats_enabled() -> bool:
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
     - By default, it should be enabled.
@@ -258,7 +258,7 @@ class UsageMessage:
         self._write_to_file(data)
         self._send_to_server(data)
 
-    def _report_continuous_usage(self):
+    def _report_continuous_usage(self) -> None:
         """Report usage every 10 minutes.
 
         This helps us to collect more data points for uptime of vLLM usages.
