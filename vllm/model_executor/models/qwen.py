@@ -16,7 +16,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -114,7 +114,6 @@ class QWenAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -281,6 +280,9 @@ class QWenBaseModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.wte(input_ids)
 
     def compute_logits(
         self,

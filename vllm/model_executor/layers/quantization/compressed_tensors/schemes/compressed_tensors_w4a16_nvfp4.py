@@ -28,7 +28,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # dont restrict as emulations
+        # don't restrict as emulations
         return 80
 
     def create_weights(

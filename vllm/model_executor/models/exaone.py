@@ -32,7 +32,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -167,7 +167,6 @@ class ExaoneAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
@@ -457,7 +456,6 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

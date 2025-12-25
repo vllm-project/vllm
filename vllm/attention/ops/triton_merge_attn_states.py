@@ -20,7 +20,11 @@ def merge_attn_states(
     num_query_heads = output.shape[1]
     head_size = output.shape[2]
     padded_head_size = triton.next_power_of_2(head_size)
-
+    # We assume the output stride on num_head is not always as same as the
+    # `suffix_output` and `prefix_output`, as them might be padded by the attention
+    # backend.
+    prefix_head_stride = prefix_output.stride(1)
+    output_head_stride = output.stride(1)
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](
         output,
@@ -29,6 +33,8 @@ def merge_attn_states(
         prefix_lse,
         suffix_output,
         suffix_lse,
+        prefix_head_stride,
+        output_head_stride,
         head_size,
         padded_head_size,
         output_lse is not None,
@@ -43,6 +49,8 @@ def merge_attn_states_kernel(
     prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
     suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
+    prefix_head_stride,
+    output_head_stride,
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
@@ -79,15 +87,15 @@ def merge_attn_states_kernel(
     head_mask = head_arange < HEAD_SIZE
     p_out = tl.load(
         prefix_output
-        + token_idx * num_heads * HEAD_SIZE
-        + head_idx * HEAD_SIZE
+        + token_idx * num_heads * prefix_head_stride
+        + head_idx * prefix_head_stride
         + head_arange,
         mask=head_mask,
     )
     s_out = tl.load(
         suffix_output
-        + token_idx * num_heads * HEAD_SIZE
-        + head_idx * HEAD_SIZE
+        + token_idx * num_heads * prefix_head_stride
+        + head_idx * prefix_head_stride
         + head_arange,
         mask=head_mask,
     )
@@ -99,7 +107,10 @@ def merge_attn_states_kernel(
     s_scale = s_se / out_se
     out = p_out * p_scale + s_out * s_scale
     tl.store(
-        output + token_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE + head_arange,
+        output
+        + token_idx * num_heads * output_head_stride
+        + head_idx * output_head_stride
+        + head_arange,
         out,
         mask=head_mask,
     )
