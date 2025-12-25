@@ -18,7 +18,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import set_graph_poo
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import weak_ref_tensors
+from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -266,7 +266,7 @@ class CUDAGraphWrapper:
                 with torch.cuda.graph(
                     cudagraph,
                     pool=self.graph_pool,
-                    stream=torch.cuda.current_stream(),
+                    stream=current_stream(),
                 ):
                     # `output` is managed by pytorch's cudagraph pool
                     output = self.runnable(*args, **kwargs)
