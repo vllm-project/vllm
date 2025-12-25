@@ -65,10 +65,8 @@ def test_rebalance():
     # Verify expected output
     expected_phy2log = torch.tensor(
         [
-            [0, 1, 9, 3, 14, 11, 5, 6, 7, 13, 8, 2, 10, 4, 15, 12, 13, 14, 15,
-             2],
-            [0, 1, 2, 3, 15, 4, 5, 6, 7, 15, 8, 9, 10, 11, 14, 12, 13, 14, 15,
-             11]
+            [0, 1, 9, 3, 14, 11, 5, 6, 7, 13, 8, 2, 10, 4, 15, 12, 13, 14, 15, 2],
+            [0, 1, 2, 3, 15, 4, 5, 6, 7, 15, 8, 9, 10, 11, 14, 12, 13, 14, 15, 11],
         ]
     )
     assert torch.all(phy2log == expected_phy2log)
@@ -76,7 +74,7 @@ def test_rebalance():
     expected_logcnt = torch.tensor(
         [
             [1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2],
-            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3]
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 2, 3],
         ]
     )
     assert torch.all(logcnt == expected_logcnt)
