@@ -132,14 +132,14 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
-            if lora_name in self.lora_requests:
-                lora_request = self.lora_requests[lora_name]
-                lora_request.lora_path = lora_path
-            else:
-                unique_id = self.lora_id_counter.inc(1)
-                lora_request = LoRARequest(
-                    lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
-                )
+            lora_int_id = (
+                self.lora_requests[lora_name].lora_int_id
+                if lora_name in self.lora_requests
+                else self.lora_id_counter.inc(1)
+            )
+            lora_request = LoRARequest(
+                lora_name=lora_name, lora_int_id=lora_int_id, lora_path=lora_path
+            )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
 
