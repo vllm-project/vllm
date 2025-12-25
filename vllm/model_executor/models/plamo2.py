@@ -57,6 +57,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -901,6 +902,12 @@ class Plamo2ForCausalLM(
             # at the same time causes dict key access error.
             if name == "lm_head.weight" and self.config.tie_word_embeddings:
                 assert "lm_head.weight" not in params_dict
+                continue
+            # Same workaround as AutoWeightsLoader for GPTQModel
+            if any(
+                substr in name
+                for substr in AutoWeightsLoader.ROTARY_EMBEDS_UNUSED_WEIGHTS
+            ):
                 continue
 
             # Update the weight names to be compatible with the vllm version
