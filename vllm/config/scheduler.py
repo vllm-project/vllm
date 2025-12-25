@@ -278,7 +278,7 @@ class SchedulerConfig:
             )
 
         if self.max_num_partial_prefills > 1:
-            if self.max_number_partial_prefills > self.max_num_batched_tokens:
+            if self.max_num_partial_prefills > self.max_num_batched_tokens:
                 # Ensure that each partial prefill can make progress.
                 raise ValueError(
                     f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
