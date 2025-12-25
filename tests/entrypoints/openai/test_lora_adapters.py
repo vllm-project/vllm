@@ -105,6 +105,50 @@ async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI, qwen3_lora_files
 
 
 @pytest.mark.asyncio
+async def test_load_lora_adapter_with_same_name_replaces_inplace(
+    client: openai.AsyncOpenAI, qwen3_meowing_lora_files, qwen3_woofing_lora_files
+):
+    """Test that loading a LoRA adapter with the same name replaces the path."""
+    adapter_name = "replaceable-adapter"
+    messages = [
+        {"content": "Follow the instructions to make animal noises", "role": "system"},
+        {"content": "Make your favorite animal noise.", "role": "user"},
+    ]
+
+    # Load the adapter for the first time
+    response = await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={"lora_name": adapter_name, "lora_path": qwen3_meowing_lora_files},
+    )
+    assert "success" in response.lower()
+
+    completion = await client.chat.completions.create(
+        model=adapter_name,
+        messages=messages,
+        max_tokens=10,
+    )
+
+    assert "Meow Meow Meow" in completion.choices[0].message.content
+
+    # Load the adapter again with the same name (same path in this case)
+    response = await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={"lora_name": adapter_name, "lora_path": qwen3_woofing_lora_files},
+    )
+    assert "success" in response.lower()
+
+    completion = await client.chat.completions.create(
+        model=adapter_name,
+        messages=messages,
+        max_tokens=10,
+    )
+
+    assert "Woof Woof Woof" in completion.choices[0].message.content
+
+
+@pytest.mark.asyncio
 async def test_dynamic_lora_not_found(client: openai.AsyncOpenAI):
     with pytest.raises(openai.NotFoundError):
         await client.post(
