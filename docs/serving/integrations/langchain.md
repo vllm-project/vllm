@@ -16,7 +16,7 @@ To run inference on a single or multiple GPUs, use `VLLM` class from `langchain`
     from langchain_community.llms import VLLM
 
     llm = VLLM(
-        model="mosaicml/mpt-7b",
+        model="Qwen/Qwen3-4B",
         trust_remote_code=True,  # mandatory for hf models
         max_new_tokens=128,
         top_k=10,

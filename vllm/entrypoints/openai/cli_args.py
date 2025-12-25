@@ -27,8 +27,8 @@ from vllm.entrypoints.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
+from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)

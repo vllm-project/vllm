@@ -308,12 +308,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
 
-        # TODO(tdoublep): remove once cascade attention is supported
-        logger.info(
-            "Disabling cascade attention since it is not supported for hybrid models."
-        )
-        model_config.disable_cascade_attn = True
-
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
@@ -363,7 +357,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kernel_block_alignment_size = 16
             if (
-                current_platform.is_device_capability(100)
+                current_platform.is_device_capability_family(100)
                 and model_config.get_head_size() == 256
                 and (
                     attention_config.backend is None
@@ -407,7 +401,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
             #          attn_1_token = 2kB -> fits ~394 tokens
-            #      then round up to a mulitple of 256 -> 512 tokens
+            #      then round up to a multiple of 256 -> 512 tokens
             # End result:
             #  attn_block_size = 512
             #  mamba_block_size = 512 (aligned to a multiple of chunk_size)

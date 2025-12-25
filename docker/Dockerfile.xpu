@@ -2,7 +2,7 @@ FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
+    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging
 
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -47,6 +47,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
     -r requirements/xpu.txt
 
+# arctic-inference is built from source which needs torch-xpu properly installed
+# used for suffix method speculative decoding
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir arctic-inference==0.1.1
+
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
@@ -75,6 +80,9 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 # install nixl from source code
 ENV NIXL_VERSION=0.7.0
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
+
+# PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
+RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
 
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \

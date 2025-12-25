@@ -122,10 +122,12 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
-    disable_hybrid_kv_cache_manager: bool = False
+    disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
+    If set to None, the default value will be determined based on the environment
+    and starting configuration.
     """
 
     async_scheduling: bool = False

@@ -1330,7 +1330,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
         that has additional subparsers.
         """
-        return MultiModalDataParser()
+        # Get expected hidden size for embedding validation if mm_embeds enabled
+        # This validates hidden dimensions to prevent vulnerabilities: embeddings
+        # with correct ndim but wrong shape could cause crashes at inference time
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        expected_hidden_size = None
+        if mm_config.enable_mm_embeds:
+            expected_hidden_size = self.info.ctx.model_config.get_inputs_embeds_size()
+
+        return MultiModalDataParser(expected_hidden_size=expected_hidden_size)
 
     def validate_num_items(
         self,
