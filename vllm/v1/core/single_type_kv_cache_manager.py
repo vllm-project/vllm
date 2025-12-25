@@ -21,29 +21,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 
-def format_blocks(blocks: list[KVCacheBlock]):
-    if not blocks:
-        return "[]"
-
-    result = []
-    i = 0
-
-    while i < len(blocks):
-        if blocks[i].block_id == 0:
-            count = 0
-            while i < len(blocks) and blocks[i].block_id == 0:
-                count += 1
-                i += 1
-            result.append(f"Null-block*{count}")
-        else:
-            result.append(
-                f"KVBlock(block_id={blocks[i].block_id}, ref_cnt={blocks[i].ref_cnt})"
-            )
-            i += 1
-
-    return f"[{', '.join(result)}]"
-
-
 class SingleTypeKVCacheManager(ABC):
     """
     An abstract base class for a manager that handle the kv cache management
@@ -88,10 +65,6 @@ class SingleTypeKVCacheManager(ABC):
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
-
-    def print(self, *args, **kwargs):
-        new_args = (f">>> [KvGrp {self.kv_cache_group_id}] ",) + args
-        print(*new_args, **kwargs)
 
     def get_num_blocks_to_allocate(
         self,
@@ -822,13 +795,6 @@ class MambaManager(SingleTypeKVCacheManager):
                 blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
             )
             return num_new_blocks + num_evictable_computed_blocks
-
-    def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
-    ) -> None:
-        # TODO(hhy): remove when prefix-caching is ready
-        assert isinstance(self.kv_cache_spec, MambaSpec)
-        super().save_new_computed_blocks(request_id, list(new_computed_blocks))
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
