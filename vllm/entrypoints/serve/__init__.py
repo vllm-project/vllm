@@ -87,3 +87,9 @@ def register_vllm_serve_api_routers(app: FastAPI):
     )
 
     attach_server_info_router(app)
+
+    from vllm.entrypoints.serve.instrumentator.kv_budget import (
+        attach_router as attach_kv_budget_router,
+    )
+
+    attach_kv_budget_router(app)

@@ -408,6 +408,41 @@ class LLMEngine:
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
 
+    def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        """Set runtime KV cache budget.
+
+        This allows dynamic control of KV cache size at runtime.
+
+        Args:
+            blocks: Target number of KV cache blocks.
+            bytes: Target KV cache size in bytes.
+
+        Note:
+            This is a preliminary implementation. Full integration with
+            the EngineCore requires additional work.
+        """
+        logger.info(
+            f"Setting KV cache budget: blocks={blocks}, bytes={bytes}. "
+            "Note: This is stored but not yet fully integrated with EngineCore."
+        )
+        # Store for future integration
+        self._kv_budget_blocks = blocks
+        self._kv_budget_bytes = bytes
+        # TODO: Implement RPC to EngineCore to propagate budget
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        """Get current KV cache budget.
+
+        Returns:
+            Tuple of (target_blocks, target_bytes).
+        """
+        return (
+            getattr(self, "_kv_budget_blocks", None),
+            getattr(self, "_kv_budget_bytes", None),
+        )
+
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:

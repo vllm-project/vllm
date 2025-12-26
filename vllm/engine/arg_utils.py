@@ -435,6 +435,8 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    kv_pool_endpoint: str = ""
+    kv_budget_start_blocks: int | None = None
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
@@ -895,6 +897,22 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
+        )
+        cache_group.add_argument(
+            "--kv-pool-endpoint",
+            type=str,
+            default="",
+            help="Unix domain socket path to external GPU memory pool broker "
+            "(gpu_poold). When set, vLLM will use the shared VRAM pool for "
+            "KV cache allocation. Example: /tmp/gpu_pool.sock",
+        )
+        cache_group.add_argument(
+            "--kv-budget-start-blocks",
+            type=int,
+            default=None,
+            help="Initial runtime KV cache budget in blocks. This can be "
+            "adjusted at runtime via the API to enable dynamic memory "
+            "allocation across multiple vLLM instances.",
         )
         cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])

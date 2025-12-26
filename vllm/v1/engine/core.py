@@ -538,6 +538,38 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
+    def set_kv_cache_budget(
+            self, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        """Set runtime KV cache budget.
+
+        Args:
+            blocks: Target number of KV cache blocks.
+            bytes: Target KV cache size in bytes.
+        """
+        if hasattr(self, 'scheduler') and hasattr(self.scheduler, 'set_kv_cache_budget'):
+            self.scheduler.set_kv_cache_budget(blocks=blocks, bytes=bytes)
+        else:
+            logger.warning(
+                "set_kv_cache_budget called but scheduler doesn't support it. "
+                "Storing for future use."
+            )
+            self._kv_budget_blocks = blocks
+            self._kv_budget_bytes = bytes
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        """Get current KV cache budget.
+
+        Returns:
+            Tuple of (target_blocks, target_bytes).
+        """
+        if hasattr(self, 'scheduler') and hasattr(self.scheduler, 'get_kv_cache_budget'):
+            return self.scheduler.get_kv_cache_budget()
+        return (
+            getattr(self, "_kv_budget_blocks", None),
+            getattr(self, "_kv_budget_bytes", None),
+        )
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
 

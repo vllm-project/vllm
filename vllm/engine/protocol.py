@@ -173,6 +173,18 @@ class EngineClient(ABC):
         """Return whether the engine is currently paused."""
         ...
 
+    @abstractmethod
+    async def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        """Set runtime KV cache budget."""
+        ...
+
+    @abstractmethod
+    async def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        """Get current KV cache budget."""
+        ...
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:

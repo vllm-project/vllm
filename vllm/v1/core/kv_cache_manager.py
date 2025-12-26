@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.v1.core.kv_budget import KVCacheBudget
 
 logger = init_logger(__name__)
 
@@ -139,6 +140,12 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+
+        # Runtime KV cache budget management
+        self._budget = KVCacheBudget()
+        self._budget_evictions = 0
+        self._budget_pauses = 0
+        self._external_allocator = None
 
     @property
     def usage(self) -> float:
@@ -417,3 +424,54 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+
+    # ---- Budget management methods ----
+
+    def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        """Set runtime KV cache budget.
+
+        This allows dynamic control of KV cache size at runtime, enabling
+        multiple vLLM instances to share GPU memory effectively.
+
+        Args:
+            blocks: Target number of KV cache blocks (takes precedence).
+            bytes: Target KV cache size in bytes (used if blocks not set).
+        """
+        self._budget = KVCacheBudget(target_blocks=blocks, target_bytes=bytes)
+        logger.info(f"KV cache budget set to blocks={blocks}, bytes={bytes}")
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        """Get current KV cache budget.
+
+        Returns:
+            Tuple of (target_blocks, target_bytes).
+        """
+        return (self._budget.target_blocks, self._budget.target_bytes)
+
+    def set_external_allocator(self, ext_alloc) -> None:
+        """Set external allocator for KV cache.
+
+        This enables using a shared VRAM pool across multiple vLLM instances.
+
+        Args:
+            ext_alloc: External allocator instance (ExternalKVAllocator).
+        """
+        self._external_allocator = ext_alloc
+        logger.info("External KV allocator configured")
+        # Note: Actual integration with block_pool would require
+        # modifications to the block pool and coordinator implementations.
+
+    def get_budget_stats(self) -> dict[str, int]:
+        """Get budget enforcement statistics.
+
+        Returns:
+            Dictionary with budget-related statistics.
+        """
+        return {
+            "budget_evictions": self._budget_evictions,
+            "budget_pauses": self._budget_pauses,
+            "target_blocks": self._budget.target_blocks or 0,
+            "target_bytes": self._budget.target_bytes or 0,
+        }

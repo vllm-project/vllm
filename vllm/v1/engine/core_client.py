@@ -162,6 +162,14 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
+    def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        raise NotImplementedError
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -223,6 +231,14 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
+        raise NotImplementedError
+
+    async def set_kv_cache_budget_async(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    async def get_kv_cache_budget_async(self) -> tuple[int | None, int | None]:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -311,6 +327,14 @@ class InprocClient(EngineCoreClient):
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
+
+    def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        self.engine_core.set_kv_cache_budget(blocks=blocks, bytes=bytes)
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        return self.engine_core.get_kv_cache_budget()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -794,6 +818,14 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        self.call_utility("set_kv_cache_budget", blocks, bytes)
+
+    def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        return self.call_utility("get_kv_cache_budget")
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -1001,6 +1033,14 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def set_kv_cache_budget_async(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        await self.call_utility_async("set_kv_cache_budget", blocks, bytes)
+
+    async def get_kv_cache_budget_async(self) -> tuple[int | None, int | None]:
+        return await self.call_utility_async("get_kv_cache_budget")
 
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None

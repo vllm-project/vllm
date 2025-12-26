@@ -874,6 +874,25 @@ class AsyncLLM(EngineClient):
         # Is None before the loop is started.
         return self.output_handler is None or not self.output_handler.done()
 
+    async def set_kv_cache_budget(
+            self, *, blocks: int | None = None, bytes: int | None = None
+    ) -> None:
+        """Set runtime KV cache budget.
+
+        Args:
+            blocks: Target number of KV cache blocks.
+            bytes: Target KV cache size in bytes.
+        """
+        await self.engine_core.set_kv_cache_budget_async(blocks=blocks, bytes=bytes)
+
+    async def get_kv_cache_budget(self) -> tuple[int | None, int | None]:
+        """Get current KV cache budget.
+
+        Returns:
+            Tuple of (target_blocks, target_bytes).
+        """
+        return await self.engine_core.get_kv_cache_budget_async()
+
     @property
     def is_stopped(self) -> bool:
         return self.errored
