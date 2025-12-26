@@ -128,7 +128,6 @@ def triton_reshape_and_cache_flash(
     value_stride = value.stride()[0]
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
-    head_stride = key_cache.stride()[2]
     head_stride = key_cache.stride(1)
     dim_stride_k = key_cache.stride(2)
     dim_stride_v = value_cache.stride(2)

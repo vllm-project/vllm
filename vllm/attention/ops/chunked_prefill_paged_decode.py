@@ -150,9 +150,9 @@ def kernel_paged_attention_2d(
         k_offset = (
             physical_block_idx * stride_k_cache_0
             + kv_head_idx * stride_k_cache_1
-            + (offs_d[:, None] // 8) * stride_k_cache_2
+            + (offs_d[:, None] // x) * stride_k_cache_2
             + actual_indices[None, :] * stride_k_cache_3
-            + (offs_d[:, None] % 8) * stride_k_cache_4
+            + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
         # 4D addressing logic of V (Slot is innermost)

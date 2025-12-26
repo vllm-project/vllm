@@ -175,9 +175,9 @@ def _fwd_kernel(
         off_k = (
             bn * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // 8) * stride_k_cache_d
+            + (offs_d[:, None] // x) * stride_k_cache_d
             + current_loc_in_physical[None, :] * stride_k_cache_bl
-            + (offs_d[:, None] % 8) * stride_k_cache_x
+            + (offs_d[:, None] % x) * stride_k_cache_x
         )
 
         # Addressing of V (4D)
