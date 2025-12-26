@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Erine VL model compatible with HuggingFace weights."""
+"""Inference-only Ernie VL model compatible with HuggingFace weights."""
 
 import itertools
 import math
@@ -41,7 +41,7 @@ from vllm.attention.layers.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.config import MultiModalConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -64,7 +64,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -952,6 +952,11 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+        )
+
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
@@ -1010,8 +1015,25 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
+
+        # Check if HF processor supports video metadata
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        supports_video_metadata = getattr(
+            hf_processor, "supports_video_metadata", False
+        )
+
+        if mm_data["videos"] and not supports_video_metadata:
+            # Old HF processor, unwrap tuple to pure frames
+            logger.warning_once(
+                "HF processor doesn't support video metadata. "
+                "Timestamps will NOT be rendered. Please upgrade the model."
+            )
+            mm_data["videos"] = [
+                v[0] if isinstance(v, tuple) else v for v in mm_data["videos"]
+            ]
+
         processor_output = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
             dict(**mm_kwargs, **tok_kwargs),
         )
@@ -1162,6 +1184,60 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
                 overrides=video_overrides,
             ),
         }
+
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ):
+        if overrides:
+            if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames,
+                        num_frames,
+                    )
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored",
+                        overrides.width,
+                        width,
+                    )
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height,
+                        height,
+                    )
+                height = min(height, overrides.height)
+        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+
+        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video_items = []
+        for i in range(num_videos):
+            video_metadata = {
+                "fps": 2.0,
+                "duration": num_frames / 2.0,
+                "total_num_frames": num_frames,
+                "frames_indices": [i for i in range(num_frames)],
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            video_item = (video.copy(), video_metadata)
+            video_items.append(video_item)
+        return video_items
 
 
 @MULTIMODAL_REGISTRY.register_processor(
