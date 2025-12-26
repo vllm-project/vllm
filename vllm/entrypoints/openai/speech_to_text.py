@@ -479,8 +479,9 @@ class OpenAISpeechToText(OpenAIServing):
             text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             for idx, result_generator in enumerate(list_result_generator):
+                start_time: float
                 if chunk_size_in_s is not None:
-                    start_time = idx * chunk_size_in_s
+                    start_time = float(idx * chunk_size_in_s)
                 else:
                     assert idx == 0, f"Cannot chunk audio input for {chunk_size_in_s=}"
                     start_time = 0.0
