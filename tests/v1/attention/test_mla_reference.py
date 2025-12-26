@@ -315,8 +315,15 @@ def create_and_prepopulate_kv_cache(
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
     randomize_blocks: bool = True,
+    kv_cache_dtype: str = "auto",
+    scale: float = 1.0,
 ) -> torch.Tensor:
-    """Create and prepopulate an MLA KV cache with context data."""
+    """Create and prepopulate an MLA KV cache with context data.
+
+    Args:
+        kv_cache_dtype: Cache dtype. Use "fp8_e4m3" for FP8 MLA cache format.
+        scale: Scaling factor for FP8 quantization.
+    """
     batch_size = len(kv_c_contexts)
     seq_lens = common_attn_metadata.seq_lens_cpu
     query_lens = (
@@ -327,11 +334,21 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Create MLA KV cache: (num_blocks, block_size, head_size)
-    kv_cache = torch.zeros(
-        num_blocks, block_size, head_size, dtype=dtype, device=device
-    )
-    kv_cache_flat = kv_cache.view(-1, head_size)
+    use_fp8 = kv_cache_dtype in ("fp8", "fp8_e4m3")
+
+    if use_fp8:
+        # FP8 MLA cache format: (num_blocks, block_size, head_size) as uint8
+        # Each element is quantized to FP8 (1 byte per value)
+        kv_cache = torch.zeros(
+            num_blocks, block_size, head_size, dtype=torch.uint8, device=device
+        )
+        scale_tensor = torch.tensor(scale, dtype=torch.float32, device=device)
+    else:
+        # Create MLA KV cache: (num_blocks, block_size, head_size)
+        kv_cache = torch.zeros(
+            num_blocks, block_size, head_size, dtype=dtype, device=device
+        )
+        kv_cache_flat = kv_cache.view(-1, head_size)
 
     # Populate the cache with the context tokens
     start_block_idx = 1  # block_id=0 is the null block
@@ -343,9 +360,21 @@ def create_and_prepopulate_kv_cache(
             continue
 
         start = start_block_idx * block_size
-        kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)], dim=-1)
-        end = start + kv_context.shape[0]
-        kv_cache_flat[start:end, ...] = kv_context
+
+        if use_fp8:
+            slots = torch.arange(context_len, device=device, dtype=torch.long) + start
+            ops.concat_and_cache_mla(
+                kv_c_context,
+                k_pe_context.squeeze(1),
+                kv_cache,
+                slots,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=scale_tensor,
+            )
+        else:
+            kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)], dim=-1)
+            end = start + kv_context.shape[0]
+            kv_cache_flat[start:end, ...] = kv_context
 
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
@@ -398,6 +427,7 @@ def run_mla_attention_backend(
     kv_cache: torch.Tensor,
     config: MLAConfig,
     mock_kv_b_proj: ColumnParallelLinear,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -417,7 +447,7 @@ def run_mla_attention_backend(
             num_kv_heads=1,  # MLA uses single KV head in latent space
             alibi_slopes=None,
             sliding_window=None,
-            kv_cache_dtype="auto",
+            kv_cache_dtype=kv_cache_dtype,
             logits_soft_cap=None,
             attn_type="decoder",
             kv_sharing_target_layer_name=None,
@@ -1184,6 +1214,221 @@ class TestMLABackendComparison:
         assert torch.allclose(flashinfer_output, triton_output, rtol=rtol, atol=atol), (
             f"FLASHINFER_MLA differs from TRITON_MLA. Max diff: {max_diff:.6f}"
         )
+
+
+class TestMLAFP8Attention:
+    """Test FP8 KV cache attention comparing FLASHINFER_MLA vs CUTLASS_MLA."""
+
+    @pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+    def test_fp8_flashinfer_vs_cutlass(
+        self,
+        dist_init,
+        batch_spec_name: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        """Compare FLASHINFER_MLA FP8 against CUTLASS_MLA FP8."""
+        # Both backends require Blackwell GPU (SM 10.x)
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        cc_major = torch.cuda.get_device_properties(0).major
+        if cc_major < 10:
+            pytest.skip("FP8 MLA backends require Blackwell GPU (SM 10.x)")
+
+        batch_spec = BATCH_SPECS[batch_spec_name]
+
+        # Use smaller config for faster testing
+        config = MLAConfig(
+            hidden_size=2048,
+            num_heads=16,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+        )
+
+        # Use block_size 64 (required by FLASHINFER_MLA decode)
+        block_size = 64
+        required_blocks = sum(
+            (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
+        )
+        num_gpu_blocks = required_blocks + 1 + 100
+
+        # Create vllm config
+        vllm_config = create_vllm_config(
+            model_name="/home/yming/.cache/huggingface/hub/"
+            "models--nvidia--DeepSeek-R1-0528-FP4-v2/snapshots/"
+            "25a138f28f49022958b9f2d205f9b7de0cdb6e18/",
+            tensor_parallel_size=1,
+            max_model_len=max(batch_spec.seq_lens),
+            num_gpu_blocks=num_gpu_blocks,
+            block_size=block_size,
+            hf_config_override={"num_attention_heads": config.num_heads},
+        )
+
+        # Create shared weight matrices
+        W_UK = torch.randn(
+            config.kv_lora_rank,
+            config.num_heads,
+            config.qk_nope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        W_UV = torch.randn(
+            config.kv_lora_rank,
+            config.num_heads,
+            config.v_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
+
+        # Generate test data
+        all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
+        kv_c_contexts, k_pe_contexts = [], []
+
+        for i in range(batch_spec.batch_size):
+            s_len = batch_spec.seq_lens[i]
+            q_len = batch_spec.query_lens[i]
+            context_len = s_len - q_len
+
+            # Generate tensors
+            q = torch.randn(
+                q_len,
+                config.num_heads,
+                config.qk_head_dim,
+                dtype=dtype,
+                device=device,
+            )
+            kv_c_full = torch.randn(
+                s_len, config.kv_lora_rank, dtype=dtype, device=device
+            )
+            k_pe_full = torch.randn(
+                s_len, 1, config.qk_rope_head_dim, dtype=dtype, device=device
+            )
+
+            # Inputs for vLLM MLA backends (only new tokens)
+            all_q_vllm.append(q)
+            all_kv_c_vllm.append(kv_c_full[context_len:])
+            all_k_pe_vllm.append(k_pe_full[context_len:])
+
+            # Context for KV cache
+            kv_c_contexts.append(kv_c_full[:context_len])
+            k_pe_contexts.append(k_pe_full[:context_len])
+
+        # Concatenate all sequences
+        query_vllm = torch.cat(all_q_vllm, dim=0)
+        kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
+        k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
+
+        # Create mock kv_b_proj
+        mock_kv_b_proj = ColumnParallelLinear(
+            input_size=config.kv_lora_rank,
+            output_size=config.num_heads
+            * (config.qk_nope_head_dim + config.v_head_dim),
+            bias=False,
+            disable_tp=True,
+        ).to(device=device, dtype=dtype)
+        kv_b_proj_weight_flat = kv_b_proj_weight.view(
+            config.kv_lora_rank,
+            config.num_heads * (config.qk_nope_head_dim + config.v_head_dim),
+        )
+        mock_kv_b_proj.weight = torch.nn.Parameter(
+            kv_b_proj_weight_flat.T, requires_grad=False
+        )
+
+        # Create metadata and FP8 KV cache (shared between both backends)
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, block_size, device
+        )
+
+        # Pad block table if needed
+        required_divisor = int(128 / block_size)
+        current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+        if current_block_num % required_divisor != 0:
+            padded_block_num = (
+                (current_block_num + required_divisor - 1) // required_divisor
+            ) * required_divisor
+            padding_cols = padded_block_num - current_block_num
+            padding = torch.zeros(
+                (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
+                dtype=torch.int32,
+                device=device,
+            )
+            common_attn_metadata.block_table_tensor = torch.cat(
+                [common_attn_metadata.block_table_tensor, padding], dim=1
+            )
+
+        # Create FP8 KV cache
+        kv_cache_fp8 = create_and_prepopulate_kv_cache(
+            kv_c_contexts=kv_c_contexts,
+            k_pe_contexts=k_pe_contexts,
+            block_size=block_size,
+            head_size=config.head_size,
+            dtype=dtype,
+            device=device,
+            num_blocks=num_gpu_blocks,
+            common_attn_metadata=common_attn_metadata,
+            randomize_blocks=False,
+            kv_cache_dtype="fp8_e4m3",
+            scale=1.0,
+        )
+
+        kv_cache_spec_fp8 = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=config.head_size,
+            dtype=torch.uint8,  # FP8 uses uint8 storage
+        )
+
+        # Run FLASHINFER_MLA with FP8 cache
+        flashinfer_output = run_mla_attention_backend(
+            AttentionBackendEnum.FLASHINFER_MLA,
+            kv_cache_spec_fp8,
+            ["test_layer_flashinfer"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query_vllm.clone(),
+            kv_c_vllm.clone(),
+            k_pe_vllm.clone(),
+            kv_cache_fp8.clone(),
+            config,
+            mock_kv_b_proj,
+            kv_cache_dtype="fp8_e4m3",
+        )
+
+        # Run CUTLASS_MLA with FP8 cache
+        cutlass_output = run_mla_attention_backend(
+            AttentionBackendEnum.CUTLASS_MLA,
+            kv_cache_spec_fp8,
+            ["test_layer_cutlass"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query_vllm.clone(),
+            kv_c_vllm.clone(),
+            k_pe_vllm.clone(),
+            kv_cache_fp8.clone(),
+            config,
+            mock_kv_b_proj,
+            kv_cache_dtype="fp8_e4m3",
+        )
+
+        # Compare outputs - both use same FP8 cache, should be very close
+        assert flashinfer_output.shape == cutlass_output.shape
+        assert torch.isfinite(flashinfer_output).all()
+        assert torch.isfinite(cutlass_output).all()
+
+        # Use reasonable tolerance - both backends read same FP8 data but may have
+        # minor implementation differences in how they handle the computation
+        rtol = 1e-2
+        atol = 2.0  # Allow for some implementation differences
+        max_diff = torch.max(torch.abs(flashinfer_output - cutlass_output)).item()
+        assert torch.allclose(
+            flashinfer_output, cutlass_output, rtol=rtol, atol=atol
+        ), f"FLASHINFER_MLA FP8 differs from CUTLASS_MLA FP8. Max diff: {max_diff:.6f}"
 
 
 if __name__ == "__main__":
