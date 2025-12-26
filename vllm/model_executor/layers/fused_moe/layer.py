@@ -12,8 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
@@ -26,14 +25,14 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.aiter_shared_expert_fusion import (
+    AiterSharedExpertFusion,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
@@ -434,25 +433,8 @@ class FusedMoE(CustomOp):
             vllm_config.parallel_config.expert_placement_strategy
         )
 
-        # ROCm aiter shared experts fusion
-        self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.aiter_fmoe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
-
-        self.num_fused_shared_experts = (
-            n_shared_experts
-            if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
-            else 0
-        )
-        if (
-            not self.aiter_fmoe_shared_expert_enabled
-            and self.num_fused_shared_experts != 0
-        ):
-            raise ValueError(
-                "n_shared_experts is only supported on ROCm aiter when "
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-            )
+        # ROCm aiter shared experts fusion - encapsulated in helper class
+        self._aiter_fusion = AiterSharedExpertFusion.create(n_shared_experts)
 
         # Determine expert maps
         if self.use_ep:
@@ -480,8 +462,7 @@ class FusedMoE(CustomOp):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                return_expert_mask=self.rocm_aiter_fmoe_enabled,
+                **self._aiter_fusion.get_expert_map_kwargs(),
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("_expert_map", expert_map)
@@ -508,13 +489,11 @@ class FusedMoE(CustomOp):
 
         self.top_k = top_k
 
-        self._init_aiter_shared_experts_topK_buffer(
-            vllm_config=vllm_config, dp_size=dp_size_
+        self._aiter_fusion.init_topk_buffers(
+            layer=self, vllm_config=vllm_config, dp_size=dp_size_
         )
-        if self.use_ep and self.rocm_aiter_fmoe_enabled:
-            assert self.expert_mask is None or torch.all(
-                (expert_mask == 0) | (expert_mask == 1)
-            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
+        if self.use_ep:
+            self._aiter_fusion.validate_expert_mask(self.expert_mask)
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -838,15 +817,15 @@ class FusedMoE(CustomOp):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                return_expert_mask=self.rocm_aiter_fmoe_enabled,
+                **self._aiter_fusion.get_expert_map_kwargs(),
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
-            if self.aiter_fmoe_shared_expert_enabled:
-                self._init_aiter_shared_experts_topK_buffer(
+            if self._aiter_fusion.is_shared_expert_fusion_enabled:
+                self._aiter_fusion.init_topk_buffers(
+                    layer=self,
                     vllm_config=get_current_vllm_config(),
                     dp_size=get_dp_group().world_size,
                 )
@@ -1063,22 +1042,21 @@ class FusedMoE(CustomOp):
             return expert_id
         return self._expert_map[expert_id].item()
 
-    def _init_aiter_shared_experts_topK_buffer(
-        self, vllm_config: VllmConfig, dp_size: int
-    ):
-        if self.num_fused_shared_experts > 0:
-            init_aiter_topK_meta_data(
-                n_routed_experts=self.global_num_experts,
-                n_shared_experts=self.num_fused_shared_experts,
-                top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
-                shared_experts_score=1.0,
-                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
-                * dp_size,
-                is_EP=self.use_ep,
-            )
-        self.local_num_experts += self.num_fused_shared_experts
+    # Backward-compatible properties for AITER shared expert fusion
+    @property
+    def rocm_aiter_fmoe_enabled(self) -> bool:
+        """Whether ROCm AITER fused MoE is enabled."""
+        return self._aiter_fusion.rocm_aiter_fmoe_enabled
+
+    @property
+    def aiter_fmoe_shared_expert_enabled(self) -> bool:
+        """Whether AITER shared expert fusion is enabled."""
+        return self._aiter_fusion.aiter_shared_expert_enabled
+
+    @property
+    def num_fused_shared_experts(self) -> int:
+        """Number of shared experts to fuse (0 if fusion is disabled)."""
+        return self._aiter_fusion.num_fused_shared_experts
 
     @overload
     def weight_loader(
@@ -1583,12 +1561,12 @@ class FusedMoE(CustomOp):
         elif self.use_grouped_topk and valid_grouping():
             assert self.topk_group is not None
             assert self.num_expert_group is not None
-            if rocm_aiter_ops.is_fused_moe_enabled():
-                if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
-                    assert self.num_fused_shared_experts == 0
+            if self._aiter_fusion.is_enabled:
+                if not self._aiter_fusion.is_shared_expert_fusion_enabled:
+                    assert self._aiter_fusion.num_fused_shared_experts == 0
                 grouped_topk_impl = partial(
                     rocm_aiter_grouped_topk,
-                    num_fused_shared_experts=self.num_fused_shared_experts,
+                    num_fused_shared_experts=self._aiter_fusion.num_fused_shared_experts,
                     topk=self.top_k,
                     renormalize=self.renormalize,
                     num_expert_group=self.num_expert_group,
@@ -1735,9 +1713,7 @@ class FusedMoE(CustomOp):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        return (
-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
-        )
+        return self._aiter_fusion.get_expert_map(self._expert_map, self.expert_mask)
 
     def forward_cuda(
         self,
