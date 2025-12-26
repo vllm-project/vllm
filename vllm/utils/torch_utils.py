@@ -465,9 +465,13 @@ def current_stream() -> torch.cuda.Stream:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
+        # is hurting performance.
+        # On CUDA, we capture and replay cudagraph on the same stream,
+        # so we need to avoid using the default stream as well. The default
+        # stream cannot be used for cudagraph capture, see
+        # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
+        # for more details. Therefore, we create a dedicated stream per process.
+        if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
