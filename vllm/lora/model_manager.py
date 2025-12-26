@@ -256,92 +256,7 @@ class LoRAModelManager:
             if not module_lora:
                 module.reset_lora(index)
                 continue
-            # Note (gnovack) - If MOE lora weights are not split into
-            # num_experts chunks, we split them here
-            if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(
-                module_lora.lora_a
-            ):
-                # Handle PEFT file format where experts.base_layer is the
-                # gate_up_proj and experts is the down_proj
-                gate_up_proj_lora = self._get_lora_layer_weights(
-                    lora_model, module_name + ".base_layer"
-                )
-                down_proj_lora = module_lora
-                # FIXME Edge case where LoRA is not added to gate_up_proj
-                # or down_proj
-                assert gate_up_proj_lora is not None
-                assert down_proj_lora is not None
-                if self._is_3d_moe_model:
-                    num_experts = module.w13_lora_a_stacked[0].shape[1]
-                    lora_weight_device = gate_up_proj_lora.lora_b.device
 
-                    # (num_experts,rank,input_size)
-                    gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
-                        num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
-                    )
-                    down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
-                        num_experts, -1, down_proj_lora.lora_a.shape[-1]
-                    )
-
-                    # (output_size,num_experts,rank)
-                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                        gate_up_proj_lora.lora_b.shape[0], -1, num_experts
-                    )
-                    down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                        down_proj_lora.lora_b.shape[0], -1, num_experts
-                    )
-
-                    # (num_experts,output_size,rank)
-                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
-                        1, 0, 2
-                    ).contiguous()
-                    down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
-                        1, 0, 2
-                    ).contiguous()
-
-                    if str(lora_weight_device) == "cpu" and is_pin_memory_available():
-                        gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.pin_memory()
-                        down_proj_lora.lora_b = down_proj_lora.lora_b.pin_memory()
-
-                    module_lora.lora_a = [
-                        gate_up_proj_lora.lora_a,
-                        down_proj_lora.lora_a,
-                    ]
-                    module_lora.lora_b = [
-                        gate_up_proj_lora.lora_b,
-                        down_proj_lora.lora_b,
-                    ]
-                else:
-                    # Some 3D MoE models haven't added the `is_3d_moe_weight`
-                    # attribute yet, so fallback here
-                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
-
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-
-                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
-                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
-
-                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
-
-                    lora_a = []
-                    lora_b = []
-                    for i in range(num_experts):
-                        lora_a.append(gate_proj_a[i])
-                        lora_a.append(down_proj_a[i])
-                        lora_a.append(up_proj_a[i])
-
-                        lora_b.append(gate_proj_b[i])
-                        lora_b.append(down_proj_b[i])
-                        lora_b.append(up_proj_b[i])
-
-                    module_lora.lora_a = lora_a
-                    module_lora.lora_b = lora_b
             module.set_lora(
                 index,
                 module_lora.lora_a,
@@ -657,6 +572,93 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
+
+        for module_name, module in self.modules.items():
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            if not module_lora:
+                continue
+
+            # Note (gnovack) - If MOE lora weights are not split into
+            # num_experts chunks, we split them here
+            if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(
+                module_lora.lora_a
+            ):
+                # Handle PEFT file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                gate_up_proj_lora = self._get_lora_layer_weights(
+                    lora_model, module_name + ".base_layer"
+                )
+                down_proj_lora = module_lora
+                # FIXME Edge case where LoRA is not added to gate_up_proj
+                # or down_proj
+                assert gate_up_proj_lora is not None
+                assert down_proj_lora is not None
+                if self._is_3d_moe_model:
+                    num_experts = module.w13_lora_a_stacked[0].shape[1]
+
+                    # (num_experts,rank,input_size)
+                    gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
+                        num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                    )
+                    down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
+                        num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                    )
+
+                    # (output_size,num_experts,rank)
+                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
+                        gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                    )
+                    down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
+                        down_proj_lora.lora_b.shape[0], -1, num_experts
+                    )
+
+                    # (num_experts,output_size,rank)
+                    gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
+                        1, 0, 2
+                    ).contiguous()
+                    down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
+                        1, 0, 2
+                    ).contiguous()
+
+                    module_lora.lora_a = [
+                        gate_up_proj_lora.lora_a,
+                        down_proj_lora.lora_a,
+                    ]
+                    module_lora.lora_b = [
+                        gate_up_proj_lora.lora_b,
+                        down_proj_lora.lora_b,
+                    ]
+                else:
+                    # Some 3D MoE models haven't added the `is_3d_moe_weight`
+                    # attribute yet, so fallback here
+                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                        num_experts, dim=-1
+                    )
+                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                        num_experts, dim=-1
+                    )
+
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+
+                    lora_a = []
+                    lora_b = []
+                    for i in range(num_experts):
+                        lora_a.append(gate_proj_a[i])
+                        lora_a.append(down_proj_a[i])
+                        lora_a.append(up_proj_a[i])
+
+                        lora_b.append(gate_proj_b[i])
+                        lora_b.append(down_proj_b[i])
+                        lora_b.append(up_proj_b[i])
+
+                    module_lora.lora_a = lora_a
+                    module_lora.lora_b = lora_b
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
