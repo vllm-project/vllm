@@ -709,7 +709,7 @@ def context_attention_fwd(
         kv_element_size = k_cache.element_size()
         block_byte_stride = k_cache.stride(0) * kv_element_size
         base_addr = k_cache.data_ptr()
-        mask = b_loc != -1
+        mask = b_loc > 1e10
         processed_b_loc = torch.where(
             mask, (b_loc - base_addr) // block_byte_stride, b_loc
         ).to(torch.int32)

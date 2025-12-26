@@ -396,15 +396,17 @@ def chunked_prefill_paged_decode(
         # Identifying the true pointer
         is_ptr_mask = block_table > 100000000
         if is_ptr_mask.any():
-            # Find the first valid pointer to calculate the offset.
-            first_ptr = block_table[is_ptr_mask][0].item()
+            # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()
             block_byte_stride = key_cache.stride(0) * kv_element_size
+            # Get the starting physical address of the KV Cache
+            base_addr = key_cache.data_ptr()
 
-            # Normalization
+            # Normalization: Directly calculate the block offset
+            # of the pointer relative to the base address
             processed_block_table = torch.where(
                 is_ptr_mask,
-                (block_table - (first_ptr % block_byte_stride)) // block_byte_stride,
+                (block_table - base_addr) // block_byte_stride,
                 block_table,
             ).to(torch.int32)
         else:
