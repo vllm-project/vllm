@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from packaging.version import Version
 from collections.abc import Mapping
+from vllm.tokenizers import cached_tokenizer_from_config
 
 import torch
 
@@ -30,6 +32,52 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     _flatten_embeddings,
+)
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import inspect
+import math
+from collections.abc import Iterable, Mapping, Sequence
+from functools import cached_property
+from math import ceil
+from typing import Literal, cast
+import mistral_common
+
+import numpy as np
+import regex as re
+import torch
+import torch.nn as nn
+from mistral_common.audio import mel_filter_bank
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
+from transformers import BatchFeature, TensorType, WhisperConfig
+from transformers.tokenization_utils_base import TextInput
+
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs.data import PromptType
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models import SupportsPP
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.whisper import WhisperEncoder
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    MultiModalUUIDDict,
+    NestedTensors,
+)
+from vllm.multimodal.parse import (
+    AudioProcessorItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
 )
 
 logger = init_logger(__name__)
@@ -241,3 +289,50 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             for e in audio_embeddings_per_sample
         ]
         return audio_embeddings_per_sample
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        sample_rate = audio_config.sampling_rate
+        return SpeechToTextConfig(
+            max_audio_clip_s=None,  # only limited by memory
+            sample_rate=sample_rate,
+            # mistral_common and whisper encoder take care of chunking
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    # for speech-to-text transcription
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
+
+        extra_kwargs = {}
+        if Version(mistral_common.__version__) >= Version("1.8.8"):
+            from mistral_common.protocol.transcription.request import StreamingMode
+            extra_kwargs = {"streaming": StreamingMode.OFFLINE}
+
+        req = TranscriptionRequest(
+            model=model_config.model,
+            audio=RawAudio.from_audio(audio),
+            language=language,
+            **extra_kwargs
+        )
+
+        tokenized = tokenizer.instruct.encode_transcription(req)
+        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
+        prompts_dict = {"multi_modal_data": {"audio": audio}}
+        prompts_dict["prompt_token_ids"] = tokenized.tokens
+        return cast(PromptType, prompts_dict)
