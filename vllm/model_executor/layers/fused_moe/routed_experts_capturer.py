@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from
+# https://github.com/zhuyijie88/sglang/commit/85fdb8086a76bf42880d06cd6e34ee67e4517a39/python/sglang/srt/layers/moe/routed_experts_capturer.py
+
 import fcntl
 import logging
 from abc import ABC, abstractmethod
