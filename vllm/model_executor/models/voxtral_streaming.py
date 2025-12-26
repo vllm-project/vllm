@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from packaging.version import Version
 from collections.abc import Mapping
-from vllm.tokenizers import cached_tokenizer_from_config
+from typing import Literal, cast
 
+import mistral_common
+import numpy as np
 import torch
+from mistral_common.protocol.instruct.chunk import RawAudio
+from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.tokens.tokenizers.audio import Audio
+from packaging.version import Version
 
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.vllm import VllmConfig
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.voxtral import (
@@ -29,52 +36,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .utils import (
     _flatten_embeddings,
-)
-import inspect
-import math
-from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from math import ceil
-from typing import Literal, cast
-import mistral_common
-
-import numpy as np
-import regex as re
-import torch
-import torch.nn as nn
-from mistral_common.audio import mel_filter_bank
-from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.protocol.transcription.request import TranscriptionRequest
-from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
-from transformers import BatchFeature, TensorType, WhisperConfig
-from transformers.tokenization_utils_base import TextInput
-
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import SupportsPP
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.whisper import WhisperEncoder
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalDataDict,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-    MultiModalUUIDDict,
-    NestedTensors,
-)
-from vllm.multimodal.parse import (
-    AudioProcessorItems,
-    MultiModalDataItems,
-    MultiModalDataParser,
 )
 
 logger = init_logger(__name__)
@@ -319,13 +284,14 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         extra_kwargs = {}
         if Version(mistral_common.__version__) >= Version("1.8.8"):
             from mistral_common.protocol.transcription.request import StreamingMode
+
             extra_kwargs = {"streaming": StreamingMode.OFFLINE}
 
         req = TranscriptionRequest(
             model=model_config.model,
             audio=RawAudio.from_audio(audio),
             language=language,
-            **extra_kwargs
+            **extra_kwargs,
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
