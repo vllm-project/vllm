@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import os
 import pickle
 import threading
 import time
@@ -352,7 +351,7 @@ class MessageQueue:
             # same port and crash with "Address already in use". Bind atomically
             # and optionally constrain the port range via `VLLM_ZMQ_PORT_RANGE`.
             remote_base_addr = f"tcp://{connect_ip}"
-            port_range = os.environ.get("VLLM_ZMQ_PORT_RANGE")
+            port_range = envs.VLLM_ZMQ_PORT_RANGE
             if port_range:
                 start_port, end_port = _parse_port_range(port_range)
                 max_tries = max(1, end_port - start_port + 1)
