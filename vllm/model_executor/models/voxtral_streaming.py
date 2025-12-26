@@ -5,13 +5,14 @@ import math
 from collections.abc import Mapping
 from typing import Literal, cast
 
-import mistral_common
 import numpy as np
 import torch
 from mistral_common.protocol.instruct.chunk import RawAudio
-from mistral_common.protocol.transcription.request import TranscriptionRequest, StreamingMode
+from mistral_common.protocol.transcription.request import (
+    StreamingMode,
+    TranscriptionRequest,
+)
 from mistral_common.tokens.tokenizers.audio import Audio
-from packaging.version import Version
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType

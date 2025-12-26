@@ -470,7 +470,9 @@ class WhisperEncoder(nn.Module):
         self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
         self.is_causal = getattr(config, "is_causal", False)
-        Conv1d = WhisperCausalConv1d if self.is_causal else partial(nn.Conv1d, padding=1)
+        Conv1d = (
+            WhisperCausalConv1d if self.is_causal else partial(nn.Conv1d, padding=1)
+        )
 
         self.conv1 = Conv1d(self.num_mel_bins, embed_dim, kernel_size=3)
         self.conv2 = Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3)
