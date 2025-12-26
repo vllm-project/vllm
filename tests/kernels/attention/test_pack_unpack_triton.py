@@ -7,6 +7,9 @@ from torch.testing import assert_close
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 
+
+pytestmark = [pytest.mark.attention, pytest.mark.expert_parallel, pytest.mark.kernels, pytest.mark.quantization, pytest.mark.tensor_parallel]
+3
 def test_pack_seq_basic_fp8():
     """Test basic functionality of pack_seq_triton with fp8 and 3D tensors."""
     device = "cuda"

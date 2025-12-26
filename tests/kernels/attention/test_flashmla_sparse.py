@@ -4,6 +4,9 @@ import pytest
 import torch
 
 
+
+pytestmark = [pytest.mark.attention, pytest.mark.kernels, pytest.mark.kv_cache, pytest.mark.pipeline_parallel, pytest.mark.quantization]
+
 def test_sparse_flashmla_metadata_smoke():
     import vllm.attention.ops.flashmla as fm
 
