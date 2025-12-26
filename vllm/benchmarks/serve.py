@@ -61,7 +61,7 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 async def get_first_model_from_server(
     base_url: str, headers: dict | None = None
-) -> str:
+) -> tuple[str, str]:
     """Fetch the first model from the server's /v1/models endpoint."""
     models_url = f"{base_url}/v1/models"
     async with aiohttp.ClientSession() as session:
@@ -70,7 +70,7 @@ async def get_first_model_from_server(
                 response.raise_for_status()
                 data = await response.json()
                 if "data" in data and len(data["data"]) > 0:
-                    return data["data"][0]["id"]
+                    return data["data"][0]["id"], data["data"][0]["root"]
                 else:
                     raise ValueError(
                         f"No models found on the server at {base_url}. "
@@ -1157,7 +1157,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--save-detailed",
         action="store_true",
         help="When saving the results, whether to include per request "
-        "information such as response, error, ttfs, tpots, etc.",
+        "information such as response, error, ttfts, tpots, etc.",
     )
     parser.add_argument(
         "--append-result",
@@ -1396,12 +1396,12 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Fetch model from server if not specified
     if args.model is None:
         print("Model not specified, fetching first model from server...")
-        model_id = await get_first_model_from_server(base_url, headers)
-        print(f"Using model: {model_id}")
+        model_name, model_id = await get_first_model_from_server(base_url, headers)
+        print(f"First model name: {model_name}, first model id: {model_id}")
     else:
+        model_name = args.served_model_name
         model_id = args.model
 
-    model_name = args.served_model_name
     tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
     tokenizer_mode = args.tokenizer_mode
 
