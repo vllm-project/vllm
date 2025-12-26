@@ -28,6 +28,10 @@ class LoRAKernelMeta:
     # to early exit from inside the lora_expand / lora_shrink torch operation.
     no_lora_flag_cpu: torch.Tensor
 
+    # Number of active LoRAs (unique non-(-1) values in token_lora_mapping)
+    # Stored as a Python int to avoid GPU->CPU sync during forward pass
+    num_active_loras: int = 0
+
     @staticmethod
     def make(
         max_loras: int, max_num_tokens: int, device: torch.device | str
@@ -73,6 +77,7 @@ class LoRAKernelMeta:
         self.num_tokens_per_lora.fill_(0)
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
+        self.num_active_loras = 0
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -117,6 +122,9 @@ class LoRAKernelMeta:
         self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
             num_tokens_per_lora, non_blocking=True
         )
+        # Store num_active_loras as Python int (excludes -1 which means no LoRA)
+        # Valid LoRA IDs are >= 0, so count those
+        self.num_active_loras = int((lora_ids >= 0).sum().item())
 
         # lora_token_start_loc
         lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
@@ -133,6 +141,7 @@ class LoRAKernelMeta:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        int,
     ]:
         """
         This function returns the kernel metadata required for the current
@@ -151,4 +160,5 @@ class LoRAKernelMeta:
             self.lora_token_start_loc,
             self.active_lora_ids,
             self.no_lora_flag_cpu,
+            self.num_active_loras,
         )
