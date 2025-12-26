@@ -1666,7 +1666,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
 
             # stream the output of a harmony message
-            if ctx.parser.last_content_delta:
+            if ctx.last_delta:
                 if (
                     ctx.parser.current_channel == "final"
                     and ctx.parser.current_recipient is None
@@ -1711,7 +1711,7 @@ class OpenAIServingResponses(OpenAIServing):
                             content_index=current_content_index,
                             output_index=current_output_index,
                             item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
+                            delta=ctx.last_delta,
                             # TODO, use logprobs from ctx.last_request_output
                             logprobs=[],
                         )
@@ -1756,7 +1756,7 @@ class OpenAIServingResponses(OpenAIServing):
                             item_id=current_item_id,
                             output_index=current_output_index,
                             content_index=current_content_index,
-                            delta=ctx.parser.last_content_delta,
+                            delta=ctx.last_delta,
                             sequence_number=-1,
                         )
                     )
@@ -1799,7 +1799,7 @@ class OpenAIServingResponses(OpenAIServing):
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
+                            delta=ctx.last_delta,
                         )
                     )
 
@@ -1969,7 +1969,7 @@ class OpenAIServingResponses(OpenAIServing):
                     yield _increment_sequence_number_and_return(
                         ResponseFunctionCallArgumentsDeltaEvent(
                             item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
+                            delta=ctx.last_delta,
                             output_index=current_output_index,
                             sequence_number=-1,
                             type="response.function_call_arguments.delta",
