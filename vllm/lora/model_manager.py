@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from typing import TypeVar
 
 import regex as re
@@ -24,7 +24,10 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
+from vllm.model_executor.models import (
+    SupportsLoRA,
+    supports_multimodal,
+)
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
@@ -34,6 +37,9 @@ from vllm.utils.platform_utils import is_pin_memory_available
 logger = init_logger(__name__)
 
 T = TypeVar("T")
+
+
+class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -52,7 +58,7 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: SupportsLoRA,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -70,10 +76,10 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
-        self.model: SupportsLoRA = model
-        self._registered_adapters: dict[int, LoRAModel] = {}
+        self.model: SupportsLoRAModel = model
+        self._registered_adapters: MutableMapping[int, LoRAModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
-        self._active_adapters: dict[int, None] = {}
+        self._active_adapters: MutableMapping[int, None] = {}
         self.adapter_type = "LoRA"
         self.lora_config = lora_config
         self.device = device
@@ -447,7 +453,7 @@ class LoRAModelManager:
         language model. LoRA for other modules, such as the vision tower, will
         be filtered out.
         """
-        if self.supports_mm:
+        if self.supports_mm and hasattr(self.model, "get_mm_mapping"):
             module_mapping: MultiModelKeys = self.model.get_mm_mapping()
             prefix_lst = module_mapping.connector + module_mapping.tower_model
             return any([module_name.startswith(prefix) for prefix in prefix_lst])
@@ -580,7 +586,12 @@ class LoRAModelManager:
         return self._registered_adapters.get(adapter_id)
 
 
-class LoRALRUCache(AdapterLRUCache[LoRAModel]):
+class LoRAModelLRUCache(AdapterLRUCache[LoRAModel]):
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], bool]):
+        super().__init__(capacity, deactivate_lora_fn)
+
+
+class NoneLRUCache(AdapterLRUCache[None]):
     def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], bool]):
         super().__init__(capacity, deactivate_lora_fn)
 
@@ -590,7 +601,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -600,10 +611,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         super().__init__(
             model, max_num_seqs, max_num_batched_tokens, vocab_size, lora_config, device
         )
-        self._registered_adapters: LoRALRUCache = LoRALRUCache(
+        self._registered_adapters: LoRAModelLRUCache = LoRAModelLRUCache(
             self.capacity, self.deactivate_adapter
         )
-        self._active_adapters: LoRALRUCache = LoRALRUCache(
+        self._active_adapters: NoneLRUCache = NoneLRUCache(
             self.lora_slots, self._deactivate_adapter
         )
 
@@ -666,7 +677,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
 
 def create_lora_manager(
-    model: nn.Module,
+    model: SupportsLoRAModel,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,
@@ -676,7 +687,7 @@ def create_lora_manager(
     **kwargs,
 ) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not isinstance(model, SupportsLoRA):
+    if not (isinstance(model, nn.Module) and isinstance(model, SupportsLoRA)):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

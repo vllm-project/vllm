@@ -175,6 +175,11 @@ class LoRAModel:
             from tensorizer import TensorDeserializer
 
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            if tensorizer_config.tensorizer_dir is None:
+                raise ValueError(
+                    "LoRAModel.from_local_checkpoint expects 'tensorizer_dir' in "
+                    "'tensorizer_config_dict', but it was not found."
+                )
             lora_tensor_path = os.path.join(
                 tensorizer_config.tensorizer_dir, "adapter_model.tensors"
             )

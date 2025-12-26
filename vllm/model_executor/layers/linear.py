@@ -280,10 +280,14 @@ class LinearBase(CustomOp):
         self.quant_config = quant_config
         self.prefix = prefix
         self.allow_fp8_block_shape_mismatch = False
+        self.quant_method: QuantizeMethodBase
         if quant_config is None:
-            self.quant_method: QuantizeMethodBase | None = UnquantizedLinearMethod()
+            self.quant_method = UnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            if quant_method is None:
+                raise ValueError("All linear layers should support quant method.")
+            self.quant_method = quant_method
         self.return_bias = return_bias
         self.disable_tp = disable_tp
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -343,8 +347,6 @@ class ReplicatedLinear(LinearBase):
             disable_tp=disable_tp,
         )
 
-        # All the linear layer supports quant method.
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             self,
             self.input_size,
@@ -397,7 +399,6 @@ class ReplicatedLinear(LinearBase):
         x: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
-        assert self.quant_method is not None
 
         output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
@@ -484,7 +485,6 @@ class ColumnParallelLinear(LinearBase):
         if output_sizes is None:
             output_sizes = [output_size]
 
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -592,7 +592,6 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
 
         if self.gather_output and self.tp_size > 1:
@@ -868,7 +867,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         if isinstance(param, BlockQuantScaleParameter):
-            assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
             weight_block_size = self.weight_block_size
@@ -1068,7 +1066,6 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # Note(simon): This is needed for Qwen3's fp8 quantization.
         if isinstance(param, BlockQuantScaleParameter):
-            assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
             weight_block_size = self.weight_block_size
@@ -1346,7 +1343,6 @@ class RowParallelLinear(LinearBase):
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -1436,7 +1432,6 @@ class RowParallelLinear(LinearBase):
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
-        assert self.quant_method is not None
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias

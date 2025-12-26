@@ -151,13 +151,18 @@ def parse_fine_tuned_lora_name(
     # LoRA weight qualified name usually starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
-    if name.startswith("base_model.model."):
-        name = name.replace("base_model.model.", "")
-        name = weights_mapper._map_name(name) if weights_mapper else name
-        # recover the prefix `base_model.model.`
-        name = "base_model.model." + name
-    else:
-        name = weights_mapper._map_name(name) if weights_mapper else name
+    if weights_mapper:
+        prefix = ""
+        if name.startswith("base_model.model."):
+            prefix = "base_model.model."
+            name = name.removeprefix(prefix)
+        mapped_name = weights_mapper._map_name(name)
+        if mapped_name is None:
+            raise ValueError(f"Cannot map the lora weight name: {name}")
+        name = mapped_name
+        if prefix:
+            # recover the prefix `base_model.model.`
+            name = prefix + name
 
     # In some situations, we may not start with `base_model.model.`.
     # If we don't (e.g., ibm-granite/granite-speech-3.3-8b),
