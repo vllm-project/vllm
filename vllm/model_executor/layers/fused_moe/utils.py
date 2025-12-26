@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from functools import lru_cache
 from math import prod
 
 import torch
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
@@ -330,3 +332,222 @@ def activation_without_mul(activation: str) -> str:
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+@lru_cache
+def supports_pdl(device: torch.device | None = None) -> bool:
+    """
+    Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
+    """
+    # PDL requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+@triton.jit
+def _update_accumulator(
+    accumulator,
+    tiled_a,
+    tiled_b,
+    token_mask,
+    iter_k,
+    a_scale_ptrs,
+    b_scale_ptrs,
+    stride_ask,
+    stride_bsk,
+    group_k,
+    group_n,
+    use_int8_w8a16: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a8: tl.constexpr,
+    compute_type: tl.constexpr = tl.float16,
+):
+    if use_int8_w8a16:
+        accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
+    elif use_fp8_w8a8 or use_int8_w8a8:
+        if group_k > 0 and group_n > 0:
+            offs_ks = iter_k // group_k
+            a_scale = tl.load(
+                a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+            )
+            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+
+            accumulator += (
+                tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+            )
+        else:
+            if use_fp8_w8a8:
+                # acc used to enable fp8_fast_accum
+                accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
+            else:
+                accumulator += tl.dot(tiled_a, tiled_b)
+    else:
+        accumulator += tl.dot(tiled_a, tiled_b)
+    return accumulator
+
+
+@triton.jit
+def mm_k(
+    a_ptrs,
+    b_ptrs,
+    ak_stride,
+    bk_stride,
+    token_mask,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
+    b_dtype: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    IS_PRIMARY: tl.constexpr,
+    base_k,
+    a_scale_ptrs=None,
+    b_scale_ptrs=None,
+    stride_ask=0,
+    stride_bsk=0,
+    group_k=0,
+    group_n=0,
+    use_int8_w8a16: tl.constexpr = False,
+    use_fp8_w8a8: tl.constexpr = False,
+    use_int8_w8a8: tl.constexpr = False,
+    compute_type: tl.constexpr = tl.float16,
+):
+    """
+    Given a_ptrs and b_ptrs, that identify the rows of A (m x k) and columns of
+    B (k x n), iterate, through the K dimension to compute the partial/complete
+    matrix block product.
+    If SPLIT_K == 1, the output m x n product is complete.
+    If SPLIT_K > 1, the thread block computes partial outputs. The partial
+    outputs are then atomically summed in the caller code.
+    Args:
+        a_ptrs: Array of pointers, identifying rows of A
+        b_ptrs: Array of pointers, identifying columns of B
+        ak_stride: K dimension stride of the A matrix
+        bk_stride: K dimension stride of the B matrix
+        K: Length of the K dimension
+        BLOCK_M: M dimension of the output block m x n
+        BLOCK_N: N dimension of the output block m x n
+        BLOCK_K: K dimension atom
+        EVEN_K: True if the blocks of A and B can be loaded without any
+          masking.
+        SPLIT_K: Parameter signifying parallelism in the K dimension.
+        CAST_TYPE: if True, cast the values from the A matrix to the B
+          matrix dtype.
+        b_dtype: datatype of the B matrix
+        USE_GDC: Whether to use PDL. True indicates use.
+        base_k: Base offset along K dimension for current SPLIT_K group
+    """
+    if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+        tl.extra.cuda.gdc_launch_dependents()
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    if USE_GDC and not IS_PRIMARY:
+        tl.extra.cuda.gdc_wait()
+
+    # Step size along K for each iteration
+    STEP_K = BLOCK_K * SPLIT_K
+
+    # Total number of iterations (compile-time constant)
+    num_iters = tl.cdiv(K, STEP_K)
+
+    for k in range(num_iters):
+        # Current iteration's global K offset
+        iter_k = k * STEP_K + base_k
+
+        # Check if this iteration is completely valid (no masking needed)
+        block_end = iter_k + BLOCK_K
+
+        if EVEN_K:
+            # K is divisible by BLOCK_K, no masking ever needed
+            # pre-fetch lora weight
+            tiled_b = tl.load(b_ptrs)
+            if USE_GDC and not IS_PRIMARY:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+            if CAST_TYPE:
+                tiled_a = tiled_a.to(b_dtype)
+            accumulator = _update_accumulator(
+                accumulator=accumulator,
+                tiled_a=tiled_a,
+                tiled_b=tiled_b,
+                token_mask=token_mask,
+                iter_k=iter_k,
+                a_scale_ptrs=a_scale_ptrs,
+                b_scale_ptrs=b_scale_ptrs,
+                stride_ask=stride_ask,
+                stride_bsk=stride_bsk,
+                group_k=group_k,
+                group_n=group_n,
+                use_int8_w8a16=use_int8_w8a16,
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                compute_type=compute_type,
+            )
+        else:
+            # Check if we need element-wise masking
+            if iter_k >= K:
+                # Entire block out of range, skip
+                pass
+            elif block_end <= K:
+                # Entire block in range, no masking needed (fast path)
+                tiled_b = tl.load(b_ptrs)
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+                if CAST_TYPE:
+                    tiled_a = tiled_a.to(b_dtype)
+                accumulator = _update_accumulator(
+                    accumulator=accumulator,
+                    tiled_a=tiled_a,
+                    tiled_b=tiled_b,
+                    token_mask=token_mask,
+                    iter_k=iter_k,
+                    a_scale_ptrs=a_scale_ptrs,
+                    b_scale_ptrs=b_scale_ptrs,
+                    stride_ask=stride_ask,
+                    stride_bsk=stride_bsk,
+                    group_k=group_k,
+                    group_n=group_n,
+                    use_int8_w8a16=use_int8_w8a16,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    use_int8_w8a8=use_int8_w8a8,
+                    compute_type=compute_type,
+                )
+            else:
+                # Partial block, need masking (only last iteration)
+                k_offsets = tl.arange(0, BLOCK_K)
+                mask = iter_k + k_offsets < K
+                tiled_b = tl.load(b_ptrs, mask=mask[:, None], other=0.0)
+                if USE_GDC and not IS_PRIMARY:
+                    tl.extra.cuda.gdc_wait()
+                tiled_a = tl.load(
+                    a_ptrs, mask=token_mask[:, None] & mask[None, :], other=0.0
+                )
+                if CAST_TYPE:
+                    tiled_a = tiled_a.to(b_dtype)
+                accumulator = _update_accumulator(
+                    accumulator=accumulator,
+                    tiled_a=tiled_a,
+                    tiled_b=tiled_b,
+                    token_mask=token_mask,
+                    iter_k=iter_k,
+                    a_scale_ptrs=a_scale_ptrs,
+                    b_scale_ptrs=b_scale_ptrs,
+                    stride_ask=stride_ask,
+                    stride_bsk=stride_bsk,
+                    group_k=group_k,
+                    group_n=group_n,
+                    use_int8_w8a16=use_int8_w8a16,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    use_int8_w8a8=use_int8_w8a8,
+                    compute_type=compute_type,
+                )
+
+        a_ptrs += STEP_K * ak_stride
+        b_ptrs += STEP_K * bk_stride
+
+    return accumulator
