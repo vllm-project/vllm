@@ -14,7 +14,6 @@ from mistral_common.tokens.tokenizers.audio import Audio
 from packaging.version import Version
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.vllm import VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
