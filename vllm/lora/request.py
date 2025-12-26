@@ -20,7 +20,6 @@ class LoRARequest(
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
-    long_lora_max_len: int | None = None
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
 
