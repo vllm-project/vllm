@@ -11,7 +11,7 @@ FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
-        reason="FlashInfer MLA Requires compute capability of 10 or above.",
+        reason="TRTLLM MLA Requires compute capability of 10 or above.",
         allow_module_level=True,
     )
 else:
@@ -98,7 +98,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
         dtype=torch.uint8,
         device=q.device,
     )
-    # Flashinfer MLA expects the query to be of shape
+    # TRTLLM MLA expects the query to be of shape
     # (bs, q_len_per_request, num_heads, qk_head_dim),
     # where q_len_per_request is the MTP query length (=1 without MTP)
     q = q.unsqueeze(1)
