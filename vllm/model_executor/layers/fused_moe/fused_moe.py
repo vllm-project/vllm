@@ -46,6 +46,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequant_nvfp4,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import NVFP4_Scheme
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
@@ -1464,11 +1468,14 @@ def inplace_fused_experts(
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
+    nvfp4_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
+    w1_row_scalar: torch.Tensor | None = None,
+    w2_row_scalar: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
@@ -1491,11 +1498,14 @@ def inplace_fused_experts(
         use_int8_w8a16,
         use_int4_w4a16,
         ocp_mx_scheme,
+        nvfp4_scheme,
         per_channel_quant,
         global_num_experts,
         expert_map,
         w1_scale,
         w2_scale,
+        w1_row_scalar,
+        w2_row_scalar,
         w1_zp,
         w2_zp,
         a1_scale,
@@ -1519,11 +1529,14 @@ def inplace_fused_experts_fake(
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
+    nvfp4_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
+    w1_row_scalar: torch.Tensor | None = None,
+    w2_row_scalar: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
@@ -1561,11 +1574,14 @@ def outplace_fused_experts(
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
+    nvfp4_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
+    w1_row_scalar: torch.Tensor | None = None,
+    w2_row_scalar: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
@@ -1588,11 +1604,14 @@ def outplace_fused_experts(
         use_int8_w8a16,
         use_int4_w4a16,
         ocp_mx_scheme,
+        nvfp4_scheme,
         per_channel_quant,
         global_num_experts,
         expert_map,
         w1_scale,
         w2_scale,
+        w1_row_scalar,
+        w2_row_scalar,
         w1_zp,
         w2_zp,
         a1_scale,
@@ -1610,16 +1629,20 @@ def outplace_fused_experts_fake(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
+    nvfp4_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
+    w1_row_scalar: torch.Tensor | None = None,
+    w2_row_scalar: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
@@ -1720,11 +1743,14 @@ def fused_experts(
             use_int8_w8a16=quant_config.use_int8_w8a16,
             use_int4_w4a16=quant_config.use_int4_w4a16,
             ocp_mx_scheme=quant_config.ocp_mx_scheme,
+            nvfp4_scheme=quant_config.nvfp4_scheme,
             per_channel_quant=quant_config.per_act_token_quant,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,
+            w1_row_scalar=quant_config.g1_alphas,
+            w2_row_scalar=quant_config.g2_alphas,
             w1_zp=quant_config.w1_zp,
             w2_zp=quant_config.w2_zp,
             a1_scale=quant_config.a1_scale,
@@ -1779,11 +1805,14 @@ def fused_experts_impl(
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
+    nvfp4_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
+    w1_row_scalar: torch.Tensor | None = None,
+    w2_row_scalar: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
@@ -1812,6 +1841,8 @@ def fused_experts_impl(
             )
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+    elif nvfp4_scheme is not None:
+        assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}"
@@ -1924,6 +1955,17 @@ def fused_experts_impl(
             w2_scale = None
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+
+    if nvfp4_scheme is not None:
+        if nvfp4_scheme in {NVFP4_Scheme.w_nvfp4_a_nvfp4}:
+            # NVFP4 dequant: (weights, group_scale_swizzled, global_scale, dtype)
+            # Reusing row_scalar for the FP32 global scale
+            w1 = dequant_nvfp4(w1, w1_scale, w1_row_scalar, hidden_states.dtype)
+            w1_scale = None
+            w2 = dequant_nvfp4(w2, w2_scale, w2_row_scalar, hidden_states.dtype)
+            w2_scale = None
+        else:
+            raise NotImplementedError(f"Unsupported nvfp4_scheme={nvfp4_scheme}")
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (

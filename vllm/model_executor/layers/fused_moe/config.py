@@ -362,6 +362,13 @@ class FusedMoEQuantConfig:
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
+    @property
+    def nvfp4_scheme(self) -> str | None:
+        """Return NVFP4 scheme string if using nvfp4, else None."""
+        if self.use_nvfp4_w4a4:
+            return "w_nvfp4_a_nvfp4"
+        return None
+
     def config_name(self, dtype: torch.dtype) -> str | None:
         """
         Return a string used to construct the filename that contains the

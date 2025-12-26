@@ -27,6 +27,7 @@ class NvFp4Support:
     cutlass_supported: bool
     allow_flashinfer: bool
     use_marlin: bool
+    use_emulation: bool
 
 
 def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
@@ -50,18 +51,23 @@ def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
             )
 
     use_marlin = False
+    use_emulation = False
     if not cutlass_supported:
         if is_fp4_marlin_supported():
             use_marlin = True
             _logger.info_once("Falling back to Marlin FP4 MoE kernel.")
         else:
-            raise ValueError(
-                "Current platform does not support NVFP4 quantization. "
-                "Please use Blackwell GPUs or enable FlashInfer."
+            # Fall back to emulation (dequantize to FP16, compute in high precision)
+            use_emulation = True
+            _logger.warning_once(
+                "Current platform does not support native NVFP4 quantization. "
+                "Falling back to emulation mode (dequantize weights to FP16). "
+                "For better performance, use Blackwell GPUs or enable FlashInfer."
             )
 
     return NvFp4Support(
         cutlass_supported=cutlass_supported,
         allow_flashinfer=allow_flashinfer,
         use_marlin=use_marlin,
+        use_emulation=use_emulation,
     )

@@ -1426,6 +1426,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
+        self.use_emulation = _nvfp4.use_emulation
         self.marlin_input_dtype = None
         self.flashinfer_moe_backend = None
         if self.allow_flashinfer:
@@ -1436,6 +1437,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         elif self.use_marlin:
             logger.info_once("Using Marlin for ModelOptNvFp4FusedMoE.")
+        elif self.use_emulation:
+            logger.info_once("Using emulation (dequant to FP16) for ModelOptNvFp4FusedMoE.")
         else:
             logger.info_once("Using Cutlass for ModelOptNvFp4FusedMoE.")
 
@@ -1443,7 +1446,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.use_marlin or (
+        if self.use_emulation:
+            return super().maybe_make_prepare_finalize(routing_tables)
+        elif self.use_marlin or (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
@@ -1466,6 +1471,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        if self.use_emulation:
+            logger.debug_once("Using Triton emulation path for NVFP4 MoE")
+            return super().select_gemm_impl(prepare_finalize, layer)
         assert self.moe_quant_config is not None
         experts = select_nvfp4_gemm_impl(
             self.moe,
@@ -1858,6 +1866,23 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
+            )
+
+        if self.use_emulation:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                quant_config=self.moe_quant_config,
             )
 
         if self.use_marlin:
