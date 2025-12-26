@@ -5,6 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
+from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -20,7 +21,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = TPUInputBatch | GPUInputBatch
+InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
 
@@ -43,6 +44,7 @@ class LoRAModelRunnerMixin:
             vllm_config,
             device,
             model.embedding_modules,
+            getattr(model, "embedding_padding_modules", []),
         )
         return self.lora_manager.create_lora_manager(model)
 
@@ -80,7 +82,9 @@ class LoRAModelRunnerMixin:
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
-            input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
+            input_batch.make_lora_inputs(  # type: ignore[attr-defined]
+                num_scheduled_tokens, num_sampled_tokens
+            )
         )
         return self._set_active_loras(
             prompt_lora_mapping, token_lora_mapping, lora_requests

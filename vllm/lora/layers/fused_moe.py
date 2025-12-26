@@ -518,29 +518,59 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
 
-        self.w13_lora_a_stacked[0][
-            index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
-        ].copy_(slliced_w1_lora_a, non_blocking=True)
+        # Device-aware scatter: optimize GPU→GPU case (slab optimization)
+        is_gpu_source = w1_lora_a.is_cuda
 
-        self.w13_lora_a_stacked[1][
-            index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
-        ].copy_(slliced_w3_lora_a, non_blocking=True)
+        if is_gpu_source:
+            # Fast path: GPU→GPU scatter (source already on GPU from slab)
+            self.w13_lora_a_stacked[0][
+                index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
+            ] = slliced_w1_lora_a
 
-        self.w13_lora_b_stacked[0][
-            index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
-        ].copy_(slliced_w1_lora_b, non_blocking=True)
+            self.w13_lora_a_stacked[1][
+                index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+            ] = slliced_w3_lora_a
 
-        self.w13_lora_b_stacked[1][
-            index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
-        ].copy_(slliced_w3_lora_b, non_blocking=True)
+            self.w13_lora_b_stacked[0][
+                index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
+            ] = slliced_w1_lora_b
 
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
+            self.w13_lora_b_stacked[1][
+                index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+            ] = slliced_w3_lora_b
 
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ] = sliced_w2_lora_a
+
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ] = sliced_w2_lora_b
+        else:
+            # Standard path: CPU→GPU transfer (baseline case)
+            self.w13_lora_a_stacked[0][
+                index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
+            ].copy_(slliced_w1_lora_a, non_blocking=True)
+
+            self.w13_lora_a_stacked[1][
+                index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+            ].copy_(slliced_w3_lora_a, non_blocking=True)
+
+            self.w13_lora_b_stacked[0][
+                index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
+            ].copy_(slliced_w1_lora_b, non_blocking=True)
+
+            self.w13_lora_b_stacked[1][
+                index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+            ].copy_(slliced_w3_lora_b, non_blocking=True)
+
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ].copy_(sliced_w2_lora_a, non_blocking=True)
+
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
@@ -691,20 +721,41 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
+        # Device-aware scatter: optimize GPU→GPU case (slab optimization)
+        is_gpu_source = w13_lora_a.is_cuda
 
-        self.w13_lora_a_stacked[0][
-            index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
-        ].copy_(sliced_w13_lora_a, non_blocking=True)
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
+        # logger.info(f"  - is_gpu_source: {is_gpu_source}")
 
-        self.w13_lora_b_stacked[0][
-            index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
-        ].copy_(sliced_w13_lora_b, non_blocking=True)
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+        if is_gpu_source:
+            # Fast path: GPU→GPU scatter (source already on GPU from slab)
+            self.w13_lora_a_stacked[0][
+                index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
+            ] = sliced_w13_lora_a
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ] = sliced_w2_lora_a
+
+            self.w13_lora_b_stacked[0][
+                index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
+            ] = sliced_w13_lora_b
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ] = sliced_w2_lora_b
+        else:
+            # Standard path: CPU→GPU transfer (baseline case)
+            self.w13_lora_a_stacked[0][
+                index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
+            ].copy_(sliced_w13_lora_a, non_blocking=True)
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ].copy_(sliced_w2_lora_a, non_blocking=True)
+
+            self.w13_lora_b_stacked[0][
+                index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
+            ].copy_(sliced_w13_lora_b, non_blocking=True)
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     @property
     def w13_input_size(self):
