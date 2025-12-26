@@ -9,7 +9,7 @@ import mistral_common
 import numpy as np
 import torch
 from mistral_common.protocol.instruct.chunk import RawAudio
-from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.protocol.transcription.request import TranscriptionRequest, StreamingMode
 from mistral_common.tokens.tokenizers.audio import Audio
 from packaging.version import Version
 
@@ -232,7 +232,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         # [total_num_20ms_frames, hidden_size]
         audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
             mel_features
-        )[0]
+        )
         conv_stride = self.whisper_encoder.whisper_encoder.total_stride
         audio_embeddings_per_sample = audio_embeddings.split(
             [s // conv_stride for s in seq_lens], dim=0
@@ -279,17 +279,11 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
 
-        extra_kwargs = {}
-        if Version(mistral_common.__version__) >= Version("1.8.8"):
-            from mistral_common.protocol.transcription.request import StreamingMode
-
-            extra_kwargs = {"streaming": StreamingMode.OFFLINE}
-
         req = TranscriptionRequest(
             model=model_config.model,
             audio=RawAudio.from_audio(audio),
             language=language,
-            **extra_kwargs,
+            streaming=StreamingMode.OFFLINE,
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
