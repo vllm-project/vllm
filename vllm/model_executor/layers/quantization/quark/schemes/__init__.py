@@ -1,9 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .quark_ocp_mx import QuarkOCP_MX
+# Wrap aiter-dependent import since aiter may fail on unsupported GPU
+# architectures (e.g., gfx1201/RDNA4 which is not in aiter's supported list)
+try:
+    from .quark_ocp_mx import QuarkOCP_MX
+except (ImportError, RuntimeError):
+    # QuarkOCP_MX requires aiter which may not support this GPU architecture
+    QuarkOCP_MX = None  # type: ignore[misc, assignment]
+
 from .quark_scheme import QuarkScheme
 from .quark_w8a8_fp8 import QuarkW8A8Fp8
 from .quark_w8a8_int8 import QuarkW8A8Int8
 
-__all__ = ["QuarkScheme", "QuarkW8A8Fp8", "QuarkW8A8Int8", "QuarkOCP_MX"]
+__all__ = ["QuarkScheme", "QuarkW8A8Fp8", "QuarkW8A8Int8"]
+if QuarkOCP_MX is not None:
+    __all__.append("QuarkOCP_MX")
