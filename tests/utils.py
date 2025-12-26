@@ -801,6 +801,31 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
+def check_gpu_memory_usage(devices: list[int]) -> dict[int, tuple[float, float]]:
+    # Use nvml instead of pytorch to reduce measurement error from torch cuda
+    # context.
+    usage_by_device: dict[int, tuple[float, float]] = {}
+    for device in devices:
+        if current_platform.is_rocm():
+            dev_handle = amdsmi_get_processor_handles()[device]
+            mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+            gb_used = mem_info["vram_used"] / 2**10
+            gb_total = mem_info["vram_total"] / 2**10
+        else:
+            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+            gb_used = mem_info.used / 2**30
+            gb_total = mem_info.total / 2**30
+        usage_by_device[device] = (gb_used, gb_total)
+
+    print("gpu memory used/total (GiB): ", end="")
+    for device, (gb_used, gb_total) in usage_by_device.items():
+        print(f"{device}={gb_used:.02f}/{gb_total:.02f}; ", end="")
+    print("")
+
+    return usage_by_device
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
@@ -809,31 +834,10 @@ def wait_for_gpu_memory_to_clear(
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
-        output: dict[int, str] = {}
-        output_raw: dict[int, tuple[float, float]] = {}
-        for device in devices:
-            if current_platform.is_rocm():
-                dev_handle = amdsmi_get_processor_handles()[device]
-                mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
-                gb_used = mem_info["vram_used"] / 2**10
-                gb_total = mem_info["vram_total"] / 2**10
-            else:
-                dev_handle = nvmlDeviceGetHandleByIndex(device)
-                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-                gb_used = mem_info.used / 2**30
-                gb_total = mem_info.total / 2**30
-            output_raw[device] = (gb_used, gb_total)
-            output[device] = f"{gb_used:.02f}/{gb_total:.02f}"
-
-        print("gpu memory used/total (GiB): ", end="")
-        for k, v in output.items():
-            print(f"{k}={v}; ", end="")
-        print("")
+        usage_by_device = check_gpu_memory_usage(devices)
 
         if threshold_bytes is not None:
             is_free = lambda used, total: used <= threshold_bytes / 2**30
@@ -843,7 +847,7 @@ def wait_for_gpu_memory_to_clear(
             threshold = f"{threshold_ratio:.2f}"
 
         dur_s = time.time() - start_time
-        if all(is_free(used, total) for used, total in output_raw.values()):
+        if all(is_free(used, total) for used, total in usage_by_device.values()):
             print(
                 f"Done waiting for free GPU memory on devices {devices=} "
                 f"({threshold=}) {dur_s=:.02f}"

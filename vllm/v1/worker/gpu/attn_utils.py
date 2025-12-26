@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
 )
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache, unbind_kv_cache
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -138,6 +138,13 @@ def init_kv_cache(
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+
+
+def free_kv_cache(
+    forward_context: dict[str, Any],
+    kv_caches: list[torch.Tensor],
+) -> None:
+    unbind_kv_cache(forward_context, kv_caches)
 
 
 def build_attn_metadata(
