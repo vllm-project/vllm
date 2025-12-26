@@ -170,6 +170,8 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         if self._experts_capturer_device_buffer is None:
             raise RuntimeError("Buffer not initialized.")
         batch_size, num_routed_experts = topk_ids.shape
+        if layer_id >= self._experts_capturer_device_buffer.shape[1]:
+            return
         # copy into device buffer (ensure shapes are compatible)
         self._experts_capturer_device_buffer[:batch_size, layer_id, :] = topk_ids
 
