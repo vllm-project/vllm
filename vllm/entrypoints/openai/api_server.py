@@ -1079,6 +1079,7 @@ async def init_app_state(
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
+            default_chat_template_kwargs=args.default_chat_template_kwargs,
             trust_request_chat_template=args.trust_request_chat_template,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
@@ -1089,7 +1090,6 @@ async def init_app_state(
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             log_error_stack=args.log_error_stack,
-            default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
         if "generate" in supported_tasks
         else None
