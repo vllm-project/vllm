@@ -50,15 +50,15 @@ elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin"))
         sys.platform,
     )
     VLLM_TARGET_DEVICE = "empty"
-elif (
-    sys.platform.startswith("linux")
-    and torch.version.cuda is None
-    and os.getenv("VLLM_TARGET_DEVICE") is None
-    and torch.version.hip is None
-):
-    # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
-    # fallback to cpu
-    VLLM_TARGET_DEVICE = "cpu"
+elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
+    if torch.version.hip is not None:
+        VLLM_TARGET_DEVICE = "rocm"
+        logger.info("Auto-detected ROCm")
+    elif torch.version.cuda is not None:
+        VLLM_TARGET_DEVICE = "cuda"
+        logger.info("Auto-detected CUDA")
+    else:
+        VLLM_TARGET_DEVICE = "cpu"
 
 
 def is_sccache_available() -> bool:
@@ -108,20 +108,26 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
-            # `nvcc_threads` is either the value of the NVCC_THREADS
-            # environment variable (if defined) or 1.
-            # when it is set, we reduce `num_jobs` to avoid
-            # overloading the system.
-            nvcc_threads = envs.NVCC_THREADS
-            if nvcc_threads is not None:
-                nvcc_threads = int(nvcc_threads)
-                logger.info(
-                    "Using NVCC_THREADS=%d as the number of nvcc threads.", nvcc_threads
-                )
-            else:
-                nvcc_threads = 1
-            num_jobs = max(1, num_jobs // nvcc_threads)
+        if _is_cuda() and CUDA_HOME is not None:
+            try:
+                nvcc_version = get_nvcc_cuda_version()
+                if nvcc_version >= Version("11.2"):
+                    # `nvcc_threads` is either the value of the NVCC_THREADS
+                    # environment variable (if defined) or 1.
+                    # when it is set, we reduce `num_jobs` to avoid
+                    # overloading the system.
+                    nvcc_threads = envs.NVCC_THREADS
+                    if nvcc_threads is not None:
+                        nvcc_threads = int(nvcc_threads)
+                        logger.info(
+                            "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                            nvcc_threads,
+                        )
+                    else:
+                        nvcc_threads = 1
+                    num_jobs = max(1, num_jobs // nvcc_threads)
+            except Exception as e:
+                logger.warning("Failed to get NVCC version: %s", e)
 
         return num_jobs, nvcc_threads
 
@@ -199,9 +205,9 @@ class cmake_build_ext(build_ext):
             # Default build tool to whatever cmake picks.
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
-        if _is_cuda():
+        if _is_cuda() and CUDA_HOME is not None:
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
-        elif _is_hip():
+        elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
@@ -340,6 +346,89 @@ class precompiled_wheel_utils:
         return wheels, repo_url
 
     @staticmethod
+    def is_rocm_system() -> bool:
+        """Detect ROCm without relying on torch (for build environment)."""
+        if os.getenv("ROCM_PATH"):
+            return True
+        if os.path.isdir("/opt/rocm"):
+            return True
+        if which("rocminfo") is not None:
+            return True
+        try:
+            import torch
+
+            return torch.version.hip is not None
+        except ImportError:
+            return False
+
+    @staticmethod
+    def find_local_rocm_wheel() -> str | None:
+        """Search for a local vllm wheel in common locations."""
+        import glob
+
+        for pattern in ["/vllm-workspace/dist/vllm-*.whl", "./dist/vllm-*.whl"]:
+            wheels = glob.glob(pattern)
+            if wheels:
+                return sorted(wheels)[-1]
+        return None
+
+    @staticmethod
+    def fetch_wheel_from_pypi_index(index_url: str, package: str = "vllm") -> str:
+        """Fetch the latest wheel URL from a PyPI-style simple index."""
+        import platform
+        from html.parser import HTMLParser
+        from urllib.parse import urljoin
+        from urllib.request import urlopen
+
+        arch = platform.machine()
+
+        class WheelLinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.wheels = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    for name, value in attrs:
+                        if name == "href" and value.endswith(".whl"):
+                            self.wheels.append(value)
+
+        simple_url = f"{index_url.rstrip('/')}/{package}/"
+        print(f"Fetching wheel list from {simple_url}")
+        with urlopen(simple_url) as resp:
+            html = resp.read().decode("utf-8")
+
+        parser = WheelLinkParser()
+        parser.feed(html)
+
+        for wheel in reversed(parser.wheels):
+            if arch in wheel:
+                if wheel.startswith("http"):
+                    return wheel
+                return urljoin(simple_url, wheel)
+
+        raise ValueError(f"No compatible wheel found for {arch} at {simple_url}")
+
+    @staticmethod
+    def determine_wheel_url_rocm() -> tuple[str, str | None]:
+        """Determine the precompiled wheel for ROCm."""
+        # Search for local wheel first
+        local_wheel = precompiled_wheel_utils.find_local_rocm_wheel()
+        if local_wheel is not None:
+            print(f"Found local ROCm wheel: {local_wheel}")
+            return local_wheel, None
+
+        # Fall back to AMD's PyPI index
+        index_url = os.getenv(
+            "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
+        )
+        print(f"Fetching ROCm precompiled wheel from {index_url}")
+        wheel_url = precompiled_wheel_utils.fetch_wheel_from_pypi_index(index_url)
+        download_filename = wheel_url.split("/")[-1].split("#")[0]
+        print(f"Using ROCm precompiled wheel: {wheel_url}")
+        return wheel_url, download_filename
+
+    @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """
         Try to determine the precompiled wheel URL or path to use.
@@ -359,6 +448,11 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
+            # ROCm: use local wheel or AMD's PyPI index
+            # TODO: When we have ROCm nightly wheels, we can update this logic.
+            if precompiled_wheel_utils.is_rocm_system():
+                return precompiled_wheel_utils.determine_wheel_url_rocm()
+
             import platform
 
             arch = platform.machine()
@@ -465,6 +559,8 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    # ROCm-specific libraries
+                    "vllm/_rocm_C.abi3.so",
                 ]
 
                 flash_attn_regex = re.compile(
@@ -601,6 +697,8 @@ def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
     # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
     try:
+        if ROCM_HOME is None:
+            return None
         librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
         if not librocm_core_file.is_file():
             return None
@@ -745,7 +843,9 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
         # Optional since this doesn't get built (produce an .so file) when

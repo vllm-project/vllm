@@ -260,7 +260,7 @@ async def test_multi_abort(output_kind: RequestOutputKind):
 
         # Use multi-abort to abort multiple requests at once
         abort_request_ids = [request_ids[i] for i in REQUEST_IDS_TO_ABORT]
-        await engine.abort(abort_request_ids)
+        await engine.abort(abort_request_ids, internal=False)
 
         # Wait for all tasks to complete
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -609,7 +609,7 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
         await asyncio.sleep(0.5)
 
         # Abort the request
-        await engine.abort(request_id)
+        await engine.abort(request_id, internal=False)
 
         # Wait for generation to complete and return final output
         final_output = await generated
