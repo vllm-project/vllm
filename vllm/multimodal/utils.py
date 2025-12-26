@@ -4,7 +4,7 @@
 import asyncio
 import atexit
 import mimetypes
-from collections.abc import Generator, Set
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
@@ -462,8 +462,6 @@ def group_mm_kwargs_by_modality(
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
-    merge_by_field_config: bool | None = None,
-    multimodal_cpu_fields: Set[str] | None = None,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -476,17 +474,6 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    if merge_by_field_config is not None:
-        logger.warning_once(
-            "The `merge_by_field_config` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.14."
-        )
-    if multimodal_cpu_fields is not None:
-        logger.warning_once(
-            "The `multimodal_cpu_fields` argument of `group_mm_kwargs_by_modality` "
-            "is deprecated and will be removed in v0.14."
-        )
-
     from vllm.multimodal.inputs import MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):

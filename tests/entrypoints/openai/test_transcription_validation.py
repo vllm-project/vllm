@@ -7,6 +7,7 @@ import json
 import pytest
 
 from ...utils import RemoteOpenAIServer
+from .conftest import add_attention_backend
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -20,11 +21,13 @@ MISTRAL_FORMAT_ARGS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
-async def test_basic_audio(mary_had_lamb, model_name):
+async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
     server_args = ["--enforce-eager"]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
@@ -44,8 +47,13 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio_with_lora(mary_had_lamb):
+async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
     """Ensure STT (transcribe) requests can pass LoRA through to generate."""
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes on ROCm, we modify the max model length to 512.
+    # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
     model_name = "ibm-granite/granite-speech-3.3-2b"
     lora_model_name = "speech"
     server_args = [
@@ -56,10 +64,12 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         "--lora-modules",
         f"{lora_model_name}={model_name}",
         "--max-model-len",
-        "2048",
+        "512" if current_platform.is_rocm() else "2048",
         "--max-num-seqs",
         "1",
     ]
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
@@ -79,11 +89,13 @@ async def test_basic_audio_with_lora(mary_had_lamb):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio_gemma(foscolo):
+async def test_basic_audio_gemma(foscolo, rocm_aiter_fa_attention):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.
     model_name = "google/gemma-3n-E2B-it"
     server_args = ["--enforce-eager"]
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
         model_name, server_args, max_wait_seconds=480
