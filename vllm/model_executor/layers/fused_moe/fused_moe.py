@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+    rocm_aiter_grouped_topk,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -1295,6 +1298,7 @@ class GroupedTopk(CustomOp):
         topk_group: int = 0,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
+        num_fused_shared_experts: int = 0,
     ) -> None:
         super().__init__()
         self.native_impl = grouped_topk
@@ -1304,6 +1308,7 @@ class GroupedTopk(CustomOp):
         self.topk_group = topk_group
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
+        self.num_fused_shared_experts = num_fused_shared_experts
 
     def forward_native(
         self,
@@ -1332,6 +1337,32 @@ class GroupedTopk(CustomOp):
         return self.forward_native(
             hidden_states, gating_output, e_score_correction_bias
         )
+
+    def forward_hip(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if rocm_aiter_ops.is_fused_moe_enabled():
+            if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+                assert self.num_fused_shared_experts == 0
+            return rocm_aiter_grouped_topk(
+                hidden_states,
+                gating_output,
+                self.topk,
+                self.renormalize,
+                self.num_expert_group,
+                self.topk_group,
+                self.scoring_func,
+                self.routed_scaling_factor,
+                e_score_correction_bias,
+                self.num_fused_shared_experts,
+            )
+        else:
+            return self.forward_native(
+                hidden_states, gating_output, e_score_correction_bias
+            )
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
