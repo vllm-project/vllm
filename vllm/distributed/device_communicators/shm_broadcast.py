@@ -43,6 +43,7 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
+
 def _parse_port_range(port_range: str) -> tuple[int, int]:
     s = port_range.strip()
     sep = "-" if "-" in s else (":" if ":" in s else None)
