@@ -1216,6 +1216,143 @@ class TestMLABackendComparison:
         )
 
 
+class TestMLAFP8CacheInput:
+    """Test FP8 input to concat_and_cache_mla (pre-quantized FP8 tensors)."""
+
+    def test_fp8_input_concat_and_cache_mla(
+        self, mla_config: MLAConfig, device: torch.device, dtype: torch.dtype
+    ):
+        """Test that concat_and_cache_mla accepts FP8 input tensors directly."""
+        num_blocks = 10
+        block_size = 16
+        num_tokens = 5
+
+        # Create FP8 KV cache
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            mla_config.head_size,
+            dtype=torch.uint8,
+            device=device,
+        )
+
+        # Create BF16 input tensors first
+        kv_c_bf16 = torch.randn(
+            num_tokens, mla_config.kv_lora_rank, dtype=dtype, device=device
+        )
+        k_pe_bf16 = torch.randn(
+            num_tokens, mla_config.qk_rope_head_dim, dtype=dtype, device=device
+        )
+
+        # Quantize to FP8 (pre-quantized input)
+        kv_c_fp8 = kv_c_bf16.to(torch.float8_e4m3fn)
+        k_pe_fp8 = k_pe_bf16.to(torch.float8_e4m3fn)
+
+        # Create slot mapping (put tokens in block 1)
+        slot_mapping = torch.arange(
+            block_size, block_size + num_tokens, dtype=torch.long, device=device
+        )
+
+        # Cache with FP8 input - this should work now
+        # With kAuto cache type, no quantization is performed (data is already FP8)
+        ops.concat_and_cache_mla(
+            kv_c_fp8,
+            k_pe_fp8,
+            kv_cache,
+            slot_mapping,
+            kv_cache_dtype="fp8_e4m3",
+            scale=torch.tensor(1.0, device=device),
+        )
+
+        # Verify the cache was populated - read back as FP8 and compare
+        cached = kv_cache.view(-1, mla_config.head_size)[
+            block_size : block_size + num_tokens
+        ]
+
+        # The cached data should match the concatenated FP8 input
+        expected_fp8 = torch.cat([kv_c_fp8, k_pe_fp8], dim=-1)
+        expected_uint8 = expected_fp8.view(torch.uint8)
+
+        assert torch.equal(cached, expected_uint8), (
+            f"Cached data doesn't match FP8 input. "
+            f"Max diff: {(cached.float() - expected_uint8.float()).abs().max()}"
+        )
+
+    def test_fp8_input_vs_bf16_input_quantized(
+        self, mla_config: MLAConfig, device: torch.device, dtype: torch.dtype
+    ):
+        """Compare FP8 input path vs BF16 input with quantization."""
+        num_blocks = 10
+        block_size = 16
+        num_tokens = 5
+
+        # Create two KV caches
+        kv_cache_from_fp8 = torch.zeros(
+            num_blocks,
+            block_size,
+            mla_config.head_size,
+            dtype=torch.uint8,
+            device=device,
+        )
+        kv_cache_from_bf16 = torch.zeros(
+            num_blocks,
+            block_size,
+            mla_config.head_size,
+            dtype=torch.uint8,
+            device=device,
+        )
+
+        # Create BF16 input tensors
+        kv_c_bf16 = torch.randn(
+            num_tokens, mla_config.kv_lora_rank, dtype=dtype, device=device
+        )
+        k_pe_bf16 = torch.randn(
+            num_tokens, mla_config.qk_rope_head_dim, dtype=dtype, device=device
+        )
+
+        # Create slot mapping
+        slot_mapping = torch.arange(
+            block_size, block_size + num_tokens, dtype=torch.long, device=device
+        )
+
+        # Path 1: Quantize BF16 to FP8 first, then cache as FP8 input
+        kv_c_fp8 = kv_c_bf16.to(torch.float8_e4m3fn)
+        k_pe_fp8 = k_pe_bf16.to(torch.float8_e4m3fn)
+
+        ops.concat_and_cache_mla(
+            kv_c_fp8,
+            k_pe_fp8,
+            kv_cache_from_fp8,
+            slot_mapping,
+            kv_cache_dtype="fp8_e4m3",
+            scale=torch.tensor(1.0, device=device),
+        )
+
+        # Path 2: Cache BF16 input with internal quantization
+        ops.concat_and_cache_mla(
+            kv_c_bf16,
+            k_pe_bf16,
+            kv_cache_from_bf16,
+            slot_mapping,
+            kv_cache_dtype="fp8_e4m3",
+            scale=torch.tensor(1.0, device=device),
+        )
+
+        # Both paths should produce the same result (or very close)
+        cached_from_fp8 = kv_cache_from_fp8.view(-1, mla_config.head_size)[
+            block_size : block_size + num_tokens
+        ]
+        cached_from_bf16 = kv_cache_from_bf16.view(-1, mla_config.head_size)[
+            block_size : block_size + num_tokens
+        ]
+
+        # The results should be identical since both use same quantization
+        assert torch.equal(cached_from_fp8, cached_from_bf16), (
+            f"FP8 input path differs from BF16 input path. "
+            f"Diff count: {(cached_from_fp8 != cached_from_bf16).sum()}"
+        )
+
+
 class TestMLAFP8Attention:
     """Test FP8 KV cache attention comparing FLASHINFER_MLA vs CUTLASS_MLA."""
 
