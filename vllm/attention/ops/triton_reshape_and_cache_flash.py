@@ -20,6 +20,9 @@ def reshape_and_cache_kernel_flash(
     key_stride: tl.int64,
     value_stride: tl.int64,
     block_stride: tl.int64,
+    head_stride: tl.int64,
+    dim_stride_k: tl.int64,
+    dim_stride_v: tl.int64,
     page_stride: tl.int64,
     num_heads: tl.constexpr,
     head_size: tl.constexpr,
@@ -35,17 +38,36 @@ def reshape_and_cache_kernel_flash(
         # Padding token that should be ignored.
         return
 
+    block_idx = slot_idx // block_size
+    block_offset = slot_idx % block_size
+
     tile_i = tl.program_id(axis=1)
     tile_offs = tl.arange(0, TILE_SIZE)
     tile_pos = tile_i * TILE_SIZE + tile_offs
 
-    block_idx = slot_idx // block_size
-    block_offset = slot_idx % block_size
-
     src_key_idx = token_idx * key_stride
     src_value_idx = token_idx * value_stride
 
-    tgt_idx = block_idx * block_stride + block_offset * page_stride
+    # Decompose the tile index back into head and dim coordinates.
+    cur_head = tile_pos // head_size
+    cur_dim = tile_pos % head_size
+
+    # Value addressing (4D): [Block, Head, Dim, Slot]
+    tgt_idx_v = (
+        block_idx * block_stride
+        + cur_head * head_stride
+        + cur_dim * dim_stride_v
+        + block_offset * 1
+    )
+
+    # Key addressing (5D): [Block, Head, Dim//8, Slot, 8]
+    tgt_idx_k = (
+        block_idx * block_stride
+        + cur_head * head_stride
+        + (cur_dim // 8) * dim_stride_k
+        + block_offset * 8
+        + (cur_dim % 8)
+    )
 
     # [TILE_SIZE]
     key_load = tl.load(
@@ -73,12 +95,12 @@ def reshape_and_cache_kernel_flash(
         value_tile = value_load
 
     tl.store(
-        key_cache_ptr + tgt_idx + tile_pos,
+        key_cache_ptr + tgt_idx_k,
         key_tile,
         mask=tile_pos < (num_heads * head_size),
     )
     tl.store(
-        value_cache_ptr + tgt_idx + tile_pos,
+        value_cache_ptr + tgt_idx_v,
         value_tile,
         mask=tile_pos < (num_heads * head_size),
     )
@@ -99,16 +121,17 @@ def triton_reshape_and_cache_flash(
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
-    block_size = key_cache.shape[1]
+    # block_size = key_cache.shape[1]
+    block_size = key_cache.shape[3]
     n = num_heads * head_size
-
     key_stride = key.stride()[0]
     value_stride = value.stride()[0]
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
-
     head_stride = key_cache.stride()[2]
-    assert head_stride == head_size, "only continous heads are supported"
+    head_stride = key_cache.stride(1)
+    dim_stride_k = key_cache.stride(2)
+    dim_stride_v = value_cache.stride(2)
 
     assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
@@ -171,6 +194,9 @@ def triton_reshape_and_cache_flash(
         key_stride=key_stride,
         value_stride=value_stride,
         block_stride=block_stride,
+        head_stride=head_stride,
+        dim_stride_k=dim_stride_k,
+        dim_stride_v=dim_stride_v,
         page_stride=page_stride,
         num_heads=num_heads,
         head_size=head_size,

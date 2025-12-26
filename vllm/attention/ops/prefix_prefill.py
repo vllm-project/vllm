@@ -79,6 +79,7 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_DMODEL_PADDED: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     num_unroll_cache: tl.constexpr,
@@ -139,42 +140,52 @@ def _fwd_kernel(
     # initialize pointer to m and l
     if not USE_SINKS:
         m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     else:
         m_i = tl.load(
             sink_ptr + tl.full([BLOCK_M], cur_head, dtype=tl.int64),
             mask=(offs_m < cur_batch_query_len),
             other=float("-inf"),
         ).to(dtype=tl.float32)
+        l_i = tl.where(m_i > float("-inf"), 1.0, 0.0)
 
-    l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
     # compute query against context (no causal mask here)
     for start_n in tl.range(
         0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
     ):
-        start_n = tl.multiple_of(start_n, BLOCK_SIZE)
-        # -- compute qk ----
+        # Explicitly calculate the current absolute offset
+        # relative to the physical block
+        # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
+        # replace one physical block every 17 32-Tile blocks
+        # bn_logical_idx = start_n // 544 Combined with internal_offset = start_n % 544,
+        # Process 17 32-Tile blocks. When the number of tiles accumulates to 544,
+        # bn_logical_idx will automatically increment by 1,
+        # and the next physical block ID will be read from B_Loc.
+        bn_logical_idx = start_n // PHYSICAL_BLOCK_SIZE
+        bn_internal_offset = start_n % PHYSICAL_BLOCK_SIZE
         bn = tl.load(
-            B_Loc
-            + cur_batch * stride_b_loc_b
-            + (start_n // BLOCK_SIZE) * stride_b_loc_s
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical_idx * stride_b_loc_s
         ).to(tl.int64)
-        # [D,BLOCK_SIZE]
+        # Calculate the physical location of this set of 32 tokens.
+        current_loc_in_physical = bn_internal_offset + offs_bs_n
+
+        # Addressing of K (5D)
         off_k = (
-            bn[None, :] * stride_k_cache_bs
+            bn * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // x) * stride_k_cache_d
-            + ((start_n + offs_bs_n[None, :]) % BLOCK_SIZE) * stride_k_cache_bl
-            + (offs_d[:, None] % x) * stride_k_cache_x
+            + (offs_d[:, None] // 8) * stride_k_cache_d
+            + current_loc_in_physical[None, :] * stride_k_cache_bl
+            + (offs_d[:, None] % 8) * stride_k_cache_x
         )
 
-        # [BLOCK_SIZE,D]
+        # Addressing of V (4D)
         off_v = (
-            bn[:, None] * stride_v_cache_bs
+            bn * stride_v_cache_bs
             + cur_kv_head * stride_v_cache_h
             + offs_d[None, :] * stride_v_cache_d
-            + offs_bs_n[:, None] * stride_v_cache_bl
+            + current_loc_in_physical[:, None] * stride_v_cache_bl
         )
 
         if (
@@ -195,12 +206,12 @@ def _fwd_kernel(
         else:
             k = k_load
 
-        qk = tl.zeros([BLOCK_M, BLOCK_SIZE], dtype=tl.float32)  # [M,N]
-        qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
+        # qk = tl.zeros([BLOCK_M, BLOCK_SIZE], dtype=tl.float32)  # [M,N]
+        qk = sm_scale * tl.dot(q, k, input_precision=IN_PRECISION)
         qk = tl.where(
             (start_n + offs_bs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf")
         )
-        qk *= sm_scale
+        # qk *= sm_scale
         if SLIDING_WINDOW > 0:
             # (cur_batch_ctx_len + offs_m[:, None]) are the positions of
             # Q entries in sequence
@@ -217,14 +228,16 @@ def _fwd_kernel(
                 (cur_batch_ctx_len + offs_m[:, None]) - (start_n + offs_bs_n[None, :])
                 < SLIDING_WINDOW,
                 qk,
-                -10000,
+                float("-inf"),
             )
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
         p = tl.exp(qk - m_ij[:, None])
+        p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
         l_ij = tl.sum(p, axis=1)
         alpha = tl.exp(m_i - m_ij)
+        alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
         acc = acc * alpha[:, None]
 
         # update acc
@@ -293,14 +306,17 @@ def _fwd_kernel(
             qk = tl.where(
                 offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW,
                 qk,
-                -10000,
+                float("-inf"),
             )
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
         p = tl.exp(qk - m_ij[:, None])
+        p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
         l_ij = tl.sum(p, axis=1)
         alpha = tl.exp(m_i - m_ij)
+        # To prevent NaN from appearing in the first round
+        alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
         acc = acc * alpha[:, None]
 
         # update acc
@@ -317,7 +333,7 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         m_i = m_ij
 
-    acc = acc / l_i[:, None]
+    acc = acc / (l_i[:, None] + 1e-10)
 
     # initialize pointers to output
     off_o = (
@@ -689,6 +705,17 @@ def context_attention_fwd(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
+    if b_loc.dtype == torch.int64 and b_loc.numel() > 0 and b_loc.max() > 1e10:
+        kv_element_size = k_cache.element_size()
+        block_byte_stride = k_cache.stride(0) * kv_element_size
+        base_addr = k_cache.data_ptr()
+        mask = b_loc != -1
+        processed_b_loc = torch.where(
+            mask, (b_loc - base_addr) // block_byte_stride, b_loc
+        ).to(torch.int32)
+    else:
+        processed_b_loc = b_loc.to(torch.int32)
+
     if alibi_slopes is not None:
         assert sinks is None, "Sinks arg is not supported with alibi"
         assert fp8_out_scale is None, "FP8 output not supported with alibi"
@@ -754,6 +781,8 @@ def context_attention_fwd(
     if current_platform.is_rocm():
         extra_kargs = {"kpack": 1, "waves_per_eu": 2}
 
+    real_block_size = v_cache.shape[3]
+
     grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid](
         q,
@@ -762,7 +791,7 @@ def context_attention_fwd(
         k_cache,
         v_cache,
         sinks,
-        b_loc,
+        processed_b_loc,
         sm_scale,
         k_scale,
         v_scale,
@@ -771,8 +800,8 @@ def context_attention_fwd(
         b_seq_len,
         k_cache.shape[4],
         o,
-        b_loc.stride(0),
-        b_loc.stride(1),
+        processed_b_loc.stride(0),
+        processed_b_loc.stride(1),
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -785,16 +814,17 @@ def context_attention_fwd(
         o.stride(0),
         o.stride(1),
         o.stride(2),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        k_cache.stride(2),
-        k_cache.stride(3),
-        k_cache.stride(4),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
-        v_cache.stride(0),
-        v_cache.stride(1),
-        v_cache.stride(2),
-        v_cache.stride(3),  # [num_blocks, num_kv_heads, head_size, block_size]
-        BLOCK_SIZE=v_cache.shape[3],
+        stride_k_cache_bs=k_cache.stride(0),
+        stride_k_cache_h=k_cache.stride(1),
+        stride_k_cache_d=k_cache.stride(2),
+        stride_k_cache_bl=k_cache.stride(3),
+        stride_k_cache_x=k_cache.stride(4),
+        stride_v_cache_bs=v_cache.stride(0),
+        stride_v_cache_h=v_cache.stride(1),
+        stride_v_cache_d=v_cache.stride(2),
+        stride_v_cache_bl=v_cache.stride(3),
+        BLOCK_SIZE=32,
+        PHYSICAL_BLOCK_SIZE=real_block_size,
         num_queries_per_kv=num_queries_per_kv,
         IN_PRECISION=IN_PRECISION,
         BLOCK_DMODEL=Lk,
@@ -802,8 +832,8 @@ def context_attention_fwd(
         SLIDING_WINDOW=sliding_window,
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
-        BLOCK_M=128,
-        BLOCK_N=64,
+        BLOCK_M=32,
+        BLOCK_N=32,
         num_unroll_cache=4,
         num_unroll_request=1,
         num_warps=4,
