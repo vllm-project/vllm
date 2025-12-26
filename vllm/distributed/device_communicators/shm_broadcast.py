@@ -49,14 +49,16 @@ def _parse_port_range(port_range: str) -> tuple[int, int]:
     sep = "-" if "-" in s else (":" if ":" in s else None)
     if sep is None:
         raise ValueError(
-            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected 'start-end' or 'start:end'"
+            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected 'start-end' or "
+            "'start:end'"
         )
     start_s, end_s = s.split(sep, 1)
     start_port = int(start_s)
     end_port = int(end_s)
     if not (1 <= start_port <= end_port <= 65535):
         raise ValueError(
-            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected 1 <= start <= end <= 65535"
+            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected "
+            "1 <= start <= end <= 65535"
         )
     return start_port, end_port
 
