@@ -662,6 +662,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
     ),
+    "IsaacForConditionalGeneration": _HfExamplesInfo(
+        "PerceptronAI/Isaac-0.1",
+        trust_remote_code=True,
+    ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1", trust_remote_code=True
     ),
