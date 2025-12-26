@@ -54,6 +54,29 @@ vllm bench serve \
     --num-prompts 2
 ```
 
+Or use http request:
+
+```shell
+# We need first call /start_profile api to start profile.
+$ curl -X POST http://localhost:8000/start_profile
+
+# Call model generate.
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "San Francisco is a"
+                        }
+                ]
+    }'
+
+# After need call /stop_profile api to stop profile.
+$ curl -X POST http://localhost:8000/stop_profile
+```
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.
