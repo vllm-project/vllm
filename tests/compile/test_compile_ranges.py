@@ -128,7 +128,7 @@ def test_compile_config_get_compile_ranges():
 
 def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
     # To force multiple compilations, we disable the compile cache
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     post_grad_range_checker = PostGradRangeChecker(
         ranges=[

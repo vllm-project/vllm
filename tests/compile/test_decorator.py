@@ -71,7 +71,7 @@ def run_model(
 def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatch):
     # disable compile cache so that we can count the number of compilations
     # appropriately
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
@@ -203,7 +203,7 @@ class A(nn.Module):
 def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch):
     # disable compile cache so that we can count the number of compilations
     # appropriately
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")

@@ -150,7 +150,7 @@ def test_simple_inductor_graph_partition(monkeypatch):
 
     # disable compile cache so that we run separately for different splitting_ops
     # and get the expected number of cudagraphs captured.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     _run_simple_model(
         splitting_ops=["silly::attention"],
