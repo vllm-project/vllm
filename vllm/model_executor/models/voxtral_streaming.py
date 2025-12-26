@@ -33,9 +33,6 @@ from vllm.sequence import IntermediateTensors
 from .utils import (
     _flatten_embeddings,
 )
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import inspect
 import math
 from collections.abc import Iterable, Mapping, Sequence
