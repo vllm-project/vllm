@@ -64,7 +64,7 @@ def generate_yaml_file(cpuset_csv, num_alloc, idle_cpuset_csv, num_idle_cpus, ar
 def main():
     ap = argparse.ArgumentParser(description="Generate override docker-compose YAML (x-sets) for single 'vllm-server'.")
     ap.add_argument("--settings",
-                    default="server/cpu_binding/cpu_binding_gnr.csv",
+                    default="cpu_binding_gnr.csv",
                     help="CSV with columns: model_id,input length,output length,world_size,num_allocated_cpu")
     ap.add_argument("--output", default="docker-compose.override.yml", help="Output compose YAML path")
     ap.add_argument("--cpuservice", help="name of the docker service binding on idle CPUs")
