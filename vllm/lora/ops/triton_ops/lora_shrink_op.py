@@ -12,7 +12,6 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
 
@@ -126,7 +125,7 @@ def _lora_shrink_kernel(
 
 
 @torch.inference_mode()
-def _lora_shrink(
+def lora_shrink(
     inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
     lora_a_weights: list[torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
     output_tensor: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
@@ -257,31 +256,3 @@ def _lora_shrink(
     )
 
     return
-
-
-def _lora_shrink_fake(
-    inputs: torch.Tensor,
-    lora_a_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    scaling: float,
-) -> None:
-    return
-
-
-try:
-    direct_register_custom_op(
-        op_name="lora_shrink",
-        op_func=_lora_shrink,
-        mutates_args=["output_tensor"],
-        fake_impl=_lora_shrink_fake,
-    )
-    lora_shrink = torch.ops.vllm.lora_shrink
-
-except AttributeError:
-    lora_shrink = _lora_shrink

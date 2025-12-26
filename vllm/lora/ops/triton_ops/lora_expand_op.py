@@ -12,7 +12,6 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
 
@@ -130,7 +129,7 @@ def _lora_expand_kernel(
 
 
 @torch.inference_mode()
-def _lora_expand(
+def lora_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
     lora_b_weights: list[torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
     output_tensor: torch.Tensor,  # shape [num_tokens, hidden_size * num_slices]
@@ -279,32 +278,3 @@ def _lora_expand(
     )
 
     return
-
-
-def _lora_expand_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    offset_start: int = 0,
-    add_inputs: bool = False,
-) -> None:
-    return
-
-
-try:
-    direct_register_custom_op(
-        op_name="lora_expand",
-        op_func=_lora_expand,
-        mutates_args=["output_tensor"],
-        fake_impl=_lora_expand_fake,
-    )
-    lora_expand = torch.ops.vllm.lora_expand
-
-except AttributeError:
-    lora_expand = _lora_expand

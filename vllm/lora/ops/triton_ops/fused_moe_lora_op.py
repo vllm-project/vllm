@@ -8,7 +8,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
 
@@ -46,7 +45,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
         "slice_c_size",
     ]
 )
-def _fused_moe_lora_kernel(
+def fused_moe_lora_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -198,7 +197,7 @@ def _fused_moe_lora_kernel(
 
 
 @torch.inference_mode()
-def _fused_moe_lora_shrink(
+def fused_moe_lora_shrink(
     a_intermediate_cache1: torch.Tensor,
     # (num_slices, num_tokens, top_k_num, max_lora_rank)
     qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
@@ -253,7 +252,7 @@ def _fused_moe_lora_shrink(
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
-    _fused_moe_lora_kernel[grid](
+    fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
         b_ptr,
         a_intermediate_cache1,
@@ -290,7 +289,7 @@ def _fused_moe_lora_shrink(
 
 
 @torch.inference_mode()
-def _fused_moe_lora_expand(
+def fused_moe_lora_expand(
     output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
     a_intermediate_cache1: torch.Tensor,  # (num_slices, M, top_k_num, max_lora_rank)
     b_intermediate_cache1: torch.Tensor,  # (num_slices, M, top_k_num, output_dim_size)
@@ -353,7 +352,7 @@ def _fused_moe_lora_expand(
         len(lora_b_stacked),
         lora_b_stacked[0].shape[0],
     )
-    _fused_moe_lora_kernel[grid](
+    fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
         b_ptr,
         b_intermediate_cache1,
@@ -392,7 +391,7 @@ def _fused_moe_lora_expand(
 
 
 @torch.inference_mode()
-def _fused_moe_lora(
+def fused_moe_lora(
     output: torch.Tensor,  # (num_tokens, top_k_num, N*len(lora_a_stacked),)
     qcurr_hidden_states: torch.Tensor,  # (num_tokens, K,)
     lora_a_stacked: list[
@@ -465,7 +464,7 @@ def _fused_moe_lora(
         device=device,
     )
 
-    _fused_moe_lora_shrink(
+    fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,
         lora_a_stacked,
@@ -508,7 +507,7 @@ def _fused_moe_lora(
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
-    _fused_moe_lora_expand(
+    fused_moe_lora_expand(
         output,
         a_intermediate_cache1,
         b_intermediate_cache1,
@@ -541,131 +540,3 @@ def _fused_moe_lora(
         mul_routed_weight,
         offset,
     )
-
-
-def _fused_moe_lora_fake(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    max_lora_rank: int,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
-    mul_routed_weight: bool = False,
-) -> None:
-    return
-
-
-def _fused_moe_lora_shrink_fake(
-    a_intermediate_cache1: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    mul_routed_weight: bool = False,
-) -> None:
-    return
-
-
-def _fused_moe_lora_expand_fake(
-    output: torch.Tensor,
-    a_intermediate_cache1: torch.Tensor,
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    max_lora_rank: int,
-    w1_output_dim_size: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    mul_routed_weight: bool = False,
-) -> None:
-    return
-
-
-try:
-    direct_register_custom_op(
-        op_name="fused_moe_lora",
-        op_func=_fused_moe_lora,
-        mutates_args=["output"],
-        fake_impl=_fused_moe_lora_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="fused_moe_lora_shrink",
-        op_func=_fused_moe_lora_shrink,
-        mutates_args=["a_intermediate_cache1"],
-        fake_impl=_fused_moe_lora_shrink_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="fused_moe_lora_expand",
-        op_func=_fused_moe_lora_expand,
-        mutates_args=["output"],
-        fake_impl=_fused_moe_lora_expand_fake,
-    )
-
-    fused_moe_lora = torch.ops.vllm.fused_moe_lora
-    fused_moe_lora_shrink = torch.ops.vllm.fused_moe_lora_shrink
-    fused_moe_lora_expand = torch.ops.vllm.fused_moe_lora_expand
-
-except AttributeError:
-    fused_moe_lora = _fused_moe_lora
-    fused_moe_lora_shrink = _fused_moe_lora_shrink
-    fused_moe_lora_expand = _fused_moe_lora_expand
