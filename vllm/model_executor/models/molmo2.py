@@ -329,8 +329,6 @@ class ViTMultiHeadDotProductAttention(nn.Module):
         num_key_value_heads: int,
         head_dim: int,
         use_bias: bool = True,
-        input_dim: int | None = None,
-        use_pytorch_sdpa: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -356,24 +354,14 @@ class ViTMultiHeadDotProductAttention(nn.Module):
 
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 
-        if input_dim is None:
-            input_dim = self.hidden_size
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.wq = ColumnParallelLinear(
-            input_dim,
-            self.total_num_heads * self.head_dim,
-            bias=use_bias,
-            quant_config=quant_config,
-        )
-        self.wk = ColumnParallelLinear(
-            input_dim,
-            self.total_num_kv_heads * self.head_dim,
-            bias=use_bias,
-            quant_config=quant_config,
-        )
-        self.wv = ColumnParallelLinear(
-            input_dim,
-            self.total_num_kv_heads * self.head_dim,
+        self.merged_qkv = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
             bias=use_bias,
             quant_config=quant_config,
         )
@@ -384,77 +372,19 @@ class ViTMultiHeadDotProductAttention(nn.Module):
             quant_config=quant_config,
         )
         self.scale = self.head_dim**-0.5
-        self.use_pytorch_sdpa = use_pytorch_sdpa
-        if use_pytorch_sdpa:
-            self.attn = None
-        else:
-            self.attn = MMEncoderAttention(
-                self.num_heads,
-                self.head_dim,
-                self.scale,
-                num_kv_heads=self.num_kv_heads,
-                prefix=f"{prefix}.attn",
-            )
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads,
+            prefix=f"{prefix}.attn",
+        )
 
-    def forward_sdpa(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        bsz, q_len, _ = query.size()
-        kv_len = key.size(1)
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        qkv, _ = self.merged_qkv(inputs)
+        xq, xk, xv = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        query = query.view(bsz, q_len, self.num_heads, self.head_dim)
-        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
-        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
-
-        if self.num_heads != self.num_kv_heads:
-            key = torch.repeat_interleave(
-                key,
-                self.num_heads // self.num_kv_heads,
-                dim=2,
-            )
-            value = torch.repeat_interleave(
-                value,
-                self.num_heads // self.num_kv_heads,
-                dim=2,
-            )
-
-        query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-
-        out = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attn_mask,
-            is_causal=False,
-        ).transpose(1, 2)
-
-        return out.reshape(bsz, q_len, -1)
-
-    def forward(
-        self,
-        inputs_q: torch.Tensor,
-        inputs_kv: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if inputs_kv is not None:
-            inputs_k = inputs_kv
-            inputs_v = inputs_kv
-        else:
-            inputs_k = inputs_q
-            inputs_v = inputs_q
-
-        xq, _ = self.wq(inputs_q)
-        xk, _ = self.wk(inputs_k)
-        xv, _ = self.wv(inputs_v)
-
-        if self.use_pytorch_sdpa:
-            output = self.forward_sdpa(xq, xk, xv, attn_mask)
-        else:
-            output = self.attn(xq, xk, xv)
+        output = self.attn(xq, xk, xv)
 
         output, _ = self.wo(output)
 
@@ -605,6 +535,133 @@ class Molmo2VisionTransformer(nn.Module):
         return hidden_states
 
 
+class ImagePoolingAttention(nn.Module):
+    """Multi-head attention used for image pooling"""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_size: int,
+        num_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        use_bias: bool = True,
+        use_pytorch_sdpa: bool = False,
+        quant_config: QuantizationConfig | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_size = hidden_size
+        self.total_num_heads = num_heads
+        tp_size = get_tensor_model_parallel_world_size()
+
+        assert self.hidden_size % self.total_num_heads == 0
+        assert self.total_num_heads % tp_size == 0
+
+        self.num_heads = self.total_num_heads // tp_size
+        self.head_dim = head_dim
+
+        assert self.head_dim == self.hidden_size // self.total_num_heads
+
+        self.total_num_kv_heads = num_key_value_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.q_proj = ColumnParallelLinear(
+            self.input_dim,
+            self.total_num_heads * self.head_dim,
+            bias=use_bias,
+            quant_config=quant_config,
+        )
+        self.merged_kv = MergedColumnParallelLinear(
+            self.input_dim,
+            [self.total_num_kv_heads * self.head_dim] * 2,
+            bias=use_bias,
+            quant_config=quant_config,
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=use_bias,
+            quant_config=quant_config,
+        )
+        self.scale = self.head_dim**-0.5
+        self.use_pytorch_sdpa = use_pytorch_sdpa
+        if use_pytorch_sdpa:
+            self.attn = None
+        else:
+            self.attn = MMEncoderAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scale,
+                num_kv_heads=self.num_kv_heads,
+            )
+
+    def forward_sdpa(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        bsz, q_len, _ = query.size()
+        kv_len = key.size(1)
+
+        query = query.view(bsz, q_len, self.num_heads, self.head_dim)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+
+        if self.num_heads != self.num_kv_heads:
+            key = torch.repeat_interleave(
+                key,
+                self.num_heads // self.num_kv_heads,
+                dim=2,
+            )
+            value = torch.repeat_interleave(
+                value,
+                self.num_heads // self.num_kv_heads,
+                dim=2,
+            )
+
+        query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+
+        out = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            is_causal=False,
+        ).transpose(1, 2)
+
+        return out.reshape(bsz, q_len, -1)
+
+    def forward(
+        self,
+        inputs_q: torch.Tensor,
+        inputs_kv: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        xq, _ = self.q_proj(inputs_q)
+        kv, _ = self.merged_kv(inputs_kv)
+        xk, xv = kv.split([self.kv_size, self.kv_size], dim=-1)
+
+        if self.use_pytorch_sdpa:
+            output = self.forward_sdpa(xq, xk, xv, attn_mask)
+        else:
+            output = self.attn(xq, xk, xv)
+
+        output, _ = self.o_proj(output)
+
+        return output
+
+
 class ImageProjectorMLP(nn.Module):
     """MLP used for the image projector"""
 
@@ -644,7 +701,11 @@ class ImageProjectorMLP(nn.Module):
 
 
 class Molmo2VisionBackbone(nn.Module, SupportsQuant):
-    packed_modules_mapping = {"merged_linear": ["gate_proj", "up_proj"]}
+    packed_modules_mapping = {
+        "merged_qkv": ["wq", "wk", "wv"],  # vision backbone
+        "merged_kv": ["k_proj", "v_proj"],  # image_pooling_2d
+        "merged_linear": ["gate_proj", "up_proj"],
+    }
 
     def __init__(
         self,
@@ -676,12 +737,12 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         self.num_prefix_tokens: int = self.image_vit.num_prefix_tokens
 
         pool_dim = vit_config.hidden_size * len(adapter_config.vit_layers)
-        self.image_pooling_2d = ViTMultiHeadDotProductAttention(
+        self.image_pooling_2d = ImagePoolingAttention(
+            input_dim=pool_dim,
             hidden_size=adapter_config.hidden_size,
             num_heads=adapter_config.num_attention_heads,
             num_key_value_heads=adapter_config.num_key_value_heads,
             head_dim=adapter_config.head_dim,
-            input_dim=pool_dim,
             use_pytorch_sdpa=adapter_config.pooling_attention_mask,
             quant_config=quant_config,
         )
@@ -776,6 +837,11 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            ("merged_qkv", "wq", "q"),
+            ("merged_qkv", "wk", "k"),
+            ("merged_qkv", "wv", "v"),
+            ("merged_kv", "k_proj", 0),
+            ("merged_kv", "v_proj", 1),
             ("merged_linear", "gate_proj", 0),
             ("merged_linear", "up_proj", 1),
         ]
@@ -2357,6 +2423,10 @@ class Molmo2ForConditionalGeneration(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping
+            "image_pooling_2d.wq.": "image_pooling_2d.q_proj.",
+            "image_pooling_2d.wk.": "image_pooling_2d.k_proj.",
+            "image_pooling_2d.wv.": "image_pooling_2d.v_proj.",
+            "image_pooling_2d.wo.": "image_pooling_2d.o_proj.",
             "image_projector.w1.": "image_projector.gate_proj.",
             "image_projector.w3.": "image_projector.up_proj.",
             "image_projector.w2.": "image_projector.down_proj.",
@@ -2382,6 +2452,8 @@ class Molmo2ForConditionalGeneration(
     packed_modules_mapping = {
         "qkv_proj": ["qkv_proj"],
         "up_gate_proj": ["up_gate_proj"],  # language model
+        "merged_qkv": ["wq", "wk", "wv"],  # vision backbone
+        "merged_kv": ["k_proj", "v_proj"],  # image_pooling_2d
         "merged_linear": ["gate_proj", "up_proj"],  # image_projector
     }
 
