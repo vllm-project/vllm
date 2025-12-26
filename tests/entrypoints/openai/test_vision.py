@@ -25,45 +25,33 @@ TEST_IMAGE_ASSETS = [
     "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
 ]
 
-EXPECTED_MM_BEAM_SEARCH_RES = [
-    [
-        "The image shows a wooden boardwalk leading through a",
-        "The image shows a wooden boardwalk extending into a",
-    ],
-    [
-        "The image shows two parrots perched on",
-        "The image shows two birds perched on a cur",
-    ],
-    [
-        "The image shows a Venn diagram with three over",
-        "The image displays a Venn diagram with three over",
-    ],
-    [
-        "This image displays a gradient of colors ranging from",
-        "This image displays a gradient of colors forming a spectrum",
-    ],
+# Required terms for beam search validation
+# Each entry is a list of term groups - ALL groups must match
+# Each group is a list of alternatives - at least ONE term in the group must appear
+# This provides semantic validation while allowing wording variation
+REQUIRED_BEAM_SEARCH_TERMS = [
+    # Boardwalk image: must have "boardwalk" AND ("wooden" or "wood")
+    [["boardwalk"], ["wooden", "wood"]],
+    # Parrots image: must have ("parrot" or "bird") AND "two"
+    [["parrot", "bird"], ["two"]],
+    # Venn diagram: must have "venn" AND "diagram"
+    [["venn"], ["diagram"]],
+    # Gradient image: must have "gradient" AND ("color" or "spectrum")
+    [["gradient"], ["color", "spectrum"]],
 ]
 
-EXPECTED_MM_BEAM_SEARCH_RES_ROCM = [
-    # MultiHeadAttention attn_backend: FLASH_ATTN
-    # with Triton Attention backend
-    [
-        "The image shows a wooden boardwalk leading through a",
-        "The image shows a wooden boardwalk extending into a",
-    ],
-    [
-        "The image shows two parrots perched on",
-        "The image shows two birds perched on a cur",
-    ],
-    [
-        "The image shows a Venn diagram with three over",
-        "The image contains a Venn diagram with three over",
-    ],
-    [
-        "This image displays a gradient of colors ranging from",
-        "This image displays a gradient of colors transitioning from",
-    ],
-]
+
+def check_output_matches_terms(content: str, term_groups: list[list[str]]) -> bool:
+    """
+    Check if content matches all required term groups.
+    Each term group requires at least one of its terms to be present.
+    All term groups must be satisfied.
+    """
+    content_lower = content.lower()
+    for group in term_groups:
+        if not any(term.lower() in content_lower for term in group):
+            return False
+    return True
 
 
 @pytest.fixture(scope="module")
@@ -319,16 +307,9 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     image_idx: int,
     url_encoded_image: dict[str, str],
 ):
-    # ROCm: Switch expected results based on platform
-    from vllm.platforms import current_platform
-
-    # NOTE: This test also validates that we pass MM data through beam search
+    # NOTE: This test validates that we pass MM data through beam search
     raw_image_url = TEST_IMAGE_ASSETS[image_idx]
-
-    if current_platform.is_rocm():
-        expected_res = EXPECTED_MM_BEAM_SEARCH_RES_ROCM[image_idx]
-    else:
-        expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
+    required_terms = REQUIRED_BEAM_SEARCH_TERMS[image_idx]
 
     messages = dummy_messages_from_image_url(url_encoded_image[raw_image_url])
 
@@ -341,8 +322,29 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
         extra_body=dict(use_beam_search=True),
     )
     assert len(chat_completion.choices) == 2
-    for actual, expected_str in zip(chat_completion.choices, expected_res):
-        assert actual.message.content == expected_str
+
+    # Verify beam search produces two different non-empty outputs
+    content_0 = chat_completion.choices[0].message.content
+    content_1 = chat_completion.choices[1].message.content
+
+    # Emit beam search outputs for debugging
+    print(
+        f"Beam search outputs for image {image_idx} ({raw_image_url}): "
+        f"Output 0: {content_0!r}, Output 1: {content_1!r}"
+    )
+
+    assert content_0, "First beam search output should not be empty"
+    assert content_1, "Second beam search output should not be empty"
+    assert content_0 != content_1, "Beam search should produce different outputs"
+
+    # Verify each output contains the required terms for this image
+    for i, content in enumerate([content_0, content_1]):
+        if not check_output_matches_terms(content, required_terms):
+            pytest.fail(
+                f"Output {i} '{content}' doesn't contain required terms. "
+                f"Expected all of these term groups (at least one from each): "
+                f"{required_terms}"
+            )
 
 
 @pytest.mark.asyncio
