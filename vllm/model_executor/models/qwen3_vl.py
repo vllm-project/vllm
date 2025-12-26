@@ -49,10 +49,10 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -66,6 +66,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -210,6 +211,7 @@ class Qwen3_VisionMLP(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={"x": 0, "cu_seqlens": 0, "rotary_pos_emb": 0, "seqlens": 0},
     mark_unbacked_dims={"seqlens": 0},
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen3_VisionBlock(nn.Module):
     def __init__(
@@ -263,7 +265,8 @@ class Qwen3_VisionBlock(nn.Module):
         return x
 
 
-@support_torch_compile(dynamic_arg_dims={"x": 0})
+@support_torch_compile(dynamic_arg_dims={"x": 0},
+    enable_if=should_torch_compile_mm_vit)
 class Qwen3_VisionPatchMerger(nn.Module):
     def __init__(
         self,
@@ -420,6 +423,17 @@ class Qwen3_VisionTransformer(nn.Module):
                     for layer_idx in range(vision_config.depth)
                 ]
             )
+        vllm_config: VllmConfig = get_current_vllm_config()
+        self._persistent_hidden_states_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_buffer: torch.Tensor | None = None
+        if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
+            max_compile_size = vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
+            self._persistent_hidden_states_buffer = torch.empty(
+                (max_compile_size, self.patch_embed.proj.input_size), device=self.device, dtype=self.dtype
+            )
+            self._persistent_rotary_pos_emb_buffer = torch.empty(
+                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.float32
+            )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -551,8 +565,25 @@ class Qwen3_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
-        hidden_states = self.patch_embed(hidden_states)
+        seq_len, _ = x.size()
+        fwd_ctx = get_forward_context()
+        if (
+            self._persistent_hidden_states_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
+            hidden_states = self._persistent_hidden_states_buffer[:seq_len]
+            hidden_states.copy_(x, non_blocking=True)
+        else:
+            hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
+
+        from vllm.compilation.backends import (
+            set_is_first_graph_in_sequence,
+            set_is_last_graph_in_sequence,
+        )
+
+        with set_is_first_graph_in_sequence(True), set_is_last_graph_in_sequence(False):
+            hidden_states = self.patch_embed(hidden_states)
 
         if isinstance(grid_thw, list):
             grid_thw_list = grid_thw
@@ -562,8 +593,19 @@ class Qwen3_VisionTransformer(nn.Module):
             grid_thw = grid_thw.numpy()
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+        original_hidden_states = hidden_states
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw_list)
+        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device, non_blocking=True)
+        if (
+            self._persistent_rotary_pos_emb_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
+            rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(
+                rotary_pos_emb
+            )
 
         cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             axis=0, dtype=np.int32
@@ -575,21 +617,37 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
+        if (
+            self._persistent_hidden_states_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
+            # The above operations will produce temporary new tensors.
+            # That is not friendly to cudagraphs,
+            # so we need to copy them back to the persistent buffer
+            original_hidden_states = original_hidden_states.view(hidden_states.shape)
+            original_hidden_states.copy_(hidden_states)
+            hidden_states = original_hidden_states
+
         deepstack_feature_lists = []
-        for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
-            )
-            if layer_num in self.deepstack_visual_indexes:
-                deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
-                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
+        with (
+            set_is_first_graph_in_sequence(False),
+            set_is_last_graph_in_sequence(False),
+        ):
+            for layer_num, blk in enumerate(self.blocks):
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens,
+                    rotary_pos_emb_cos=rotary_pos_emb_cos,
+                    rotary_pos_emb_sin=rotary_pos_emb_sin,
+                    max_seqlen=max_seqlen,
                 )
-                deepstack_feature_lists.append(deepstack_feature)
+                if layer_num in self.deepstack_visual_indexes:
+                    deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
+                    deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
+                        hidden_states
+                )
+                    deepstack_feature_lists.append(deepstack_feature)
         hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
@@ -1433,7 +1491,18 @@ class Qwen3VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            with set_forward_context(None, self.vllm_config):
+            if self.vllm_config.is_in_compile:
+                with set_forward_context(None, self.vllm_config):
+                    if self.use_data_parallel:
+                        return run_dp_sharded_mrope_vision_model(
+                            self.visual,
+                            pixel_values,
+                            grid_thw_list,
+                            rope_type="rope_3d",
+                        )
+                    else:
+                        image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            else:
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
