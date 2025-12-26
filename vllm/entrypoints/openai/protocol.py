@@ -474,6 +474,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -876,6 +877,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -1316,6 +1318,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -2182,6 +2185,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
             extra_args=self.vllm_xargs,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
@@ -2409,6 +2413,7 @@ class TranslationRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
     @model_validator(mode="before")
