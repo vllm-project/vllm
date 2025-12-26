@@ -10,6 +10,7 @@ import torch
 
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -31,18 +32,18 @@ from vllm.v1.worker.mamba_utils import get_mamba_groups
 class StepAction:
     num_computed_tokens_start: int
     num_scheduled_tokens: int
-    kv_cache_block_ids: list[int] | None  # [] to follow last step
-    preprocess_copy_idx: tuple[int, int] | None  # -1, -1 for no copy
-    postprocess_copy_idx: tuple[int, int] | None  # -1, -1 for no copy
+    kv_cache_block_ids: list[int]  # [] to follow last step
+    preprocess_copy_idx: tuple[int, int]  # -1, -1 for no copy
+    postprocess_copy_idx: tuple[int, int]  # -1, -1 for no copy
 
 
 num_speculative_tokens = 3
 
 num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
-MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct"
+MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 BLOCK_SIZE = 560
-NUM_HIDDEN_LAYERS = 8
+NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
 cur_step_action: StepAction | None = None
 step_actions: list[StepAction] = []
@@ -274,7 +275,37 @@ def get_fake_process_mamba_fn(
     original_post_process_mamba_fn: Callable,
     original_copy_fn: Callable,
 ):
-    copy_info = (-1, -1)
+    copy_info: tuple[list[int], list[int], list[int]] | None = None
+
+    def check_copy_info(
+        action: tuple[int, int],
+        kv_cache_config: KVCacheConfig,
+        forward_context: dict[str, Any],
+        input_batch: GPUInputBatch,
+    ):
+        assert copy_info is not None
+        if action == (-1, -1):
+            assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
+        else:
+            assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
+            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            mamba_group_id = mamba_group_ids[0]
+            mamba_layer_name = kv_cache_config.kv_cache_groups[
+                mamba_group_id
+            ].layer_names[0]
+            mamba_kv_cache = forward_context[mamba_layer_name].kv_cache[0][-1]
+            mamba_block_table = input_batch.block_table.block_tables[
+                mamba_group_id
+            ].block_table.cpu[0]
+            expected_temporal_src = mamba_kv_cache[
+                mamba_block_table[action[0]]
+            ].data_ptr()
+            expected_temporal_dest = mamba_kv_cache[
+                mamba_block_table[action[1]]
+            ].data_ptr()
+            # -1 is qwen3-next's temporal. We skip checking conv as it is more complex.
+            assert copy_info[0][-1] == expected_temporal_src
+            assert copy_info[1][-1] == expected_temporal_dest
 
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
@@ -284,9 +315,10 @@ def get_fake_process_mamba_fn(
         input_batch: GPUInputBatch,
         requests: dict[str, CachedRequestState],
         forward_context: dict[str, Any],
+        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     ):
         nonlocal copy_info
-        copy_info = (-1, -1)
+        copy_info = None
         ret = original_preprocess_mamba_fn(
             scheduler_output,
             kv_cache_config,
@@ -295,10 +327,15 @@ def get_fake_process_mamba_fn(
             input_batch,
             requests,
             forward_context,
+            mamba_state_copy_funcs,
         )
         if cur_step_action is not None:
-            print("[UNIT TEST STEP] verifying preprocess_copy_idx")
-            assert copy_info == cur_step_action.preprocess_copy_idx
+            check_copy_info(
+                cur_step_action.preprocess_copy_idx,
+                kv_cache_config,
+                forward_context,
+                input_batch,
+            )
         return ret
 
     def fake_post_process_mamba_fn(
@@ -308,9 +345,10 @@ def get_fake_process_mamba_fn(
         requests: dict[str, CachedRequestState],
         mamba_state_idx: dict[str, int],
         forward_context: dict[str, Any],
+        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     ):
         nonlocal copy_info
-        copy_info = (-1, -1)
+        copy_info = None
         ret = original_post_process_mamba_fn(
             scheduler_output,
             kv_cache_config,
@@ -318,32 +356,29 @@ def get_fake_process_mamba_fn(
             requests,
             mamba_state_idx,
             forward_context,
+            mamba_state_copy_funcs,
         )
         if cur_step_action is not None:
-            print("[UNIT TEST STEP] verifying postprocess_copy_idx")
-            assert copy_info == cur_step_action.postprocess_copy_idx
+            check_copy_info(
+                cur_step_action.postprocess_copy_idx,
+                kv_cache_config,
+                forward_context,
+                input_batch,
+            )
         return ret
 
     def fake_copy_fn(
-        kv_cache_config: KVCacheConfig,
-        mamba_group_ids: list[int],
-        src_block_idx: int,
-        dest_block_idx: int,
-        accept_token_bias: int,
-        req_state: CachedRequestState,
-        forward_context: dict[str, Any],
+        src_state_list: list[int],
+        dest_state_list: list[int],
+        num_elements_list: list[int],
     ):
         nonlocal copy_info
-        assert copy_info == (-1, -1)
-        copy_info = (src_block_idx, dest_block_idx)
+        assert copy_info is None
+        copy_info = (src_state_list, dest_state_list, num_elements_list)
         return original_copy_fn(
-            kv_cache_config,
-            mamba_group_ids,
-            src_block_idx,
-            dest_block_idx,
-            accept_token_bias,
-            req_state,
-            forward_context,
+            src_state_list,
+            dest_state_list,
+            num_elements_list,
         )
 
     return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
@@ -362,7 +397,6 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
     engine = LLM(
         model=MODEL,
-        enforce_eager=True,
         block_size=BLOCK_SIZE,
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
         seed=42,
@@ -452,12 +486,12 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
         get_fake_process_mamba_fn(
             mamba_utils.preprocess_mamba,
             mamba_utils.postprocess_mamba,
-            mamba_utils.mamba_copy_block,
+            mamba_utils.do_mamba_copy_block,
         )
     )
     monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
     monkeypatch.setattr(mamba_utils, "postprocess_mamba", fake_post_process_mamba_fn)
-    monkeypatch.setattr(mamba_utils, "mamba_copy_block", fake_copy_fn)
+    monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
@@ -490,7 +524,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(554, 4, [], (-1, -1), (-1, -1)),
                 StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
                 StepAction(560, 4, [], (-1, -1), (-1, -1)),
                 StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -503,7 +537,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
                 StepAction(559, 4, [], (-1, -1), (1, 0)),
                 StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -516,7 +550,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(553, 4, [], (-1, -1), (-1, -1)),
                 StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
                 StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -527,7 +561,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
                 StepAction(560, 4, [], (-1, -1), (-1, -1)),
                 StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -539,7 +573,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
                 StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -550,7 +584,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
                 StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(565, 4, [], (-1, -1), (-1, -1)),
             ],
@@ -562,7 +596,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
                 StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(566, 4, [], (-1, -1), (-1, -1)),
             ],
@@ -574,7 +608,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
                 StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -584,7 +618,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (0, 0)),
+                StepAction(556, 4, [], (-1, -1), (3, 0)),
                 StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -594,7 +628,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
             ],
         ),
@@ -603,8 +637,8 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
-                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (1, 1)),
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(560 * 2, 4, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
             ],
         ),
@@ -613,7 +647,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
                 StepAction(560 * 2 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -623,8 +657,8 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
-                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (2, 2)),
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1, 1], (2, 3), (-1, -1)),
             ],
         ),
@@ -633,7 +667,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
                 StepAction(560 * 3 + 10, 4, [0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
@@ -643,20 +677,20 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (4, 4)),
+                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 5,
                     560 * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
-                    (8, 8),
+                    (-1, -1),
                 ),
                 StepAction(
                     560 * 9,
                     560,
                     [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (8, 9),
-                    (9, 9),
+                    (-1, -1),
                 ),
                 StepAction(
                     560 * 10,
@@ -672,13 +706,13 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (4, 4)),
+                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 5,
                     560 * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
-                    (8, 8),
+                    (-1, -1),
                 ),
                 StepAction(
                     560 * 9,
@@ -694,7 +728,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
-        enforce_eager=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
         speculative_config={
