@@ -93,10 +93,11 @@ class SingleTypeKVCacheManager(ABC):
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
-            assert (
-                len(new_computed_blocks) == 0 and num_required_blocks >= num_req_blocks
-            )
-            return num_required_blocks - num_req_blocks
+            assert len(new_computed_blocks) == 0
+            # NOTE: With speculative decoding, request's blocks may be allocated
+            # for draft tokens which are later rejected. In this case,
+            # num_required_blocks may be smaller than num_req_blocks.
+            return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
