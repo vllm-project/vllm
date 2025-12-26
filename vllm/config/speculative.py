@@ -32,6 +32,7 @@ MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
+    "glm4_moe_lite_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",

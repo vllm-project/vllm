@@ -973,6 +973,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
     ),
+    "Glm4MoeMTPLiteModel": _HfExamplesInfo(
+        "zai-org/GLM-Lite",
+        speculative_model="zai-org/GLM-Lite",
+    ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
         trust_remote_code=True,
