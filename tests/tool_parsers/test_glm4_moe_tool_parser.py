@@ -284,6 +284,22 @@ def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser):
     assert extracted_tool_calls.tool_calls[0].function.arguments == "{}"
 
 
+def test_extract_tool_calls_no_newline_no_arguments(glm4_moe_tool_parser):
+    """Test tool calls with no newline and no arguments (issue #31379)."""
+    # This is the case when a tool has no parameters at all
+    model_output = """<tool_call>get_current_time</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_time"
+    # Empty arguments should result in empty JSON object
+    assert extracted_tool_calls.tool_calls[0].function.arguments == "{}"
+
+
 def test_extract_tool_calls_mixed_content(glm4_moe_tool_parser):
     """Test extraction with mixed content and multiple tool calls."""
     model_output = """I will help you get the weather info.
