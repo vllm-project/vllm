@@ -1366,14 +1366,18 @@ class TestMLAFP8CacheInput:
         1. ops.concat_and_cache_mla() - caches k_c_normed and k_pe to KV cache
         2. _forward_prefill() - for prefill tokens (if any)
         3. _forward_decode() - for decode tokens (if any)
+           - For FLASHINFER_MLA: calls trtllm_batch_decode_with_kv_cache_mla
         4. _v_up_proj() - projects attention output back to v_head_dim
         """
         import logging
         from unittest.mock import patch
 
-        # Skip if no Blackwell GPU (needed for TRITON_MLA FP8)
+        # FLASHINFER_MLA requires Blackwell GPU (SM 10.x)
         if not torch.cuda.is_available():
             pytest.skip("CUDA not available")
+        cc_major = torch.cuda.get_device_properties(0).major
+        if cc_major < 10:
+            pytest.skip("FLASHINFER_MLA requires Blackwell GPU (SM 10.x)")
 
         # Set up logging
         logging.basicConfig(level=logging.INFO)
@@ -1616,15 +1620,45 @@ class TestMLAFP8CacheInput:
                 )
                 return original_v_up_proj(*args, **kwargs)
 
+            # Patch flashinfer's trtllm_batch_decode_with_kv_cache_mla
+            # The function is imported at module level in flashinfer_mla.py,
+            # so we need to patch it in that module, not in flashinfer.decode
+            from vllm.v1.attention.backends.mla import (
+                flashinfer_mla as flashinfer_mla_module,
+            )
+
+            original_trtllm_decode = (
+                flashinfer_mla_module.trtllm_batch_decode_with_kv_cache_mla
+            )
+
+            def logged_trtllm_decode(*args, **kwargs):
+                query = kwargs.get("query", args[0] if args else None)
+                kv_cache_arg = kwargs.get(
+                    "kv_cache", args[1] if len(args) > 1 else None
+                )
+                call_log.append(
+                    f"flashinfer.trtllm_batch_decode_with_kv_cache_mla called "
+                    f"with query.shape={query.shape}, "
+                    f"kv_cache.shape={kv_cache_arg.shape}"
+                )
+                return original_trtllm_decode(*args, **kwargs)
+
             # Apply patches
-            with patch.object(ops, "concat_and_cache_mla", logged_concat_and_cache_mla):
+            with (
+                patch.object(ops, "concat_and_cache_mla", logged_concat_and_cache_mla),
+                patch.object(
+                    flashinfer_mla_module,
+                    "trtllm_batch_decode_with_kv_cache_mla",
+                    logged_trtllm_decode,
+                ),
+            ):
                 impl._forward_prefill = logged_forward_prefill
                 impl._forward_decode = logged_forward_decode
                 impl._v_up_proj = logged_v_up_proj
 
                 # Run forward pass
                 logger.info("=" * 60)
-                logger.info("Starting impl.forward() execution trace")
+                logger.info("Starting FLASHINFER_MLA impl.forward() execution trace")
                 logger.info("=" * 60)
                 logger.info("Input shapes:")
                 logger.info("  q: %s, dtype: %s", query_vllm.shape, query_vllm.dtype)
@@ -1661,12 +1695,12 @@ class TestMLAFP8CacheInput:
 
         # Print summary for test output
         print("\n" + "=" * 60)
-        print("MLACommonImpl.forward() Execution Trace")
+        print("FLASHINFER_MLA impl.forward() Execution Trace")
         print("=" * 60)
         print(f"Batch: {batch_spec}")
         print(f"Input dtypes: q={query_vllm.dtype}, kv_c={kv_c_vllm.dtype}")
         print("-" * 60)
-        print("Functions called (from vllm/v1/attention/backends/mla/common.py):")
+        print("Functions called:")
         for i, call in enumerate(call_log, 1):
             print(f"  {i}. {call}")
         print("=" * 60)
