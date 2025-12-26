@@ -21,8 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
-model compatible with HuggingFace weights."""
+"""Inference-only GLM-Lite MTP model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
 
@@ -42,10 +41,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .glm4_moe import (
+from .glm4_moe_lite import (
     Glm4MixtureOfExperts,
-    Glm4MoE,
-    Glm4MoeDecoderLayer,
+    Glm4MoeLite,
+    Glm4MoeLiteDecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
 from .interfaces import SupportsPP
@@ -72,7 +71,7 @@ class SharedHead(nn.Module):
         return self.norm(hidden_states)
 
 
-class Glm4MoeMultiTokenPredictorLayer(nn.Module):
+class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -89,7 +88,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
             config=config, prefix=prefix, quant_config=quant_config
         )
         self.enable_eplb = parallel_config.enable_eplb
-        self.mtp_block = Glm4MoeDecoderLayer(
+        self.mtp_block = Glm4MoeLiteDecoderLayer(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -122,7 +121,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         return hidden_states
 
 
-class Glm4MoeMultiTokenPredictor(nn.Module):
+class Glm4MoeLiteMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -131,7 +130,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): Glm4MoeMultiTokenPredictorLayer(
+                str(idx): Glm4MoeLiteMultiTokenPredictorLayer(
                     config,
                     f"{prefix}.layers.{idx}",
                     cache_config=vllm_config.cache_config,
@@ -185,11 +184,11 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
+class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.model = Glm4MoeMultiTokenPredictor(
+        self.model = Glm4MoeLiteMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -200,13 +199,13 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
         self.num_expert_groups = self.config.n_group
 
         self.moe_layers: list[FusedMoE] = []
-        self.moe_mlp_layers: list[Glm4MoE] = []
+        self.moe_mlp_layers: list[Glm4MoeLite] = []
         example_moe = None
         for layer in self.model.layers.values():
-            assert isinstance(layer, Glm4MoeMultiTokenPredictorLayer)
+            assert isinstance(layer, Glm4MoeLiteMultiTokenPredictorLayer)
             layer = layer.mtp_block
-            assert isinstance(layer, Glm4MoeDecoderLayer)
-            if isinstance(layer.mlp, Glm4MoE):
+            assert isinstance(layer, Glm4MoeLiteDecoderLayer)
+            if isinstance(layer.mlp, Glm4MoeLite):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
@@ -239,12 +238,15 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
+        mla_params_mapping = [
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+        ]
+
+        stacked_params_mapping.extend(mla_params_mapping)
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)

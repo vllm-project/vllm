@@ -31,34 +31,44 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention,
-    DeepseekV2MoE,
+    DeepseekV2MLAAttention,
 )
+from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -67,9 +77,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.platforms import current_platform
-
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 
 logger = init_logger(__name__)
 
@@ -82,14 +89,21 @@ class Glm4MoeLiteMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        is_sequence_parallel=False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        # If is_sequence_parallel, the input and output tensors are sharded
+        # across the ranks within the tp_group. In this case the weights are
+        # replicated and no collective ops are needed.
+        # Otherwise we use standard TP with an allreduce at the end.
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -98,6 +112,7 @@ class Glm4MoeLiteMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -113,11 +128,165 @@ class Glm4MoeLiteMLP(nn.Module):
         return x
 
 
-class Glm4MoeLite(DeepseekV2MoE):
-    pass
+class Glm4MoeLite(nn.Module):
+    def __init__(
+        self,
+        config: Glm4MoeLiteConfig,
+        parallel_config: ParallelConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
+
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+        if config.hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {config.hidden_act}. "
+                "Only silu is supported for now."
+            )
+
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
+        if getattr(config, "topk_method", None) == "noaux_tc":
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts, dtype=torch.float32)
+            )
+        else:
+            self.gate.e_score_correction_bias = None
+
+        # Load balancing settings.
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        self.is_fusion_moe_shared_experts_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
+        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+            self.shared_experts = None
+        else:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+
+            self.shared_experts = Glm4MoeLiteMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            gate=self.gate,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=getattr(config, "n_group", 1),
+            topk_group=getattr(config, "topk_group", 1),
+            prefix=f"{prefix}.experts",
+            scoring_func=getattr(config, "scoring_func", "softmax"),
+            # we do scaling outside, set factor to 1.0 to avoid double mul
+            # aiter applies routed_scaling_factor internally
+            routed_scaling_factor=1.0
+            if not self.is_rocm_aiter_moe_enabled
+            else self.routed_scaling_factor,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+            n_shared_experts=config.n_shared_experts
+            if self.is_fusion_moe_shared_experts_enabled
+            else None,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # Chunk the hidden states so they aren't replicated across TP ranks.
+        # This avoids duplicate computation in self.experts.
+        # TODO: We can replace the all_reduce at the end of attn with a
+        # reduce_scatter instead of chunking here.
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
+
+        shared_output, final_hidden_states = fused_moe_out
+        if self.shared_experts is None:
+            assert shared_output is None
+
+        if not self.is_rocm_aiter_moe_enabled:
+            final_hidden_states *= self.routed_scaling_factor
+        elif self.shared_experts is not None:
+            assert shared_output is not None
+            shared_output *= 1.0 / self.routed_scaling_factor
+
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states
+            )
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class Glm4MoeLiteAttention(DeepseekV2Attention):
+    pass
+
+
+class Glm4MoeLiteMLAAttention(DeepseekV2MLAAttention):
     pass
 
 
@@ -152,7 +321,12 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
 
-        self.self_attn = Glm4MoeLiteAttention(
+        if model_config.use_mla:
+            attn_cls = Glm4MoeLiteMLAAttention
+        else:
+            attn_cls = Glm4MoeLiteAttention
+
+        self.self_attn = attn_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
@@ -212,7 +386,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             "positions": positions,
             "hidden_states": hidden_states,
         }
-
+        attn_kwargs["llama_4_scaling"] = llama_4_scaling
         hidden_states = self.self_attn(**attn_kwargs)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -364,7 +538,6 @@ class Glm4MoeLiteModel(nn.Module):
                 if rocm_aiter_moe_shared_expert_enabled
                 else 0
             ),
-            num_redundant_experts=self.num_redundant_experts,
         )
 
         params_dict = dict(self.named_parameters())
@@ -642,7 +815,7 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
                 continue
 
             assert isinstance(layer, Glm4MoeLiteDecoderLayer)
-            if isinstance(layer.mlp, DeepseekV2MoE):
+            if isinstance(layer.mlp, Glm4MoeLite):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)

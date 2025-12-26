@@ -205,6 +205,17 @@ class SpeculativeConfig:
                 }
             )
 
+        if hf_config.architectures[0] == "Glm4MoeLiteForCausalLM":
+            hf_config.model_type = "glm4_moe_lite_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeLiteMTPModel"],
+                }
+            )
+
         if hf_config.model_type == "ernie4_5_moe":
             hf_config.model_type = "ernie_mtp"
         if hf_config.model_type == "ernie_mtp":
