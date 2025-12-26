@@ -511,7 +511,10 @@ class Gemma3ForConditionalGeneration(
         if modality.startswith("image"):
             return "<start_of_image>"
 
-        raise ValueError("Only image modality is supported")
+        raise ValueError(
+            f"Only image modality is supported: "
+            f"modality should start with 'image', got {modality}."
+        )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
