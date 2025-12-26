@@ -1352,6 +1352,325 @@ class TestMLAFP8CacheInput:
             f"Diff count: {(cached_from_fp8 != cached_from_bf16).sum()}"
         )
 
+    def test_fp8_input_trace_execution(
+        self,
+        dist_init,
+        mla_config: MLAConfig,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        """Trace execution flow through impl.forward().
+
+        This test adds logging to understand the execution path in
+        MLACommonImpl.forward():
+        1. ops.concat_and_cache_mla() - caches k_c_normed and k_pe to KV cache
+        2. _forward_prefill() - for prefill tokens (if any)
+        3. _forward_decode() - for decode tokens (if any)
+        4. _v_up_proj() - projects attention output back to v_head_dim
+        """
+        import logging
+        from unittest.mock import patch
+
+        # Skip if no Blackwell GPU (needed for TRITON_MLA FP8)
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        # Set up logging
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+
+        batch_spec = BATCH_SPECS["small_decode"]
+
+        # Use smaller config for faster testing
+        config = MLAConfig(
+            hidden_size=2048,
+            num_heads=16,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=1536,
+        )
+
+        block_size = 64
+        required_blocks = sum(
+            (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
+        )
+        num_gpu_blocks = required_blocks + 1 + 100
+
+        vllm_config = create_vllm_config(
+            model_name="/home/yming/.cache/huggingface/hub/"
+            "models--nvidia--DeepSeek-R1-0528-FP4-v2/snapshots/"
+            "25a138f28f49022958b9f2d205f9b7de0cdb6e18/",
+            tensor_parallel_size=1,
+            max_model_len=max(batch_spec.seq_lens),
+            num_gpu_blocks=num_gpu_blocks,
+            block_size=block_size,
+            hf_config_override={"num_attention_heads": config.num_heads},
+        )
+
+        # Create weight matrices
+        W_UK = torch.randn(
+            config.kv_lora_rank,
+            config.num_heads,
+            config.qk_nope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        W_UV = torch.randn(
+            config.kv_lora_rank,
+            config.num_heads,
+            config.v_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
+
+        # Generate test data
+        all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
+        kv_c_contexts, k_pe_contexts = [], []
+
+        for i in range(batch_spec.batch_size):
+            s_len = batch_spec.seq_lens[i]
+            q_len = batch_spec.query_lens[i]
+            context_len = s_len - q_len
+
+            q = torch.randn(
+                q_len,
+                config.num_heads,
+                config.qk_head_dim,
+                dtype=dtype,
+                device=device,
+            )
+            kv_c_full = torch.randn(
+                s_len, config.kv_lora_rank, dtype=dtype, device=device
+            )
+            k_pe_full = torch.randn(
+                s_len, 1, config.qk_rope_head_dim, dtype=dtype, device=device
+            )
+
+            all_q_vllm.append(q)
+            all_kv_c_vllm.append(kv_c_full[context_len:])
+            all_k_pe_vllm.append(k_pe_full[context_len:])
+            kv_c_contexts.append(kv_c_full[:context_len])
+            k_pe_contexts.append(k_pe_full[:context_len])
+
+        query_vllm = torch.cat(all_q_vllm, dim=0)
+        kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
+        k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
+
+        # Create mock kv_b_proj
+        mock_kv_b_proj = ColumnParallelLinear(
+            input_size=config.kv_lora_rank,
+            output_size=config.num_heads
+            * (config.qk_nope_head_dim + config.v_head_dim),
+            bias=False,
+            disable_tp=True,
+        ).to(device=device, dtype=dtype)
+        kv_b_proj_weight_flat = kv_b_proj_weight.view(
+            config.kv_lora_rank,
+            config.num_heads * (config.qk_nope_head_dim + config.v_head_dim),
+        )
+        mock_kv_b_proj.weight = torch.nn.Parameter(
+            kv_b_proj_weight_flat.T, requires_grad=False
+        )
+
+        # Create metadata
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, block_size, device
+        )
+
+        # Pad block table if needed
+        required_divisor = int(128 / block_size)
+        current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+        if current_block_num % required_divisor != 0:
+            padded_block_num = (
+                (current_block_num + required_divisor - 1) // required_divisor
+            ) * required_divisor
+            padding_cols = padded_block_num - current_block_num
+            padding = torch.zeros(
+                (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
+                dtype=torch.int32,
+                device=device,
+            )
+            common_attn_metadata.block_table_tensor = torch.cat(
+                [common_attn_metadata.block_table_tensor, padding], dim=1
+            )
+
+        # Create BF16 KV cache (not FP8 for this trace test)
+        kv_cache = create_and_prepopulate_kv_cache(
+            kv_c_contexts=kv_c_contexts,
+            k_pe_contexts=k_pe_contexts,
+            block_size=block_size,
+            head_size=config.head_size,
+            dtype=dtype,
+            device=device,
+            num_blocks=num_gpu_blocks,
+            common_attn_metadata=common_attn_metadata,
+            randomize_blocks=False,
+        )
+
+        kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=config.head_size,
+            dtype=dtype,
+        )
+
+        # Track function calls
+        call_log = []
+
+        # Get backend classes
+        backend = AttentionBackendEnum.FLASHINFER_MLA
+        builder_cls, impl_cls = try_get_attention_backend(backend)
+
+        with set_current_vllm_config(vllm_config):
+            num_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            head_size = vllm_config.model_config.get_head_size()
+            scale = 1.0 / (head_size**0.5)
+
+            impl = impl_cls(
+                num_heads=num_heads,
+                head_size=head_size,
+                scale=scale,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="auto",
+                logits_soft_cap=None,
+                attn_type="decoder",
+                kv_sharing_target_layer_name=None,
+                q_lora_rank=config.q_lora_rank,
+                kv_lora_rank=config.kv_lora_rank,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                qk_head_dim=config.qk_head_dim,
+                v_head_dim=config.v_head_dim,
+                kv_b_proj=mock_kv_b_proj,
+            )
+
+            act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+            impl.process_weights_after_loading(act_dtype)
+
+            layer_name = "test_layer_trace"
+            vllm_config.compilation_config.static_forward_context[layer_name] = (
+                MockMLAAttentionLayer(impl)
+            )
+
+            builder = builder_cls(kv_cache_spec, [layer_name], vllm_config, device)
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            mock_layer = MockAttentionLayer(device)
+            num_tokens = query_vllm.shape[0]
+            output = torch.empty(
+                num_tokens,
+                num_heads * config.v_head_dim,
+                dtype=query_vllm.dtype,
+                device=query_vllm.device,
+            )
+
+            # Patch functions to log calls
+            original_concat_and_cache_mla = ops.concat_and_cache_mla
+
+            def logged_concat_and_cache_mla(*args, **kwargs):
+                call_log.append(
+                    f"ops.concat_and_cache_mla called with "
+                    f"kv_c.shape={args[0].shape}, kv_c.dtype={args[0].dtype}, "
+                    f"k_pe.shape={args[1].shape}, k_pe.dtype={args[1].dtype}, "
+                    f"kv_cache_dtype={kwargs.get('kv_cache_dtype', 'auto')}"
+                )
+                return original_concat_and_cache_mla(*args, **kwargs)
+
+            original_forward_prefill = impl._forward_prefill
+
+            def logged_forward_prefill(*args, **kwargs):
+                call_log.append(
+                    f"_forward_prefill called with "
+                    f"q.shape={args[0].shape}, k_c_normed.shape={args[1].shape}"
+                )
+                return original_forward_prefill(*args, **kwargs)
+
+            original_forward_decode = impl._forward_decode
+
+            def logged_forward_decode(*args, **kwargs):
+                q = args[0]
+                if isinstance(q, tuple):
+                    call_log.append(
+                        f"_forward_decode called with "
+                        f"q_nope.shape={q[0].shape}, q_pe.shape={q[1].shape}"
+                    )
+                else:
+                    call_log.append(f"_forward_decode called with q.shape={q.shape}")
+                return original_forward_decode(*args, **kwargs)
+
+            original_v_up_proj = impl._v_up_proj
+
+            def logged_v_up_proj(*args, **kwargs):
+                call_log.append(
+                    f"_v_up_proj called with attn_out.shape={args[0].shape}"
+                )
+                return original_v_up_proj(*args, **kwargs)
+
+            # Apply patches
+            with patch.object(ops, "concat_and_cache_mla", logged_concat_and_cache_mla):
+                impl._forward_prefill = logged_forward_prefill
+                impl._forward_decode = logged_forward_decode
+                impl._v_up_proj = logged_v_up_proj
+
+                # Run forward pass
+                logger.info("=" * 60)
+                logger.info("Starting impl.forward() execution trace")
+                logger.info("=" * 60)
+                logger.info("Input shapes:")
+                logger.info("  q: %s, dtype: %s", query_vllm.shape, query_vllm.dtype)
+                logger.info("  kv_c: %s, dtype: %s", kv_c_vllm.shape, kv_c_vllm.dtype)
+                logger.info("  k_pe: %s, dtype: %s", k_pe_vllm.shape, k_pe_vllm.dtype)
+                logger.info("  kv_cache: %s, dtype: %s", kv_cache.shape, kv_cache.dtype)
+                logger.info("Batch spec: %s", batch_spec)
+                logger.info(
+                    "  num_decodes: %s, num_prefills: %s",
+                    attn_metadata.num_decodes,
+                    attn_metadata.num_prefills,
+                )
+                logger.info("-" * 60)
+
+                output = impl.forward(
+                    mock_layer,
+                    query_vllm,
+                    kv_c_vllm,
+                    k_pe_vllm,
+                    kv_cache,
+                    attn_metadata,
+                    output=output,
+                )
+
+                logger.info("-" * 60)
+                logger.info("Execution trace (functions called in order):")
+                for i, call in enumerate(call_log, 1):
+                    logger.info("  %d. %s", i, call)
+                logger.info("=" * 60)
+
+        # Verify output is valid
+        assert torch.isfinite(output).all()
+        assert len(call_log) > 0, "No functions were traced!"
+
+        # Print summary for test output
+        print("\n" + "=" * 60)
+        print("MLACommonImpl.forward() Execution Trace")
+        print("=" * 60)
+        print(f"Batch: {batch_spec}")
+        print(f"Input dtypes: q={query_vllm.dtype}, kv_c={kv_c_vllm.dtype}")
+        print("-" * 60)
+        print("Functions called (from vllm/v1/attention/backends/mla/common.py):")
+        for i, call in enumerate(call_log, 1):
+            print(f"  {i}. {call}")
+        print("=" * 60)
+
 
 class TestMLAFP8Attention:
     """Test FP8 KV cache attention comparing FLASHINFER_MLA vs CUTLASS_MLA."""
