@@ -261,7 +261,6 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         return SpeechToTextConfig(
             max_audio_clip_s=None,  # only limited by memory
             sample_rate=sample_rate,
-            # mistral_common and whisper encoder take care of chunking
             min_energy_split_window_size=None,
         )
 
