@@ -17,7 +17,7 @@ from pydantic_core import core_schema
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
+ARGPARSE_DOC_DIR = ROOT_DIR / "docs/generated/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
 
