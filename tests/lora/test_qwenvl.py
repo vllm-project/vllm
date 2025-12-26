@@ -151,16 +151,6 @@ EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
     "A closeup shot of the Tokyo Skytree with pink flowers in the foreground.",
 ]
 
-EXPECTED_OUTPUTS_VISION_QWEN2_5_VL = [
-    "A black car is driving past a stop sign and a large red and gold arch.",
-    "A view of the Tokyo Skytree through the branches of a cherry blossom tree.",
-]
-
-EXPECTED_OUTPUTS_VISION_QWEN3_VL = [
-    "A black SUV drives past a stop sign in front of a Chinese gate.",
-    "A tall white tower is seen through pink flowers.",
-]
-
 # NOTE - beam search .text contains the whole text
 EXPECTED_BEAM_SEARCH_OUTPUTS = [
     [
@@ -226,7 +216,7 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
     for lora_id in [1, 2]:
         tester.run_test(
             TEST_IMAGES,
-            expected_outputs=EXPECTED_OUTPUTS_VISION_QWEN2_5_VL,
+            expected_outputs=EXPECTED_OUTPUTS,
             lora_id=lora_id,
         )
 
@@ -245,7 +235,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
     for lora_id in [1, 2]:
         tester.run_test(
             TEST_IMAGES,
-            expected_outputs=EXPECTED_OUTPUTS_VISION_QWEN3_VL,
+            expected_outputs=EXPECTED_OUTPUTS,
             lora_id=lora_id,
         )
 
