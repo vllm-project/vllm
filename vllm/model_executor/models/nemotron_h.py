@@ -32,12 +32,20 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+
+# Import LoRA classes for custom 3-slice MergedColumnParallelLinear support
+from vllm.lora.layers.column_parallel_linear import (
+    MergedColumnParallelLinearWithLoRA,
+)
+from vllm.lora.layers.utils import _not_fully_sharded_can_replace
+from vllm.lora.utils import _all_lora_classes
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -632,14 +640,7 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -653,8 +654,20 @@ class NemotronHModel(nn.Module):
                 num_experts=self.config.n_routed_experts,
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
-        else:
-            expert_params_mapping = []
+            return expert_params_mapping
+
+        # No MoE
+        return []
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+
+        expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -735,6 +748,75 @@ class NemotronHModel(nn.Module):
         return loaded_params
 
 
+# Custom LoRA class for MergedColumnParallelLinear with variable slices
+# (e.g., conv1d with 3 slices, in_proj with 5 slices)
+class MergedColumnParallelLinearVariableSliceWithLoRA(
+    MergedColumnParallelLinearWithLoRA
+):
+    """MergedColumnParallelLinear with variable number of slices (3+).
+
+    This handles cases where the checkpoint has a single weight for the whole
+    module (not split into slices), but the layer itself has multiple slices.
+    """
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config,
+        packed_modules_list: list,
+        model_config=None,
+    ) -> bool:
+        # Support MergedColumnParallelLinear with 3 or more slices
+        # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
+        if type(source_layer) is not MergedColumnParallelLinear:
+            return False
+
+        # If packed_modules_list is provided and has 3+ items, use it
+        if len(packed_modules_list) >= 3:
+            return True
+
+        # If packed_modules_list is empty or has < 3 items,
+        # check the layer's output_sizes
+        # This handles cases where the checkpoint has a single weight
+        # but the layer has multiple slices
+        return (
+            hasattr(source_layer, "output_sizes")
+            and len(source_layer.output_sizes) >= 3
+        )
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        """Override to handle single tensor weights
+        that need to be split into slices."""
+        self.reset_lora(index)
+
+        # Handle case where checkpoint has single tensor weights (not split into slices)
+        # lora_a shape: (rank, input_size) - same for all slices, duplicate it
+        if isinstance(lora_a, torch.Tensor):
+            lora_a = [lora_a] * self.n_slices
+
+        # lora_b shape: (total_output_size, rank) -
+        # split along dim 0 based on output_sizes
+        if isinstance(lora_b, torch.Tensor):
+            output_sizes = self.base_layer.output_sizes
+            lora_b_list = []
+            start_idx = 0
+            for output_size in output_sizes:
+                end_idx = start_idx + output_size
+                lora_b_list.append(lora_b[start_idx:end_idx, :])
+                start_idx = end_idx
+            lora_b = lora_b_list
+
+        # Now call parent's set_lora which expects lists
+        super().set_lora(index, lora_a, lora_b)
+
+
 class NemotronHForCausalLM(
     nn.Module,
     HasInnerState,
@@ -745,6 +827,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
@@ -756,6 +841,10 @@ class NemotronHForCausalLM(
             "k_proj",
             "v_proj",
         ],
+        # Note: conv1d and in_proj (MambaMixer2) are NOT in packed_modules_mapping
+        # because the checkpoint may have a single weight for the whole module.
+        # The custom MergedColumnParallelLinearVariableSliceWithLoRA class
+        # handles these by checking output_sizes when packed_modules_list is empty.
     }
 
     # LoRA specific attributes
@@ -816,6 +905,12 @@ class NemotronHForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
+
+        # Register custom LoRA class for variable-slice MergedColumnParallelLinear
+        # This must be done before model creation so LoRA manager can find it
+        if MergedColumnParallelLinearVariableSliceWithLoRA not in _all_lora_classes:
+            _all_lora_classes.add(MergedColumnParallelLinearVariableSliceWithLoRA)
+
         self.model = NemotronHModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
