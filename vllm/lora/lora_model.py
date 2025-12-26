@@ -3,15 +3,21 @@
 
 import os
 
-import safetensors
+import safetensors.torch
 import torch
 
+from vllm.config.lora import LoRAConfig
+from vllm.envs import SLAB_OPTIMIZATION
 from vllm.logger import init_logger
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.slab_helper import (
+    create_slab_optimized_lora_model,
+)
 from vllm.lora.utils import (
     get_lora_id,
     is_base_embeddding_weights,
+    is_regex_target_modules,
     parse_fine_tuned_lora_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -49,11 +55,23 @@ class LoRAModel:
         """Return a copy of the object with different ids.
 
         Will share the underlying tensors."""
-        return self.__class__(
+        cloned = self.__class__(
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
         )
+
+        # Copy slab metadata if present (for SLAB optimization)
+        if hasattr(self, "_cached_cpu_slab"):
+            cloned._cached_cpu_slab = self._cached_cpu_slab  # type: ignore[attr-defined]
+        if hasattr(self, "_cached_metadata"):
+            cloned._cached_metadata = self._cached_metadata  # type: ignore[attr-defined]
+        if hasattr(self, "_lora_dir"):
+            cloned._lora_dir = self._lora_dir  # type: ignore[attr-defined]
+        if hasattr(self, "_loras_dict"):
+            cloned._loras_dict = self._loras_dict  # type: ignore[attr-defined]
+
+        return cloned
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""
@@ -71,42 +89,124 @@ class LoRAModel:
         device: str = "cuda",
         dtype: torch.dtype | None = None,
         model_vocab_size: int | None = None,
+        embedding_modules: dict[str, str] | None = None,
+        embedding_padding_modules: list[str] | None = None,
         weights_mapper: WeightsMapper | None = None,
+        lora_dir: str | None = None,
+        target_modules_dict: dict | None = None,
+        target_lora_config: LoRAConfig | None = None,
+        slab_path: str | None = None,
+        packed_modules: dict | None = None,
+        packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        loras: dict[str, LoRALayerWeights] = {}
-        for tensor_name, tensor in tensors.items():
-            if is_base_embeddding_weights(tensor_name):
-                continue
-            module_name, is_lora_a = parse_fine_tuned_lora_name(
-                tensor_name, weights_mapper
-            )
-            if module_name not in loras:
-                loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, peft_helper
+        if not SLAB_OPTIMIZATION:
+            pin_memory = str(device) == "cpu" and is_pin_memory_available()
+            loras: dict[str, LoRALayerWeights] = {}
+
+            for tensor_name, tensor in tensors.items():
+                if is_base_embeddding_weights(tensor_name):
+                    continue
+                module_name, is_lora_a = parse_fine_tuned_lora_name(
+                    tensor_name, weights_mapper
                 )
-
-            if is_lora_a:
-                if (
-                    "lora_embedding_A" in tensor_name
-                    and model_vocab_size is not None
-                    and model_vocab_size != tensor.shape[1]
-                ):
-                    raise RuntimeError(
-                        f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
-                        f" with the base model's vocabulary size({model_vocab_size})."
+                if module_name not in loras:
+                    loras[module_name] = LoRALayerWeights.from_config(
+                        module_name, peft_helper
                     )
-                loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
-                if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
-            else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
 
-                if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                if is_lora_a:
+                    if (
+                        "lora_embedding_A" in tensor_name
+                        and model_vocab_size is not None
+                        and model_vocab_size != tensor.shape[1]
+                    ):
+                        raise RuntimeError(
+                            f"The embedding LoRA size({tensor.shape[1]}) "
+                            f"must be consistent with the base model's "
+                            f"vocabulary size({model_vocab_size})."
+                        )
+                    loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
+                    if pin_memory:
+                        loras[module_name].lora_a = loras[
+                            module_name
+                        ].lora_a.pin_memory()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+                else:
+                    loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
+
+                    if pin_memory:
+                        loras[module_name].lora_b = loras[
+                            module_name
+                        ].lora_b.pin_memory()
+
+            return cls(lora_model_id, peft_helper.r, loras)
+        else:
+            logger.debug("Using slab-based LoRA tensor optimization")
+
+            from vllm.lora.slab_helper import check_slab_cache
+
+            cache_hit, lora_model_cached = check_slab_cache(
+                lora_dir, peft_helper, target_lora_config, target_modules_dict
+            )
+
+            if cache_hit and lora_model_cached is not None:
+                logger.debug(
+                    "[SLAB_CACHE_HIT] Using cached slab for %s, cloning with ID %s",
+                    lora_dir,
+                    lora_model_id,
+                )
+                # Clone cached model with correct ID
+                return lora_model_cached.clone(lora_model_id)
+
+            logger.debug("Building new slab for %s", lora_dir)
+            lora_model, gpu_slab, metadata = create_slab_optimized_lora_model(
+                lora_model_id=lora_model_id,
+                tensors=tensors,
+                peft_helper=peft_helper,
+                device=device,
+                dtype=dtype,
+                embeddings=None,
+                target_embedding_padding=model_vocab_size,
+                embedding_modules=embedding_modules,
+                embedding_padding_modules=embedding_padding_modules,
+                weights_mapper=weights_mapper,
+                lora_dir=lora_dir,
+                lora_config=peft_helper,
+                target_modules_dict=target_modules_dict,
+                target_lora_config=target_lora_config,
+                slab_path=slab_path,
+                packed_modules=packed_modules,
+                packed_modules_mapping=packed_modules_mapping,
+            )
+
+            if (
+                gpu_slab is not None
+                and metadata is not None
+                and target_modules_dict is not None
+            ):
+                # Pre-cache metadata lookup once for all modules
+                if not hasattr(metadata, "_lookup_cache"):
+                    metadata._lookup_cache = {
+                        info.module_name: info for info in metadata.tensor_infos
+                    }
+
+                # Instead of calling create_lora_weights, just cache slab references
+                for module_name, module in target_modules_dict.items():
+                    if hasattr(module, "create_lora_weights"):
+                        module._gpu_slab_ref = gpu_slab
+                        module._slab_metadata_ref = metadata
+                        module._slab_ready = True
+                        module._using_slab_views = True
+            # Add any post-processing after slab model creation
+            torch.cuda.synchronize()  # Check for pending GPU operations
+
+            # Cache the built LoRAModel for future reuse
+            from vllm.lora.slab_helper import cache_lora_model
+
+            cache_lora_model(lora_dir, lora_model)
+
+            return lora_model
 
     @classmethod
     def from_local_checkpoint(
@@ -119,8 +219,15 @@ class LoRAModel:
         device: str = "cuda",
         dtype: torch.dtype | None = None,
         model_vocab_size: int | None = None,
+        embedding_modules: dict[str, str] | None = None,
+        embedding_padding_modules: list[str] | None = None,
         weights_mapper: WeightsMapper | None = None,
         tensorizer_config_dict: dict | None = None,
+        target_modules_dict: dict | None = None,
+        target_lora_config: LoRAConfig | None = None,
+        slab_path: str | None = None,
+        packed_modules: dict | None = None,
+        packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -200,22 +307,55 @@ class LoRAModel:
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path) or os.path.isfile(lora_pt_file_path):
+            # When a bin/pt file is provided, we rely on config to find
+            # unexpected modules.
+            unexpected_modules = []
+            target_modules = peft_helper.target_modules
+            if not isinstance(target_modules, list):
+                target_modules = [target_modules]
+            for module in target_modules:
+                # Compatible with more modules,
+                # such as:layers.11.self_attn.k_proj
+                part_name = module.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module)
+            # loaded lora's target modules must be a subset of
+            # expected_lora_modules. It is not reliable. See
+            # https://github.com/vllm-project/vllm/pull/5909. But there's no
+            # other better mechanism.
+            if unexpected_modules and not is_regex_target_modules(
+                peft_helper.target_modules, expected_lora_modules
+            ):
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct"
+                )
             lora_file_path = (
                 lora_bin_file_path
                 if os.path.isfile(lora_bin_file_path)
                 else lora_pt_file_path
             )
             tensors = torch.load(lora_file_path, map_location=device, weights_only=True)
-            check_unexpected_modules(tensors)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
+        lora_id = get_lora_id() if lora_model_id is None else lora_model_id
         return cls.from_lora_tensors(
-            lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
+            lora_model_id=lora_id,
             tensors=tensors,
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,
             model_vocab_size=model_vocab_size,
+            embedding_modules=embedding_modules,
+            embedding_padding_modules=embedding_padding_modules,
             weights_mapper=weights_mapper,
+            lora_dir=lora_dir,
+            target_modules_dict=target_modules_dict,
+            target_lora_config=target_lora_config,
+            slab_path=slab_path,
+            packed_modules=packed_modules,
+            packed_modules_mapping=packed_modules_mapping,
         )
