@@ -56,17 +56,19 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2MixtureOfExperts,
     DeepseekV2Attention,
     DeepseekV2MoE,
 )
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
+from vllm.platforms import current_platform
+
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 
 logger = init_logger(__name__)
@@ -74,13 +76,13 @@ logger = init_logger(__name__)
 
 class Glm4MoeLiteMLP(nn.Module):
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            quant_config: QuantizationConfig | None = None,
-            reduce_results: bool = True,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -121,11 +123,11 @@ class Glm4MoeLiteAttention(DeepseekV2Attention):
 
 class Glm4MoeLiteDecoderLayer(nn.Module):
     def __init__(
-            self,
-            vllm_config: VllmConfig,
-            prefix: str,
-            config: Glm4MoeLiteConfig | None = None,
-            topk_indices_buffer: torch.Tensor | None = None,
+        self,
+        vllm_config: VllmConfig,
+        prefix: str,
+        config: Glm4MoeLiteConfig | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -168,9 +170,9 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         )
 
         if (
-                config.n_routed_experts is not None
-                and layer_idx >= config.first_k_dense_replace
-                and layer_idx % moe_layer_freq == 0
+            config.n_routed_experts is not None
+            and layer_idx >= config.first_k_dense_replace
+            and layer_idx % moe_layer_freq == 0
         ):
             self.mlp = Glm4MoeLite(
                 config=config,
@@ -193,11 +195,11 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            residual: torch.Tensor | None,
-            llama_4_scaling: torch.Tensor | None = None,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -232,16 +234,29 @@ class Glm4MoeLiteModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
+        self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        else:
+            topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -249,11 +264,10 @@ class Glm4MoeLiteModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Glm4MoeLiteDecoderLayer(
+                vllm_config=vllm_config,
                 config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=prefix,
-                enable_eplb=enable_eplb,
+                topk_indices_buffer=topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -270,11 +284,11 @@ class Glm4MoeLiteModel(nn.Module):
         return self.embed_tokens(input_ids)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -299,7 +313,7 @@ class Glm4MoeLiteModel(nn.Module):
         return hidden_states
 
     def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype, device: torch.device
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         return IntermediateTensors(
             {
@@ -345,11 +359,11 @@ class Glm4MoeLiteModel(nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-                        + (
-                            self.config.n_shared_experts
-                            if rocm_aiter_moe_shared_expert_enabled
-                            else 0
-                        ),
+            + (
+                self.config.n_shared_experts
+                if rocm_aiter_moe_shared_expert_enabled
+                else 0
+            ),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -364,7 +378,7 @@ class Glm4MoeLiteModel(nn.Module):
                 continue  # skip spec decode layers for main model
 
             is_fusion_moe_shared_experts_layer = (
-                    rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -387,7 +401,7 @@ class Glm4MoeLiteModel(nn.Module):
                 # weight loading if it's not enabled
                 # if go with fusion option, then update name
                 if (
-                        param_name == "fused_qkv_a_proj"
+                    param_name == "fused_qkv_a_proj"
                 ) and name_mapped not in params_dict:
                     continue
                 else:
@@ -435,11 +449,11 @@ class Glm4MoeLiteModel(nn.Module):
                     if is_fusion_moe_shared_experts_layer:
                         if split_dim == 0:
                             weight_to_load = loaded_weight[
-                                j * chunk_size: (j + 1) * chunk_size, :
+                                j * chunk_size : (j + 1) * chunk_size, :
                             ]
                         else:
                             weight_to_load = loaded_weight[
-                                :, j * chunk_size: (j + 1) * chunk_size
+                                :, j * chunk_size : (j + 1) * chunk_size
                             ]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
@@ -544,9 +558,9 @@ class Glm4MixtureOfExperts(MixtureOfExperts):
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-            self,
-            num_physical_experts: int,
-            num_local_physical_experts: int,
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -585,7 +599,7 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
         # quantization config init and may be used to select the
         # quant_method for relevant layers during initialization.
         self.fuse_qkv_a_proj = (
-                hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
+            hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
         )
         if self.fuse_qkv_a_proj:
             self.packed_modules_mapping["fused_qkv_a_proj"] = [
@@ -611,7 +625,7 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
         )
         # Set MoE hyperparameters
         self.num_moe_layers = (
-                self.config.num_hidden_layers - self.config.first_k_dense_replace
+            self.config.num_hidden_layers - self.config.first_k_dense_replace
         )
         self.set_moe_parameters()
 
@@ -640,11 +654,11 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
         return self.model.embed_input_ids(input_ids)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
@@ -652,8 +666,8 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
         return hidden_states
 
     def compute_logits(
-            self,
-            hidden_states: torch.Tensor,
+        self,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
@@ -669,12 +683,16 @@ class Glm4MoeLiteForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfE
             num_redundant_experts=0,
         )
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+
 
 def get_spec_layer_idx_from_weight_name(
-        config: Glm4MoeLiteConfig, weight_name: str
+    config: Glm4MoeLiteConfig, weight_name: str
 ) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
-            config.num_nextn_predict_layers > 0
+        config.num_nextn_predict_layers > 0
     ):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
