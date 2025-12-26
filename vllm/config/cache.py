@@ -159,6 +159,68 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used
     together with kv_offloading_size."""
 
+    # PagedEviction Configuration
+    eviction_policy: Literal["lru", "paged"] = "lru"
+    """The KV cache eviction policy to use. Options:
+    - "lru": Least Recently Used (baseline, current vLLM behavior)
+    - "paged": PagedEviction block-wise eviction (arXiv:2509.04377v1)
+
+    PagedEviction provides fine-grained block-level eviction that integrates with
+    vLLM's PagedAttention without requiring CUDA kernel modifications.
+
+    Reference: PagedEviction paper Section 4"""
+
+    # PagedEviction parameters (only used when eviction_policy="paged")
+    paged_eviction_recency_weight: float = Field(default=0.4, ge=0, le=1)
+    """Weight for recency score in PagedEviction utility calculation.
+    Higher values prioritize recently accessed blocks.
+
+    Reference: Paper Section 4.1 (Token Importance)"""
+
+    paged_eviction_frequency_weight: float = Field(default=0.4, ge=0, le=1)
+    """Weight for frequency score in PagedEviction utility calculation.
+    Higher values prioritize frequently accessed blocks.
+
+    Reference: Paper Section 4.1 (Token Importance)"""
+
+    paged_eviction_cache_weight: float = Field(default=0.2, ge=0, le=1)
+    """Weight for prefix cache value in PagedEviction utility calculation.
+    Higher values prioritize blocks in the prefix cache with high hit counts.
+
+    Reference: Paper Section 4.1 (Token Importance)"""
+
+    paged_eviction_time_decay: float = Field(default=0.95, gt=0, le=1)
+    """Exponential decay factor for recency score in PagedEviction.
+    Larger values (closer to 1) mean recency decays more slowly.
+
+    Formula: recency_score = time_decay ^ time_since_access
+
+    Reference: Paper Section 4.1"""
+
+    paged_eviction_cache_budget: int | None = None
+    """Maximum number of tokens to keep in KV cache when using PagedEviction.
+    If None, no explicit budget is enforced (uses available GPU memory).
+
+    Example values from paper experiments: 256, 512, 1024, 2048, 4096 tokens.
+
+    Reference: Paper Section 5.1 (Experimental Setup)"""
+
+    paged_eviction_enable_prefill: bool = True
+    """Whether to enable token-level eviction during prefill phase.
+
+    When True, PagedEviction evicts low-importance tokens during prefill
+    before partitioning into blocks (Algorithm 2).
+
+    Reference: Paper Section 4.2 (Prefill Phase)"""
+
+    paged_eviction_enable_decode: bool = True
+    """Whether to enable block-level eviction during decode phase.
+
+    When True, PagedEviction evicts entire blocks when the current block
+    becomes full (Algorithm 3).
+
+    Reference: Paper Section 4.3 (Decode Phase)"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -186,6 +248,15 @@ class CacheConfig:
             "num_cpu_blocks",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Eviction policy parameters (runtime behavior, not graph structure)
+            "eviction_policy",
+            "paged_eviction_recency_weight",
+            "paged_eviction_frequency_weight",
+            "paged_eviction_cache_weight",
+            "paged_eviction_time_decay",
+            "paged_eviction_cache_budget",
+            "paged_eviction_enable_prefill",
+            "paged_eviction_enable_decode",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

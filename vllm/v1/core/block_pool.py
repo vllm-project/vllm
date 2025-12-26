@@ -12,6 +12,8 @@ from vllm.distributed.kv_events import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.eviction_policy import EvictionPolicy
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -151,6 +153,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        eviction_policy: EvictionPolicy | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -178,6 +181,12 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+
+        if eviction_policy is None:
+            from vllm.v1.core.eviction_policy import LRUEvictionPolicy
+
+            eviction_policy = LRUEvictionPolicy()
+        self.eviction_policy = eviction_policy
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -303,22 +312,36 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
-
-        # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+            free_blocks_list = self._get_free_blocks_list()
+            cached_blocks_map = self._get_cached_blocks_map()
+
+            selected_blocks = self.eviction_policy.select_blocks_to_evict(
+                num_blocks_needed=num_blocks,
+                free_blocks=free_blocks_list,
+                cached_blocks=cached_blocks_map,
+            )
+
+            for block in selected_blocks:
+                self.free_block_queue.remove(block)
+
+            ret = selected_blocks
+
         else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+            ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+
+        for block in ret:
+            if self.enable_caching:
+                self._maybe_evict_cached_block(block)
+
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
+
+            if self.metrics_collector:
+                self.metrics_collector.on_block_allocated(block)
+
+            self.eviction_policy.on_block_allocated(block)
+
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -369,6 +392,9 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
+
+        accessed_blocks = []
+
         for blocks_per_group in blocks:
             for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
@@ -378,6 +404,10 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_accessed(block)
+
+                accessed_blocks.append(block)
+
+        self.eviction_policy.update_access(accessed_blocks)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
@@ -391,6 +421,10 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
+
+            if block.ref_cnt == 0 and not block.is_null:
+                self.eviction_policy.on_block_freed(block)
+
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
@@ -481,3 +515,81 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+    def _get_free_blocks_list(self) -> list[KVCacheBlock]:
+        """
+        Get list of all free blocks for eviction policy evaluation.
+        The eviction policy needs to see all free blocks to compute scores and select the best candidates for eviction.
+
+        Returns:
+            List of all blocks currently in the free queue
+        """
+
+        free_blocks = []
+        current = self.free_block_queue.fake_free_list_head.next_free_block
+        while current != self.free_block_queue.fake_free_list_tail:
+            free_blocks.append(current)
+            current = current.next_free_block
+
+        return free_blocks
+
+    def _get_cached_blocks_map(self) -> dict[int, KVCacheBlock]:
+        """
+        Get map of block_id -> block for all cached blocks.
+
+        The eviction policy uses this to consider prefix cache value when
+        selecting blocks to evict.
+
+        Returns:
+            Dictionary mapping block_id to KVCacheBlock for all cached blocks
+        """
+
+        cached_map = {}
+        for blocks in self.cached_block_hash_to_block._cache.values():
+            if isinstance(blocks, KVCacheBlock):
+                cached_map[blocks.block_id] = blocks
+            elif isinstance(blocks, dict):
+                cached_map.update(blocks)
+
+        return cached_map
+
+    def get_eviction_policy_stats(self) -> dict:
+        """
+        Get statistics from the eviction policy for monitoring/debugging.
+
+        This is useful for understanding eviction behavior and tuning parameters.
+
+        Returns:
+            Dictionary with policy-specific statistics
+        """
+        stats = {}
+
+        if hasattr(self.eviction_policy, "get_stats"):
+            stats.update(self.eviction_policy.get_stats())
+
+        # BlockPool-level metrics
+        stats["policy_type"] = type(self.eviction_policy).__name__
+        stats["num_gpu_blocks"] = self.num_gpu_blocks
+        stats["num_free_blocks"] = self.get_num_free_blocks()
+        stats["num_allocated_blocks"] = (
+            self.num_gpu_blocks - self.get_num_free_blocks() - 1
+        )  # -1 for null block
+        stats["cache_utilization"] = self.get_usage()
+
+        # Cached blocks info
+        stats["num_cached_blocks"] = len(self.cached_block_hash_to_block)
+
+        # Count cached blocks in cache by type
+        single_blocks = 0
+        dict_blocks = 0
+        for blocks in self.cached_block_hash_to_block._cache.values():
+            if isinstance(blocks, KVCacheBlock):
+                single_blocks += 1
+            elif isinstance(blocks, dict):
+                dict_blocks += len(blocks)
+
+        stats["cached_single_blocks"] = single_blocks
+        stats["cached_dict_blocks"] = dict_blocks
+        stats["total_cached_block_instances"] = single_blocks + dict_blocks
+
+        return stats
