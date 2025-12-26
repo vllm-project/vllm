@@ -909,6 +909,16 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        from vllm.entrypoints.openai.protocol import VLLMValidationError
+
+        param = None
+        for error in exc.errors():
+            if "ctx" in error and "error" in error["ctx"]:
+                ctx_error = error["ctx"]["error"]
+                if isinstance(ctx_error, VLLMValidationError):
+                    param = ctx_error.parameter
+                    break
+
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
@@ -922,6 +932,7 @@ def build_app(args: Namespace) -> FastAPI:
                 message=message,
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
+                param=param,
             )
         )
         return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
@@ -1145,6 +1156,7 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)

@@ -138,7 +138,7 @@ def create_batched_mm_kwargs(
     )
 
 
-# TODO(Isotr0py): Don't initalize model during test
+# TODO(Isotr0py): Don't initialize model during test
 @contextmanager
 def initialize_dummy_model(
     model_cls: type[nn.Module],

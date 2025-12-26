@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -40,8 +41,9 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(self, output_kind: RequestOutputKind):
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
@@ -92,6 +94,7 @@ class RequestState:
     def __init__(
         self,
         request_id: str,
+        external_req_id: str,
         parent_req: ParentRequest | None,
         request_index: int,
         lora_request: LoRARequest | None,
@@ -111,6 +114,7 @@ class RequestState:
         temperature: float | None = None,
     ):
         self.request_id = request_id
+        self.external_req_id = external_req_id
         self.parent_req = parent_req
         self.request_index = request_index
         self.lora_request = lora_request
@@ -176,8 +180,10 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
+        assert request.external_req_id is not None
         return cls(
             request_id=request.request_id,
+            external_req_id=request.external_req_id,
             parent_req=parent_req,
             request_index=request_index,
             lora_request=request.lora_request,
@@ -235,10 +241,13 @@ class RequestState:
                 ]
                 self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
 
-        request_id = self.request_id
+        external_req_id = self.external_req_id
+
         if pooling_output is not None:
             return self._new_request_output(
-                request_id, [self._new_pooling_output(pooling_output)], finished
+                external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -246,19 +255,18 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
-            request_id, outputs, finished = self.parent_req.get_outputs(
-                request_id, output
-            )
+            outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             if not outputs:
                 return None
+            external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            external_req_id, outputs, finished, kv_transfer_params
         )
 
     def _new_request_output(
         self,
-        request_id: str,
+        external_req_id: str,
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -269,7 +277,7 @@ class RequestState:
             # Prompt embeddings are currently not supported by pooling requests.
             assert self.prompt_token_ids is not None
             return PoolingRequestOutput(
-                request_id=request_id,
+                request_id=external_req_id,
                 outputs=first_output,
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
@@ -288,7 +296,7 @@ class RequestState:
             prompt_token_ids = [0] * len(self.prompt_embeds)
 
         return RequestOutput(
-            request_id=request_id,
+            request_id=external_req_id,  # request_id is what was provided externally
             lora_request=self.lora_request,
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
@@ -352,6 +360,7 @@ class OutputProcessor:
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
+        self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracer: Tracer | None = None
         self._requests_drained = asyncio.Event()
@@ -375,12 +384,41 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(
-        self,
-        request_ids: Iterable[str],
-    ) -> list[str]:
-        request_ids_to_abort = []
+    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+        """Abort a list of requests.
+
+        The request_ids may be either external request IDs (those passed to
+        InputProcessor.process_inputs()) or internal request IDs (those randomly
+        generated when creating the EngineCoreRequest).
+
+        If an external request ID is provided, and that external request ID
+        was used for multiple requests, all requests associated with that external
+        request ID are aborted.
+
+        In the case of parallel sampling, a request ID may be used to identify
+        a parent request, in which case the associated child requests are aborted
+        also.
+        """
+
+        internal_req_ids = []
         for request_id in request_ids:
+            if internal:
+                # Internal ID - this may be a parent request
+                internal_req_ids.append(request_id)
+
+                # Remove internal ID from the external->internal mapping
+                if req_state := self.request_states.get(request_id):
+                    external_req_id = req_state.external_req_id
+                    internal_ids = self.external_req_ids[external_req_id]
+                    internal_ids.remove(request_id)
+                    if not internal_ids:
+                        del self.external_req_ids[external_req_id]
+            elif internal_ids := self.external_req_ids.pop(request_id, []):
+                # External ID - abort all requests in the external->internal mapping
+                internal_req_ids.extend(internal_ids)
+
+        request_ids_to_abort = []
+        for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
@@ -404,7 +442,7 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs)
+                    child_reqs = self.abort_requests(child_reqs, internal=True)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         if not self.request_states:
@@ -438,6 +476,9 @@ class OutputProcessor:
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
+
+        # Track the external_req_id -> [internal_req_id, ...] mapping
+        self.external_req_ids[req_state.external_req_id].append(request_id)
 
     def process_outputs(
         self,
@@ -522,6 +563,12 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
+
+                internal_ids = self.external_req_ids[req_state.external_req_id]
+                internal_ids.remove(req_id)
+                if not internal_ids:
+                    del self.external_req_ids[req_state.external_req_id]
+
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
@@ -597,7 +644,9 @@ class OutputProcessor:
             )
 
             # meta
-            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_REQUEST_ID, req_state.external_req_id
+            )
             if req_state.top_p:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
             if req_state.max_tokens_param:

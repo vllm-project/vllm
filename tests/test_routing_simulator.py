@@ -127,7 +127,7 @@ def test_routing_strategy_integration(monkeypatch, device):
         envs.environment_variables[env_name] = lambda s=strategy: s
 
         # Test the select_experts method
-        topk_weights, topk_ids, _ = fused_moe.select_experts(
+        topk_weights, topk_ids = fused_moe.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
