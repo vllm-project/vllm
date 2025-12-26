@@ -5,7 +5,11 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -169,3 +173,65 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
 
         final_content = content or None
         return reasoning, final_content
+
+
+class Glm4AppendThinkReasoningParser(ReasoningParser):
+    """
+    Reasoning parser for GLM-4 models that don't generate <think> start token.
+
+    Some GLM-4 variants (e.g., GLM-4.7-FP8) don't generate the <think> token
+    in their output even though the chat template adds it to the prompt.
+    The model only generates </think> at the end of reasoning.
+
+    This parser prepends <think> to the output content to ensure proper
+    formatting for downstream reasoning extraction.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
+        self.think_start_token = "<think>"
+        self.think_end_token = "</think>"
+        self.end_token_id = self.vocab.get(self.think_end_token)
+
+        if self.end_token_id is None:
+            raise RuntimeError(
+                "Glm4AppendThinkReasoningParser could not locate "
+                "</think> token in the tokenizer!"
+            )
+
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """Check if reasoning has ended by looking for </think> token."""
+        return any(input_id == self.end_token_id for input_id in reversed(input_ids))
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """Return all input IDs as content."""
+        return input_ids
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        """
+        Extract reasoning content from streaming delta.
+
+        Prepends <think> to the first delta since the model doesn't
+        generate it.
+        """
+        if len(previous_token_ids) == 0:
+            delta_text = self.think_start_token + delta_text
+        return DeltaMessage(content=delta_text)
+
+    def extract_reasoning(
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[str | None, str | None]:
+        """
+        Extract reasoning from non-streaming output.
+
+        Prepends <think> to the output since the model doesn't generate it.
+        """
+        return None, self.think_start_token + model_output

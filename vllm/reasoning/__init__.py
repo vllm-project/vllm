@@ -36,6 +36,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "glm4_moe_reasoning_parser",
         "Glm4MoeModelReasoningParser",
     ),
+    "glm45_append_think": (
+        "glm4_moe_reasoning_parser",
+        "Glm4AppendThinkReasoningParser",
+    ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
         "GptOssReasoningParser",
