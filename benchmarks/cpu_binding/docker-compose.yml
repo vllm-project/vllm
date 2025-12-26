@@ -1,47 +1,31 @@
-# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
-# SPDX-License-Identifier: Apache-2.0
-
 services:
   vllm-server:
-    image: ${DOCKER_IMAGE}
-    environment:
-      - MODEL
-      - HF_HOME=/mnt/hf_cache
-      - HF_TOKEN
-      - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
-      - PYTHONUNBUFFERED=1
-    env_file:
-      - ./server/server_user.env
+    image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:latest
+    container_name: vllm-ci-test-gpu
     volumes:
-      - /mnt/hf_cache:/mnt/hf_cache
-    ports:
-      - "8000:8000"
-    cap_add:
-      - SYS_NICE
+      - "${MODEL_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface"
+      #- /mnt/hf_cache:/mnt/hf_cache
+      #- "${VLLM_FOLDER_PATH:-./vllm}/.buildkite:/workspace/.buildkite"
+      #- "${VLLM_FOLDER_PATH:-./vllm}/benchmarks:/workspace/benchmarks"
+      - "./tests/serving-tests.json:/vllm-workspace/.buildkite/performance-benchmarks/tests/serving-tests.json:ro"
+      - "./results:/vllm-workspace/benchmarks/results"
+    shm_size: 128g
+    # Equivalent to: --gpus all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Equivalent to: --runtime nvidia (for older Docker setups)
+    runtime: nvidia
+    # Equivalent to: --ipc=host
     ipc: host
-    runtime: habana
-    restart: unless-stopped
-    command: ["server", "--config-file", "${VLLM_SERVER_CONFIG_FILE}", "--config-name", "${VLLM_SERVER_CONFIG_NAME}"]
-    healthcheck:
-      test: ["CMD", "sh", "-c", "[ -f logs/vllm_server.log ] && grep -q 'Application startup complete' logs/vllm_server.log"]
-      interval: 10s
-      timeout: 2s
-      retries: 500
-      start_period: 10s
-
-  benchmark:
-    profiles: ["benchmark"]
-    image: ${DOCKER_IMAGE}
-    network_mode: service:vllm-server
-    depends_on:
-      vllm-server:
-        condition: service_healthy
     environment:
-      - MODEL
-      - HF_TOKEN=${HF_TOKEN}
-      - PYTHONUNBUFFERED=1
-    env_file:
-      - ./benchmark/benchmark_user.env
-    volumes:
-      - /tmp/logs:/root/scripts/logs
-    command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]
+      no_proxy: ${no_proxy}
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      HF_TOKEN: ${HF_TOKEN}
+    entrypoint: ["bash", "/vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh"]
+
