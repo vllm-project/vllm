@@ -202,11 +202,10 @@ class TestGetScorePrompt:
         tokenization_kwargs,
         mock_model_no_score_template,
     ):
-        # FIXME: Models implementing SupportsScoreTemplate must use their custom
-        # template implementation by default to preserve existing functionality.
-        # Attempting to use tokenizer_config.json templates would most likely break
-        # these models, as often they just inherit the template from the original LLM.
-        # CLI --chat-template overrides are still supported.
+        # FIXME: For now, we only apply a template when one is explicitly provided.
+        # We cannot rely on the tokenizer's chat template because many models
+        # inherit junk templates from their base LLM, which breaks both the models
+        # and the tests that use them.
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",

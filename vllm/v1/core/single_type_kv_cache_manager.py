@@ -737,6 +737,14 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         return super().allocate_new_blocks(request_id, num_tokens)
 
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """
+        Get the number of tokens whose mamba state are not needed anymore. Mamba only
+        need to keep the state of the last computed token, so we return
+        num_computed_tokens - 1.
+        """
+        return num_computed_tokens - 1
+
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
