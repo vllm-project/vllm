@@ -660,7 +660,10 @@ class OpenAISpeechToText(OpenAIServing):
     def _split_audio(
         self, audio_data: np.ndarray, sample_rate: int
     ) -> list[np.ndarray]:
-        assert self.asr_config.max_audio_clip_s is not None
+        assert self.asr_config.max_audio_clip_s is not None, (
+            f"{self.asr_config.max_audio_clip_s=} cannot be None to"
+            " split audio into chunks."
+        )
         chunk_size = sample_rate * self.asr_config.max_audio_clip_s
         overlap_size = sample_rate * self.asr_config.overlap_chunk_second
         chunks = []
