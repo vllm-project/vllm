@@ -6,7 +6,7 @@ from enum import Enum
 
 import pytest
 
-from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
+from vllm.config.utils import get_compile_factors, hash_factors, normalize_value
 
 # Helpers
 
@@ -25,7 +25,7 @@ def expected_path(p_str: str = ".") -> str:
     return p.expanduser().resolve().as_posix()
 
 
-# Minimal dataclass to test get_hash_factors.
+# Minimal dataclass to test get_compile_factors.
 # Avoid importing heavy vLLM configs.
 @dataclass
 class SimpleConfig:
@@ -136,8 +136,8 @@ def test_enum_vs_int_disambiguation():
     assert enum_val == "raw_logits"
 
     # Build factor dicts from configs with int vs enum
-    f_int = get_hash_factors(SimpleConfig(1), set())
-    f_enum = get_hash_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
+    f_int = get_compile_factors(SimpleConfig(1), set())
+    f_enum = get_compile_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
     # The int case remains a primitive value
     assert f_int["a"] == 1
     # The enum case becomes a tagged tuple ("module.QualName", "raw_logits")
