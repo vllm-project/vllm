@@ -451,7 +451,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     try:
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
-        logger.exception("Error in create_messages: %s", e)
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             content=AnthropicErrorResponse(
@@ -898,6 +897,7 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
+        logger.exception("HTTPException caught")
         err = ErrorResponse(
             error=ErrorInfo(
                 message=exc.detail,
@@ -909,6 +909,7 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        logger.exception("RequestValidationError caught")
         from vllm.entrypoints.openai.protocol import VLLMValidationError
 
         param = None
