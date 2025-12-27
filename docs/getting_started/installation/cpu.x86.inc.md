@@ -164,21 +164,84 @@ uv pip install dist/*.whl
 [https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo)
 
 !!! warning
-    If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. It is recommended to build images for these machines with the appropriate build arguments (e.g., `--build-arg VLLM_CPU_DISABLE_AVX512=true`, `--build-arg VLLM_CPU_AVX512BF16=false`, or `--build-arg VLLM_CPU_AVX512VNNI=false`) to disable unsupported features. Please note that without `avx512f`, AVX2 will be used and this version is not recommended because it only has basic feature support.
+    If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. See the build-image-from-source section below for build arguments to match your target CPU capabilities.
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
+
+## Building for your target CPU
+
+vLLM supports building Docker images for specific CPU instruction sets, including cross-compilation (building on one system for deployment on another).
+
+### Cross-compilation: Building on any machine
+
+The `VLLM_CPU_AVX2` and `VLLM_CPU_AVX512` build arguments enable cross-compilation. This means you can build images for AVX512 or AVX2 CPUs **even if your build machine doesn't have those instruction sets**.
+
+**Example: Building AVX512 image on a machine without AVX512**
+
+```bash
+# This works even if your build system lacks AVX512!
+# The compiler generates AVX512 code that will run on your deployment servers
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_AVX512=true \
+        --build-arg VLLM_CPU_AVX512BF16=true \
+        --build-arg VLLM_CPU_AVX512VNNI=true \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
+```
+
+**Example: Building AVX2 image on a machine without AVX2**
+
+```bash
+# This works on any x86_64 build system
+# The resulting image will run on AVX2-capable CPUs (2013+)
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_AVX2=true \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
+```
+
+!!! tip "When to use cross-compilation"
+    - Building on CI/CD systems that may not have the same CPU as your production servers
+    - Building on development machines for deployment to different server types
+    - Creating portable images without needing access to specific hardware
+
+    The cross-compilation flags tell the compiler which instruction set to target, regardless of the build system's CPU capabilities.
+
+### Native builds (auto-detection)
+
+If you're building directly on a machine with the same CPU as your target, you can omit the cross-compilation flags and let vLLM auto-detect the CPU features:
+
+```bash
+# Auto-detects AVX512/AVX2 from the build system's CPU
+docker build -f docker/Dockerfile.cpu \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
+```
+
+!!! warning "Auto-detection requires matching CPU"
+    Without cross-compilation flags, the build will **fail** if your build system lacks AVX2/AVX512 support, even if you intend to deploy on a system that has these features. You must use the cross-compilation flags (`VLLM_CPU_AVX2` or `VLLM_CPU_AVX512`) when building on systems without the target CPU instruction sets.
+
+### Advanced: Fine-tuning instruction set support
+
+If you need to disable specific AVX512 features on systems that have AVX512 but lack certain extensions:
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
         --build-arg VLLM_CPU_AVX512BF16=false (default)|true \
         --build-arg VLLM_CPU_AVX512VNNI=false (default)|true \
         --build-arg VLLM_CPU_AMXBF16=false|true (default) \
-        --build-arg VLLM_CPU_DISABLE_AVX512=false (default)|true \ 
+        --build-arg VLLM_CPU_DISABLE_AVX512=false (default)|true \
         --tag vllm-cpu-env \
         --target vllm-openai .
+```
 
-# Launching OpenAI server
+!!! warning
+    AVX2-only builds have limited feature support compared to AVX512. For best performance, use AVX512 if your target CPU supports it.
+
+## Launching the OpenAI server
+
+```bash
 docker run --rm \
             --security-opt seccomp=unconfined \
             --cap-add SYS_NICE \
