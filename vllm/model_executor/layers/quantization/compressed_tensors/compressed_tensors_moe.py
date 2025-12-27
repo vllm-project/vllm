@@ -66,6 +66,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_weight_tensor_strategy_moe,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
@@ -84,7 +87,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
     normalize_e4m3fn_to_e4m3fnuz,
-    per_tensor_dequantize,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
@@ -880,45 +882,15 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
             replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
-        # Per tensor kernels require single weight scale for w13 per expert, but
-        # on disk there is a scale for w1 and w3. Use the max to requantize.
+        # Per-tensor kernels use a single scale, for W13, but on disk there
+        # is a separate scale for W1 and W3. Requantize with the max scale.
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
             shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        w13_weight[expert_id][start : start + shard_size, :],
-                        w13_weight_scale[expert_id][shard_id],
-                    )
-                    w13_weight[expert_id][start : start + shard_size, :], _ = (
-                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
-                    )
-                    start += shard_size
-            w13_weight_scale = max_w13_scales
-
-        if self.use_cutlass:
-            assert self.weight_quant.strategy != QuantizationStrategy.BLOCK
-            device = layer.w13_weight.device
-            # ab_strides1 and c_strides2 are the same
-            self.ab_strides1_c_strides2 = torch.full(
-                (layer.local_num_experts,),
-                layer.hidden_size,
-                device=device,
-                dtype=torch.int64,
-            )
-            self.ab_strides2 = torch.full(
-                (layer.local_num_experts,),
-                layer.intermediate_size_per_partition,
-                device=device,
-                dtype=torch.int64,
-            )
-            self.c_strides1 = torch.full(
-                (layer.local_num_experts,),
-                2 * layer.intermediate_size_per_partition,
-                device=device,
-                dtype=torch.int64,
+            process_fp8_weight_tensor_strategy_moe(
+                w13_weight,
+                w13_weight_scale,
+                shard_size,
+                layer.num_local_experts,
             )
 
         convert_weights_to_kernel_format(

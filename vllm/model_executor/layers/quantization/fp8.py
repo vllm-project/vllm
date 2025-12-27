@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
+    process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -83,7 +84,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
-    per_tensor_dequantize,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -838,19 +838,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # on disk there is a scale for w1 and w3. Use the max to requantize.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        w13_weight[expert_id][start : start + shard_size, :],
-                        w13_weight_scale[expert_id][shard_id],
-                    )
-                    w13_weight[expert_id][start : start + shard_size, :], _ = (
-                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
-                    )
-                    start += shard_size
-            w13_weight_scale = max_w13_scales
+            w13_weight, w13_weight_scale = process_fp8_weight_tensor_strategy_moe(
+                w13_weight, w13_weight_scale, shard_size, layer.local_num_experts
+            )
 
         # Shuffle weights into the runtime format.
         convert_weights_to_kernel_format(

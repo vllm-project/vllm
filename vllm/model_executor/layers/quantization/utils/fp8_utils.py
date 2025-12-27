@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
+    per_tensor_dequantize,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -1444,7 +1445,23 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
         replace_parameter(layer, scale_attr, dg_weight_scale)
 
 
-def expert_weight_is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+def process_fp8_weight_tensor_strategy_moe(
+    weight: torch.Tensor, weight_scales: torch.Tensor, shard_size: int, num_experts: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process moe weights for tensor-wise quantization strategy."""
+
+    # Per tensor kernels require single weight scale for w13 per expert, but
+    # on disk there is a scale for w1 and w3. Use the max to requantize.
+    max_scales = weight_scales.max(dim=1).values
+    for expert_id in range(num_experts):
+        start = 0
+        for shard_id in range(2):
+            dq_weight = per_tensor_dequantize(
+                weight[expert_id][start : start + shard_size, :],
+                weight_scales[expert_id][shard_id],
+            )
+            weight[expert_id][start : start + shard_size, :], _ = ops.scaled_fp8_quant(
+                dq_weight, max_scales[expert_id]
+            )
+            start += shard_size
+    return weight, max_scales
