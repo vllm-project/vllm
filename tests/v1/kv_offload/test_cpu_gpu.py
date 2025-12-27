@@ -189,3 +189,42 @@ def test_transfer(
                 torch.testing.assert_close(
                     dst_cache[dst_block].cpu(), expected_value.cpu()
                 )
+
+
+def test_expand_block_ids_with_sorting():
+    """Test that block ID expansion and sorting produces correct results.
+
+    This verifies that sorting src_to_dst by source block ID works correctly
+    with expand_block_ids, enabling contiguous memory access patterns.
+    """
+    import numpy as np
+
+    from vllm.v1.kv_offload.worker.cpu_gpu import expand_block_ids
+
+    # Test case: unsorted block IDs [3, 1, 2] with block_size_factor=2
+    src_blocks = np.array([3, 1, 2], dtype=np.int64)
+    dst_blocks = np.array([0, 1, 2], dtype=np.int64)
+    src_block_size_factor = 2
+    dst_block_size_factor = 2
+
+    dst_sub_block_count = dst_blocks.size * dst_block_size_factor
+
+    src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
+    expand_block_ids(src_blocks, src_block_size_factor, src_to_dst[:, 0])
+    expand_block_ids(dst_blocks, dst_block_size_factor, src_to_dst[:, 1])
+
+    # Before sorting: src blocks are [6,7, 2,3, 4,5] (from [3,1,2] * 2)
+    # After sorting by src: should be [2,3, 4,5, 6,7]
+    sort_indices = np.argsort(src_to_dst[:, 0])
+    sorted_src_to_dst = src_to_dst[sort_indices]
+
+    # Verify sorted order
+    assert np.all(sorted_src_to_dst[:-1, 0] <= sorted_src_to_dst[1:, 0]), (
+        "Source block IDs should be in ascending order after sorting"
+    )
+
+    # Verify the mapping is still correct (each src maps to correct dst)
+    expected_sorted_src = np.array([2, 3, 4, 5, 6, 7])
+    expected_sorted_dst = np.array([2, 3, 4, 5, 0, 1])
+    np.testing.assert_array_equal(sorted_src_to_dst[:, 0], expected_sorted_src)
+    np.testing.assert_array_equal(sorted_src_to_dst[:, 1], expected_sorted_dst)

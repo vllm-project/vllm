@@ -128,6 +128,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             skip_count=src_sub_blocks_to_skip,
         )
         expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
+
+        # Sort by source block ID to enable contiguous memory access.
+        # This improves I/O efficiency by allowing the CUDA kernel to
+        # coalesce memory operations when blocks are accessed sequentially.
+        sort_indices = np.argsort(src_to_dst[:, 0])
+        src_to_dst = src_to_dst[sort_indices]
+
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = (
