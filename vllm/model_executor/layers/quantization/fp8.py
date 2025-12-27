@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -27,13 +26,16 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.oracle import (
+    Fp8MoeBackend,
+    get_fp8_moe_backend,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -49,7 +51,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    get_flashinfer_moe_backend,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
@@ -98,8 +99,6 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
-from vllm.utils.flashinfer import has_flashinfer_moe
-from vllm.utils.import_utils import has_deep_gemm
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -107,95 +106,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-class Fp8MoeBackend(Enum):
-    NONE = 0
-    FLASHINFER_TRTLLM = 1
-    FLASHINFER_CUTLASS = 2
-    DEEPGEMM = 3
-    MARLIN = 4
-    TRITON = 5
-    AITER = 6
-
-
-def get_fp8_moe_backend(
-    block_quant: bool,
-    moe_parallel_config: FusedMoEParallelConfig,
-    with_lora_support: bool,
-) -> Fp8MoeBackend | None:
-    """
-    Select the primary FP8 MoE backend
-    Note: Shape-specific fallbacks may still occur at runtime.
-    """
-    if current_platform.is_xpu():
-        return None
-    if with_lora_support:
-        return Fp8MoeBackend.TRITON
-    # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
-    if (
-        current_platform.is_cuda()
-        and (
-            current_platform.is_device_capability_family(100)
-            or current_platform.is_device_capability(90)
-        )
-        and envs.VLLM_USE_FLASHINFER_MOE_FP8
-        and has_flashinfer_moe()
-    ):
-        backend = get_flashinfer_moe_backend()
-        if backend == FlashinferMoeBackend.TENSORRT_LLM:
-            logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
-            return Fp8MoeBackend.FLASHINFER_TRTLLM
-        else:
-            if block_quant and current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "FlashInfer FP8 MoE throughput backend does not "
-                    "support block quantization. Please use "
-                    "VLLM_FLASHINFER_MOE_BACKEND=latency "
-                    "instead."
-                )
-            logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM90/SM100")
-            return Fp8MoeBackend.FLASHINFER_CUTLASS
-
-    # weight-only path for older GPUs without native FP8
-    use_marlin = (
-        not current_platform.has_device_capability(89)
-        or envs.VLLM_TEST_FORCE_FP8_MARLIN
-    )
-    if current_platform.is_rocm():
-        use_marlin = False
-    if use_marlin:
-        logger.info_once("Using Marlin backend for FP8 MoE")
-        return Fp8MoeBackend.MARLIN
-
-    # Determine if we should use DeepGEMM with block-quantized weights:
-    # - If explicitly set by user, respect their choice
-    # - If not explicitly set (default), disable when TP size is >= 8
-    moe_use_deep_gemm = envs.VLLM_MOE_USE_DEEP_GEMM
-    if not envs.is_set("VLLM_MOE_USE_DEEP_GEMM") and moe_parallel_config.tp_size >= 8:
-        moe_use_deep_gemm = False
-        logger.info_once(
-            "DeepGEMM MoE is disabled by default when TP size is >= 8. "
-            "Set VLLM_MOE_USE_DEEP_GEMM=1 to enable it.",
-            scope="local",
-        )
-
-    if envs.VLLM_USE_DEEP_GEMM and moe_use_deep_gemm and block_quant:
-        if not has_deep_gemm():
-            logger.warning_once(
-                "DeepGEMM backend requested but not available.", scope="local"
-            )
-        elif is_deep_gemm_supported():
-            logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
-            return Fp8MoeBackend.DEEPGEMM
-
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-        logger.info_once("Using ROCm AITER backend for FP8 MoE", scope="local")
-        return Fp8MoeBackend.AITER
-
-    # default to Triton
-    logger.info_once("Using Triton backend for FP8 MoE")
-    return Fp8MoeBackend.TRITON
 
 
 class Fp8Config(QuantizationConfig):
@@ -731,7 +641,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
         self.fp8_backend = get_fp8_moe_backend(
-            self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
+            self.block_quant,
+            layer.moe_parallel_config.tp_size,
+            self.moe.is_lora_enabled,
         )
 
         self.marlin_input_dtype = None
@@ -740,6 +652,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+            # TODO(rob): move this logic into the oracle.
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports block "
