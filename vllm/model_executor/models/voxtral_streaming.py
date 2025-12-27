@@ -215,11 +215,15 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             "For streaming you must provide an audio input at every step."
         )
 
-        def _truncate_left(sample: torch.Tensor, mult_of: int, pos: int) -> torch.Tensor:
+        def _truncate_left(
+            sample: torch.Tensor, mult_of: int, pos: int
+        ) -> torch.Tensor:
             assert pos in [0, 1], pos
             if (ctx := sample.shape[pos] % mult_of) != 0:
                 sample = sample[ctx:] if pos == 0 else sample[:, ctx:]
-                assert sample.shape[pos] > 0, f"Sample is empty after truncation with ctx {ctx}"
+                assert sample.shape[pos] > 0, (
+                    f"Sample is empty after truncation with ctx {ctx}"
+                )
 
             return sample
 
@@ -247,7 +251,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         # audio_embeddings per sample need to be divisible by 4
         pool_size = self.config.audio_config.block_pool_size
 
-        audio_embeddings_per_sample = [_truncate_left(sample, pool_size, 0) for sample in audio_embeddings_per_sample]
+        audio_embeddings_per_sample = [
+            _truncate_left(sample, pool_size, 0)
+            for sample in audio_embeddings_per_sample
+        ]
 
         audio_embeddings_per_sample = [
             e.view(e.shape[0] // pool_size, e.shape[1] * pool_size)
