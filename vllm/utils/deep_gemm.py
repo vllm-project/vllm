@@ -363,7 +363,7 @@ def per_block_cast_to_fp8(
     )
 
 
-def calc_diff(x: torch.Tensor, y: torch.Tensor):
+def calc_diff(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """Return a global difference metric for unit tests.
 
     DeepGEMM kernels on Blackwell/B200 currently exhibit noticeable per-element
