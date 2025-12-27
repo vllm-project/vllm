@@ -74,10 +74,10 @@ def _init_kv_cache_quant(
     # with the model weights.
     layer.kv_cache_dtype = kv_cache_dtype
     layer.calculate_kv_scales = calculate_kv_scales
-    layer._k_scale = torch.tensor(1.0, dtype=torch.float32)
-    layer._v_scale = torch.tensor(1.0, dtype=torch.float32)
-    layer._q_scale = torch.tensor(1.0, dtype=torch.float32)
-    layer._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+    layer.register_buffer("_k_scale", torch.tensor(1.0, dtype=torch.float32))
+    layer.register_buffer("_v_scale", torch.tensor(1.0, dtype=torch.float32))
+    layer.register_buffer("_q_scale", torch.tensor(1.0, dtype=torch.float32))
+    layer.register_buffer("_prob_scale", torch.tensor(1.0, dtype=torch.float32))
 
     # We also keep q/k/v_scale on host (cpu) memory for attention
     # backends that require the scales to be on host instead of on device.
