@@ -85,7 +85,10 @@ class FusedMoEBlock(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        orig_shape = hidden_states.shape
+        assert hidden_states.dim() in (1, 2), (
+            "FusedMoEBlock only supports 1D or 2D inputs"
+        )
+        is_input_1d = hidden_states.dim() == 1
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -97,7 +100,7 @@ class FusedMoEBlock(nn.Module):
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
-        return final_hidden_states.view(orig_shape)
+        return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
 
 
 class Step3TextMLP(nn.Module):
