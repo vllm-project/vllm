@@ -218,7 +218,7 @@ class ParallelConfig:
     inference when distributed_executor_backend is mp."""
 
     world_size: int = Field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
+    """world_size is TPxPPxPCP, it affects the number of workers we create."""
 
     rank: int = 0
     """Global rank in distributed setup."""
