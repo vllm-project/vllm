@@ -29,13 +29,14 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, AttentionType
+from vllm.attention.layers.static_sink_attention import StaticSinkAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
     tensor_model_parallel_all_gather,
@@ -77,8 +78,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -155,7 +159,15 @@ class OpenPanguMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
-        self.gate.e_score_correction_bias = None
+        if (
+            hasattr(config, "router_enable_expert_bias")
+            and config.router_enable_expert_bias
+        ):
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(self.n_routed_experts, dtype=torch.float32)
+            )
+        else:
+            self.gate.e_score_correction_bias = None
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -530,6 +542,264 @@ class OpenPanguEmbeddedAttention(nn.Module):
         )
 
 
+class OpenPanguSinkAttention(nn.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_parameters: dict[str, Any] | None = None,
+        max_position_embeddings: int = 8192,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        bias_o_proj: bool = False,
+        cache_config: CacheConfig | None = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+    ) -> None:
+        super().__init__()
+        layer_idx = extract_layer_index(prefix)
+        self.hidden_size = hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.total_num_heads = num_heads
+        if self.total_num_heads % self.tp_size != 0:
+            raise ValueError(
+                f"total_num_heads {self.total_num_heads} "
+                f"is not divisible by tp_size {self.tp_size}."
+            )
+        self.num_heads = self.total_num_heads // self.tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if (
+            self.total_num_kv_heads > self.tp_size
+            and self.total_num_kv_heads % self.tp_size != 0
+        ):
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel ranks.
+            raise ValueError(
+                "Number of KV heads is greater than TP size, "
+                f"but total_num_kv_heads {self.total_num_kv_heads} "
+                f"is not divisible by tp_size {self.tp_size}."
+            )
+        elif self.total_num_kv_heads < self.tp_size:
+            # TODO: Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel ranks.
+            raise ValueError(
+                f"Number of KV heads {self.total_num_kv_heads} is less than "
+                f"TP size {self.tp_size}, KV heads replication is not support yet."
+            )
+        self.num_kv_heads = max(1, self.total_num_kv_heads // self.tp_size)
+        self.qk_nope_dim = getattr(config, "qk_nope_dim", None)
+        self.qk_rope_dim = getattr(config, "qk_rope_dim", None)
+        self.v_channels = getattr(config, "v_channels", None)
+        self.head_dim = self.qk_rope_dim + self.qk_nope_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.k_size = self.num_kv_heads * self.head_dim
+        self.v_size = self.num_kv_heads * self.v_channels
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.param_sink_number = getattr(config, "param_sink_number", 0)
+        self.param_sink_with_value = getattr(config, "param_sink_with_value", False)
+        self.param_sink_scalar = getattr(config, "param_sink_scalar", None)
+        self.param_sink_of_head_num = getattr(config, "param_sink_of_head_dim", False)
+
+        self.qkv_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[
+                self.q_size * self.tp_size,
+                self.k_size * self.tp_size,
+                self.v_size * self.tp_size,
+            ],
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.v_channels,
+            output_size=hidden_size,
+            bias=bias_o_proj,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        self._init_rotary_emb(
+            config, rope_parameters=rope_parameters, quant_config=quant_config
+        )
+
+        if hasattr(config, "interleaved_sliding_window"):
+            interleaved_sliding_window = config.interleaved_sliding_window
+            if isinstance(interleaved_sliding_window, int):
+                sliding_window = interleaved_sliding_window
+            elif isinstance(interleaved_sliding_window, list):
+                sw_idx = layer_idx % len(interleaved_sliding_window)
+                sliding_window = interleaved_sliding_window[sw_idx]
+            else:
+                raise ValueError(
+                    f"{type(interleaved_sliding_window)} "
+                    "for interleaved_sliding_window is not supported."
+                )
+        else:
+            sliding_window = None
+
+        FlashAttentionDiffKVBackend.set_head_size_v(self.v_channels)
+        self.attn = StaticSinkAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            sink_len=self.param_sink_number,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
+            attn_type=attn_type,
+            prefix=f"{prefix}.attn",
+            attn_backend=FlashAttentionDiffKVBackend,
+            head_size_v=self.v_channels,
+        )
+
+        if self.param_sink_number > 0:
+            self.param_sink_key = torch.nn.Parameter(
+                torch.empty(
+                    (
+                        self.param_sink_number,
+                        self.num_kv_heads,
+                        self.head_dim,
+                    ),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                )
+            )
+            set_weight_attrs(
+                self.param_sink_key,
+                {
+                    "output_dim": 1,
+                    "weight_loader": self.weight_loader,
+                },
+            )
+
+            if self.param_sink_with_value:
+                self.param_sink_value = torch.nn.Parameter(
+                    torch.empty(
+                        (
+                            self.param_sink_number,
+                            self.num_kv_heads,
+                            self.v_channels,
+                        ),
+                        device=current_platform.current_device(),
+                        dtype=config.torch_dtype,
+                    )
+                )
+                set_weight_attrs(
+                    self.param_sink_value,
+                    {
+                        "output_dim": 1,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.param_sink_value = torch.zeros(
+                    (
+                        self.param_sink_number,
+                        self.num_kv_heads,
+                        self.v_channels,
+                    ),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                )
+        # To enable dummy run with out weight
+        self.post_weight_load()
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        output_dim = getattr(param, "output_dim", None)
+
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        # bitsandbytes loads the weights of the specific portion
+        # no need to narrow
+        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+
+        # Special case for GGUF
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
+        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+        if is_gguf_weight_type:
+            param.weight_type = loaded_weight.item()
+
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, nn.UninitializedParameter):
+            final_shape = list(loaded_weight.shape)
+            if output_dim is not None:
+                assert final_shape[output_dim] % self.tp_size == 0
+                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
+
+        param_data = param.data
+        if output_dim is not None and not is_sharded_weight:
+            shard_size = param_data.shape[output_dim]
+            start_idx = self.tp_rank * shard_size
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        k = self.k_layernorm(k.view(-1, self.num_kv_heads, self.head_dim))
+        q, k = self.rotary_emb(positions, q, k)
+
+        q = q.view(-1, self.q_size)
+        k = k.view(-1, self.k_size)
+
+        attn_output = self.attn(
+            q,
+            k,
+            v,
+            output_shape=torch.Size(
+                [q.shape[0], q.shape[1] // self.head_dim * self.v_channels]
+            ),
+        )
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    def _init_rotary_emb(
+        self,
+        config: PretrainedConfig,
+        rope_parameters: dict[str, Any] | None,
+        quant_config: QuantizationConfig | None,
+    ) -> None:
+        is_neox_style = False
+        rope_parameters = {"partial_rotary_factor": self.qk_rope_dim / self.head_dim}
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=self.max_position_embeddings,
+            rope_parameters=rope_parameters,
+            is_neox_style=is_neox_style,
+        )
+
+    def post_weight_load(self) -> None:
+        if hasattr(self, "k_layernorm") and self.k_layernorm is not None:
+            param_sink_key = self.k_layernorm(self.param_sink_key)
+        else:
+            param_sink_key = self.param_sink_key
+
+        self.attn.update_sink_kv(param_sink_key, self.param_sink_value)
+
+
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -557,6 +827,9 @@ class OpenPanguDecoderLayer(nn.Module):
             and hasattr(config, "v_head_dim")
             and hasattr(config, "kv_lora_rank")
         )
+        self.use_sink_attention = (
+            hasattr(config, "param_sink_number") and config.param_sink_number > 0
+        )
         if self.use_mla:
             self.self_attn = OpenPanguMLAAttention(
                 config=config,
@@ -573,6 +846,42 @@ class OpenPanguDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+            )
+        elif self.use_sink_attention:
+            attention_bias = getattr(config, "attention_bias", False) or getattr(
+                config, "bias", False
+            )
+            bias_o_proj = attention_bias
+            if hasattr(config, "qkv_bias"):
+                attention_bias = config.qkv_bias
+            if getattr(config, "is_causal", True):
+                attn_type = AttentionType.DECODER
+            else:
+                raise ValueError(
+                    f"is_causal={config.is_causal} is not support "
+                    "for attention with sink"
+                )
+            rope_parameters = getattr(config, "rope_scaling", None)
+            if rope_parameters is None:
+                rope_parameters = {
+                    "rope_type": "default",
+                    "rope_theta": config.rope_theta,
+                }
+            self.self_attn = OpenPanguSinkAttention(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=getattr(
+                    config, "num_key_value_heads", config.num_attention_heads
+                ),
+                rope_parameters=rope_parameters,
+                max_position_embeddings=max_position_embeddings,
+                quant_config=quant_config,
+                bias=attention_bias,
+                bias_o_proj=bias_o_proj,
+                cache_config=cache_config,
+                prefix=f"{prefix}.self_attn",
+                attn_type=attn_type,
             )
         else:
             attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -903,6 +1212,10 @@ class OpenPanguModel(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 name = maybe_remap_kv_scale_name(name, params_dict)
+                if name.endswith("e_score_correction_bias"):
+                    name = name.replace(
+                        "e_score_correction_bias", "gate.e_score_correction_bias"
+                    )
                 if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
@@ -912,7 +1225,16 @@ class OpenPanguModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+
+        self.post_weight_load()
         return loaded_params
+
+    def post_weight_load(self) -> None:
+        for name, module in self.named_modules():
+            if module is self:
+                continue
+            if hasattr(module, "post_weight_load"):
+                module.post_weight_load()
 
 
 class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
@@ -1046,4 +1368,8 @@ class PanguEmbeddedForCausalLM(OpenPanguEmbeddedModel):
 
 
 class PanguUltraMoEForCausalLM(OpenPanguMoEModel):
+    pass
+
+
+class PanguProMoEV2ForCausalLM(OpenPanguMoEModel):
     pass
