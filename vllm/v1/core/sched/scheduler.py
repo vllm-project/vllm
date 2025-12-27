@@ -136,7 +136,18 @@ class Scheduler(SchedulerInterface):
             )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
-        assert num_gpu_blocks is not None and num_gpu_blocks > 0
+        if num_gpu_blocks is None or num_gpu_blocks <= 0:
+            raise ValueError(
+                f"Insufficient GPU memory for KV cache: num_gpu_blocks="
+                f"{num_gpu_blocks}. This usually means the model is too large "
+                "for the available GPU memory. Try one of the following:\n"
+                "  1. Reduce max_model_len (e.g., --max-model-len 2048)\n"
+                "  2. Increase gpu_memory_utilization "
+                "(e.g., --gpu-memory-utilization 0.95)\n"
+                "  3. Use tensor parallelism to distribute across GPUs "
+                "(e.g., --tensor-parallel-size 2)\n"
+                "  4. Enable KV cache offloading if supported"
+            )
 
         self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size

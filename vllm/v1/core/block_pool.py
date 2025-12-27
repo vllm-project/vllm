@@ -152,7 +152,12 @@ class BlockPool:
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        if not isinstance(num_gpu_blocks, int) or num_gpu_blocks <= 0:
+            raise ValueError(
+                f"num_gpu_blocks must be a positive integer, got "
+                f"{num_gpu_blocks!r}. This indicates insufficient GPU memory "
+                "for KV cache allocation."
+            )
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
