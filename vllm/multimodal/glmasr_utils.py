@@ -33,6 +33,15 @@ def _as_list_chunk_counts(
     return [int(c) for c in chunk_counts]
 
 
+def _normalize_chunk_counts(
+    chunk_counts: torch.Tensor | list[int] | list[torch.Tensor] | None,
+    num_chunks: int,
+) -> list[int]:
+    if chunk_counts is None:
+        return [1] * num_chunks
+    return _as_list_chunk_counts(chunk_counts)
+
+
 def _get_audio_output_lengths_from_lengths(
     audio_lengths: torch.Tensor,
     merge_factor: int,
@@ -62,10 +71,14 @@ def _get_audio_output_lengths_for_tower(
     merge_factor: int,
     conv_params: list[tuple[int, int, int]],
 ) -> torch.Tensor:
-    _, audio_output_lengths = audio_tower._get_feat_extract_output_lengths(
-        audio_lengths
+    if hasattr(audio_tower, "_get_feat_extract_output_lengths"):
+        _, audio_output_lengths = audio_tower._get_feat_extract_output_lengths(
+            audio_lengths
+        )
+        return audio_output_lengths
+    return _get_audio_output_lengths_from_lengths(
+        audio_lengths, merge_factor, conv_params
     )
-    return audio_output_lengths
 
 
 def _flatten_audio_features_by_length(

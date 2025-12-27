@@ -19,11 +19,11 @@ from vllm.multimodal.glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
-    _as_list_chunk_counts,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _get_audio_output_lengths_from_mask,
     _group_audio_embeddings,
+    _normalize_chunk_counts,
 )
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -233,7 +233,16 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        # Handle deprecated "audios" key
+        if "audios" in mm_data:
+            mm_data["audio"] = mm_data.pop("audios")
+
         audio_list = mm_data.get("audio", [])
+        if not audio_list:
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
         if not isinstance(audio_list, list):
             audio_list = [audio_list]
 
@@ -282,10 +291,19 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
     def _extract_mask_for_item(
         self,
         feature_attention_mask: torch.Tensor | list[torch.Tensor],
-        chunk_counts: torch.Tensor | list[int],
+        chunk_counts: torch.Tensor | list[int] | None,
         item_idx: int,
     ) -> torch.Tensor:
         """Extract attention mask for a specific audio item."""
+        if chunk_counts is None:
+            # Single item per audio
+            mask = feature_attention_mask[item_idx]
+            return (
+                mask.unsqueeze(0)
+                if isinstance(feature_attention_mask, torch.Tensor)
+                else self._normalize_to_tensor(mask)
+            )
+
         # Multiple chunks per audio: calculate slice indices
         counts = (
             chunk_counts.tolist()
@@ -312,7 +330,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         config = self.info.get_hf_config()
 
         audio_token = getattr(processor, "audio_token", "<|pad|>")
-        audio_token_id = vocab[audio_token]
+        audio_token_id = vocab.get(audio_token)
+        if audio_token_id is None:
+            audio_token_id = processor.audio_token_id
 
         merge_factor = getattr(config, "merge_factor", DEFAULT_MERGE_FACTOR)
         out_mm_data = out_mm_kwargs.get_data()
@@ -408,6 +428,9 @@ class GlmAsrForConditionalGeneration(
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
         chunk_counts = kwargs.pop("chunk_counts", None)
 
+        if input_features is None and audio_embeds is None:
+            return None
+
         if audio_embeds is not None:
             return GlmAsrEmbeddingInputs(type="audio_embeds", audio_embeds=audio_embeds)
 
@@ -436,7 +459,9 @@ class GlmAsrForConditionalGeneration(
             input_features = torch.cat(input_features, dim=0)
             feature_attention_mask = torch.cat(feature_attention_mask, dim=0)
 
-        chunk_counts = _as_list_chunk_counts(chunk_counts)
+        chunk_counts = _normalize_chunk_counts(
+            chunk_counts, num_chunks=input_features.shape[0]
+        )
 
         audio_outputs = self.audio_tower(input_features)
         audio_hidden_states = audio_outputs.last_hidden_state
@@ -471,6 +496,8 @@ class GlmAsrForConditionalGeneration(
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
+            return []
         masked_audio_features = self._process_audio_input(audio_input)
         return masked_audio_features
 
