@@ -130,10 +130,11 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
+        k_pe: torch.Tensor,
         positions: torch.Tensor,
         q_scale: torch.Tensor,
-    ) -> torch.Tensor:
-        """Fused RoPE + FP8 quantization for decode Q.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for decode Q, plus RoPE for K.
 
         Uses flashinfer.rope.mla_rope_quantize_fp8 to apply RoPE and quantize
         in a single fused kernel for better performance.
@@ -141,11 +142,14 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         Args:
             ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
             q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
+            k_pe: Raw k_pe (no RoPE yet). Shape: [B, 1, R].
             positions: Position indices. Shape: [B]
             q_scale: Scale for FP8 quantization (unused, scale is 1.0).
 
         Returns:
-            FP8 quantized tensor with RoPE applied. Shape: [B, N, L+R]
+            tuple of:
+            - q_out: FP8 quantized Q with RoPE. Shape: [B, N, L+R]
+            - k_pe_roped: K with RoPE applied (original dtype). Shape: [B, 1, R]
         """
         assert self.rotary_emb is not None, (
             "rotary_emb must be set for fused RoPE+quant"
@@ -165,25 +169,19 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # flashinfer requires cos_sin_cache to be float32
         cos_sin_cache_f32 = self.rotary_emb.cos_sin_cache.float()
 
-        # The flashinfer kernel requires K tensors to have the same batch size
-        # as Q tensors. For decode, K is already in cache with RoPE applied,
-        # so we pass dummy K tensors and ignore the output.
-        # K tensors need shape [B, 1, dim] to match Q's batch size.
-        # Use empty instead of zeros since these are dummy tensors - the
-        # output is ignored.
-        k_rope_dummy = torch.empty(B, 1, R, dtype=q_pe.dtype, device=q_pe.device)
+        # K output tensors - we need RoPE applied but in FP8, will dequant
         k_nope_dummy = torch.empty(B, 1, L, dtype=ql_nope.dtype, device=ql_nope.device)
-        k_rope_out_dummy = torch.empty(
+        k_rope_out_fp8 = torch.empty(
             B, 1, R, dtype=torch.float8_e4m3fn, device=q_pe.device
         )
         k_nope_out_dummy = torch.empty(
             B, 1, L, dtype=torch.float8_e4m3fn, device=ql_nope.device
         )
 
-        # Call fused kernel
+        # Call fused kernel - applies RoPE and FP8 quant to both Q and K
         mla_rope_quantize_fp8(
             q_rope=q_pe,
-            k_rope=k_rope_dummy,
+            k_rope=k_pe,
             q_nope=ql_nope,
             k_nope=k_nope_dummy,
             cos_sin_cache=cos_sin_cache_f32,
@@ -192,13 +190,16 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             quantize_dtype=torch.float8_e4m3fn,
             q_rope_out=q_out[..., L:],  # RoPE portion goes after nope
             q_nope_out=q_out[..., :L],  # nope portion goes first
-            k_rope_out=k_rope_out_dummy,  # ignored
-            k_nope_out=k_nope_out_dummy,  # ignored
+            k_rope_out=k_rope_out_fp8,
+            k_nope_out=k_nope_out_dummy,
             quant_scale_q=1.0,
             quant_scale_kv=1.0,
         )
 
-        return q_out
+        # Dequantize k_rope from FP8 back to original dtype for cache storage
+        k_pe_roped = k_rope_out_fp8.to(k_pe.dtype)
+
+        return q_out, k_pe_roped
 
     def _forward_decode(
         self,

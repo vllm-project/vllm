@@ -219,6 +219,7 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -1927,74 +1928,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
 
-    def _apply_rope(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        """Apply RoPE to a tensor using stored rotary_emb.
-
-        Args:
-            x: Tensor to apply RoPE to. Shape: [num_tokens, num_heads, head_dim]
-                or [num_tokens, 1, head_dim] for k_pe.
-            positions: Position indices. Shape: [num_tokens]
-
-        Returns:
-            Tensor with RoPE applied.
-        """
-        assert self.rotary_emb is not None, "rotary_emb must be set to use _apply_rope"
-        from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-
-        # TODO: use self.rotary_emb(positions, x, None)[0] once flashinfer
-        # rope supports key=None
-        return RotaryEmbedding.forward_static(
-            positions,
-            x,
-            None,
-            self.rotary_emb.head_size,
-            self.rotary_emb.rotary_dim,
-            self.rotary_emb.cos_sin_cache,
-            self.rotary_emb.is_neox_style,
-        )[0]
-
-    def _apply_rope_q(
-        self,
-        q: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        """Apply RoPE to the q_pe portion of q in-place.
-
-        Args:
-            q: Query tensor. Shape: [num_tokens, num_heads, qk_head_dim]
-                where qk_head_dim = qk_nope_head_dim + qk_rope_head_dim.
-                Modified in-place.
-            positions: Position indices.
-        """
-        assert self.rotary_emb is not None, (
-            "rotary_emb must be set to use _apply_rope_q"
-        )
-        from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-
-        # TODO: use self.rotary_emb(positions, q_pe, None)[0] once flashinfer
-        # rope supports key=None
-        q[..., self.qk_nope_head_dim :] = RotaryEmbedding.forward_static(
-            positions,
-            q[..., self.qk_nope_head_dim :],
-            None,
-            self.rotary_emb.head_size,
-            self.rotary_emb.rotary_dim,
-            self.rotary_emb.cos_sin_cache,
-            self.rotary_emb.is_neox_style,
-        )[0]
-
     def _fused_rope_quant(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
+        k_pe: torch.Tensor,
         positions: torch.Tensor,
         q_scale: torch.Tensor,
-    ) -> torch.Tensor:
-        """Fused RoPE + FP8 quantization for decode Q.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for decode Q, plus RoPE for K.
 
         This method should be overridden by subclasses that support
         fused RoPE+quant (e.g., FlashInferMLAImpl).
@@ -2002,11 +1944,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         Args:
             ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
             q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
+            k_pe: Raw k_pe (no RoPE yet). Shape: [B, 1, R].
             positions: Position indices. Shape: [B]
             q_scale: Scale for FP8 quantization.
 
         Returns:
-            FP8 quantized tensor with RoPE applied. Shape: [B, N, L+R]
+            tuple of:
+            - q_out: FP8 quantized Q with RoPE applied. Shape: [B, N, L+R]
+            - k_pe_roped: K with RoPE applied (original dtype). Shape: [B, 1, R]
         """
         raise NotImplementedError(
             "Fused RoPE+quant not implemented for this backend. "
@@ -2100,37 +2045,48 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             positions[num_decode_tokens:] if positions is not None else None
         )
 
-        # Apply RoPE to k_pe before storing to cache
-        # k_pe needs RoPE for both prefill and decode paths
-        if self.rotary_emb is not None and positions is not None:
-            k_pe = self._apply_rope(k_pe, positions)
-
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        if fp8_attention:
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        # NOTE: RoPE is now applied per-path (prefill vs decode) rather than
+        # upfront. This enables using self.rotary_emb() directly which uses
+        # faster flashinfer RoPE.
 
         if has_prefill:
-            # Apply RoPE to prefill q_pe before attention (in-place)
+            # Apply RoPE to both prefill q_pe and k_pe using self.rotary_emb
             if self.rotary_emb is not None and prefill_positions is not None:
-                self._apply_rope_q(prefill_q, prefill_positions)
-            # Re-slice prefill_k_pe since k_pe was modified by RoPE
-            prefill_k_pe = k_pe[num_decode_tokens:]
+                # TODO: Once flashinfer supports key=None, switch from forward_static
+                # to self.rotary_emb(prefill_positions, prefill_q, prefill_k_pe)
+                prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = (
+                    RotaryEmbedding.forward_static(
+                        prefill_positions,
+                        prefill_q[..., self.qk_nope_head_dim :],
+                        prefill_k_pe,
+                        self.rotary_emb.head_size,
+                        self.rotary_emb.rotary_dim,
+                        self.rotary_emb.cos_sin_cache,
+                        self.rotary_emb.is_neox_style,
+                    )
+                )
+
+            # Store prefill k to cache (after RoPE applied)
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    prefill_k_c_normed,
+                    prefill_k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping[num_decode_tokens:].flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
+
+            if fp8_attention:
+                kv_cache_for_prefill = kv_cache.view(current_platform.fp8_dtype())
+            else:
+                kv_cache_for_prefill = kv_cache
 
             self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
                 prefill_k_pe,
-                kv_cache,
+                kv_cache_for_prefill,
                 attn_metadata,
                 layer._k_scale,
                 output=output[num_decode_tokens:],
@@ -2138,6 +2094,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_decode:
             assert attn_metadata.decode is not None
+
+            decode_k_c_normed = k_c_normed[:num_decode_tokens]
+            decode_k_pe = k_pe[:num_decode_tokens]
 
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -2189,18 +2148,30 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 and self.rotary_emb is not None
                 and decode_positions is not None
             ):
-                # Fused RoPE + FP8 quant path
-                # decode_q_pe is raw (no RoPE yet), fused kernel will apply it
-                decode_q = self._fused_rope_quant(
+                # Sub-case 2.1: Fused RoPE + FP8 quant path
+                # _fused_rope_quant applies RoPE to both Q and K
+                decode_q, decode_k_pe = self._fused_rope_quant(
                     decode_ql_nope,
                     decode_q_pe,
+                    decode_k_pe,
                     decode_positions,
                     layer._q_scale,
                 )
             elif fp8_attention:
-                # Non-fused FP8 path: apply RoPE first, then quantize
+                # Sub-case 2.2: Non-fused FP8 path
+                # Apply RoPE to both q_pe and k_pe
                 if self.rotary_emb is not None and decode_positions is not None:
-                    decode_q_pe = self._apply_rope(decode_q_pe, decode_positions)
+                    # TODO: Once flashinfer supports key=None, switch to
+                    # self.rotary_emb(decode_positions, decode_q_pe, decode_k_pe)
+                    decode_q_pe, decode_k_pe = RotaryEmbedding.forward_static(
+                        decode_positions,
+                        decode_q_pe,
+                        decode_k_pe,
+                        self.rotary_emb.head_size,
+                        self.rotary_emb.rotary_dim,
+                        self.rotary_emb.cos_sin_cache,
+                        self.rotary_emb.is_neox_style,
+                    )
 
                 ql_nope_shape = decode_ql_nope.shape
                 q_pe_shape = decode_q_pe.shape
@@ -2227,10 +2198,35 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
                 decode_q = decode_q.view(decode_q_shape)
             else:
-                # Non-FP8 path: apply RoPE to decode_q_pe
+                # Sub-case 2.3: Non-FP8 path
+                # Apply RoPE to both q_pe and k_pe
                 if self.rotary_emb is not None and decode_positions is not None:
-                    decode_q_pe = self._apply_rope(decode_q_pe, decode_positions)
+                    # TODO: Once flashinfer supports key=None, switch to
+                    # self.rotary_emb(decode_positions, decode_q_pe, decode_k_pe)
+                    decode_q_pe, decode_k_pe = RotaryEmbedding.forward_static(
+                        decode_positions,
+                        decode_q_pe,
+                        decode_k_pe,
+                        self.rotary_emb.head_size,
+                        self.rotary_emb.rotary_dim,
+                        self.rotary_emb.cos_sin_cache,
+                        self.rotary_emb.is_neox_style,
+                    )
                 decode_q = (decode_ql_nope, decode_q_pe)
+
+            # SHARED: Store decode k to cache (after RoPE applied in all sub-cases)
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    decode_k_c_normed,
+                    decode_k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping[:num_decode_tokens].flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
+
+            if fp8_attention:
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
             if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
