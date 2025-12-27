@@ -100,8 +100,14 @@ class DPMetadata:
         num_tokens: int,
         num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
-        assert num_tokens_across_dp_cpu is not None
-        assert parallel_config.data_parallel_size > 1
+        assert num_tokens_across_dp_cpu is not None, (
+            "num_tokens_across_dp_cpu must be provided when creating DPMetadata"
+        )
+        assert parallel_config.data_parallel_size > 1, (
+            "DPMetadata.make() should only be called when data parallelism "
+            f"is enabled (data_parallel_size > 1), but got "
+            f"data_parallel_size={parallel_config.data_parallel_size}"
+        )
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
 
@@ -167,7 +173,10 @@ class DPMetadata:
             self.local_sizes = None
 
     def get_chunk_sizes_across_dp_rank(self) -> list[int] | None:
-        assert self.local_sizes is not None
+        assert self.local_sizes is not None, (
+            "local_sizes is not set. This method should only be called "
+            "within a chunked_sizes() or sp_local_sizes() context manager."
+        )
         return self.local_sizes
 
     # Get the cumulative tokens across sequence parallel ranks.
@@ -290,15 +299,23 @@ def set_forward_context(
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
         if num_tokens_across_dp is None:
-            assert ubatch_slices is None
-            assert num_tokens is not None
+            assert ubatch_slices is None, (
+                "ubatch_slices must not be set when num_tokens_across_dp is "
+                "not provided, as microbatching is disabled in this case"
+            )
+            assert num_tokens is not None, (
+                "num_tokens must be provided when num_tokens_across_dp is not "
+                "set, since it is needed to coordinate the batch across DP ranks"
+            )
             _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
                 allow_dp_padding=False,
             )
-            assert num_tokens_across_dp is not None
+            assert num_tokens_across_dp is not None, (
+                "coordinate_batch_across_dp() failed to compute num_tokens_across_dp"
+            )
         dp_metadata = DPMetadata.make(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
