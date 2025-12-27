@@ -230,6 +230,20 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
+async def check_engine_fault(raw_request: Request):
+    client = engine_client(raw_request)
+    assert hasattr(client, "engine_core")
+    core_client = client.engine_core
+    if (
+        hasattr(core_client, "client_sentinel")
+        and core_client.client_sentinel.is_faulted.is_set()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Service is in faulted state, cannot process requests.",
+        )
+
+
 router = APIRouter()
 
 
@@ -326,7 +340,7 @@ async def _convert_stream_to_sse_events(
 
 @router.post(
     "/v1/responses",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
@@ -419,7 +433,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
 
 @router.post(
     "/v1/messages",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
@@ -475,7 +489,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
 @router.post(
     "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
@@ -516,7 +530,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
 @router.post(
     "/v1/completions",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request), Depends(check_engine_fault)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
