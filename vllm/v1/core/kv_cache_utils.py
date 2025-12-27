@@ -327,6 +327,11 @@ class FreeKVCacheBlockQueue:
         if len(blocks) == 0:
             return
 
+        # Sort blocks by block_id to enable contiguous allocation.
+        # This improves I/O efficiency for layer-wise KV cache transfers
+        # by allowing multiple blocks to be merged into single operations.
+        blocks.sort(key=lambda x: x.block_id)
+
         last_block = self.fake_free_list_tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist"

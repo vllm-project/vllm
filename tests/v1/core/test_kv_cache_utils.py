@@ -289,6 +289,42 @@ def test_free_kv_cache_block_queue_append_n():
     )
 
 
+def test_free_kv_cache_block_queue_append_n_sorts_by_block_id():
+    """Test that append_n sorts blocks by block_id to enable contiguous allocation."""
+    # Create an empty FreeKVCacheBlockQueue
+    queue = FreeKVCacheBlockQueue([])
+
+    # Create blocks out of order
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    out_of_order_blocks = [blocks[5], blocks[2], blocks[4], blocks[0], blocks[3]]
+
+    # Append blocks in out-of-order sequence
+    queue.append_n(out_of_order_blocks)
+
+    # Verify blocks are sorted by block_id in the queue
+    # The queue should contain blocks in sorted order: 0, 2, 3, 4, 5
+    free_blocks = queue.get_all_free_blocks()
+    assert len(free_blocks) == 5
+    block_ids = [b.block_id for b in free_blocks]
+    assert block_ids == [0, 2, 3, 4, 5], (
+        f"Expected blocks sorted by block_id, got {block_ids}"
+    )
+
+    # Test with already sorted blocks
+    queue2 = FreeKVCacheBlockQueue([])
+    sorted_blocks = [KVCacheBlock(block_id=i) for i in range(3)]
+    queue2.append_n(sorted_blocks)
+    free_blocks2 = queue2.get_all_free_blocks()
+    assert [b.block_id for b in free_blocks2] == [0, 1, 2]
+
+    # Test with reverse sorted blocks
+    queue3 = FreeKVCacheBlockQueue([])
+    reverse_sorted_blocks = [KVCacheBlock(block_id=i) for i in range(4, -1, -1)]
+    queue3.append_n(reverse_sorted_blocks)
+    free_blocks3 = queue3.get_all_free_blocks()
+    assert [b.block_id for b in free_blocks3] == [0, 1, 2, 3, 4]
+
+
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
     # Create an empty FreeKVCacheBlockQueue with these blocks
