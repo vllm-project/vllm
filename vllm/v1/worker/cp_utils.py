@@ -23,20 +23,25 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
-                    "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    "MTP with cp_kv_cache_interleave_size > 1 requires an "
+                    "attention backend that supports this configuration, but "
+                    f"{layer_impl.__class__.__name__} does not. "
+                    "Try setting VLLM_ATTENTION_BACKEND to a compatible backend."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+                    "Decode Context Parallelism (DCP) requires an attention "
+                    "backend that returns softmax LSE for decode, but "
+                    f"{layer_impl.__class__.__name__} does not. "
+                    "Set VLLM_ATTENTION_BACKEND to a DCP-compatible backend "
+                    "such as FLASH_ATTN or FLASHINFER, and retry."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    "Prefill Context Parallelism (PCP) requires an attention "
+                    "backend with PCP support, but "
+                    f"{layer_impl.__class__.__name__} does not. "
+                    "Set VLLM_ATTENTION_BACKEND to a PCP-compatible backend "
+                    "such as FLASH_ATTN or FLASHINFER, and retry."
                 )
