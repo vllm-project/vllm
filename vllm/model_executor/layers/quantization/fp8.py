@@ -1022,8 +1022,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     MarlinExperts(quant_config=self.moe_quant_config),
                 )
             else:
+                prepare_finalize = self.maybe_make_prepare_finalize()
+                logger.info_once(f"{prepare_finalize=}")
                 self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
+                    prepare_finalize,
                     TritonOrDeepGemmExperts(
                         quant_config=self.moe_quant_config,
                         allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
