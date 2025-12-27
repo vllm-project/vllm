@@ -311,6 +311,16 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """TritonAttention supports all attention types."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
+        )
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
 
