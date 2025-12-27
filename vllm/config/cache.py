@@ -100,6 +100,9 @@ class CacheConfig:
     load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
+
+    DEPRECATED: This field is deprecated and will be removed in a future
+    release. Please use OffloadConfig.cpu_offload_gb instead.
     """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
