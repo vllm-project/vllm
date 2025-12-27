@@ -32,6 +32,8 @@ _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
 _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
+# Interval between continuous usage reports (10 minutes in seconds)
+_CONTINUOUS_USAGE_REPORT_INTERVAL_S = 600
 
 _GLOBAL_RUNTIME_DATA = dict[str, str | int | bool]()
 
@@ -259,13 +261,13 @@ class UsageMessage:
         self._send_to_server(data)
 
     def _report_continuous_usage(self):
-        """Report usage every 10 minutes.
+        """Report usage periodically.
 
         This helps us to collect more data points for uptime of vLLM usages.
         This function can also help send over performance metrics over time.
         """
         while True:
-            time.sleep(600)
+            time.sleep(_CONTINUOUS_USAGE_REPORT_INTERVAL_S)
             data = {
                 "uuid": self.uuid,
                 "log_time": _get_current_timestamp_ns(),
