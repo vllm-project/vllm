@@ -1336,6 +1336,11 @@ def set_current_vllm_config(
 
     num_models_seen = compilation_counter.num_models_seen
     try:
+        # Clear the compilation config cache when context changes.
+        # This is needed since the old config may have been accessed
+        # and cached before the new config is set.
+        get_cached_compilation_config.cache_clear()
+
         _current_vllm_config = vllm_config
         _current_prefix = prefix
         yield
