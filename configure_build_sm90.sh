@@ -7,7 +7,7 @@ set -e
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/cmake-release-build"
-CONDA_ENV="${VLLM_CONDA_ENV:-/workspace/aimo/miniconda/envs/vllm}"
+CONDA_ENV="${VLLM_CONDA_ENV:-usr/local}"
 PYTHON="${CONDA_ENV}/bin/python"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 LOG_DIR="${SCRIPT_DIR}/../logs"
