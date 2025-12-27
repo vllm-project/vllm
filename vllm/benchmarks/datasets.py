@@ -1294,6 +1294,78 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
+def _is_local_hf_dataset(path: str) -> bool:
+    """Check if a local path is a downloaded HuggingFace dataset.
+
+    HuggingFace datasets when downloaded locally typically contain:
+    - dataset_info.json file
+    - Arrow files (.arrow) or parquet files
+    """
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        return False
+
+    # Check for HF dataset markers
+    if (p / "dataset_info.json").exists():
+        return True
+
+    # Check for arrow files (common in HF datasets)
+    return any(p.glob("*.arrow")) or any(p.glob("**/*.arrow"))
+
+
+def _infer_dataset_name_from_path(dataset_path: str) -> str | None:
+    """Try to infer dataset type from the path.
+
+    This provides backward compatibility with the legacy benchmark_serving.py
+    script which automatically inferred ShareGPT when a dataset path was
+    provided. See GitHub issue #24684.
+
+    Returns:
+        Inferred dataset name, or None if inference failed.
+    """
+    path_lower = dataset_path.lower()
+
+    # Check if it's a locally downloaded HuggingFace dataset first
+    # This handles cases like "/data/Aeala/ShareGPT_Vicuna_unfiltered/"
+    # where the path contains keyword patterns but is actually an HF dataset
+    if _is_local_hf_dataset(dataset_path):
+        return "hf"
+
+    # Check if it looks like a HuggingFace dataset ID (remote)
+    # HuggingFace IDs look like "org/dataset-name" - contains '/' but no
+    # file extension and doesn't look like a file path
+    if (
+        "/" in dataset_path
+        and not dataset_path.startswith(("/", ".", "~"))
+        and not any(
+            path_lower.endswith(ext)
+            for ext in [".json", ".jsonl", ".txt", ".csv", ".parquet"]
+        )
+    ):
+        return "hf"
+
+    # Check for sharegpt patterns in local file paths
+    if "sharegpt" in path_lower:
+        return "sharegpt"
+
+    # Check for sonnet patterns
+    if "sonnet" in path_lower:
+        return "sonnet"
+
+    # Check for burstgpt patterns
+    if "burstgpt" in path_lower:
+        return "burstgpt"
+
+    # For .json/.jsonl files without a clear pattern, default to sharegpt
+    # as this was the legacy behavior
+    if path_lower.endswith((".json", ".jsonl")):
+        return "sharegpt"
+
+    return None
+
+
 class _ValidateDatasetArgs(argparse.Action):
     """Argparse action to validate dataset name and path compatibility."""
 
@@ -1306,12 +1378,23 @@ class _ValidateDatasetArgs(argparse.Action):
 
         # Validate the combination
         if dataset_name == "random" and dataset_path is not None:
-            parser.error(
-                "Cannot use 'random' dataset with --dataset-path. "
-                "Please specify the appropriate --dataset-name (e.g., "
-                "'sharegpt', 'custom', 'sonnet') for your dataset file: "
-                f"{dataset_path}"
-            )
+            # Try to infer the dataset type from the path for backward
+            # compatibility with legacy benchmark_serving.py behavior
+            inferred_name = _infer_dataset_name_from_path(dataset_path)
+            if inferred_name is not None:
+                logger.info(
+                    "Inferred --dataset-name=%s from --dataset-path=%s",
+                    inferred_name,
+                    dataset_path,
+                )
+                namespace.dataset_name = inferred_name
+            else:
+                parser.error(
+                    "Cannot use 'random' dataset with --dataset-path. "
+                    "Please specify the appropriate --dataset-name (e.g., "
+                    "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+                    f"{dataset_path}"
+                )
 
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
