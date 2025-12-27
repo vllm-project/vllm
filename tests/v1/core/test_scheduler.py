@@ -15,8 +15,6 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
-from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -3462,7 +3460,8 @@ def test_finishing_prefill_prioritized():
 
     assert output.num_scheduled_tokens[requests[0].request_id] == 500
     assert output.num_scheduled_tokens[requests[1].request_id] == 400
-    # Request 1 will be finished after this scheduling, so it should be first in running list
+    # Request 1 will be finished after this scheduling
+    # so it should be first in running list
     assert scheduler.running[0].request_id == requests[1].request_id
     assert scheduler.running[1].request_id == requests[0].request_id
 
