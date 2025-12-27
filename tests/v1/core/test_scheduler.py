@@ -3479,6 +3479,30 @@ def test_concurrent_partial_prefill_with_engine(
     )
 
 
+def test_finishing_prefill_prioritized():
+    scheduler = create_scheduler(
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        long_prefill_token_threshold=1500,
+        max_num_batched_tokens=1000,
+        max_model_len=4096,
+    )
+    requests = create_requests(num_requests=2, num_tokens=[2000, 400])
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # Each request consumes one 512-token chunk in the first step.
+    assert output.num_scheduled_tokens[requests[0].request_id] == 500
+    assert output.num_scheduled_tokens[requests[1].request_id] == 400
+    # Request 1 only needs 188 more prompt tokens, so it should be moved
+    # ahead of the longer prompt for the next iteration.
+    print(f"scheduler.running: {[r.request_id for r in scheduler.running]}")
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert scheduler.running[1].request_id == requests[0].request_id
+
+
 # ==============================================================================
 # Concurrent Partial Prefill tests end
 # ==============================================================================

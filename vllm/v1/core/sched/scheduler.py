@@ -828,7 +828,10 @@ class Scheduler(SchedulerInterface):
                         any_request.request_id
                     )
                 )
-
+        # reorder scheduled prefills to have finishing ones first
+        self.running = self._order_finishing_prefills_first(
+            self.running, num_scheduled_tokens
+        )
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
@@ -1075,6 +1078,36 @@ class Scheduler(SchedulerInterface):
         if index <= 0:
             return None
         return self._prefill_slot_budgets[index]
+
+    def _order_finishing_prefills_first(
+        self,
+        running_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+    ) -> list[Request]:
+        """Move prefills that can finish in the next step to the front."""
+
+        # TODO: should we also enable this for non-partial prefill scheduling?
+        if (
+            not self.enable_concurrent_partial_prefill_scheduling
+            or len(running_reqs) <= 1
+        ):
+            return running_reqs
+
+        # Track prefill state after accounting for the work scheduled
+        # in the current iteration.
+        finishing_prefills: list[Request] = []
+        non_finishing_prefills: list[Request] = []
+        for request in running_reqs:
+            scheduled_tokens = num_scheduled_tokens.get(request.request_id, 0)
+            num_tokens_after_step = request.num_computed_tokens + scheduled_tokens
+            print(scheduled_tokens, num_tokens_after_step, request.num_prompt_tokens)
+            if num_tokens_after_step >= request.num_prompt_tokens:
+                finishing_prefills.append(request)
+            else:
+                non_finishing_prefills.append(request)
+        print("Finished prefills:", [r.request_id for r in finishing_prefills])
+        print("Non-finishing prefills:", [r.request_id for r in non_finishing_prefills])
+        return finishing_prefills + non_finishing_prefills
 
     def _get_request_prefill_state(
         self, request: Request, num_computed_tokens: int
