@@ -23,20 +23,25 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
-                    "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    f"Multi-Token Prediction (MTP) with "
+                    f"cp_kv_cache_interleave_size > 1 is not supported by "
+                    f"'{layer_impl.__class__.__name__}'. Try using a different "
+                    f"attention backend by setting VLLM_ATTENTION_BACKEND."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+                    f"Decode Context Parallelism (DCP) requires attention "
+                    f"implementations to return the softmax LSE for decode, "
+                    f"but '{layer_impl.__class__.__name__}' does not support this. "
+                    f"Try using a different attention backend by setting "
+                    f"VLLM_ATTENTION_BACKEND=FLASH_ATTN or "
+                    f"VLLM_ATTENTION_BACKEND=FLASHINFER."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    f"Prefill Context Parallelism (PCP) requires attention "
+                    f"implementation support, but '{layer_impl.__class__.__name__}' "
+                    f"does not support PCP. Try using a different attention backend "
+                    f"by setting VLLM_ATTENTION_BACKEND=FLASH_ATTN."
                 )
