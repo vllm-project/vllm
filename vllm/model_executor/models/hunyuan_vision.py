@@ -247,6 +247,12 @@ class HunYuanVisionAttention(nn.Module):
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
         out = self.attn(q, k, v)
+        out = out.view(
+            x.size(0),
+            -1,
+            self.num_attention_heads_per_partition
+            * self.hidden_size_per_attention_head,
+        )
         output, _ = self.o_proj(out)
         return output
 
