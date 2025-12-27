@@ -219,7 +219,6 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -2052,18 +2051,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_prefill:
             # Apply RoPE to both prefill q_pe and k_pe using self.rotary_emb
             if self.rotary_emb is not None and prefill_positions is not None:
-                # TODO: Once flashinfer supports key=None, switch from forward_static
-                # to self.rotary_emb(prefill_positions, prefill_q, prefill_k_pe)
-                prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = (
-                    RotaryEmbedding.forward_static(
-                        prefill_positions,
-                        prefill_q[..., self.qk_nope_head_dim :],
-                        prefill_k_pe,
-                        self.rotary_emb.head_size,
-                        self.rotary_emb.rotary_dim,
-                        self.rotary_emb.cos_sin_cache,
-                        self.rotary_emb.is_neox_style,
-                    )
+                prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = self.rotary_emb(
+                    prefill_positions,
+                    prefill_q[..., self.qk_nope_head_dim :],
+                    prefill_k_pe,
                 )
 
             # Store prefill k to cache (after RoPE applied)
@@ -2161,16 +2152,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 # Sub-case 2.2: Non-fused FP8 path
                 # Apply RoPE to both q_pe and k_pe
                 if self.rotary_emb is not None and decode_positions is not None:
-                    # TODO: Once flashinfer supports key=None, switch to
-                    # self.rotary_emb(decode_positions, decode_q_pe, decode_k_pe)
-                    decode_q_pe, decode_k_pe = RotaryEmbedding.forward_static(
+                    decode_q_pe, decode_k_pe = self.rotary_emb(
                         decode_positions,
                         decode_q_pe,
                         decode_k_pe,
-                        self.rotary_emb.head_size,
-                        self.rotary_emb.rotary_dim,
-                        self.rotary_emb.cos_sin_cache,
-                        self.rotary_emb.is_neox_style,
                     )
 
                 ql_nope_shape = decode_ql_nope.shape
@@ -2201,16 +2186,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 # Sub-case 2.3: Non-FP8 path
                 # Apply RoPE to both q_pe and k_pe
                 if self.rotary_emb is not None and decode_positions is not None:
-                    # TODO: Once flashinfer supports key=None, switch to
-                    # self.rotary_emb(decode_positions, decode_q_pe, decode_k_pe)
-                    decode_q_pe, decode_k_pe = RotaryEmbedding.forward_static(
+                    decode_q_pe, decode_k_pe = self.rotary_emb(
                         decode_positions,
                         decode_q_pe,
                         decode_k_pe,
-                        self.rotary_emb.head_size,
-                        self.rotary_emb.rotary_dim,
-                        self.rotary_emb.cos_sin_cache,
-                        self.rotary_emb.is_neox_style,
                     )
                 decode_q = (decode_ql_nope, decode_q_pe)
 
