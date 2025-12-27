@@ -397,38 +397,36 @@ class GlmAsrForConditionalGeneration(
         self, audio_input: GlmAsrInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if audio_input["type"] == "audio_embeds":
-            audio_embeds = audio_input["audio_embeds"]
-            return tuple(audio_embeds)
+            return tuple(audio_input["audio_embeds"])
 
         input_features = audio_input["input_features"]
         feature_attention_mask = audio_input["feature_attention_mask"]
-        chunk_counts = audio_input.get("chunk_counts")
 
         if isinstance(input_features, list):
             input_features = torch.cat(input_features, dim=0)
             feature_attention_mask = torch.cat(feature_attention_mask, dim=0)
 
+        num_chunks = input_features.shape[0]
         chunk_counts = _normalize_chunk_counts(
-            chunk_counts, num_chunks=input_features.shape[0]
+            audio_input.get("chunk_counts"), num_chunks=num_chunks
         )
 
-        audio_outputs = self.audio_tower(input_features)
-        audio_hidden_states = audio_outputs.last_hidden_state
+        audio_hidden_states = self.audio_tower(input_features).last_hidden_state
         audio_hidden_states = audio_hidden_states.reshape(
-            input_features.shape[0],
+            num_chunks,
             -1,
             self.config.audio_config.intermediate_size,
         )
         audio_features = self.multi_modal_projector(audio_hidden_states)
 
-        # Calculate output lengths using encoder's method if available,
-        # otherwise use our calculation
         merge_factor = getattr(self.config, "merge_factor", DEFAULT_MERGE_FACTOR)
         conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
 
-        audio_lengths = feature_attention_mask.sum(-1)
         audio_output_lengths = _get_audio_output_lengths_for_tower(
-            self.audio_tower, audio_lengths, merge_factor, conv_params
+            self.audio_tower,
+            feature_attention_mask.sum(-1),
+            merge_factor,
+            conv_params,
         )
 
         masked_audio_features = _flatten_audio_features_by_length(
