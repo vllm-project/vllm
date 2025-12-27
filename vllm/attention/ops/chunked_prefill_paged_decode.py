@@ -269,6 +269,7 @@ def chunked_prefill_paged_decode(
     output_scale=None,
     # Optional tensor for sinks
     sinks=None,
+    is_block_table_ptr: bool = False,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -393,9 +394,7 @@ def chunked_prefill_paged_decode(
     else:
         real_block_size = value_cache.shape[3]
 
-        # Identifying the true pointer
-        is_ptr_mask = block_table > 100000000
-        if is_ptr_mask.any():
+        if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()
             block_byte_stride = key_cache.stride(0) * kv_element_size
@@ -404,11 +403,9 @@ def chunked_prefill_paged_decode(
 
             # Normalization: Directly calculate the block offset
             # of the pointer relative to the base address
-            processed_block_table = torch.where(
-                is_ptr_mask,
-                (block_table - base_addr) // block_byte_stride,
-                block_table,
-            ).to(torch.int32)
+            processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
+                torch.int32
+            )
         else:
             processed_block_table = block_table.to(torch.int32)
 
