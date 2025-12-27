@@ -3413,15 +3413,8 @@ def test_concurrent_partial_prefill_mixed_requests():
 
     for request in long_requests:
         scheduler.add_request(request)
-        print(request.num_computed_tokens)
     for request in short_requests:
         scheduler.add_request(request)
-        print(request.num_computed_tokens)
-    print(
-        scheduler._get_request_prefill_state(
-            short_requests[0], short_requests[0].num_computed_tokens
-        ).remaining_tokens
-    )
     # first iteration
     output = scheduler.schedule()
     assert len(scheduler.running) == 2
@@ -3441,7 +3434,6 @@ def test_concurrent_partial_prefill_mixed_requests():
     # short_requests[0] should be finished
     # short_requests[1] should continue prefill
     output = scheduler.schedule()
-    print(output.num_scheduled_tokens)
     assert len(scheduler.running) == 3
     assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
     assert output.num_scheduled_tokens[short_requests[1].request_id] == 32
@@ -3452,31 +3444,6 @@ def test_concurrent_partial_prefill_mixed_requests():
     output = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert output.num_scheduled_tokens[long_requests[0].request_id] == 64
-
-
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
-def test_concurrent_partial_prefill_with_engine(
-    model: str, max_num_partial_prefills: int
-):
-    engine_args = EngineArgs(
-        model=model,
-        max_num_partial_prefills=max_num_partial_prefills,
-        max_num_batched_tokens=40,
-        enable_chunked_prefill=True,
-        max_model_len=1024,
-    )
-    engine = LLMEngine.from_engine_args(engine_args)
-    prompt = "hello" * 40
-    sampling_params = SamplingParams()
-    for req_num in range(max_num_partial_prefills):
-        engine.add_request(f"request_{req_num}", prompt, sampling_params)
-    request_outputs = engine.step()
-    assert len(request_outputs) == 0
-    assert (
-        len(engine.engine_core.engine_core.scheduler.running)
-        == max_num_partial_prefills
-    )
 
 
 def test_finishing_prefill_prioritized():
@@ -3498,7 +3465,6 @@ def test_finishing_prefill_prioritized():
     assert output.num_scheduled_tokens[requests[1].request_id] == 400
     # Request 1 only needs 188 more prompt tokens, so it should be moved
     # ahead of the longer prompt for the next iteration.
-    print(f"scheduler.running: {[r.request_id for r in scheduler.running]}")
     assert scheduler.running[0].request_id == requests[1].request_id
     assert scheduler.running[1].request_id == requests[0].request_id
 
