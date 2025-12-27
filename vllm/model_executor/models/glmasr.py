@@ -21,7 +21,7 @@ from vllm.multimodal.glmasr_utils import (
     DEFAULT_MERGE_FACTOR,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
-    _get_audio_output_lengths_from_mask,
+    _get_num_features_for_item,
     _group_audio_embeddings,
     _normalize_chunk_counts,
 )
@@ -276,48 +276,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _glmasr_field_config(hf_inputs)
 
-    def _normalize_to_tensor(
-        self, mask: torch.Tensor | list[torch.Tensor]
-    ) -> torch.Tensor:
-        """Convert mask to tensor, handling both list and tensor formats."""
-        if isinstance(mask, list):
-            return (
-                torch.stack(mask)
-                if mask and isinstance(mask[0], torch.Tensor)
-                else torch.tensor(mask)
-            )
-        return mask
-
-    def _extract_mask_for_item(
-        self,
-        feature_attention_mask: torch.Tensor | list[torch.Tensor],
-        chunk_counts: torch.Tensor | list[int] | None,
-        item_idx: int,
-    ) -> torch.Tensor:
-        """Extract attention mask for a specific audio item."""
-        if chunk_counts is None:
-            # Single item per audio
-            mask = feature_attention_mask[item_idx]
-            return (
-                mask.unsqueeze(0)
-                if isinstance(feature_attention_mask, torch.Tensor)
-                else self._normalize_to_tensor(mask)
-            )
-
-        # Multiple chunks per audio: calculate slice indices
-        counts = (
-            chunk_counts.tolist()
-            if isinstance(chunk_counts, torch.Tensor)
-            else chunk_counts
-        )
-        start_idx = sum(counts[:item_idx])
-        end_idx = start_idx + counts[item_idx]
-
-        # Extract slice
-        if isinstance(feature_attention_mask, torch.Tensor):
-            return feature_attention_mask[start_idx:end_idx]
-        return self._normalize_to_tensor(feature_attention_mask[start_idx:end_idx])
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -340,19 +298,16 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         chunk_counts = out_mm_data.get("chunk_counts")
 
         def get_replacement_glmasr(item_idx: int):
-            if feature_attention_mask is not None:
-                mask = self._extract_mask_for_item(
-                    feature_attention_mask, chunk_counts, item_idx
-                )
-                # Get conv params from config if available
-                conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
-                audio_output_lengths = _get_audio_output_lengths_from_mask(
-                    mask, merge_factor, conv_params
-                )
-                num_features = audio_output_lengths.sum().item()
-            else:
-                audio_embeds = out_mm_data["audio_embeds"][item_idx]
-                num_features = audio_embeds.shape[0]
+            conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
+            audio_embeds = out_mm_data.get("audio_embeds")
+            num_features = _get_num_features_for_item(
+                feature_attention_mask,
+                chunk_counts,
+                item_idx,
+                audio_embeds,
+                merge_factor,
+                conv_params,
+            )
 
             if num_features == 0:
                 raise ValueError("Audio is too short")
@@ -423,26 +378,20 @@ class GlmAsrForConditionalGeneration(
         )
 
     def _parse_and_validate_audio_input(self, **kwargs: object) -> GlmAsrInputs | None:
-        input_features = kwargs.pop("input_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
-        feature_attention_mask = kwargs.pop("feature_attention_mask", None)
-        chunk_counts = kwargs.pop("chunk_counts", None)
-
-        if input_features is None and audio_embeds is None:
-            return None
-
         if audio_embeds is not None:
             return GlmAsrEmbeddingInputs(type="audio_embeds", audio_embeds=audio_embeds)
 
-        if input_features is not None:
-            return GlmAsrFeatureInputs(
-                type="audio_features",
-                input_features=input_features,
-                feature_attention_mask=feature_attention_mask,
-                chunk_counts=chunk_counts,
-            )
+        input_features = kwargs.pop("input_features", None)
+        if input_features is None:
+            return None
 
-        raise AssertionError("This line should be unreachable.")
+        return GlmAsrFeatureInputs(
+            type="audio_features",
+            input_features=input_features,
+            feature_attention_mask=kwargs.pop("feature_attention_mask", None),
+            chunk_counts=kwargs.pop("chunk_counts", None),
+        )
 
     def _process_audio_input(
         self, audio_input: GlmAsrInputs
