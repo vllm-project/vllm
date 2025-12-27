@@ -648,7 +648,9 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
             input_ids[1:] == self.image_token_id
         )
         language_token_mask = ~vision_token_mask
-        # language_token_mask = language_token_mask ^ (input_ids == self.pad_token_id)
+        # TODO: Investigate if this change is worth it. Affects the Attention and
+        # MLP Layers
+        #language_token_mask = language_token_mask ^ (input_ids == self.pad_token_id)
 
         return vision_token_mask, language_token_mask
 
