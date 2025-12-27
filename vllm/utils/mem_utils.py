@@ -11,7 +11,11 @@ import psutil
 import torch
 import torch.types
 
+from vllm.logger import init_logger
+
 from .mem_constants import GiB_bytes
+
+logger = init_logger(__name__)
 
 
 @cache
@@ -253,3 +257,169 @@ def memory_profiling(
     result.non_kv_cache_memory = (
         non_torch_memory + peak_activation_memory + result.weights_memory
     )  # noqa
+
+
+class MemorySnapshotProfiler:
+    """Memory snapshot profiler with start/stop API.
+
+    This class provides a similar interface to torch.profiler.profile()
+    for memory profiling, supporting:
+    - start()/stop() methods for controlling profiling
+    - Exception handling to dump snapshot on error
+    - Context manager support
+
+    Usage:
+        profiler = MemorySnapshotProfiler(
+            output_dir="/path/to/output",
+            dump_on_exception=True,
+        )
+
+        # Method 1: start/stop
+        profiler.start()
+        ... # code to profile
+        profiler.stop()
+
+        # Method 2: context manager
+        with profiler:
+            ... # code to profile
+
+    The output .pickle file can be visualized at https://pytorch.org/memory_viz
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        filename_prefix: str = "memory_snapshot",
+        max_entries: int = 100000,
+        dump_on_exception: bool = True,
+    ):
+        """
+        Args:
+            output_dir: Directory to save the memory snapshot file.
+            filename_prefix: Prefix for the snapshot filename.
+            max_entries: Maximum number of allocation entries to record.
+            dump_on_exception: If True, dump snapshot when exception occurs.
+        """
+        self.output_dir = output_dir
+        self.filename_prefix = filename_prefix
+        self.max_entries = max_entries
+        self.dump_on_exception = dump_on_exception
+        self._recording = False
+        self._rank: int | None = None
+
+    def set_rank(self, rank: int) -> None:
+        """Set the worker rank for filename disambiguation."""
+        self._rank = rank
+
+    def start(self) -> "MemorySnapshotProfiler":
+        """Start recording memory allocation history."""
+        import os
+
+        if self._recording:
+            logger.warning("Memory snapshot profiler is already recording.")
+            return self
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Clear existing memory state for a cleaner baseline
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        # Start recording memory history with full stack traces
+        torch.cuda.memory._record_memory_history(
+            enabled="all",  # Record all allocations
+            stacks="all",  # Capture both Python and C++ stacks
+            max_entries=self.max_entries,
+        )
+        self._recording = True
+        logger.info("Memory snapshot profiling started.")
+        return self
+
+    def stop(self, suffix: str | None = None) -> str | None:
+        """Stop recording and save the memory snapshot.
+
+        Args:
+            suffix: Optional suffix to add to the filename before timestamp.
+
+        Returns:
+            Path to the saved snapshot file, or None if not recording.
+        """
+        import os
+
+        if not self._recording:
+            logger.warning("Memory snapshot profiler is not recording.")
+            return None
+
+        torch.cuda.synchronize()
+
+        # Build filename
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        parts = [self.filename_prefix]
+        if self._rank is not None:
+            parts.append(f"rank{self._rank}")
+        if suffix:
+            parts.append(suffix)
+        parts.append(timestamp)
+        filename = "_".join(parts) + ".pickle"
+
+        snapshot_file = os.path.join(self.output_dir, filename)
+        torch.cuda.memory._dump_snapshot(snapshot_file)
+        torch.cuda.memory._record_memory_history(enabled=None)
+        self._recording = False
+
+        logger.info(
+            "Memory snapshot saved to %s. Visualize at https://pytorch.org/memory_viz",
+            snapshot_file,
+        )
+        return snapshot_file
+
+    def dump_on_error(self) -> str | None:
+        """Dump snapshot on error without stopping the profiler.
+
+        Returns:
+            Path to the saved snapshot file, or None if not recording.
+        """
+        import os
+
+        if not self._recording:
+            return None
+
+        torch.cuda.synchronize()
+
+        # Build filename with error suffix
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        parts = [self.filename_prefix]
+        if self._rank is not None:
+            parts.append(f"rank{self._rank}")
+        parts.append("error")
+        parts.append(timestamp)
+        filename = "_".join(parts) + ".pickle"
+
+        snapshot_file = os.path.join(self.output_dir, filename)
+        try:
+            torch.cuda.memory._dump_snapshot(snapshot_file)
+            logger.info(
+                "Memory snapshot (error) saved to %s. "
+                "Visualize at https://pytorch.org/memory_viz",
+                snapshot_file,
+            )
+            return snapshot_file
+        except Exception as e:
+            logger.warning("Failed to dump memory snapshot on error: %s", e)
+            return None
+
+    def __enter__(self) -> "MemorySnapshotProfiler":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is not None and self.dump_on_exception:
+            # Dump snapshot on exception before stopping
+            self.dump_on_error()
+        self.stop()
+
+    @property
+    def is_recording(self) -> bool:
+        """Check if profiler is currently recording."""
+        return self._recording

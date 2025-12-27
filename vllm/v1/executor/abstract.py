@@ -239,6 +239,9 @@ class Executor(ABC):
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start,))
 
+    def mem_profile(self, is_start: bool = True):
+        self.collective_rpc("mem_profile", args=(is_start,))
+
     def save_sharded_state(
         self,
         path: str,

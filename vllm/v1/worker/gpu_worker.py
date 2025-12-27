@@ -42,7 +42,11 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    MemorySnapshotProfiler,
+    memory_profiling,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -111,6 +115,17 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
+        # Memory snapshot profiler. Enabled when memory_profiler_dir is set.
+        if profiler_config.memory_profiler_enabled:
+            self.mem_profiler: MemorySnapshotProfiler | None = MemorySnapshotProfiler(
+                output_dir=profiler_config.memory_profiler_dir,
+                max_entries=profiler_config.memory_profiler_max_entries,
+                dump_on_exception=profiler_config.memory_profiler_dump_on_exception,
+            )
+            self.mem_profiler.set_rank(rank)
+        else:
+            self.mem_profiler = None
+
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
@@ -173,6 +188,26 @@ class Worker(WorkerBase):
             return allocator.use_memory_pool(tag=tag)
         else:
             return nullcontext()
+
+    def _maybe_get_memory_snapshot_context(
+        self, stage: str = "load_model"
+    ) -> AbstractContextManager:
+        """Get memory snapshot context for init stage profiling.
+
+        Args:
+            stage: Name of the stage being profiled (e.g., "load_model", "init").
+        """
+        profiler_config = self.vllm_config.profiler_config
+        if profiler_config.memory_profiler_profile_init:
+            profiler = MemorySnapshotProfiler(
+                output_dir=profiler_config.memory_profiler_dir,
+                filename_prefix=stage,
+                max_entries=profiler_config.memory_profiler_max_entries,
+                dump_on_exception=profiler_config.memory_profiler_dump_on_exception,
+            )
+            profiler.set_rank(self.rank)
+            return profiler
+        return nullcontext()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -273,7 +308,10 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(tag="weights"):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            self._maybe_get_memory_snapshot_context(),
+        ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -414,10 +452,14 @@ class Worker(WorkerBase):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="kv_cache"):
+            with (
+                allocator.use_memory_pool(tag="kv_cache"),
+                self._maybe_get_memory_snapshot_context(stage="kv_cache"),
+            ):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            with self._maybe_get_memory_snapshot_context(stage="kv_cache"):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         warmup_sizes = []
@@ -457,7 +499,8 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._maybe_get_memory_snapshot_context(stage="cuda_graph"):
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -657,6 +700,22 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+
+    def mem_profile(self, is_start: bool = True):
+        """Start or stop memory snapshot profiling.
+
+        Args:
+            is_start: If True, start profiling. If False, stop and save snapshot.
+        """
+        if self.mem_profiler is None:
+            raise RuntimeError(
+                "Memory profiling is not enabled. "
+                "Set --profiler-config.memory_profiler_dir to enable."
+            )
+        if is_start:
+            self.mem_profiler.start()
+        else:
+            self.mem_profiler.stop()
 
     def execute_dummy_batch(self) -> None:
         if self.use_v2_model_runner:

@@ -115,6 +115,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def start_mem_profile(self) -> None:
+        """Start memory snapshot profiling"""
+        ...
+
+    @abstractmethod
+    async def stop_mem_profile(self) -> None:
+        """Stop memory snapshot profiling"""
+        ...
+
+    @abstractmethod
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""
         ...
