@@ -692,6 +692,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # TODO(rob): enable selecting this externally.
             allow_vllm_cutlass=True,
         )
+        # TODO(rob): hook this up in a follow up PR.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            raise NotImplementedError(
+                "FlashInfer TRTLLM backend not supported for compressed-tensors yet."
+            )
 
     def create_weights(
         self,
