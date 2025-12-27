@@ -1023,7 +1023,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             else:
                 prepare_finalize = self.maybe_make_prepare_finalize()
-                logger.info_once(f"{prepare_finalize=}")
                 self.kernel = mk.FusedMoEModularKernel(
                     prepare_finalize,
                     TritonOrDeepGemmExperts(
