@@ -240,6 +240,8 @@ def make_kernel(
             MarlinExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
+        # TODO(rob): once the refactor is complete, switch to
+        # initializing these during the CutlassExpertsFp8 init.
         device = layer.w13_weight.device
         # ab_strides1 and c_strides2 are the same
         ab_strides1_c_strides2 = torch.full(
