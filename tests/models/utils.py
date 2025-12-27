@@ -292,7 +292,11 @@ def build_model_context(
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
