@@ -549,17 +549,16 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        # Initialize device
-        self.worker.init_device()
-
-        # Set process title and log prefix
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
 
         # Load model
         self._init_message_queues(input_shm_handle, vllm_config)
-        self.worker.load_model()
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.worker.init_device()
+            self.worker.load_model()
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
