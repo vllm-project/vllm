@@ -43,8 +43,12 @@ lower computational requirements."""  # noqa: E501
 TEXT_IMAGE_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"},
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"},
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+        },
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+        },
     ],
 }
 
@@ -58,7 +62,9 @@ TEXT_TEXT_TEST_DATA = {
 
 IMAGE_TEXT_TEST_DATA = {
     "query": [
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"}
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+        }
     ],
     "documents": [
         {"text": LONG_TEXT_DOC},
@@ -68,11 +74,17 @@ IMAGE_TEXT_TEST_DATA = {
 
 IMAGE_IMAGE_TEST_DATA = {
     "query": [
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"}
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+        }
     ],
     "documents": [
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"},
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"},
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+        },
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+        },
     ],
 }
 
@@ -80,9 +92,13 @@ TEXT_MIXED_DOCS_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
         {"text": LONG_TEXT_DOC},
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"},
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+        },
         {"text": "数据提取么？为什么不用正则啊,你用正则不就全解决了么?"},
-        {"image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"},
+        {
+            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+        },
     ],
 }
 
@@ -129,8 +145,7 @@ def create_score_multimodal_param(
             else:
                 formatted_content.append(
                     ChatCompletionContentPartImageEmbedsParam(
-                        type="image_embeds",
-                        image_embeds=image_val
+                        type="image_embeds", image_embeds=image_val
                     )
                 )
 
@@ -196,7 +211,7 @@ def _run_hf(
         else:
             raise ValueError(f"Unsupported document format at index {idx}")
 
-    scores = [None] * len(document_strs)
+    scores: list[None | float] = [None] * len(document_strs)
 
     with hf_runner(
         model,
@@ -248,12 +263,14 @@ def _run_test(
     hf_outputs = _run_hf(hf_runner, model, dtype, query_strs, document_strs)
 
     # Compare outputs
-    assert len(hf_outputs) == len(vllm_outputs), \
+    assert len(hf_outputs) == len(vllm_outputs), (
         f"Output length mismatch: HF={len(hf_outputs)}, vLLM={len(vllm_outputs)}"
+    )
 
     for i, (hf_score, vllm_score) in enumerate(zip(hf_outputs, vllm_outputs)):
-        assert hf_score == pytest.approx(vllm_score, rel=0.02), \
+        assert hf_score == pytest.approx(vllm_score, rel=0.02), (
             f"Score mismatch at index {i}: HF={hf_score}, vLLM={vllm_score}"
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
