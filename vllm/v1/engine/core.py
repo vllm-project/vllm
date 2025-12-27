@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
@@ -1001,7 +1002,7 @@ class EngineCoreProc(EngineCore):
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
         # Wait until msg sent by the daemon before shutdown.
-        self.output_thread.join(timeout=5.0)
+        self.output_thread.join(timeout=envs.VLLM_ENGINE_SHUTDOWN_TIMEOUT)
         if self.output_thread.is_alive():
             logger.fatal(
                 "vLLM shutdown signal from EngineCore failed "

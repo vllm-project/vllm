@@ -304,8 +304,9 @@ def shutdown(procs: list[BaseProcess]):
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    timeout = envs.VLLM_ENGINE_SHUTDOWN_TIMEOUT
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
