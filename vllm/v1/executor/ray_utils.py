@@ -326,17 +326,22 @@ def initialize_ray_cluster(
     if current_platform.is_cuda() and parallel_config.world_size > 1:
         from vllm.utils.torch_utils import cuda_device_count_stateless
 
-        available_gpus = cuda_device_count_stateless()
-        if parallel_config.world_size > available_gpus:
+        local_gpu_count = cuda_device_count_stateless()
+        required_gpus = parallel_config.world_size
+        if required_gpus > local_gpu_count:
+            # Note: This warning may be a false positive for multi-node Ray
+            # clusters where total cluster GPUs >= required_gpus
             logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
-                parallel_config.world_size,
-                available_gpus,
-                available_gpus,
-                parallel_config.world_size,
+                "Required GPU count (%d) exceeds locally visible GPUs (%d). "
+                "If using a multi-node Ray cluster, this warning can be "
+                "ignored if your cluster has sufficient GPUs. "
+                "Required: tensor_parallel_size=%d × pipeline_parallel_size=%d"
+                " = %d GPUs total.",
+                required_gpus,
+                local_gpu_count,
+                parallel_config.tensor_parallel_size,
+                parallel_config.pipeline_parallel_size,
+                required_gpus,
             )
 
     if ray.is_initialized():
