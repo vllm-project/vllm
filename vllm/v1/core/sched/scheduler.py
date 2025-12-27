@@ -340,6 +340,10 @@ class Scheduler(SchedulerInterface):
         partial_prefill_slot_budget = self._get_prefill_slot_budget(
             partial_prefill_metadata
         )
+        print(
+            f"Partial prefill metadata: {partial_prefill_metadata.active_prefills}, {partial_prefill_metadata.long_prefills}, {partial_prefill_metadata.schedulable_prefills}"
+        )
+        print(f"Partial prefill slot budget: {partial_prefill_slot_budget}")
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -367,9 +371,11 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+            print(f"num_new_token_1 for request {request.request_id}: {num_new_tokens}")
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+            print(f"num_new_token_2 for request {request.request_id}: {num_new_tokens}")
             if (
                 self.enable_concurrent_partial_prefill_scheduling
                 and partial_prefill_slot_budget is not None
@@ -379,12 +385,16 @@ class Scheduler(SchedulerInterface):
                 )
                 if prefill_state.is_prefill:
                     num_new_tokens = min(num_new_tokens, partial_prefill_slot_budget)
+                    print(
+                        f"num_new_token_3 for request {request.request_id}: {num_new_tokens}"
+                    )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
+            print(f"num_new_token_4 for request {request.request_id}: {num_new_tokens}")
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -1100,7 +1110,9 @@ class Scheduler(SchedulerInterface):
         for request in running_reqs:
             scheduled_tokens = num_scheduled_tokens.get(request.request_id, 0)
             num_tokens_after_step = request.num_computed_tokens + scheduled_tokens
-            print(scheduled_tokens, num_tokens_after_step, request.num_prompt_tokens)
+            print(
+                f"scheduled_tokens: {scheduled_tokens}, computed_token: {request.num_computed_tokens}, num_tokens_after_step: {num_tokens_after_step}, request.num_prompt_tokens: {request.num_prompt_tokens}"
+            )
             if num_tokens_after_step >= request.num_prompt_tokens:
                 finishing_prefills.append(request)
             else:
