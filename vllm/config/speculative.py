@@ -31,6 +31,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_flash_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
@@ -191,6 +192,18 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            hf_config.model_type = "mimo_v2_flash_mtp"
+            # MiMo-V2-Flash uses a single shared MTP block for all steps
+            # Set num_hidden_layers to 0 so MTP layers start at index 0
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "num_nextn_predict_layers": 1,
+                    "architectures": ["MiMoV2FlashMTPModel"],
                 }
             )
 
