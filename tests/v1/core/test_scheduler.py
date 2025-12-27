@@ -3460,11 +3460,9 @@ def test_finishing_prefill_prioritized():
 
     output = scheduler.schedule()
 
-    # Each request consumes one 512-token chunk in the first step.
     assert output.num_scheduled_tokens[requests[0].request_id] == 500
     assert output.num_scheduled_tokens[requests[1].request_id] == 400
-    # Request 1 only needs 188 more prompt tokens, so it should be moved
-    # ahead of the longer prompt for the next iteration.
+    # Request 1 will be finished after this scheduling, so it should be first in running list
     assert scheduler.running[0].request_id == requests[1].request_id
     assert scheduler.running[1].request_id == requests[0].request_id
 
