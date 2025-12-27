@@ -23,7 +23,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
         if not num_cpu_blocks:
-            raise Exception(
+            raise ValueError(
                 "num_cpu_blocks must be specified in kv_connector_extra_config"
             )
         self.num_cpu_blocks: int = num_cpu_blocks
@@ -69,7 +69,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
             if not current_platform.is_cuda_alike():
-                raise Exception(
+                raise RuntimeError(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
