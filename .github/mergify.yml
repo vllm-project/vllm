@@ -26,14 +26,14 @@ pull_request_rules:
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
-        uv pip install pre-commit
-        pre-commit install
-        pre-commit run --all-files
+        uv pip install prek
+        prek install
+        prek run --all-files
         ```
 
         Then, commit the changes and push to your branch.
 
-        For future commits, `pre-commit` will run automatically on changed files before each commit.
+        For future commits, `prek` will run automatically on changed files before each commit.
 
         > [!TIP]
         > <details>
@@ -43,9 +43,9 @@ pull_request_rules:
         >
         > ```bash
         > # For mypy (substitute "3.10" with the failing version if needed)
-        > pre-commit run --hook-stage manual mypy-3.10
+        > prek run --hook-stage manual mypy-3.10
         > # For markdownlint
-        > pre-commit run --hook-stage manual markdownlint
+        > prek run --hook-stage manual markdownlint
         > ```
         > </details>
 

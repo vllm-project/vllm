@@ -60,30 +60,30 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 
 ### Linting
 
-vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
+vLLM uses `prek` to lint and format the codebase. See <https://prek.j178.dev/quickstart/> if `prek` is new to you. Setting up `prek` is as easy as:
 
 ```bash
-uv pip install pre-commit
-pre-commit install
+uv pip install prek
+prek install
 ```
 
-vLLM's `pre-commit` hooks will now run automatically every time you commit.
+vLLM's `prek` hooks will now run automatically every time you commit.
 
 !!! tip "Tips"
-    You can manually run the `pre-commit` hooks using:
+    You can manually run the `prek` hooks using:
 
     ```bash
-    pre-commit run     # runs on staged files
-    pre-commit run -a  # runs on all files (short for --all-files)
+    prek run     # runs on staged files
+    prek run -a  # runs on all files (short for --all-files)
     ```
 
     ---
 
-    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
+    Some `prek` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual markdownlint
-    pre-commit run --hook-stage manual mypy-3.10
+    prek run --hook-stage manual markdownlint
+    prek run --hook-stage manual mypy-3.10
     ```
 
 ### Documentation

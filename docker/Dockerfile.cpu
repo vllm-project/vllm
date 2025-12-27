@@ -164,7 +164,7 @@ COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirement
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/dev.txt && \
-    pre-commit install --hook-type pre-commit --hook-type commit-msg
+    prek install --hook-type pre-commit --hook-type commit-msg
 
 ENTRYPOINT ["bash"]
 
