@@ -3,7 +3,7 @@
 
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
@@ -49,6 +49,7 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+            self._execute_model_outputs = deque[AsyncModelRunnerOutput]()
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -87,6 +88,7 @@ try:
         ) -> Union[
             "ModelRunnerOutput",
             tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
+            None,
         ]:
             # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
@@ -112,11 +114,24 @@ try:
                 output = scheduler_output, grammar_output, None
             elif output is None:
                 output = self.worker.model_runner.sample_tokens(grammar_output)
+
+            if self.vllm_config.scheduler_config.async_scheduling:
+                self._execute_model_outputs.append(output)
+                return None
+
+            return output
+
+        def get_execute_model_output(self) -> "ModelRunnerOutput":
+            assert self.vllm_config.scheduler_config.async_scheduling
+            assert self._execute_model_outputs, "No execute_model output available"
+            output = self._execute_model_outputs.popleft()
+
+            if isinstance(output, AsyncModelRunnerOutput):
                 # Ensure outputs crossing Ray compiled DAG are serializable.
                 # AsyncModelRunnerOutput holds CUDA events and cannot be
                 # pickled.
-                if isinstance(output, AsyncModelRunnerOutput):
-                    output = output.get_output()
+                output = output.get_output()
+
             return output
 
         def override_env_vars(self, vars: dict[str, str]):
@@ -146,8 +161,24 @@ class FutureWrapper(Future):
         self.ref_or_refs = ref_or_refs
         self.aggregator = aggregator
 
+    def is_callable(self, ref_or_refs):
+        if isinstance(ref_or_refs, list):
+            return callable(ref_or_refs[0])
+        else:
+            return callable(ref_or_refs)
+
+    def get_refs(self, timeout=None):
+        if self.is_callable(self.ref_or_refs):
+            if isinstance(self.ref_or_refs, list):
+                refs = [ref(timeout) for ref in self.ref_or_refs]
+            else:
+                refs = self.ref_or_refs(timeout)
+        else:
+            refs = self.ref_or_refs
+        return refs
+
     def result(self, timeout=None):
-        outputs = ray.get(self.ref_or_refs, timeout=timeout)
+        outputs = ray.get(self.get_refs(), timeout=timeout)
         if self.aggregator is None:
             return outputs
 
