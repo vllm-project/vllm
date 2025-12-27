@@ -5,7 +5,7 @@
 from vllm.tokenizers import TokenizerLike
 
 
-def _replace_none_with_empty(tokens: list[str | None]):
+def _replace_none_with_empty(tokens: list[str | None]) -> None:
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
