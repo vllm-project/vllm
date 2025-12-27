@@ -17,6 +17,8 @@ from vllm.scalar_type import ScalarType, scalar_types
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+# Number of bits in an int32, used for packing quantized values
+INT32_BITS = 32
 
 
 # Use proxy as NamedTuple direct subclasses cannot have static members
@@ -252,7 +254,7 @@ def pack_quantized_values_into_int32(
     inv_perm = tuple(perm.index(i) for i in range(len(perm)))
     w_q_perm = w_q.permute(perm)
 
-    pack_factor = 32 // wtype.size_bits
+    pack_factor = INT32_BITS // wtype.size_bits
     mask = (1 << wtype.size_bits) - 1
 
     new_shape_perm = list(w_q_perm.shape)
@@ -274,7 +276,7 @@ def unpack_quantized_values_into_int32(
     inv_perm = tuple(perm.index(i) for i in range(len(perm)))
     w_q_perm = w_q.permute(perm)
 
-    pack_factor = 32 // wtype.size_bits
+    pack_factor = INT32_BITS // wtype.size_bits
     mask = (1 << wtype.size_bits) - 1
 
     new_shape_perm = list(w_q_perm.shape)
@@ -344,9 +346,9 @@ def is_layer_skipped(
     return is_skipped
 
 
-def get_pack_factor(num_bits):
-    assert 32 % num_bits == 0, f"Unsupported num_bits = {num_bits}"
-    return 32 // num_bits
+def get_pack_factor(num_bits: int) -> int:
+    assert INT32_BITS % num_bits == 0, f"Unsupported num_bits = {num_bits}"
+    return INT32_BITS // num_bits
 
 
 def permute_rows(
