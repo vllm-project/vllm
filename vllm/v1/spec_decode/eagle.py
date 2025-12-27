@@ -303,6 +303,10 @@ class EagleProposer:
             self.spec_tree_manager.max_total_draft_tokens,
         )
 
+        # Storage for draft probabilities - populated during propose() for rejection sampling
+        # If None, rejection sampler uses draft_prob=1 (argmax behavior)
+        self.last_draft_probs: torch.Tensor | None = None
+
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
@@ -437,9 +441,16 @@ class EagleProposer:
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
+        # Clear previous draft probs - will be populated during sampling
+        self.last_draft_probs = None
+        draft_probs_list: list[torch.Tensor] = []
+
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            draft_token_ids = logits.argmax(dim=-1)
+            draft_token_ids, probs = sample_draft_tokens(
+                logits, sampling_metadata, return_probs=True
+            )
+            self.last_draft_probs = probs
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
@@ -458,6 +469,7 @@ class EagleProposer:
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
+            # TODO: Implement return_probs for tree attention path
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
                 logits=logits,
@@ -468,7 +480,12 @@ class EagleProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        draft_token_ids = logits.argmax(dim=-1)
+        # First draft token with temperature awareness
+        draft_token_ids, probs = sample_draft_tokens(
+            logits, sampling_metadata, return_probs=True
+        )
+        if probs is not None:
+            draft_probs_list.append(probs)
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -627,11 +644,22 @@ class EagleProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
-            draft_token_ids = logits.argmax(dim=-1)
+            # Use temperature-aware sampling
+            draft_token_ids, probs = sample_draft_tokens(
+                logits, sampling_metadata, return_probs=True
+            )
+            if probs is not None:
+                draft_probs_list.append(probs)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+
+        # Concatenate and store probs for rejection sampling
+        if draft_probs_list:
+            # Shape: [batch_size * num_speculative_tokens, vocab_size]
+            self.last_draft_probs = torch.cat(draft_probs_list, dim=0)
+
         return draft_token_ids
 
     def prepare_next_token_ids_cpu(

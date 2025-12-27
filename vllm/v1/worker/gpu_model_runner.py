@@ -2066,6 +2066,12 @@ class GPUModelRunner(
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+            # Get draft probabilities from drafter if available
+            draft_probs=(
+                getattr(self.drafter, "last_draft_probs", None)
+                if hasattr(self, "drafter")
+                else None
+            ),
         )
 
     def _prepare_kv_sharing_fast_prefill(
