@@ -295,7 +295,11 @@ class MultiConnector(KVConnectorBase_V1):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
-            if i == chosen_connector:
+            send_type = c._kv_transfer_config.get_from_extra_config("send_type", "GET")
+            if i == chosen_connector or (
+                send_type in ["PUT_ASYNC", "PUT"]
+                and c._kv_transfer_config.is_kv_producer
+            ):
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
