@@ -144,7 +144,9 @@ def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
 
 
 def create_vllm_config(
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    # Use a public, ungated default model to avoid requiring HF access
+    # to gated repositories when running tests.
+    model_name: str = "Qwen/Qwen3-0.6B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
     dtype: ModelDType | torch.dtype = "auto",

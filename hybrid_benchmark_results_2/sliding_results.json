@@ -1,0 +1,253 @@
+{
+  "config": "sliding_window_only",
+  "model": "meta-llama/Llama-3.2-1B",
+  "benchmark_params": {
+    "input_lengths": [
+      512,
+      1024,
+      2048,
+      4096
+    ],
+    "num_prompts_per_length": 50,
+    "output_len": 128,
+    "num_warmup_iters": 3,
+    "num_benchmark_iters": 5,
+    "sliding_window": 4096,
+    "use_hybrid": false,
+    "seed": 42
+  },
+  "by_input_length": {
+    "512": {
+      "config": "sliding_window_only",
+      "config_description": "Sliding window attention without SSM",
+      "model": "meta-llama/Llama-3.2-1B",
+      "num_prompts": 50,
+      "initialization": {
+        "time_seconds": 6.460759278386831
+      },
+      "memory": {
+        "baseline": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_init": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_benchmark": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "torch_stats": {},
+        "kv_cache_memory_gib": null,
+        "model_memory_gib": 0
+      },
+      "throughput": {
+        "tokens_per_second": 15305.768363181385,
+        "requests_per_second": 23.915263067470914,
+        "total_prompt_tokens": 25600,
+        "total_output_tokens": 6400
+      },
+      "latency": {
+        "avg_seconds": 2.0907150324434043,
+        "min_seconds": 2.0034154914319515,
+        "max_seconds": 2.425036311149597,
+        "std_seconds": 0.16718701428595853,
+        "p50_seconds": 2.0087619852274656,
+        "p90_seconds": 2.2597201958298685,
+        "p99_seconds": 2.4085046996176245,
+        "all_latencies": [
+          2.425036311149597,
+          2.0046153515577316,
+          2.0034154914319515,
+          2.0087619852274656,
+          2.011746022850275
+        ]
+      },
+      "benchmark_params": {
+        "num_warmup_iters": 3,
+        "num_benchmark_iters": 5,
+        "gpu_memory_utilization": 0.9,
+        "sliding_window": 4096,
+        "use_hybrid": false
+      }
+    },
+    "1024": {
+      "config": "sliding_window_only",
+      "config_description": "Sliding window attention without SSM",
+      "model": "meta-llama/Llama-3.2-1B",
+      "num_prompts": 50,
+      "initialization": {
+        "time_seconds": 5.830795558169484
+      },
+      "memory": {
+        "baseline": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_init": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_benchmark": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "torch_stats": {},
+        "kv_cache_memory_gib": null,
+        "model_memory_gib": 0
+      },
+      "throughput": {
+        "tokens_per_second": 20723.953672687505,
+        "requests_per_second": 17.989543118652346,
+        "total_prompt_tokens": 51200,
+        "total_output_tokens": 6400
+      },
+      "latency": {
+        "avg_seconds": 2.7793924320489167,
+        "min_seconds": 2.589493414387107,
+        "max_seconds": 3.475830474868417,
+        "std_seconds": 0.3485113619953869,
+        "p50_seconds": 2.6006975043565035,
+        "p90_seconds": 3.1382622089236976,
+        "p99_seconds": 3.442073648273945,
+        "all_latencies": [
+          3.475830474868417,
+          2.5990309566259384,
+          2.6006975043565035,
+          2.6319098100066185,
+          2.589493414387107
+        ]
+      },
+      "benchmark_params": {
+        "num_warmup_iters": 3,
+        "num_benchmark_iters": 5,
+        "gpu_memory_utilization": 0.9,
+        "sliding_window": 4096,
+        "use_hybrid": false
+      }
+    },
+    "2048": {
+      "config": "sliding_window_only",
+      "config_description": "Sliding window attention without SSM",
+      "model": "meta-llama/Llama-3.2-1B",
+      "num_prompts": 50,
+      "initialization": {
+        "time_seconds": 5.748518666252494
+      },
+      "memory": {
+        "baseline": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_init": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_benchmark": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "torch_stats": {},
+        "kv_cache_memory_gib": null,
+        "model_memory_gib": 0
+      },
+      "throughput": {
+        "tokens_per_second": 26234.13136281681,
+        "requests_per_second": 12.056126545412138,
+        "total_prompt_tokens": 102400,
+        "total_output_tokens": 6400
+      },
+      "latency": {
+        "avg_seconds": 4.147269009798765,
+        "min_seconds": 3.773140389472246,
+        "max_seconds": 5.624760625883937,
+        "std_seconds": 0.7387657501701321,
+        "p50_seconds": 3.775993447750807,
+        "p90_seconds": 4.8901596006006,
+        "p99_seconds": 5.551300523355603,
+        "all_latencies": [
+          5.624760625883937,
+          3.775993447750807,
+          3.7741925232112408,
+          3.7882580626755953,
+          3.773140389472246
+        ]
+      },
+      "benchmark_params": {
+        "num_warmup_iters": 3,
+        "num_benchmark_iters": 5,
+        "gpu_memory_utilization": 0.9,
+        "sliding_window": 4096,
+        "use_hybrid": false
+      }
+    },
+    "4096": {
+      "config": "sliding_window_only",
+      "config_description": "Sliding window attention without SSM",
+      "model": "meta-llama/Llama-3.2-1B",
+      "num_prompts": 50,
+      "initialization": {
+        "time_seconds": 6.0413644555956125
+      },
+      "memory": {
+        "baseline": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_init": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "post_benchmark": {
+          "free_memory_gib": 0,
+          "total_memory_gib": 0,
+          "used_memory_gib": 0
+        },
+        "torch_stats": {},
+        "kv_cache_memory_gib": null,
+        "model_memory_gib": 0
+      },
+      "throughput": {
+        "tokens_per_second": 25501.299338743796,
+        "requests_per_second": 6.037239426785937,
+        "total_prompt_tokens": 204800,
+        "total_output_tokens": 6400
+      },
+      "latency": {
+        "avg_seconds": 8.281930939853192,
+        "min_seconds": 7.513331227004528,
+        "max_seconds": 11.315708927810192,
+        "std_seconds": 1.516942546772316,
+        "p50_seconds": 7.516508297994733,
+        "p90_seconds": 9.808657545596361,
+        "p99_seconds": 11.165003789588809,
+        "all_latencies": [
+          11.315708927810192,
+          7.513331227004528,
+          7.516025774180889,
+          7.548080472275615,
+          7.516508297994733
+        ]
+      },
+      "benchmark_params": {
+        "num_warmup_iters": 3,
+        "num_benchmark_iters": 5,
+        "gpu_memory_utilization": 0.9,
+        "sliding_window": 4096,
+        "use_hybrid": false
+      }
+    }
+  }
+}
