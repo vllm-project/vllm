@@ -350,7 +350,7 @@ def marlin_zero_points(
     elif num_bits == 8:
         interleave = numpy.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise ValueError(f"num_bits must be 4 or 8, got {num_bits}")
 
     if not is_a_8bit:
         zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
@@ -379,7 +379,7 @@ def awq_to_marlin_zero_points(
     elif num_bits == 8:
         undo_interleave = numpy.argsort(numpy.array([0, 2, 1, 3]))
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise ValueError(f"num_bits must be 4 or 8, got {num_bits}")
 
     q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
     q_zp = q_zp.reshape((-1, size_n)).contiguous()

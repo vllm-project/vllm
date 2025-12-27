@@ -118,7 +118,7 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
         else:
             interleave = np.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise ValueError(f"num_bits must be 4 or 8, got {num_bits}")
 
     perm = perm.reshape((-1, len(interleave)))[:, interleave].ravel()
     perm = torch.from_numpy(perm)
