@@ -166,7 +166,7 @@ class StatelessProcessGroup:
     # A deque to store the data entries, with key and timestamp.
     entries: deque[tuple[str, float]] = dataclasses.field(default_factory=deque)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         assert self.rank < self.world_size
         self.send_dst_counter = {i: 0 for i in range(self.world_size)}
         self.recv_src_counter = {i: 0 for i in range(self.world_size)}

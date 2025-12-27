@@ -21,7 +21,7 @@ class LoRAMapping:
     is_prefill: bool = False
     type: LoRAMappingType = LoRAMappingType.LANGUAGE
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
 

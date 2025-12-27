@@ -205,7 +205,7 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )

@@ -23,7 +23,7 @@ class LoRARequest(
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.lora_int_id < 1:
             raise ValueError(f"id must be > 0, got {self.lora_int_id}")
 
