@@ -27,10 +27,10 @@ physical experts.
 """
 
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
@@ -46,9 +46,42 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
-from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
+from .rebalance_execute import (
+    RecvMetadata,
+    move_from_buffer,
+    rearrange_expert_weights_inplace,
+)
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class EplbStats:
+    """
+    Model stats used in EPLB rebalanding algorithm.
+    """
+
+    global_expert_load_window: torch.Tensor
+    """
+    Experts load window.
+    Shape: (window_size, num_moe_layers, num_physical_experts)
+    """
+    num_replicas: int
+    """
+    Number of physical experts.
+    """
+    num_groups: int
+    """
+    Number of expert groups.
+    """
+    num_nodes: int
+    """
+    Number of nodes.
+    """
+    num_gpus: int
+    """
+    Number of GPUs.
+    """
 
 
 @dataclass
@@ -164,20 +197,23 @@ class EplbModelState:
     """
     Whether the async EPLB needs to poll peers for buffer readiness.
     """
-    is_unchanged: list[bool]
+    eplb_stats: EplbStats | None
+    """
+    EPLB stats for the model.
+    """
+    is_unchanged: np.ndarray
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     The size is same as the num of physical experts in the current layer.
     """
-    is_received_locally: list[bool]
+    is_received_locally: np.ndarray
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     The size is same as the num of physical experts in the current layer.
     """
-    experts_recv_loc: dict[int, int]
+    recv_metadata: RecvMetadata
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
     """
     is_async_enabled: bool
     """
@@ -507,9 +543,15 @@ class EplbState:
             layer_to_transfer=0,
             rebalanced=False,
             pending_global_ready_check=False,
-            is_unchanged=[],
-            is_received_locally=[],
-            experts_recv_loc={},
+            eplb_stats=None,
+            is_unchanged=np.array([]),
+            is_received_locally=np.array([]),
+            recv_metadata=RecvMetadata(
+                recv_primary_mask=np.array([]),
+                recv_count=0,
+                recv_expert_ids=np.array([]),
+                recv_dst_rows=np.array([]),
+            ),
             is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
             new_physical_to_logical_map=new_physical_to_logical_map,
@@ -553,7 +595,12 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        if log_stats:
+        if (
+            log_stats
+            and self.expert_rearrangement_step
+            % self.parallel_config.eplb_config.log_balancedness_interval
+            == 0
+        ):
             # Sync the expert load pass for each model (main and drafter).
             # expert_load_pass: (num_moe_layers, num_physical_experts)
             expert_load_pass_list = self._sync_load_pass()
@@ -585,9 +632,10 @@ class EplbState:
 
                 if ep_group.rank() == 0:
                     logger.info(
-                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                        "EPLB step: %d/%d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f",
                         self.expert_rearrangement_step,
+                        self.expert_rearrangement_step_interval,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
@@ -684,11 +732,14 @@ class EplbState:
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
 
-        time_start = None
+        start_event = None
+        end_event = None
         is_main_rank = ep_rank == 0
         if is_main_rank:
-            torch.cuda.synchronize()
-            time_start = time.perf_counter()
+            if not self.is_async or is_profile:
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
                 "(async mode)" if self.is_async else "sync mode",
@@ -789,20 +840,21 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
-            # Get new expert mappings for the model
-            (
-                new_physical_to_logical_map,
-                new_logical_to_physical_map,
-                new_logical_replica_count,
-            ) = self.policy.rebalance_experts(
-                global_expert_load_window,
-                num_replicas,
-                num_groups,
-                num_nodes,
-                num_gpus,
-            )
-
             if not eplb_model_state.is_async_enabled or is_profile:
+                # Get new expert mappings for the model
+                (
+                    new_physical_to_logical_map,
+                    new_logical_to_physical_map,
+                    new_logical_replica_count,
+                ) = self.policy.rebalance_experts(
+                    global_expert_load_window,
+                    num_replicas,
+                    num_groups,
+                    num_nodes,
+                    num_gpus,
+                    eplb_model_state.physical_to_logical_map,
+                )
+
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
@@ -848,35 +900,29 @@ class EplbState:
                         new_logical_replica_count
                     )
                 if is_main_rank:
-                    assert time_start is not None
-                    torch.cuda.synchronize()
-                    time_end = time.perf_counter()
+                    assert start_event is not None
+                    assert end_event is not None
+                    end_event.record()
+                    end_event.synchronize()
+                    gpu_elapsed = start_event.elapsed_time(end_event) / 1000.0
                     logger.info(
-                        "Rearranged experts%sin %.2f seconds.",
+                        "Rearranged experts %s in %.2f s.",
                         " (profile) " if is_profile else " ",
-                        time_end - time_start,
+                        gpu_elapsed,
                     )
             else:
-                device = eplb_model_state.physical_to_logical_map.device
-                new_physical = new_physical_to_logical_map.to(device)
-                max_slots = eplb_model_state.logical_to_physical_map.shape[-1]
-                padded_logical = torch.nn.functional.pad(
-                    new_logical_to_physical_map,
-                    (0, max(0, max_slots - new_logical_to_physical_map.shape[-1])),
-                    value=-1,
-                ).to(eplb_model_state.logical_to_physical_map.device)
-                new_replica = new_logical_replica_count.to(
-                    eplb_model_state.logical_replica_count.device
+                eplb_model_state.eplb_stats = EplbStats(
+                    # We copy the tensor to snapshot the workload on the main
+                    # thread to be used on the async thread.
+                    global_expert_load_window=global_expert_load_window.clone(),
+                    num_replicas=num_replicas,
+                    num_groups=num_groups,
+                    num_nodes=num_nodes,
+                    num_gpus=num_gpus,
                 )
-
-                eplb_model_state.new_physical_to_logical_map = new_physical
-                eplb_model_state.new_logical_to_physical_map = padded_logical
-                eplb_model_state.new_logical_replica_count = new_replica
-
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
-
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.set()
@@ -908,11 +954,13 @@ class EplbState:
 
         target_device = model_state.physical_to_logical_map.device
         new_physical = model_state.new_physical_to_logical_map
+        # In order to avoid race condition with async eplb worker,
+        # we need to copy blocking in case of updated EP size.
         if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
             model_state.physical_to_logical_map = new_physical.to(target_device)
         else:
             model_state.physical_to_logical_map[layer].copy_(
-                new_physical[layer].to(target_device)
+                new_physical[layer].to(target_device, non_blocking=True)
             )
 
         logical_device = model_state.logical_to_physical_map.device
@@ -968,25 +1016,28 @@ class EplbState:
                 stream = torch.cuda.current_stream(device=device_index)
                 stream.wait_event(model_state.buffer_ready_event)
                 model_state.buffer_ready_event = None
+            expert_weights = model_state.model.expert_weights[
+                model_state.layer_to_transfer
+            ]
+            expert_weights_buffer = model_state.expert_buffer
+            new_indices = model_state.new_physical_to_logical_map[
+                model_state.layer_to_transfer
+            ].numpy()
             move_from_buffer(
-                expert_weights=model_state.model.expert_weights[
-                    model_state.layer_to_transfer
-                ],
-                expert_weights_buffer=model_state.expert_buffer,
+                expert_weights=expert_weights,
+                expert_weights_buffers=expert_weights_buffer,
                 is_unchanged=model_state.is_unchanged,
                 is_received_locally=model_state.is_received_locally,
-                experts_recv_loc=model_state.experts_recv_loc,
-                new_indices=model_state.new_physical_to_logical_map[
-                    model_state.layer_to_transfer
-                ].tolist(),
-                ep_group=ep_group,
+                recv_metadata=model_state.recv_metadata,
+                new_indices=new_indices,
+                ep_rank=ep_group.rank(),
             )
             transferred_layer = model_state.layer_to_transfer
             self._update_layer_mapping_from_new(model_state, transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
-            logger.info(
+            logger.debug(
                 "model %s successfully move_to_workspace layer %d",
                 model_state.model_name,
                 transferred_layer,
@@ -1005,9 +1056,7 @@ class EplbState:
         assert model_state.new_physical_to_logical_map is not None
         assert model_state.new_logical_to_physical_map is not None
         assert model_state.new_logical_replica_count is not None
-        if not is_profile:
-            for layer_idx in range(model_state.physical_to_logical_map.shape[0]):
-                self._update_layer_mapping_from_new(model_state, layer_idx)
+
         model_state.new_physical_to_logical_map = None
         model_state.new_logical_to_physical_map = None
         model_state.new_logical_replica_count = None
