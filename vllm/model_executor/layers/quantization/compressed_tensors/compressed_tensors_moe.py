@@ -79,6 +79,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    prepare_moe_fp8_layer_for_marlin,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
@@ -680,6 +683,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization."
             )
 
+        self.disable_expert_map = False
+
         self.fp8_backend = get_fp8_moe_backend(
             block_quant=self.block_quant,
             tp_size=moe.tp_size,
@@ -893,16 +898,34 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 layer.num_local_experts,
             )
 
-        convert_weights_to_kernel_format(
-            fp8_backend=self.fp8_backend,
-            layer=layer,
-            w13_weight=w13_weight,
-            w2_weight=w2_weight,
-            w13_weight_scale=w13_weight_scale,
-            w2_weight_scale=w2_weight_scale,
-            weight_scale_name="weight_scale",
-            marlin_input_dtype=self.marlin_input_dtype,
+        (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale) = (
+            convert_weights_to_kernel_format(
+                fp8_backend=self.fp8_backend,
+                layer=layer,
+                w13_weight=w13_weight,
+                w2_weight=w2_weight,
+                w13_weight_scale=w13_weight_scale,
+                w2_weight_scale=w2_weight_scale,
+            )
         )
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
+        replace_parameter(layer, "w13_weight", w13_weight)
+        replace_parameter(layer, "w2_weight", w2_weight)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
+
+        # TODO(rob): we do this after replace_parameter() because
+        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
+        # directly. We will refactor this in a follow up PR to move
+        # it inside convert_weights_to_kernel_format.
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=get_marlin_input_dtype(prefix="")
+            )
+            # Activations not quantized for marlin.
+            del layer.w13_input_scale
+            del layer.w2_input_scale
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None

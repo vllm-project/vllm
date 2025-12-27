@@ -72,6 +72,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
+    prepare_moe_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -843,16 +844,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Shuffle weights into the runtime format.
-        convert_weights_to_kernel_format(
-            fp8_backend=self.fp8_backend,
-            layer=layer,
-            w13_weight=w13_weight,
-            w2_weight=w2_weight,
-            w13_weight_scale=w13_weight_scale,
-            w2_weight_scale=w2_weight_scale,
-            weight_scale_name=self.weight_scale_name,
-            marlin_input_dtype=self.marlin_input_dtype,
+        (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale) = (
+            convert_weights_to_kernel_format(
+                fp8_backend=self.fp8_backend,
+                layer=layer,
+                w13_weight=w13_weight,
+                w2_weight=w2_weight,
+                w13_weight_scale=w13_weight_scale,
+                w2_weight_scale=w2_weight_scale,
+            )
         )
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
+        replace_parameter(layer, "w13_weight", w13_weight)
+        replace_parameter(layer, "w2_weight", w2_weight)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
+
+        # TODO(rob): we do this after replace_parameter() because
+        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
+        # directly. We will refactor this in a follow up PR to move
+        # it inside convert_weights_to_kernel_format.
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=get_marlin_input_dtype(prefix="")
+            )
+            # Activations not quantized for marlin.
+            del layer.w13_input_scale
+            del layer.w2_input_scale
 
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

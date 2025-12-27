@@ -43,10 +43,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
-)
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
@@ -162,9 +158,7 @@ def convert_weights_to_kernel_format(
     w2_weight: torch.Tensor,
     w13_weight_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
-    weight_scale_name: str,
-    marlin_input_dtype: torch.dtype,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
         assert block_quant
@@ -198,21 +192,7 @@ def convert_weights_to_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
-    # Replace parameters with updated versions. Note that this helper
-    # function ensures the replacement is compatible with RL weight reloads.
-    replace_parameter(layer, "w13_weight", w13_weight)
-    replace_parameter(layer, "w2_weight", w2_weight)
-    replace_parameter(layer, f"w13_{weight_scale_name}", w13_weight_scale)
-    replace_parameter(layer, f"w2_{weight_scale_name}", w2_weight_scale)
-
-    # TODO(rob): we do this after replace_parameter() because
-    # prepare_moe_fp8_layer_for_marlin uses on the layer's params
-    # directly. We will refactor this in a follow up PR.
-    if fp8_backend == Fp8MoeBackend.MARLIN:
-        prepare_moe_fp8_layer_for_marlin(layer, False, input_dtype=marlin_input_dtype)
-        # Activations not quantized for marlin.
-        del layer.w13_input_scale
-        del layer.w2_input_scale
+    return w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
 
 
 def make_kernel(
