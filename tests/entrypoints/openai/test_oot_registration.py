@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from ...utils import VLLM_PATH, RemoteOpenAIServer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()

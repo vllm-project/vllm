@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 import soundfile as sf
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
 SERVER_ARGS = ["--enforce-eager"]

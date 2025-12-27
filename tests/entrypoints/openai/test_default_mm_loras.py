@@ -8,8 +8,9 @@ import pytest
 import pytest_asyncio
 from huggingface_hub import snapshot_download
 
+from tests.utils import RemoteOpenAIServer
+
 from ...conftest import AudioTestAssets
-from ...utils import RemoteOpenAIServer
 
 # NOTE - the tests in this module are currently analogous to test_chat, but are
 # separated to avoid OOM killing due to module-scoped servers, since we

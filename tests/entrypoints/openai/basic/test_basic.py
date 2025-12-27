@@ -15,7 +15,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")

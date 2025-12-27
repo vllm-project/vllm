@@ -6,9 +6,8 @@ import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.tool_server import MCPToolServer
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 

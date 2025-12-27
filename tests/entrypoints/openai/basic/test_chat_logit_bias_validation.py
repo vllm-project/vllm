@@ -8,7 +8,7 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 def get_vocab_size(model_name):
