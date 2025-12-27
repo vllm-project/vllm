@@ -215,7 +215,7 @@ def get_device_indices(
             )
         )
     except IndexError as e:
-        raise Exception(
+        raise RuntimeError(
             f"Error setting {device_control_env_var}: "
             f"local range: [{local_dp_rank * world_size}, "
             f"{(local_dp_rank + 1) * world_size}) "
