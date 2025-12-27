@@ -156,7 +156,18 @@ def _save_results(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = "baseline" if is_baseline else "eagle3"
 
-    # Configuration file
+    # Configuration file - make JSON-safe by converting complex objects to strings
+    def make_json_safe(obj):
+        """Convert non-serializable objects to strings."""
+        if isinstance(obj, dict):
+            return {k: make_json_safe(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [make_json_safe(v) for v in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            return str(obj)  # Convert complex objects to string
+
     config = {
         "timestamp": timestamp,
         "model": args.model,
@@ -176,7 +187,7 @@ def _save_results(
             "min_p": args.min_p,
             "seed": args.seed,
         },
-        "speculative_config": spec_config,
+        "speculative_config": make_json_safe(spec_config),
         "results": {
             "tokens_per_s": tokens_per_s,
             "total_tokens": total_tokens,
