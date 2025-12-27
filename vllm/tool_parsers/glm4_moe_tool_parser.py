@@ -41,7 +41,7 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>([^\n]*)\n(.*?)</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -99,10 +99,15 @@ class Glm4MoeModelToolParser(ToolParser):
             tool_calls = []
             for match in matched_tool_calls:
                 tc_detail = self.func_detail_regex.search(match)
-                tc_name = tc_detail.group(1)
-                tc_args = tc_detail.group(2)
-                pairs = self.func_arg_regex.findall(tc_args)
+                tc_name = tc_detail.group(1).strip()
+                tc_args = tc_detail.group(2).strip() if tc_detail.group(2) else ""
+                # Skip tool calls with empty names
+                if not tc_name:
+                    logger.warning("Skipping tool call with empty name")
+                    continue
                 arg_dct = {}
+                # Handle empty/None arguments (tools with no parameters)
+                pairs = self.func_arg_regex.findall(tc_args) if tc_args else []
                 for key, value in pairs:
                     arg_key = key.strip()
                     arg_val = value.strip()
