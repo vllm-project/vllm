@@ -147,6 +147,7 @@ def get_fp8_moe_backend(
         return Fp8MoeBackend.AITER
 
     if allow_vllm_cutlass:
+        logger.info_once(_make_log_backend("vLLM CUTLASS"), scope="local")
         return Fp8MoeBackend.VLLM_CUTLASS
 
     # default to Triton
