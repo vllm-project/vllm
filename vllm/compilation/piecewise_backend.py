@@ -5,6 +5,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
+import torch
 import torch.fx as fx
 
 from vllm.compilation.backends import VllmBackend
@@ -14,6 +15,59 @@ from vllm.config.compilation import Range
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def _detect_encoder_compilation(
+    graph: fx.GraphModule,
+    sym_shape_indices: list[int],
+    max_num_batched_tokens: int,
+) -> bool:
+    """
+    Detect whether this is encoder or decoder compilation by analyzing
+    the graph's input shapes.
+
+    For encoder compilation, the first symbolic shape dimension typically
+    has an upper bound larger than max_num_batched_tokens, as encoders
+    process full sequences at once.
+
+    For decoder compilation, the upper bound is typically at or below
+    max_num_batched_tokens.
+    """
+    if not sym_shape_indices:
+        return False
+
+    placeholder_values = []
+    for node in graph.graph.nodes:
+        if node.op == "placeholder":
+            placeholder_values.append(node.meta.get("example_value"))
+        else:
+            break
+
+    first_sym_idx = sym_shape_indices[0]
+    if first_sym_idx >= len(placeholder_values):
+        return False
+
+    first_sym_value = placeholder_values[first_sym_idx]
+
+    if isinstance(first_sym_value, torch.SymInt):
+        try:
+            hint = first_sym_value.node.hint
+            if hint is not None and hint > max_num_batched_tokens:
+                logger.debug(
+                    "Detected encoder compilation: shape=%d"
+                    "is greater than max_num_batched_tokens=%d",
+                    hint,
+                    max_num_batched_tokens,
+                )
+                return True
+        except (AttributeError, RuntimeError) as e:
+            # If we can't get the hint, log and assume decoder
+            logger.debug(
+                "Could not extract hint from SymInt for encoder detection: %s", e
+            )
+
+    logger.debug("Detected decoder compilation")
+    return False
 
 
 @dataclasses.dataclass
@@ -53,7 +107,18 @@ class PiecewiseBackend:
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
-        self.is_encoder_compilation = vllm_backend.is_encoder
+
+        # Detect encoder compilation based on graph analysis instead of label
+        self.is_encoder_compilation = (
+            _detect_encoder_compilation(
+                graph=graph,
+                sym_shape_indices=sym_shape_indices,
+                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            )
+            and vllm_config.compilation_config.compile_mm_encoder
+        )
+        if self.is_encoder_compilation:
+            vllm_backend.is_encoder = True
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
         if self.is_encoder_compilation:
@@ -69,11 +134,11 @@ class PiecewiseBackend:
                 start=last_compile_range.start, end=max_int32
             )
 
-        log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
+        log_string = f"PiecewiseBackend compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
         self.compile_sizes = self.compilation_config.compile_sizes
-        log_string = f"PiecewiseBackend: compile_sizes: {self.compile_sizes}"
+        log_string = f"PiecewiseBackend compile_sizes: {self.compile_sizes}"
         logger.debug_once(log_string)
 
         self.sym_shape_indices = sym_shape_indices
