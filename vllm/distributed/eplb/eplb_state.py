@@ -335,6 +335,38 @@ class EplbState:
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
+        # Auto-calculate num_redundant_experts if set to -1 (auto).
+        # NOTE: This is a fallback - normally the value is calculated earlier
+        # in VllmConfig.__post_init__() before model construction. This handles
+        # edge cases where that didn't happen (e.g., direct ParallelConfig usage).
+        if self.parallel_config.eplb_config.num_redundant_experts == -1:
+            ep_size = get_ep_group().world_size
+            num_logical_experts = model.num_logical_experts
+
+            # Calculate minimum redundant experts needed for even distribution
+            # Formula: (num_logical_experts + num_redundant_experts) % ep_size == 0
+            remainder = num_logical_experts % ep_size
+            min_redundant_experts = (ep_size - remainder) % ep_size
+
+            # Update both config and model
+            self.parallel_config.eplb_config.num_redundant_experts = (
+                min_redundant_experts
+            )
+            model.num_redundant_experts = min_redundant_experts
+            model.num_physical_experts = num_logical_experts + min_redundant_experts
+            # Also update local physical experts to maintain consistency:
+            # num_physical_experts == ep_size * num_local_physical_experts
+            model.num_local_physical_experts = model.num_physical_experts // ep_size
+
+            logger.info(
+                "Auto-calculated num_redundant_experts=%d for EPLB "
+                "(num_logical_experts=%d, ep_size=%d, num_local_physical_experts=%d)",
+                min_redundant_experts,
+                num_logical_experts,
+                ep_size,
+                model.num_local_physical_experts,
+            )
+
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
