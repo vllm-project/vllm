@@ -4,7 +4,6 @@
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from functools import partial
 from typing import Literal, cast, get_args, overload
 
 import torch
@@ -67,9 +66,6 @@ else:
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-    rocm_aiter_grouped_topk,
-)
 
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
@@ -1583,28 +1579,15 @@ class FusedMoE(CustomOp):
         elif self.use_grouped_topk and valid_grouping():
             assert self.topk_group is not None
             assert self.num_expert_group is not None
-            if rocm_aiter_ops.is_fused_moe_enabled():
-                if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
-                    assert self.num_fused_shared_experts == 0
-                grouped_topk_impl = partial(
-                    rocm_aiter_grouped_topk,
-                    num_fused_shared_experts=self.num_fused_shared_experts,
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                    num_expert_group=self.num_expert_group,
-                    topk_group=self.topk_group,
-                    scoring_func=self.scoring_func,
-                    routed_scaling_factor=self.routed_scaling_factor,
-                )
-            else:
-                grouped_topk_impl = GroupedTopk(
-                    topk=self.top_k,
-                    renormalize=self.renormalize,
-                    num_expert_group=self.num_expert_group,
-                    topk_group=self.topk_group,
-                    scoring_func=self.scoring_func,
-                    routed_scaling_factor=self.routed_scaling_factor,
-                )
+            grouped_topk_impl = GroupedTopk(
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
 
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
