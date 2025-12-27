@@ -876,11 +876,15 @@ class VllmConfig:
                 "deepep_low_latency",
                 "deepep_high_throughput",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                f"Dual Batch Overlap (DBO) / microbatching requires DeepEP kernels "
+                f"but '{a2a_backend}' all2all backend was specified. "
+                f"DBO overlaps computation and communication for MoE models, "
+                f"but currently only works with DeepEP backends. "
+                f"To fix, either:\n"
+                f"  1. Use --all2all-backend=deepep_low_latency or "
+                f"--all2all-backend=deepep_high_throughput (requires DeepEP), or\n"
+                f"  2. Disable DBO by not using --enable-dbo if you want "
+                f"to use the '{a2a_backend}' backend"
             )
 
             if not self.model_config.disable_cascade_attn:
