@@ -241,8 +241,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.marlin_input_dtype = None
         self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        # Be conservative and tune for the most extreme inbalance for MoE,
+        # i.e., one expert receives all the tokens.
+        self.tune_max_num_tokens = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
@@ -868,7 +870,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "gemm1_beta": layer.gemm1_beta,
                     "gemm1_clamp_limit": layer.gemm1_clamp_limit,
                     # TODO(bnell): part of quant_config
-                    "max_capture_size": self.max_capture_size,
+                    "tune_max_num_tokens": self.tune_max_num_tokens,
                 }
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
@@ -981,7 +983,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,
                 1 if layer.renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
-                tune_max_num_tokens=max(self.max_capture_size, 1),
+                tune_max_num_tokens=self.tune_max_num_tokens,
             )[0]
             return trtllm_gen_output
         elif (
@@ -1048,7 +1050,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 tp_rank=self.moe.tp_rank,
                 ep_size=self.moe.ep_size,
                 ep_rank=self.moe.ep_rank,
-                tune_max_num_tokens=max(self.max_capture_size, 1),
+                tune_max_num_tokens=self.tune_max_num_tokens,
                 **extra_kwargs,
             )
 

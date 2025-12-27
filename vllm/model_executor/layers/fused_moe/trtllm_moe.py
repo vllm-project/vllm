@@ -21,14 +21,14 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         gemm1_alpha,
         gemm1_beta,
         gemm1_clamp_limit,
-        max_capture_size,
+        tune_max_num_tokens,
     ):
         super().__init__(quant_config)
         self.moe = moe
         self.gemm1_alpha = gemm1_alpha
         self.gemm1_beta = gemm1_beta
         self.gemm1_clamp_limit = gemm1_clamp_limit
-        self.max_capture_size = max_capture_size
+        self.tune_max_num_tokens = tune_max_num_tokens
 
     @property
     def activation_formats(
@@ -127,7 +127,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "routing_method_type": 1,
             "do_finalize": True,
             "output": output,
-            "tune_max_num_tokens": max(self.max_capture_size, 1),
+            "tune_max_num_tokens": self.tune_max_num_tokens,
         }
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe
