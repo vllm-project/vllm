@@ -19,11 +19,13 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
+from vllm.tracing import instrument
 from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
 
+@instrument(span_name="Initialize model")
 def initialize_model(
     vllm_config: VllmConfig,
     *,

@@ -94,6 +94,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.tool_parsers import ToolParserManager
+from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -1267,6 +1268,7 @@ def validate_api_server_args(args):
         )
 
 
+@instrument(span_name="API server setup")
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""

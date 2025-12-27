@@ -31,8 +31,12 @@ from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
+from vllm.tracing import instrument, is_otel_available
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+if is_otel_available():
+    from opentelemetry import trace
 
 from .caching import VllmSerializableFunction
 from .compiler_interface import (
@@ -195,6 +199,7 @@ class CompilerManager:
         )
         return compiled_graph
 
+    @instrument(span_name="Compile graph")
     def compile(
         self,
         graph: fx.GraphModule,
@@ -558,6 +563,17 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
+    @instrument(span_name="Inductor compilation")
+    def _run_inductor_compilation(
+        self,
+        submod_names_to_compile: list[str],
+        example_inputs,
+    ) -> None:
+        """Run the Inductor compilation phase."""
+        PiecewiseCompileInterpreter(
+            self.split_gm, submod_names_to_compile, self.vllm_config, self
+        ).run(*example_inputs)
+
     def configure_post_pass(self):
         self.pass_manager.configure(self.vllm_config)
 
@@ -706,6 +722,12 @@ class VllmBackend:
         )
         self.compilation_config.compilation_time += dynamo_time
 
+        # Record Dynamo time in tracing if available
+        if is_otel_available():
+            tracer = trace.get_tracer(__name__)
+            with tracer.start_as_current_span("Dynamo bytecode transform") as span:
+                span.set_attribute("dynamo.time_seconds", dynamo_time)
+
         # we control the compilation process, each instance can only be
         # called once
         assert not self._called, "VllmBackend can only be called once"
@@ -747,9 +769,7 @@ class VllmBackend:
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
-        PiecewiseCompileInterpreter(
-            self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*fake_args)
+        self._run_inductor_compilation(submod_names_to_compile, example_inputs)
 
         from torch._guards import detect_fake_mode
 
