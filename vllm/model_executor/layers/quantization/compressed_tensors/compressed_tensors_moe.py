@@ -48,8 +48,8 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_weights_to_kernel_format,
-    get_fp8_moe_backend,
     make_kernel,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
@@ -685,7 +685,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         self.disable_expert_map = False
 
-        self.fp8_backend = get_fp8_moe_backend(
+        self.fp8_backend = select_fp8_moe_backend(
             block_quant=self.block_quant,
             tp_size=moe.tp_size,
             with_lora_support=moe.is_lora_enabled,

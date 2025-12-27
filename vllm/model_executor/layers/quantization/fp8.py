@@ -35,8 +35,8 @@ from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_weights_to_kernel_format,
-    get_fp8_moe_backend,
     make_kernel,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -637,7 +637,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
-        self.fp8_backend = get_fp8_moe_backend(
+        self.fp8_backend = select_fp8_moe_backend(
             block_quant=self.block_quant,
             tp_size=layer.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,

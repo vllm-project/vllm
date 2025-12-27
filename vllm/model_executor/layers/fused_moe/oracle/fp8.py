@@ -62,7 +62,7 @@ class Fp8MoeBackend(Enum):
     VLLM_CUTLASS = 7
 
 
-def get_fp8_moe_backend(
+def select_fp8_moe_backend(
     block_quant: bool,
     tp_size: int,
     with_lora_support: bool,
