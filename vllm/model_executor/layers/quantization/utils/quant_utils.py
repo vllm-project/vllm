@@ -631,7 +631,7 @@ def awq_pack(
     elif num_bits == 8:
         interleave = numpy.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise ValueError(f"num_bits must be 4 or 8, got {num_bits}")
 
     q_w = q_w.reshape((-1, len(interleave)))[:, interleave].ravel()
     q_w = q_w.reshape((-1, size_n)).contiguous()
