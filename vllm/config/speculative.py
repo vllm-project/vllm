@@ -32,6 +32,7 @@ MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
+    "glm4_moe_lite_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
@@ -202,6 +203,17 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "Glm4MoeLiteForCausalLM":
+            hf_config.model_type = "glm4_moe_lite_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeLiteMTPModel"],
                 }
             )
 
