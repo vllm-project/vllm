@@ -1,40 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from collections.abc import Iterable
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
-from transformers.models.glmasr import GlmAsrConfig, GlmAsrEncoder, GlmAsrProcessor
-from transformers.models.whisper import WhisperFeatureExtractor
+from transformers.models.glmasr import GlmAsrConfig, GlmAsrEncoder
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalDataDict,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
+from vllm.multimodal.glmasr_utils import (
+    DEFAULT_CONV_PARAMS,
+    DEFAULT_MERGE_FACTOR,
+    _flatten_audio_features_by_length,
+    _get_audio_output_lengths_for_tower,
+    _group_audio_embeddings,
+    _normalize_chunk_counts,
 )
-from vllm.multimodal.parse import (
-    DictEmbeddingItems,
-    ModalityData,
-    ModalityDataItems,
-    MultiModalDataItems,
-    MultiModalDataParser,
+from vllm.multimodal.processors.glmasr import (
+    GlmAsrDummyInputsBuilder,
+    GlmAsrMultiModalProcessor,
+    GlmAsrProcessingInfo,
 )
-from vllm.multimodal.processing import (
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -45,20 +35,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-
-DEFAULT_MAX_AUDIO_LEN_S = 655
-DEFAULT_MERGE_FACTOR = 4
-# Default convolution parameters: (padding, kernel_size, stride)
-# These correspond to the two conv layers in GlmAsrEncoder
-DEFAULT_CONV_PARAMS = [(1, 3, 1), (1, 3, 2)]
-
-
-def _calculate_conv_output_length(
-    input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
-) -> torch.Tensor:
-    """Calculate Conv1d output length using standard formula."""
-    # Standard formula: floor((input + 2*padding - kernel_size) / stride) + 1
-    return (input_length + 2 * padding - kernel_size) // stride + 1
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -121,288 +97,6 @@ class GlmAsrMultiModalProjector(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
-
-
-class GlmAsrProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> GlmAsrConfig:
-        return self.ctx.get_hf_config(GlmAsrConfig)
-
-    def get_hf_processor(self, **kwargs: object) -> GlmAsrProcessor:
-        return self.ctx.get_hf_processor(GlmAsrProcessor, **kwargs)
-
-    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
-        assert isinstance(feature_extractor, WhisperFeatureExtractor)
-        return feature_extractor
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
-
-
-class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_audios = mm_counts.get("audio", 0)
-        hf_processor = self.info.get_hf_processor()
-        return hf_processor.audio_token * num_audios
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor()
-        sampling_rate = feature_extractor.sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio") if mm_options else None
-
-        max_audio_len = getattr(
-            self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
-        )
-        audio_len = int(max_audio_len * sampling_rate)
-
-        return {
-            "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
-            )
-        }
-
-
-def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    chunk_counts = hf_inputs.get("chunk_counts")
-    if chunk_counts is not None:
-        return dict(
-            audio_embeds=MultiModalFieldConfig.batched("audio"),
-            input_features=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
-        )
-    return dict(
-        audio_embeds=MultiModalFieldConfig.batched("audio"),
-        input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
-    )
-
-
-class GlmAsrMultiModalDataParser(MultiModalDataParser):
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_glmasr_field_config,
-            )
-        return super()._parse_audio_data(data)
-
-
-class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return GlmAsrMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
-
-    def _calculate_chunk_counts(
-        self,
-        audio_list: list[Any],
-        feature_extractor: WhisperFeatureExtractor,
-        processor: GlmAsrProcessor,
-    ) -> list[int]:
-        """Calculate chunk counts for each audio."""
-        sampling_rate = feature_extractor.sampling_rate
-        chunk_length = feature_extractor.chunk_length
-        max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
-        window_size = int(sampling_rate * chunk_length)
-        max_windows = int(max_audio_len // chunk_length)
-
-        chunk_counts = []
-        for audio in audio_list:
-            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
-            n_chunks = max(1, (n_samples + window_size - 1) // window_size)
-            chunk_counts.append(min(n_chunks, max_windows))
-        return chunk_counts
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Handle deprecated "audios" key
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
-
-        # Text-only input
-        audio_list = mm_data.get("audio", [])
-        if not audio_list:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        # Normalize audio_list to list format
-        if not isinstance(audio_list, list):
-            audio_list = [audio_list]
-
-        processor = self.info.get_hf_processor(**mm_kwargs)
-        feature_extractor = processor.feature_extractor
-        mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
-
-        # Calculate chunk counts
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, feature_extractor, processor
-        )
-
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        # Rename mask key and add chunk_counts
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-
-        return outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return _glmasr_field_config(hf_inputs)
-
-    def _normalize_to_tensor(
-        self, mask: torch.Tensor | list[torch.Tensor]
-    ) -> torch.Tensor:
-        """Convert mask to tensor, handling both list and tensor formats."""
-        if isinstance(mask, list):
-            return (
-                torch.stack(mask)
-                if mask and isinstance(mask[0], torch.Tensor)
-                else torch.tensor(mask)
-            )
-        return mask
-
-    def _extract_mask_for_item(
-        self,
-        feature_attention_mask: torch.Tensor | list[torch.Tensor],
-        chunk_counts: torch.Tensor | list[int] | None,
-        item_idx: int,
-    ) -> torch.Tensor:
-        """Extract attention mask for a specific audio item."""
-        if chunk_counts is None:
-            # Single item per audio
-            mask = feature_attention_mask[item_idx]
-            return (
-                mask.unsqueeze(0)
-                if isinstance(feature_attention_mask, torch.Tensor)
-                else self._normalize_to_tensor(mask)
-            )
-
-        # Multiple chunks per audio: calculate slice indices
-        counts = (
-            chunk_counts.tolist()
-            if isinstance(chunk_counts, torch.Tensor)
-            else chunk_counts
-        )
-        start_idx = sum(counts[:item_idx])
-        end_idx = start_idx + counts[item_idx]
-
-        # Extract slice
-        if isinstance(feature_attention_mask, torch.Tensor):
-            return feature_attention_mask[start_idx:end_idx]
-        return self._normalize_to_tensor(feature_attention_mask[start_idx:end_idx])
-
-    def _calculate_audio_output_lengths(
-        self,
-        mask: torch.Tensor,
-        merge_factor: int,
-        conv_params: list[tuple[int, int, int]] | None = None,
-    ) -> torch.Tensor:
-        """
-        Calculate output lengths after convolution and merge operations.
-
-        Args:
-            mask: Attention mask tensor
-            merge_factor: Factor for merge operation
-            conv_params: List of (padding, kernel_size, stride) tuples for
-                        each conv layer. Defaults to [(1, 3, 1), (1, 3, 2)] if
-                        not provided.
-        """
-        if conv_params is None:
-            conv_params = DEFAULT_CONV_PARAMS
-
-        audio_lengths = mask.sum(-1)
-        for padding, kernel_size, stride in conv_params:
-            audio_lengths = _calculate_conv_output_length(
-                audio_lengths, padding, kernel_size, stride
-            )
-        # Apply merge operation
-        return (audio_lengths - merge_factor) // merge_factor + 1
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-        config = self.info.get_hf_config()
-
-        audio_token = getattr(processor, "audio_token", "<|pad|>")
-        audio_token_id = vocab.get(audio_token)
-        if audio_token_id is None:
-            audio_token_id = processor.audio_token_id
-
-        merge_factor = getattr(config, "merge_factor", DEFAULT_MERGE_FACTOR)
-        out_mm_data = out_mm_kwargs.get_data()
-        feature_attention_mask = out_mm_data.get("feature_attention_mask")
-        chunk_counts = out_mm_data.get("chunk_counts")
-
-        def get_replacement_glmasr(item_idx: int):
-            if feature_attention_mask is not None:
-                mask = self._extract_mask_for_item(
-                    feature_attention_mask, chunk_counts, item_idx
-                )
-                # Get conv params from config if available
-                conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
-                audio_output_lengths = self._calculate_audio_output_lengths(
-                    mask, merge_factor, conv_params
-                )
-                num_features = audio_output_lengths.sum().item()
-            else:
-                audio_embeds = out_mm_data["audio_embeds"][item_idx]
-                num_features = audio_embeds.shape[0]
-
-            if num_features == 0:
-                raise ValueError("Audio is too short")
-
-            audio_tokens = [audio_token_id] * int(num_features)
-            return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
-            )
-
-        return [
-            PromptReplacement(
-                modality="audio",
-                target=audio_token,
-                replacement=get_replacement_glmasr,
-            )
-        ]
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -492,16 +186,9 @@ class GlmAsrForConditionalGeneration(
             input_features = torch.cat(input_features, dim=0)
             feature_attention_mask = torch.cat(feature_attention_mask, dim=0)
 
-        if chunk_counts is None:
-            chunk_counts = [1] * input_features.shape[0]
-        elif isinstance(chunk_counts, torch.Tensor):
-            chunk_counts = chunk_counts.tolist()
-        elif (
-            isinstance(chunk_counts, list)
-            and chunk_counts
-            and isinstance(chunk_counts[0], torch.Tensor)
-        ):
-            chunk_counts = [c.item() for c in chunk_counts]
+        chunk_counts = _normalize_chunk_counts(
+            chunk_counts, num_chunks=input_features.shape[0]
+        )
 
         audio_outputs = self.audio_tower(input_features)
         audio_hidden_states = audio_outputs.last_hidden_state
@@ -517,42 +204,19 @@ class GlmAsrForConditionalGeneration(
         merge_factor = getattr(self.config, "merge_factor", DEFAULT_MERGE_FACTOR)
         conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
 
-        if hasattr(self.audio_tower, "_get_feat_extract_output_lengths"):
-            # Use encoder's built-in method
-            audio_lengths = feature_attention_mask.sum(-1)
-            _, audio_output_lengths = self.audio_tower._get_feat_extract_output_lengths(
-                audio_lengths
-            )
-        else:
-            # Fallback to manual calculation
-            audio_lengths = feature_attention_mask.sum(-1)
-            for padding, kernel_size, stride in conv_params:
-                audio_lengths = _calculate_conv_output_length(
-                    audio_lengths, padding, kernel_size, stride
-                )
-            audio_output_lengths = (audio_lengths - merge_factor) // merge_factor + 1
-
-        num_chunks, max_audio_tokens, embed_dim = audio_features.shape
-        audio_output_lengths = audio_output_lengths.unsqueeze(1)
-        audio_features_mask = (
-            torch.arange(max_audio_tokens)
-            .expand(num_chunks, max_audio_tokens)
-            .to(audio_output_lengths.device)
-            < audio_output_lengths
+        audio_lengths = feature_attention_mask.sum(-1)
+        audio_output_lengths = _get_audio_output_lengths_for_tower(
+            self.audio_tower, audio_lengths, merge_factor, conv_params
         )
-        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
+
+        masked_audio_features = _flatten_audio_features_by_length(
+            audio_features, audio_output_lengths
+        )
 
         chunk_embeddings = torch.split(
             masked_audio_features, audio_output_lengths.flatten().tolist()
         )
-
-        grouped_embeddings = []
-        current_idx = 0
-        for count in chunk_counts:
-            audio_chunks = chunk_embeddings[current_idx : current_idx + count]
-            grouped_embeddings.append(torch.cat(audio_chunks, dim=0))
-            current_idx += count
-        return tuple(grouped_embeddings)
+        return _group_audio_embeddings(chunk_embeddings, chunk_counts)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
