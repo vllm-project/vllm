@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    CutlassExpertsFp8,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
@@ -212,6 +215,7 @@ def convert_weights_to_kernel_format(
 
 
 def setup_kernel(
+    layer: torch.nn.Module,
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
@@ -221,6 +225,7 @@ def setup_kernel(
     # done, then we will initialzie the TP case and DP/EP case
     # via the same code path (i.e. via maybe_init_modular_kernel).
     # NOTE(rob): in progress migrating all into this format.
+    use_inplace = True
     if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         kernel = mk.FusedMoEModularKernel(
             # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
@@ -242,30 +247,56 @@ def setup_kernel(
         )
         use_inplace = False
 
-    elif fp8_backend in [
-        Fp8MoeBackend.DEEPGEMM,
-        Fp8MoeBackend.TRITON,
-        Fp8MoeBackend.MARLIN,
-        Fp8MoeBackend.AITER,
-    ]:
-        if fp8_backend == Fp8MoeBackend.AITER:
-            kernel = mk.FusedMoEModularKernel(
-                # TODO: make defer_input_quant an attr of the AiterExperts
-                MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-                AiterExperts(quant_config=moe_quant_config),
-            )
-        elif fp8_backend == Fp8MoeBackend.MARLIN:
-            kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                MarlinExperts(quant_config=moe_quant_config),
-            )
-        else:
-            kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                TritonOrDeepGemmExperts(
-                    quant_config=moe_quant_config,
-                    allow_deep_gemm=(fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                ),
-            )
-        use_inplace = True
+    elif fp8_backend == Fp8MoeBackend.AITER:
+        kernel = mk.FusedMoEModularKernel(
+            # TODO: make defer_input_quant an attr of the AiterExperts
+            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            AiterExperts(quant_config=moe_quant_config),
+        )
+    elif fp8_backend == Fp8MoeBackend.MARLIN:
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            MarlinExperts(quant_config=moe_quant_config),
+        )
+    elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
+        device = layer.w13_weight.device
+        # ab_strides1 and c_strides2 are the same
+        ab_strides1_c_strides2 = torch.full(
+            (layer.local_num_experts,),
+            layer.hidden_size,
+            device=device,
+            dtype=torch.int64,
+        )
+        ab_strides2 = torch.full(
+            (layer.local_num_experts,),
+            layer.intermediate_size_per_partition,
+            device=device,
+            dtype=torch.int64,
+        )
+        c_strides1 = torch.full(
+            (layer.local_num_experts,),
+            2 * layer.intermediate_size_per_partition,
+            device=device,
+            dtype=torch.int64,
+        )
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp8(
+                out_dtype=torch.get_default_dtype(),
+                ab_strides1=ab_strides1_c_strides2,
+                ab_strides2=ab_strides2,
+                c_strides1=c_strides1,
+                c_strides2=ab_strides1_c_strides2,
+                quant_config=moe_quant_config,
+            ),
+        )
+    else:
+        assert fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.TRITON]
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            TritonOrDeepGemmExperts(
+                quant_config=moe_quant_config,
+                allow_deep_gemm=(fp8_backend == Fp8MoeBackend.DEEPGEMM),
+            ),
+        )
     return kernel, use_inplace

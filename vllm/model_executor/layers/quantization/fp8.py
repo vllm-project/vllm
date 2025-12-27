@@ -868,6 +868,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         self.kernel, self.use_inplace = setup_kernel(
+            layer=layer,
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
@@ -1205,13 +1206,14 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
 
-        # Shuffle weights into the runtime format.
-        self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
-        )
+        # # Shuffle weights into the runtime format.
+        # self._convert_weights_to_kernel_format(
+        #     layer, w13_weight, w2_weight, layer.w13_weight_scale,
+        #   layer.w2_weight_scale
+        # )
 
-        # Setup modular kernel for TP case.
-        self._setup_kernel(layer)
+        # # Setup modular kernel for TP case.
+        # self._setup_kernel(layer)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
