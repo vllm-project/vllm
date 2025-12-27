@@ -62,10 +62,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    expert_weight_is_col_major,
-    requant_weight_ue8m0_inplace,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
@@ -75,9 +71,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
@@ -93,9 +86,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
-    get_col_major_tma_aligned_tensor,
     get_mk_alignment_for_contiguous_layout,
-    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
@@ -879,9 +870,39 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def _convert_weights_to_kernel_format(
+        self,
+        layer: torch.nn.Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w13_weight_scale: torch.Tensor,
+        w2_weight_scale: torch.Tensor,
+    ) -> None:
+        pass
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Fp8 moe kernels require a single activation scale.
-        # We take the max of all the scales in case they differ.
+        from vllm.model_executor.utils import replace_parameter
+
+        # Allow for accessing weights and scales in standard way.
+        w13_weight = layer.w13_weight
+        w2_weight = layer.w2_weight
+        w13_weight_scale = layer.w13_weight_scale
+        w2_weight_scale = layer.w2_weight_scale
+
+        # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
+        if current_platform.is_fp8_fnuz():
+            w13_weight, w13_weight_scale, layer.w13_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w13_weight, w13_weight_scale, layer.w13_input_scale
+                )
+            )
+            w2_weight, w2_weight_scale, layer.w2_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w2_weight, w2_weight_scale, layer.w2_input_scale
+                )
+            )
+
+        # Per tensor kernels require single activation scale. Use the max.
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
@@ -897,79 +918,26 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     "fp8 MoE layer. Using the maximum across experts "
                     "for each layer."
                 )
-            layer.w13_input_scale = torch.nn.Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-            layer.w2_input_scale = torch.nn.Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
+            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
+            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
 
-        if current_platform.is_fp8_fnuz():
-            # Normalize the weights and scales
-            w13_weight, w13_weight_scale, w13_input_scale = (
-                normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_weight_scale, layer.w13_input_scale
-                )
-            )
-            w2_weight, w2_weight_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                layer.w2_weight, layer.w2_weight_scale, layer.w2_input_scale
-            )
-            # Reset the parameter
-            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w13_weight_scale, requires_grad=False
-            )
-            if w13_input_scale is not None:
-                layer.w13_input_scale = torch.nn.Parameter(
-                    w13_input_scale, requires_grad=False
-                )
-            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(
-                w2_weight_scale, requires_grad=False
-            )
-            if w2_input_scale is not None:
-                layer.w2_input_scale = torch.nn.Parameter(
-                    w2_input_scale, requires_grad=False
-                )
-
-        # For Per-TENSOR case, Fp8 moe kernel needs single weight scale
-        # for w13 per expert. Use max then dequant and requant each expert.
+        # Per tensor kernels require single weight scale for w13 per expert, but
+        # on disk there is a scale for w1 and w3. Use the max to requantize.
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
-            assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
             for expert_id in range(layer.local_num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
-                        layer.w13_weight[expert_id][start : start + shard_size, :],
-                        layer.w13_weight_scale[expert_id][shard_id],
+                        w13_weight[expert_id][start : start + shard_size, :],
+                        w13_weight_scale[expert_id][shard_id],
                     )
-                    layer.w13_weight[expert_id][start : start + shard_size, :], _ = (
+                    w13_weight[expert_id][start : start + shard_size, :], _ = (
                         ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
                     )
                     start += shard_size
-            layer.w13_weight_scale = torch.nn.Parameter(
-                max_w13_scales, requires_grad=False
-            )
-
-        # Property to determine if AITER is used
-        if self.rocm_aiter_moe_enabled:
-            # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data
-            )
-
-            layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
-
-        elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
+            w13_weight_scale = max_w13_scales
 
         if self.use_cutlass:
             assert self.weight_quant.strategy != QuantizationStrategy.BLOCK
@@ -993,31 +961,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 device=device,
                 dtype=torch.int64,
             )
-
-        if is_deep_gemm_e8m0_used() and self.block_quant:
-            assert layer.weight_block_size is not None
-            # Re-quantise the expert weights so their scales are UE8M0.
-            block_sz = tuple(layer.weight_block_size)
-            requant_weight_ue8m0_inplace(
-                layer.w13_weight.data,
-                layer.w13_weight_scale.data,
-                block_sz,
+        else:
+            # Shuffle weights into the runtime format.
+            self._convert_weights_to_kernel_format(
+                layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
             )
-            requant_weight_ue8m0_inplace(
-                layer.w2_weight.data,
-                layer.w2_weight_scale.data,
-                block_sz,
-            )
-
-            # Ensure column-major TMA alignment expected by DeepGEMM.
-            if expert_weight_is_col_major(layer.w13_weight_scale):
-                layer.w13_weight_scale = get_col_major_tma_aligned_tensor(
-                    layer.w13_weight_scale
-                )
-            if expert_weight_is_col_major(layer.w2_weight_scale):
-                layer.w2_weight_scale = get_col_major_tma_aligned_tensor(
-                    layer.w2_weight_scale
-                )
 
     def maybe_make_prepare_finalize(
         self,

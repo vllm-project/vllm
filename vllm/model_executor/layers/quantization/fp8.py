@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle import (
     Fp8MoeBackend,
+    convert_weights_to_kernel_format,
     get_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -51,17 +52,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    register_moe_scaling_factors,
-    rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
-    swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    deepgemm_post_process_fp8_weight_block,
     maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
@@ -73,7 +70,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
-    prepare_moe_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -96,7 +92,6 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
-    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
 
@@ -799,68 +794,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def _convert_weights_to_kernel_format(
-        self,
-        layer: Module,
-        w13_weight: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w13_weight_scale: torch.Tensor,
-        w2_weight_scale: torch.Tensor,
-    ) -> None:
-        if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-            assert self.block_quant
-            w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
-                wq=w13_weight,
-                ws=w13_weight_scale,
-                quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
-            )
-            w2_weight, w2_weight_scale = deepgemm_post_process_fp8_weight_block(
-                wq=w2_weight,
-                ws=w2_weight_scale,
-                quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
-            )
-        elif self.fp8_backend == Fp8MoeBackend.AITER:
-            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-                w13_weight, w2_weight
-            )
-        elif self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-        ]:
-            w13_weight = swap_w13_to_w31(w13_weight)
-            if self.block_quant:
-                w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
-            else:
-                # TODO(rob): this function is a hack that renames the scaling
-                # factors in the Module. This is a hack we should clean up.
-                register_moe_scaling_factors(layer)
-                if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
-        elif self.fp8_backend == Fp8MoeBackend.AITER:
-            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-                w13_weight, w2_weight
-            )
-
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
-        replace_parameter(layer, "w13_weight", w13_weight)
-        replace_parameter(layer, "w2_weight", w2_weight)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
-
-        # TODO(rob): we do this after replace_parameter() because
-        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
-        # directly. We will refactor this in a follow up PR.
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
-
     def _setup_kernel(self, layer: Module) -> None:
         """Setup Modular Kernel for TP Case"""
         # NOTE(rob): this is a WIP refactor. We are first migrating
@@ -1002,8 +935,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_weight_scale = max_w13_scales
 
         # Shuffle weights into the runtime format.
-        self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        convert_weights_to_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            weight_scale_name=self.weight_scale_name,
+            marlin_input_dtype=self.marlin_input_dtype,
         )
 
         # Setup modular kernel for TP case.

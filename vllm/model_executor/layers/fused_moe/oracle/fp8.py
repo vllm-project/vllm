@@ -2,14 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
 
+import torch
+
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
+    register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    prepare_moe_fp8_layer_for_marlin,
+)
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -110,3 +123,63 @@ def get_fp8_moe_backend(
     # default to Triton
     logger.info_once(_make_log_backend("Triton"))
     return Fp8MoeBackend.TRITON
+
+
+def convert_weights_to_kernel_format(
+    fp8_backend: Fp8MoeBackend,
+    layer: torch.nn.Module,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    weight_scale_name: str,
+    marlin_input_dtype: torch.dtype,
+) -> None:
+    block_quant = hasattr(layer, "weight_block_size")
+    if fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        assert block_quant
+        w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
+            wq=w13_weight,
+            ws=w13_weight_scale,
+            quant_block_shape=tuple(layer.weight_block_size),
+            use_e8m0=is_deep_gemm_e8m0_used(),
+        )
+        w2_weight, w2_weight_scale = deepgemm_post_process_fp8_weight_block(
+            wq=w2_weight,
+            ws=w2_weight_scale,
+            quant_block_shape=tuple(layer.weight_block_size),
+            use_e8m0=is_deep_gemm_e8m0_used(),
+        )
+    elif fp8_backend == Fp8MoeBackend.AITER:
+        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
+    elif fp8_backend in [
+        Fp8MoeBackend.FLASHINFER_CUTLASS,
+        Fp8MoeBackend.FLASHINFER_TRTLLM,
+    ]:
+        w13_weight = swap_w13_to_w31(w13_weight)
+        if block_quant:
+            w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
+        else:
+            # TODO(rob): this function is a hack that renames the scaling
+            # factors in the Module. This is a hack we should clean up.
+            register_moe_scaling_factors(layer)
+            if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+                rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+    elif fp8_backend == Fp8MoeBackend.AITER:
+        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
+
+    # Replace parameters with updated versions. Note that this helper
+    # function ensures the replacement is compatible with RL weight reloads.
+    replace_parameter(layer, "w13_weight", w13_weight)
+    replace_parameter(layer, "w2_weight", w2_weight)
+    replace_parameter(layer, f"w13_{weight_scale_name}", w13_weight_scale)
+    replace_parameter(layer, f"w2_{weight_scale_name}", w2_weight_scale)
+
+    # TODO(rob): we do this after replace_parameter() because
+    # prepare_moe_fp8_layer_for_marlin uses on the layer's params
+    # directly. We will refactor this in a follow up PR.
+    if fp8_backend == Fp8MoeBackend.MARLIN:
+        prepare_moe_fp8_layer_for_marlin(layer, False, input_dtype=marlin_input_dtype)
+        # Activations not quantized for marlin.
+        del layer.w13_input_scale
+        del layer.w2_input_scale
