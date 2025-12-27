@@ -9,6 +9,7 @@ import prometheus_client
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
+from vllm.v1.metrics.reader import Metric
 
 logger = init_logger(__name__)
 
@@ -212,6 +213,22 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+
+def compute_acceptance_rate(metrics: list[Metric]) -> float:
+    name2metric = {metric.name: metric for metric in metrics}
+    n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
+    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    return n_accepted_toks / n_draft_toks
+
+
+def compute_acceptance_len(metrics: list[Metric]) -> float:
+    name2metric = {metric.name: metric for metric in metrics}
+    n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
+    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    if n_drafts == 0:
+        return 1
+    return 1 + (n_accepted_toks / n_drafts)
 
 
 def make_per_engine(

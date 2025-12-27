@@ -74,6 +74,14 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    tensor_parallel_size: int | None = None
+    """Users should pass "draft_tensor_parallel_size". This parameters is only 
+    to reject it if passed."""
+
+    disable_logprobs: bool = True
+    """If set to True, token log probabilities are not returned during
+    speculative decoding. If set to False, token log probabilities are returned
+    according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
@@ -377,12 +385,6 @@ class SpeculativeConfig:
                         )
                 else:
                     self.method = "draft_model"
-                    raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or mtp."
-                    )
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -593,6 +595,12 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.tensor_parallel_size is not None:
+            raise ValueError(
+                "'tensor_parallel_size' is not a valid argument in the "
+                "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
         if self.num_speculative_tokens is None:
             raise ValueError(
                 "num_speculative_tokens must be provided with "
@@ -631,11 +639,41 @@ class SpeculativeConfig:
                 f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
-
+        self.verify_equal_vocab_size_if_draft_model()
         return self
+
+    def verify_equal_vocab_size_if_draft_model(self):
+        if (
+            self.method == "draft_model"
+            and self.target_model_config is not None
+            and self.draft_model_config is not None
+        ):
+            target_vocab_size = self.target_model_config.get_vocab_size()
+            draft_vocab_size = self.draft_model_config.get_vocab_size()
+            if target_vocab_size != draft_vocab_size:
+                raise ValueError(
+                    f"Target and draft model should have the same vocabulary size. "
+                    f"Target model vocab_size={target_vocab_size}. "
+                    f"Draft model vocab_size={draft_vocab_size}. "
+                    f"Using models with different tokenizers can cause out-of-bounds "
+                    f"errors during speculative decoding."
+                )
+
+    @property
+    def num_lookahead_slots(self) -> int:
+        """The number of additional slots the scheduler should allocate per
+        step, in addition to the slots allocated for each known token.
+
+        This is equal to the number of speculative tokens, as each speculative
+        token must be scored.
+        """
+        return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
 
     def __repr__(self) -> str:
         method = self.method
