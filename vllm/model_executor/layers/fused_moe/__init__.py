@@ -116,3 +116,19 @@ else:
 
     fused_topk = lambda *args, **kwargs: _raise_exception("fused_topk")
     fused_experts = lambda *args, **kwargs: _raise_exception("fused_experts")
+
+# Sonic MoE integration (optional, requires sonicmoe package and Hopper GPU)
+try:
+    from vllm.model_executor.layers.fused_moe.sonic_moe import (
+        SonicMoEExperts,
+        is_sonic_moe_supported,
+        sonic_moe,
+    )
+
+    __all__ += [
+        "SonicMoEExperts",
+        "is_sonic_moe_supported",
+        "sonic_moe",
+    ]
+except ImportError:
+    pass
