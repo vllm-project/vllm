@@ -115,7 +115,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args: kv_caches:
             dictionary of layer names, kv cache
         """
-        self._lmcache_engine.register_kv_caches(kv_caches)
+        if hasattr(self._lmcache_engine, "register_kv_caches"):
+            self._lmcache_engine.register_kv_caches(kv_caches)
+        else:
+            logger.warning(
+                "LMCache engine does not support register_kv_caches, "
+                "please check and use the latest version"
+            )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
