@@ -9,14 +9,15 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -36,6 +37,8 @@ class GDNAttentionMetadata:
     num_actual_tokens: int
 
     has_initial_state: torch.Tensor | None = None
+    block_size: int | None = None
+    chunk_size: int | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
     non_spec_query_start_loc: torch.Tensor | None = (
@@ -52,16 +55,28 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # APC metadata, similar definitions to Mamba2
+    # state_indices_tensor is None when APC is disabled.
+    # When APC is enabled, it takes the role of non_spec_state_indices_tensor
+    state_indices_tensor: torch.Tensor | None = None  # shape: [batch, max_num_blocks]
+    block_idx_last_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
+    block_idx_first_scheduled_token_p: torch.Tensor | None = None  # shape: [batch,]
+    block_idx_last_computed_token: torch.Tensor | None = None  # shape: [batch,]
+    num_computed_tokens_p: torch.Tensor | None = None  # shape: [batch,]
+    seq_idx_p: torch.Tensor | None = None  # shape: [batch,]
+    cu_chunk_seqlen_p: torch.Tensor | None = None  # shape: [batch,]
+    last_chunk_indices_p: torch.Tensor | None = None  # shape: [batch,]
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
 
-class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+class GDNAttentionMetadataBuilder(
+    BaseMambaAttentionMetadataBuilder[GDNAttentionMetadata]
+):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -70,17 +85,34 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        assert isinstance(kv_cache_spec, MambaSpec)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
-        self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+        self.device = device
         if self.speculative_config:
             self.num_spec = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+
+        # 64 is a hardcoded value in the FLA GDN kernel.
+        # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439
+        self.chunk_size = 64
+        if self.vllm_config.cache_config.enable_prefix_caching and (
+            kv_cache_spec.block_size % self.chunk_size != 0
+        ):
+            raise ValueError(
+                "GDN prefix caching requires the mamba block size to be a "
+                f"multiple of the kernel chunk size ({self.chunk_size})."
+            )
+
+        if self.vllm_config.cache_config.enable_prefix_caching and self.use_spec_decode:
+            raise NotImplementedError(
+                "GDN prefix caching is currently supported only for decode-only "
+                "workloads; speculative decoding with APC will be added separately."
+            )
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -142,9 +174,29 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        context_lens = m.num_computed_tokens_cpu
-        context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
+        context_lens_cpu = m.num_computed_tokens_cpu
+        context_lens = context_lens_cpu.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+
+        enable_apc = self.vllm_config.cache_config.enable_prefix_caching
+        block_size_value: int | None = None
+        chunk_size_value: int | None = None
+        if enable_apc:
+            block_size_value = self.kv_cache_spec.block_size
+            chunk_size_value = self.chunk_size
+
+        # APC related tensors
+        state_indices_tensor: torch.Tensor | None = None
+        block_idx_first_scheduled_token: torch.Tensor | None = None
+        block_idx_last_computed_token: torch.Tensor | None = None
+        block_idx_last_scheduled_token: torch.Tensor | None = None
+        block_idx_first_scheduled_token_p: torch.Tensor | None = None
+
+        num_computed_tokens_p: torch.Tensor | None = None
+        seq_idx_p: torch.Tensor | None = None
+        cu_chunk_seqlen_p: torch.Tensor | None = None
+        last_chunk_indices_p: torch.Tensor | None = None
+        non_spec_query_start_loc_cpu: torch.Tensor | None = None
 
         if (
             not self.use_spec_decode
@@ -158,7 +210,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes = 0
         else:
             spec_sequence_masks = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks.sum().item()
+            num_spec_decodes = int(spec_sequence_masks.sum().item())
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
             else:
@@ -177,6 +229,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_state_indices_tensor = m.block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
+            non_spec_query_start_loc_cpu = m.query_start_loc_cpu
             num_accepted_tokens = None
         else:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -241,12 +294,92 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
+                query_lens_cpu = m.query_start_loc_cpu[1:] - m.query_start_loc_cpu[:-1]
+                non_spec_query_start_loc_cpu = torch.zeros(
+                    query_lens_cpu.size(0) - num_spec_decodes + 1,
+                    dtype=torch.int32,
+                )
+                torch.cumsum(
+                    query_lens_cpu[~spec_sequence_masks.cpu()],
+                    dim=0,
+                    out=non_spec_query_start_loc_cpu[1:],
+                )
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
+        if enable_apc:
+            assert spec_sequence_masks is None
+            assert block_size_value is not None
+            state_indices_tensor = m.block_table_tensor
+            (
+                block_idx_last_computed_token,
+                block_idx_first_scheduled_token,
+                block_idx_last_scheduled_token,
+            ) = self._compute_prefix_caching_block_indices(m, block_size_value)
+
+        if enable_apc and num_prefills > 0:
+            assert block_idx_first_scheduled_token is not None
+            prefill_start = num_decodes
+            prefill_end = prefill_start + num_prefills
+            block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
+                prefill_start:prefill_end
+            ]
+            num_computed_tokens_p = context_lens[prefill_start:prefill_end]
+            num_computed_tokens_p_cpu = context_lens_cpu[prefill_start:prefill_end]
+
+            assert non_spec_query_start_loc_cpu is not None
+            query_start_loc_p_cpu = (
+                non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
+            )
+
+            cu_chunk_seqlen: list[int] = []
+            seq_idx_list: list[int] = []
+            last_chunk_indices_list: list[int] = []
+            seqlen_pos = 0
+
+            for req_idx in range(num_prefills):
+                this_num_computed = int(num_computed_tokens_p_cpu[req_idx].item())
+                this_new_tokens = int(
+                    query_start_loc_p_cpu[req_idx + 1].item()
+                    - query_start_loc_p_cpu[req_idx].item()
+                )
+
+                if this_num_computed % self.chunk_size != 0:
+                    seq_idx_list.append(req_idx)
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    chunk_len = (
+                        cdiv(this_num_computed, self.chunk_size) * self.chunk_size
+                        - this_num_computed
+                    )
+                    chunk_len = min(chunk_len, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                n_chunks = cdiv(this_new_tokens, self.chunk_size)
+                for _ in range(n_chunks):
+                    seq_idx_list.append(req_idx)
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    chunk_len = min(self.chunk_size, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                assert this_new_tokens == 0
+                last_chunk_indices_list.append(len(cu_chunk_seqlen) - 1)
+
+            cu_chunk_seqlen.append(seqlen_pos)
+
+            device = query_start_loc.device
+            seq_idx_p = torch.as_tensor(seq_idx_list, device=device, dtype=torch.int32)
+            cu_chunk_seqlen_p = torch.as_tensor(
+                cu_chunk_seqlen, device=device, dtype=torch.int32
+            )
+            last_chunk_indices_p = torch.as_tensor(
+                last_chunk_indices_list, device=device, dtype=torch.int32
+            )
+
         if num_prefills > 0:
-            has_initial_state = context_lens_tensor > 0
+            has_initial_state = context_lens > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
@@ -310,6 +443,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
+            # TODO: check if we are doing extra unnecessary work here if
+            # APC is enabled. We might get away with just the state_indices_tensor
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
@@ -325,6 +460,29 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+            if enable_apc and num_decodes > 0:
+                self.state_indices_tensor[:num_decodes].copy_(
+                    state_indices_tensor, non_blocking=True
+                )
+                state_indices_tensor = self.state_indices_tensor[:num_decodes]
+
+                assert block_idx_last_scheduled_token is not None
+                assert block_idx_last_computed_token is not None
+                self.block_idx_last_scheduled_token[:num_decodes].copy_(
+                    block_idx_last_scheduled_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
+                    :num_decodes
+                ]
+                self.block_idx_last_computed_token[:num_decodes].copy_(
+                    block_idx_last_computed_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_computed_token = self.block_idx_last_computed_token[
+                    :num_decodes
+                ]
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -334,6 +492,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            block_size=block_size_value,
+            chunk_size=chunk_size_value,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
@@ -342,6 +502,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            state_indices_tensor=state_indices_tensor,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
+            block_idx_last_computed_token=block_idx_last_computed_token,
+            seq_idx_p=seq_idx_p,
+            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+            last_chunk_indices_p=last_chunk_indices_p,
+            num_computed_tokens_p=num_computed_tokens_p,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
