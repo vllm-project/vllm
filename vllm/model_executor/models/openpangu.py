@@ -61,6 +61,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_expert_weight_name,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -820,7 +821,10 @@ class OpenPanguModel(nn.Module):
             if origin_name not in weight_name:
                 continue
             flag_dict["is_expert_weight"] = True
-            weight_name_mapped = weight_name.replace(origin_name, param_name)
+            # Remap expert weight name (handles base_layer suffix correctly)
+            weight_name_mapped = remap_expert_weight_name(
+                weight_name, origin_name, param_name
+            )
             if is_pp_missing_parameter(weight_name_mapped, self):
                 continue
             param = params_dict[weight_name_mapped]

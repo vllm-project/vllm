@@ -45,7 +45,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_expert_weight_name,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
@@ -806,7 +809,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     continue
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # Remap expert weight name (handles base_layer suffix correctly)
+                name = remap_expert_weight_name(name, weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     return
                 param = params_dict[name]

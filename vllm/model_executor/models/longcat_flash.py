@@ -60,7 +60,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_expert_weight_name,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.sequence import IntermediateTensors
 
@@ -676,7 +679,10 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     if weight_name not in name:
                         continue
                     is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name_mapped = remap_expert_weight_name(
+                        name, weight_name, param_name
+                    )
                     # Skip mtp
                     if ".mtp." in name_mapped:
                         continue

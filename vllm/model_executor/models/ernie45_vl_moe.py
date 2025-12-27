@@ -56,6 +56,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_expert_weight_name,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
@@ -736,7 +737,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                     moe_offset = int(name.split(".")[-3])
                     is_text_expert = moe_offset <= self.config.moe_num_experts[0] - 1
 
-                    name = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name = remap_expert_weight_name(name, weight_name, param_name)
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:

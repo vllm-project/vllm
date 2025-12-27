@@ -34,7 +34,10 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_expert_weight_name,
+)
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMultiTokenPredictor,
     DeepSeekMultiTokenPredictorLayer,
@@ -201,7 +204,8 @@ class OpenPanguMTP(nn.Module, SupportsPP):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
+                    # Remap expert weight name (handles base_layer suffix correctly)
+                    name = remap_expert_weight_name(name, weight_name, param_name)
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
