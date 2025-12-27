@@ -4,6 +4,7 @@
 from collections.abc import Sequence
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
@@ -24,6 +25,61 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
     def end_token(self) -> str:
         """The token that ends reasoning content."""
         return "</think>"
+
+    def prepare_structured_tag(
+        self, original_tag: str | None, tool_server: ToolServer | None
+    ) -> str:
+        """
+        Prepare structural tag for Kimi K2 / DeepSeek R1 models to enforce
+        proper reasoning + tool call structure.
+
+        This prevents early EOS sampling by constraining the model to always
+        generate tool calls when tools are available.
+        """
+        if original_tag is None:
+            if tool_server is None or not tool_server.has_builtin_tools():
+                # No tools available: just reasoning structure
+                structural_tag = {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "triggered_tags",
+                        "tags": [
+                            {
+                                "begin": "<think>",
+                                "content": {"type": "any_text"},
+                                "end": "</think>",
+                            }
+                        ],
+                        "triggers": ["<think>"],
+                        "stop_after_first": False,
+                    },
+                }
+            else:
+                # Tools available: enforce reasoning + tool calls structure
+                structural_tag = {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "triggered_tags",
+                        "tags": [
+                            {
+                                "begin": "<think>",
+                                "content": {"type": "any_text"},
+                                "end": "</think>",
+                            },
+                            {
+                                "begin": "<|tool_calls_section_begin|>",
+                                "content": {"type": "any_text"},
+                                "end": "<|tool_calls_section_end|>",
+                            },
+                        ],
+                        "triggers": ["<think>", "<|tool_calls_section_begin|>"],
+                        "stop_after_first": False,
+                    },
+                }
+            import json
+            return json.dumps(structural_tag)
+        else:
+            return original_tag
 
     def extract_reasoning_streaming(
         self,
