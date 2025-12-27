@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -27,13 +26,18 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_weights_to_kernel_format,
+    get_fp8_moe_backend,
+    make_kernel,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -49,21 +53,17 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    get_flashinfer_moe_backend,
-    register_moe_scaling_factors,
-    rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
-    swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    deepgemm_post_process_fp8_weight_block,
     maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
+    process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -72,7 +72,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
-    prepare_moe_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -85,7 +84,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
-    per_tensor_dequantize,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -95,11 +93,8 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
-    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
-from vllm.utils.flashinfer import has_flashinfer_moe
-from vllm.utils.import_utils import has_deep_gemm
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -107,95 +102,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-class Fp8MoeBackend(Enum):
-    NONE = 0
-    FLASHINFER_TRTLLM = 1
-    FLASHINFER_CUTLASS = 2
-    DEEPGEMM = 3
-    MARLIN = 4
-    TRITON = 5
-    AITER = 6
-
-
-def get_fp8_moe_backend(
-    block_quant: bool,
-    moe_parallel_config: FusedMoEParallelConfig,
-    with_lora_support: bool,
-) -> Fp8MoeBackend | None:
-    """
-    Select the primary FP8 MoE backend
-    Note: Shape-specific fallbacks may still occur at runtime.
-    """
-    if current_platform.is_xpu():
-        return None
-    if with_lora_support:
-        return Fp8MoeBackend.TRITON
-    # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
-    if (
-        current_platform.is_cuda()
-        and (
-            current_platform.is_device_capability_family(100)
-            or current_platform.is_device_capability(90)
-        )
-        and envs.VLLM_USE_FLASHINFER_MOE_FP8
-        and has_flashinfer_moe()
-    ):
-        backend = get_flashinfer_moe_backend()
-        if backend == FlashinferMoeBackend.TENSORRT_LLM:
-            logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
-            return Fp8MoeBackend.FLASHINFER_TRTLLM
-        else:
-            if block_quant and current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "FlashInfer FP8 MoE throughput backend does not "
-                    "support block quantization. Please use "
-                    "VLLM_FLASHINFER_MOE_BACKEND=latency "
-                    "instead."
-                )
-            logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM90/SM100")
-            return Fp8MoeBackend.FLASHINFER_CUTLASS
-
-    # weight-only path for older GPUs without native FP8
-    use_marlin = (
-        not current_platform.has_device_capability(89)
-        or envs.VLLM_TEST_FORCE_FP8_MARLIN
-    )
-    if current_platform.is_rocm():
-        use_marlin = False
-    if use_marlin:
-        logger.info_once("Using Marlin backend for FP8 MoE")
-        return Fp8MoeBackend.MARLIN
-
-    # Determine if we should use DeepGEMM with block-quantized weights:
-    # - If explicitly set by user, respect their choice
-    # - If not explicitly set (default), disable when TP size is >= 8
-    moe_use_deep_gemm = envs.VLLM_MOE_USE_DEEP_GEMM
-    if not envs.is_set("VLLM_MOE_USE_DEEP_GEMM") and moe_parallel_config.tp_size >= 8:
-        moe_use_deep_gemm = False
-        logger.info_once(
-            "DeepGEMM MoE is disabled by default when TP size is >= 8. "
-            "Set VLLM_MOE_USE_DEEP_GEMM=1 to enable it.",
-            scope="local",
-        )
-
-    if envs.VLLM_USE_DEEP_GEMM and moe_use_deep_gemm and block_quant:
-        if not has_deep_gemm():
-            logger.warning_once(
-                "DeepGEMM backend requested but not available.", scope="local"
-            )
-        elif is_deep_gemm_supported():
-            logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
-            return Fp8MoeBackend.DEEPGEMM
-
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE:
-        logger.info_once("Using ROCm AITER backend for FP8 MoE", scope="local")
-        return Fp8MoeBackend.AITER
-
-    # default to Triton
-    logger.info_once("Using Triton backend for FP8 MoE")
-    return Fp8MoeBackend.TRITON
 
 
 class Fp8Config(QuantizationConfig):
@@ -731,7 +637,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
         self.fp8_backend = get_fp8_moe_backend(
-            self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
+            block_quant=self.block_quant,
+            tp_size=layer.moe_parallel_config.tp_size,
+            with_lora_support=self.moe.is_lora_enabled,
         )
 
         self.marlin_input_dtype = None
@@ -740,6 +648,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+            # TODO(rob): move this logic into the oracle.
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports block "
@@ -886,151 +795,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def _convert_weights_to_kernel_format(
-        self,
-        layer: Module,
-        w13_weight: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w13_weight_scale: torch.Tensor,
-        w2_weight_scale: torch.Tensor,
-    ) -> None:
-        if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
-            assert self.block_quant
-            w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
-                wq=w13_weight,
-                ws=w13_weight_scale,
-                quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
-            )
-            w2_weight, w2_weight_scale = deepgemm_post_process_fp8_weight_block(
-                wq=w2_weight,
-                ws=w2_weight_scale,
-                quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
-            )
-        elif self.fp8_backend == Fp8MoeBackend.AITER:
-            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-                w13_weight, w2_weight
-            )
-        elif self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-        ]:
-            w13_weight = swap_w13_to_w31(w13_weight)
-            if self.block_quant:
-                w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
-            else:
-                # TODO(rob): this function is a hack that renames the scaling
-                # factors in the Module. This is a hack we should clean up.
-                register_moe_scaling_factors(layer)
-                if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
-        elif self.fp8_backend == Fp8MoeBackend.AITER:
-            w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-                w13_weight, w2_weight
-            )
-
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
-        replace_parameter(layer, "w13_weight", w13_weight)
-        replace_parameter(layer, "w2_weight", w2_weight)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
-
-        # TODO(rob): we do this after replace_parameter() because
-        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
-        # directly. We will refactor this in a follow up PR.
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
-
-    def _setup_kernel(self, layer: Module) -> None:
-        """Setup Modular Kernel for TP Case"""
-        # NOTE(rob): this is a WIP refactor. We are first migrating
-        # all of the kernels in the TP case to use mk. Once this is
-        # done, then we will initialzie the TP case and DP/EP case
-        # via the same code path (i.e. via maybe_init_modular_kernel).
-        # NOTE(rob): in progress migrating all into this format.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-                FlashInferExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-                FlashInferAllGatherMoEPrepareAndFinalize,
-            )
-
-            config = self.get_fused_moe_quant_config(layer)
-            assert config is not None
-            self.moe_quant_config = config
-
-            self.kernel = mk.FusedMoEModularKernel(
-                # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
-                # with the changes to defer input quantization
-                FlashInferAllGatherMoEPrepareAndFinalize(
-                    use_dp=(self.moe.dp_size > 1),
-                    use_deepseek_fp8_block_scale=self.block_quant,
-                ),
-                FlashInferExperts(
-                    out_dtype=torch.get_default_dtype(),
-                    quant_config=self.moe_quant_config,
-                    ep_rank=self.moe.ep_rank,
-                    ep_size=self.moe.ep_size,
-                    tp_rank=self.moe.tp_rank,
-                    tp_size=self.moe.tp_size,
-                    use_dp=(self.moe.dp_size > 1),
-                    use_deepseek_fp8_block_scale=self.block_quant,
-                ),
-            )
-            self.use_inplace = False
-
-        elif self.fp8_backend in [
-            Fp8MoeBackend.DEEPGEMM,
-            Fp8MoeBackend.TRITON,
-            Fp8MoeBackend.MARLIN,
-            Fp8MoeBackend.AITER,
-        ]:
-            from vllm.model_executor.layers.fused_moe import (
-                TritonOrDeepGemmExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-                MarlinExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
-            )
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                AiterExperts,
-            )
-
-            config = self.get_fused_moe_quant_config(layer)
-            assert config is not None
-            self.moe_quant_config = config
-
-            if self.fp8_backend == Fp8MoeBackend.AITER:
-                self.kernel = mk.FusedMoEModularKernel(
-                    # TODO: make defer_input_quant an attr of the AiterExperts
-                    MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-                    AiterExperts(quant_config=self.moe_quant_config),
-                )
-            elif self.fp8_backend == Fp8MoeBackend.MARLIN:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    MarlinExperts(quant_config=self.moe_quant_config),
-                )
-            else:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonOrDeepGemmExperts(
-                        quant_config=self.moe_quant_config,
-                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                    ),
-                )
-            self.use_inplace = True
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -1074,27 +838,31 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # on disk there is a scale for w1 and w3. Use the max to requantize.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = w13_weight_scale.max(dim=1).values
-            for expert_id in range(layer.local_num_experts):
-                start = 0
-                for shard_id in range(2):
-                    dq_weight = per_tensor_dequantize(
-                        w13_weight[expert_id][start : start + shard_size, :],
-                        w13_weight_scale[expert_id][shard_id],
-                    )
-                    w13_weight[expert_id][start : start + shard_size, :], _ = (
-                        ops.scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
-                    )
-                    start += shard_size
-            w13_weight_scale = max_w13_scales
+            w13_weight, w13_weight_scale = process_fp8_weight_tensor_strategy_moe(
+                w13_weight, w13_weight_scale, shard_size, layer.local_num_experts
+            )
 
         # Shuffle weights into the runtime format.
-        self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        convert_weights_to_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            weight_scale_name=self.weight_scale_name,
+            marlin_input_dtype=self.marlin_input_dtype,
         )
 
         # Setup modular kernel for TP case.
-        self._setup_kernel(layer)
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.kernel, self.use_inplace = make_kernel(
+            layer=layer,
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1428,13 +1196,14 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
 
-        # Shuffle weights into the runtime format.
-        self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
-        )
+        # # Shuffle weights into the runtime format.
+        # self._convert_weights_to_kernel_format(
+        #     layer, w13_weight, w2_weight, layer.w13_weight_scale,
+        #   layer.w2_weight_scale
+        # )
 
-        # Setup modular kernel for TP case.
-        self._setup_kernel(layer)
+        # # Setup modular kernel for TP case.
+        # self._make_kernel(layer)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

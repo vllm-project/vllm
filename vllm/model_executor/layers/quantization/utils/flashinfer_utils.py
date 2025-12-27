@@ -274,6 +274,8 @@ def flashinfer_cutlass_moe_fp8(
     )
 
 
+# TODO(rob): move to vllm.model_executor.layers.fused_moe.oracle
+# once all quantization integrations use the oracle logic.
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
     backend_map = {
         "throughput": FlashinferMoeBackend.CUTLASS,
