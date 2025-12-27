@@ -215,7 +215,7 @@ def convert_weights_to_kernel_format(
         del layer.w2_input_scale
 
 
-def setup_kernel(
+def make_kernel(
     layer: torch.nn.Module,
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,

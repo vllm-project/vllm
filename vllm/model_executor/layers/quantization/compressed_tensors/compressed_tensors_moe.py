@@ -49,7 +49,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_weights_to_kernel_format,
     get_fp8_moe_backend,
-    setup_kernel,
+    make_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
@@ -906,7 +906,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
-        self.kernel, self.use_inplace = setup_kernel(
+        self.kernel, self.use_inplace = make_kernel(
             layer=layer,
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
