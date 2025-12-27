@@ -208,6 +208,7 @@ def chunk_gated_delta_rule(
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            UserWarning,
             stacklevel=2,
         )
     if cu_seqlens is not None:

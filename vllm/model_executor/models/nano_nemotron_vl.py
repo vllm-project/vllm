@@ -1205,6 +1205,7 @@ class NemotronH_Nano_VL_V2(
             warnings.warn(
                 "In ps_version 'v1', the height and width have not "
                 "been swapped back, which results in a transposed image.",
+                UserWarning,
                 stacklevel=2,
             )
         else:

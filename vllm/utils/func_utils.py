@@ -74,7 +74,8 @@ def deprecate_args(
                         msg += f" {additional_message}"
 
                     warnings.warn(
-                        DeprecationWarning(msg),
+                        msg,
+                        DeprecationWarning,
                         stacklevel=3,  # The inner function takes up one level
                     )
 
@@ -109,7 +110,8 @@ def deprecate_kwargs(
                         msg += f" {additional_message}"
 
                     warnings.warn(
-                        DeprecationWarning(msg),
+                        msg,
+                        DeprecationWarning,
                         stacklevel=3,  # The inner function takes up one level
                     )
 
