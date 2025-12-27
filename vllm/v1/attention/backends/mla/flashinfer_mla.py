@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.rope import mla_rope_quantize_fp8
 
 from vllm.attention.backends.abstract import (
     AttentionLayer,
@@ -121,6 +122,80 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+        # Enable fused RoPE+quant for FP8 attention
+        self.use_fused_rope_quant = kv_cache_dtype.startswith("fp8")
+
+    def _fused_rope_quant(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fused RoPE + FP8 quantization for decode Q.
+
+        Uses flashinfer.rope.mla_rope_quantize_fp8 to apply RoPE and quantize
+        in a single fused kernel for better performance.
+
+        Args:
+            ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
+            q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
+            positions: Position indices. Shape: [B]
+            cos_sin_cache: Precomputed cos/sin cache.
+            q_scale: Scale for FP8 quantization (unused, scale is 1.0).
+
+        Returns:
+            FP8 quantized tensor with RoPE applied. Shape: [B, N, L+R]
+        """
+        B, N, L = ql_nope.shape
+        R = q_pe.shape[-1]
+
+        # Output tensor: [B, N, L+R] in FP8
+        q_out = torch.empty(
+            B,
+            N,
+            L + R,
+            dtype=torch.float8_e4m3fn,
+            device=q_pe.device,
+        )
+
+        # flashinfer requires cos_sin_cache to be float32
+        cos_sin_cache_f32 = cos_sin_cache.float()
+
+        # The flashinfer kernel requires K tensors to have the same batch size
+        # as Q tensors. For decode, K is already in cache with RoPE applied,
+        # so we pass dummy K tensors and ignore the output.
+        # K tensors need shape [B, 1, dim] to match Q's batch size.
+        k_rope_dummy = q_pe.new_zeros(B, 1, R)
+        k_nope_dummy = ql_nope.new_zeros(B, 1, L)
+        k_rope_out_dummy = torch.empty(
+            B, 1, R, dtype=torch.float8_e4m3fn, device=q_pe.device
+        )
+        k_nope_out_dummy = torch.empty(
+            B, 1, L, dtype=torch.float8_e4m3fn, device=ql_nope.device
+        )
+
+        # Call fused kernel
+        mla_rope_quantize_fp8(
+            q_rope=q_pe,
+            k_rope=k_rope_dummy,
+            q_nope=ql_nope,
+            k_nope=k_nope_dummy,
+            cos_sin_cache=cos_sin_cache_f32,
+            pos_ids=positions,
+            is_neox=False,  # MLA uses GPT-J style RoPE
+            quantize_dtype=torch.float8_e4m3fn,
+            q_rope_out=q_out[..., L:],  # RoPE portion goes after nope
+            q_nope_out=q_out[..., :L],  # nope portion goes first
+            k_rope_out=k_rope_out_dummy,  # ignored
+            k_nope_out=k_nope_out_dummy,  # ignored
+            quant_scale_q=1.0,
+            quant_scale_kv=1.0,
+        )
+
+        return q_out
 
     def _forward_decode(
         self,
