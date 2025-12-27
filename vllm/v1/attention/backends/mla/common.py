@@ -1931,11 +1931,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
         k_pe: torch.Tensor,
         positions: torch.Tensor,
         q_scale: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused RoPE + FP8 quantization for decode Q, plus RoPE for K.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for Q and K.
 
         This method should be overridden by subclasses that support
         fused RoPE+quant (e.g., FlashInferMLAImpl).
@@ -1943,14 +1944,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         Args:
             ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
             q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
-            k_pe: Raw k_pe (no RoPE yet). Shape: [B, 1, R].
+            k_nope: k_c_normed (latent). Shape: [B, L] (2D, no head dim).
+            k_pe: Raw k_pe (no RoPE yet). Shape: [B, R] (2D, squeezed by caller).
             positions: Position indices. Shape: [B]
             q_scale: Scale for FP8 quantization.
 
         Returns:
             tuple of:
             - q_out: FP8 quantized Q with RoPE applied. Shape: [B, N, L+R]
-            - k_pe_roped: K with RoPE applied (original dtype). Shape: [B, 1, R]
+            - k_nope_out: FP8 quantized k_nope. Shape: [B, L]
+            - k_pe_out: FP8 quantized k_pe with RoPE. Shape: [B, R]
         """
         raise NotImplementedError(
             "Fused RoPE+quant not implemented for this backend. "
@@ -2140,14 +2143,18 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 and decode_positions is not None
             ):
                 # Sub-case 2.1: Fused RoPE + FP8 quant path
-                # _fused_rope_quant applies RoPE to both Q and K
-                decode_q, decode_k_pe = self._fused_rope_quant(
+                # _fused_rope_quant applies RoPE and FP8 quant to both Q and K
+                # Squeeze k_pe from [B, 1, R] to [B, R] for MLA kernel
+                decode_q, decode_k_c_normed, decode_k_pe = self._fused_rope_quant(
                     decode_ql_nope,
                     decode_q_pe,
-                    decode_k_pe,
+                    decode_k_c_normed,
+                    decode_k_pe.squeeze(1),
                     decode_positions,
                     layer._q_scale,
                 )
+                # decode_k_c_normed and decode_k_pe are now FP8
+                # concat_and_cache_mla supports FP8 input directly
             elif fp8_attention:
                 # Sub-case 2.2: Non-fused FP8 path
                 # Apply RoPE to both q_pe and k_pe
