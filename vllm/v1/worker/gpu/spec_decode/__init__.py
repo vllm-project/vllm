@@ -4,6 +4,25 @@ import torch
 
 from vllm.config import VllmConfig
 
+from vllm.v1.worker.gpu.spec_decode.spec_tree_manager import (
+    SpecTreeManager,
+    create_spec_tree_manager_from_choices,
+)
+from vllm.v1.worker.gpu.spec_decode.drafting_loops import (
+    BaseDraftingLoopWrapper,
+    LinearDraftingLoopWrapper,
+    TreeDraftingLoopWrapper,
+)
+
+__all__ = [
+    "init_speculator",
+    "SpecTreeManager",
+    "create_spec_tree_manager_from_choices",
+    "BaseDraftingLoopWrapper",
+    "LinearDraftingLoopWrapper",
+    "TreeDraftingLoopWrapper",
+]
+
 
 def init_speculator(
     vllm_config: VllmConfig,

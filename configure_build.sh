@@ -36,12 +36,16 @@ TORCH_DIR=$("${PYTHON}" -c "import torch; print(torch.__path__[0])")
 TORCH_CMAKE_DIR="${TORCH_DIR}/share/cmake/Torch"
 TORCH_INCLUDE_DIR="${TORCH_DIR}/include"
 
+TORCH_API_INCLUDE="${TORCH_INCLUDE_DIR}/torch/csrc/api/include"
+
 echo "========================================"
 echo "vLLM Incremental Build Configuration"
 echo "========================================"
 echo "Build directory: ${BUILD_DIR}"
 echo "Python: ${PYTHON}"
 echo "PyTorch: ${TORCH_DIR}"
+echo "PyTorch Include: ${TORCH_INCLUDE_DIR}"
+echo "Torch API Include: ${TORCH_API_INCLUDE}"
 echo "CUDA: ${CUDA_HOME}"
 echo "SM Architecture: sm_${SM_ARCH}"
 echo "========================================"
@@ -58,7 +62,7 @@ cd "${BUILD_DIR}"
 # Configure CMake
 echo "Configuring CMake for SM${SM_ARCH}..."
 CMAKE_PREFIX_PATH="${TORCH_DIR}" \
-CPATH="${TORCH_INCLUDE_DIR}" \
+CPATH="${TORCH_INCLUDE_DIR}:${TORCH_API_INCLUDE}" \
 cmake .. \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DVLLM_TARGET_DEVICE=cuda \
@@ -66,10 +70,11 @@ cmake .. \
   -DCMAKE_CUDA_COMPILER="${CUDA_HOME}/bin/nvcc" \
   -DCMAKE_CUDA_ARCHITECTURES="${SM_ARCH}" \
   -DTorch_DIR="${TORCH_CMAKE_DIR}" \
-  -DCMAKE_CUDA_FLAGS="-I${TORCH_INCLUDE_DIR} -I${TORCH_INCLUDE_DIR}/torch/csrc/api/include" \
-  -DCMAKE_CXX_FLAGS="-I${TORCH_INCLUDE_DIR} -I${TORCH_INCLUDE_DIR}/torch/csrc/api/include" \
+  -DCMAKE_CUDA_FLAGS="-I${TORCH_INCLUDE_DIR} -I${TORCH_API_INCLUDE}" \
+  -DCMAKE_CXX_FLAGS="-I${TORCH_INCLUDE_DIR} -I${TORCH_API_INCLUDE}" \
   -G Ninja \
   2>&1 | tee "${LOG_DIR}/vllm_cmake_configure_sm${SM_ARCH}.log"
+
 
 echo ""
 echo "========================================"

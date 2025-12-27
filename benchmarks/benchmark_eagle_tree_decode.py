@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Benchmark EAGLE3 tree-based speculative decoding with sampling args and output saving.
+
+Features:
+- Supports min_p, temperature, top_p, top_k sampling arguments
+- Saves output text, tokens, and configuration to files
+- Validates min_p works with speculative decoding
+"""
 import argparse
+import json
+import os
 import time
+from datetime import datetime
+from pathlib import Path
 
 import torch
 
@@ -84,39 +96,168 @@ def _build_llm(args: argparse.Namespace, speculative_config: dict | None) -> LLM
     )
 
 
-def _run_once(llm: LLM, prompts: list[str], sampling_params: SamplingParams) -> int:
-    outputs = llm.generate(prompts, sampling_params)
-    token_count = 0
-    for output in outputs:
-        token_count += len(output.outputs[0].token_ids)
-    return token_count
-
-
-def _benchmark(
-    args: argparse.Namespace, speculative_config: dict | None
-) -> tuple[float, int]:
-    prompts = [args.prompt] * args.batch_size
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        top_k=-1,
+def _build_sampling_params(args: argparse.Namespace) -> SamplingParams:
+    """Build SamplingParams with all supported arguments."""
+    return SamplingParams(
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k_sample,  # Use top_k_sample to avoid conflict with tree top_k
+        min_p=args.min_p,
         seed=args.seed,
         max_tokens=args.max_tokens,
     )
+
+
+def _run_once(
+    llm: LLM,
+    prompts: list[str],
+    sampling_params: SamplingParams,
+    save_outputs: bool = False,
+) -> tuple[int, list[dict]]:
+    """Run generation and optionally collect outputs."""
+    outputs = llm.generate(prompts, sampling_params)
+    token_count = 0
+    results = []
+
+    for i, output in enumerate(outputs):
+        token_ids = list(output.outputs[0].token_ids)
+        text = output.outputs[0].text
+        token_count += len(token_ids)
+
+        if save_outputs:
+            results.append(
+                {
+                    "prompt_idx": i,
+                    "prompt": prompts[i],
+                    "output_text": text,
+                    "output_tokens": token_ids,
+                    "num_tokens": len(token_ids),
+                    "finish_reason": str(output.outputs[0].finish_reason),
+                }
+            )
+
+    return token_count, results
+
+
+def _save_results(
+    args: argparse.Namespace,
+    results: list[dict],
+    sampling_params: SamplingParams,
+    spec_config: dict | None,
+    tree: str,
+    tokens_per_s: float,
+    total_tokens: int,
+    is_baseline: bool = False,
+):
+    """Save results to output directory."""
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = "baseline" if is_baseline else "eagle3"
+
+    # Configuration file
+    config = {
+        "timestamp": timestamp,
+        "model": args.model,
+        "draft_model": args.draft_model if not is_baseline else None,
+        "method": args.method if not is_baseline else None,
+        "tree_type": args.tree_type,
+        "tree": tree,
+        "num_spec_tokens": args.num_spec_tokens,
+        "batch_size": args.batch_size,
+        "max_model_len": args.max_model_len,
+        "max_tokens": args.max_tokens,
+        "num_iters": args.num_iters,
+        "sampling_params": {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k_sample": args.top_k_sample,
+            "min_p": args.min_p,
+            "seed": args.seed,
+        },
+        "speculative_config": spec_config,
+        "results": {
+            "tokens_per_s": tokens_per_s,
+            "total_tokens": total_tokens,
+        },
+    }
+
+    config_path = output_dir / f"{prefix}_config_{timestamp}.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"Saved configuration to: {config_path}")
+
+    # Results file (text and tokens)
+    if results:
+        results_path = output_dir / f"{prefix}_outputs_{timestamp}.json"
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"Saved outputs to: {results_path}")
+
+        # Plain text file for easy viewing
+        text_path = output_dir / f"{prefix}_text_{timestamp}.txt"
+        with open(text_path, "w") as f:
+            for i, r in enumerate(results):
+                f.write(f"=== Prompt {i} ===\n")
+                f.write(f"Input: {r['prompt']}\n")
+                f.write(f"Output ({r['num_tokens']} tokens):\n")
+                f.write(f"{r['output_text']}\n")
+                f.write(
+                    f"Token IDs: {r['output_tokens'][:20]}...\n"
+                    if len(r["output_tokens"]) > 20
+                    else f"Token IDs: {r['output_tokens']}\n"
+                )
+                f.write("\n")
+        print(f"Saved text to: {text_path}")
+
+
+def _benchmark(
+    args: argparse.Namespace,
+    speculative_config: dict | None,
+    tree: str,
+    is_baseline: bool = False,
+) -> tuple[float, int, list[dict]]:
+    prompts = [args.prompt] * args.batch_size
+    sampling_params = _build_sampling_params(args)
     llm = _build_llm(args, speculative_config)
 
+    # Warmup
     for _ in range(args.warmup_iters):
-        _run_once(llm, prompts, sampling_params)
+        _run_once(llm, prompts, sampling_params, save_outputs=False)
 
     total_tokens = 0
     total_time_s = 0.0
-    for _ in range(args.num_iters):
+    all_results = []
+
+    for iter_idx in range(args.num_iters):
         start = time.perf_counter()
-        total_tokens += _run_once(llm, prompts, sampling_params)
+        # Save outputs on last iteration
+        save_outputs = (iter_idx == args.num_iters - 1) and args.output_dir
+        tokens, results = _run_once(
+            llm, prompts, sampling_params, save_outputs=save_outputs
+        )
+        total_tokens += tokens
         total_time_s += time.perf_counter() - start
+        if save_outputs:
+            all_results = results
 
     tokens_per_s = total_tokens / total_time_s if total_time_s > 0 else 0.0
-    return tokens_per_s, total_tokens
+
+    # Save results if output directory specified
+    if args.output_dir:
+        _save_results(
+            args,
+            all_results,
+            sampling_params,
+            speculative_config,
+            tree,
+            tokens_per_s,
+            total_tokens,
+            is_baseline,
+        )
+
+    return tokens_per_s, total_tokens, all_results
 
 
 def main() -> None:
@@ -124,8 +265,9 @@ def main() -> None:
         raise SystemExit("CUDA is required for this benchmark.")
 
     parser = argparse.ArgumentParser(
-        description="Benchmark EAGLE3 tree-based speculative decoding."
+        description="Benchmark EAGLE3 tree-based speculative decoding with sampling args."
     )
+    # Model arguments
     parser.add_argument("--model", required=True, help="Target model path.")
     parser.add_argument("--draft-model", required=True, help="EAGLE3 draft model path.")
     parser.add_argument(
@@ -134,6 +276,8 @@ def main() -> None:
         choices=("eagle", "eagle3"),
         help="Speculative method to use.",
     )
+
+    # Tree configuration
     parser.add_argument(
         "--num-spec-tokens",
         type=int,
@@ -157,6 +301,34 @@ def main() -> None:
         default=3,
         help="Number of top candidates at first level for branching tree.",
     )
+
+    # Sampling arguments (min_p support!)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature. Use 0.0 for greedy.",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Top-p (nucleus) sampling.",
+    )
+    parser.add_argument(
+        "--top-k-sample",
+        type=int,
+        default=-1,
+        help="Top-k sampling. -1 means disabled.",
+    )
+    parser.add_argument(
+        "--min-p",
+        type=float,
+        default=0.0,
+        help="Min-p sampling threshold. 0.0 means disabled. Values like 0.1 filter low-probability tokens.",
+    )
+
+    # Benchmark configuration
     parser.add_argument(
         "--attention-backend",
         default="TRITON_ATTN",
@@ -177,6 +349,20 @@ def main() -> None:
         action="store_true",
         help="Also run baseline (no spec decode) for comparison.",
     )
+
+    # Output saving
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save output text, tokens, and configuration. If not set, outputs are not saved.",
+    )
+    parser.add_argument(
+        "--inspect-min-p",
+        action="store_true",
+        help="Print detailed token probability info to inspect min_p filtering.",
+    )
+
     args = parser.parse_args()
 
     # Generate tree if not provided
@@ -192,11 +378,24 @@ def main() -> None:
 
     tree_list = ast.literal_eval(tree)
     num_tree_tokens = len(tree_list)
-    print(f"=== Tree Configuration ===")
+
+    print(f"=== Configuration ===")
     print(f"Tree type: {args.tree_type}")
     print(f"Max depth: {args.num_spec_tokens}")
     print(f"Total draft tokens: {num_tree_tokens}")
     print(f"Tree: {tree[:100]}..." if len(tree) > 100 else f"Tree: {tree}")
+    print(f"\n=== Sampling Parameters ===")
+    print(f"temperature: {args.temperature}")
+    print(f"top_p: {args.top_p}")
+    print(f"top_k: {args.top_k_sample}")
+    print(f"min_p: {args.min_p}")
+    if args.min_p > 0:
+        print(
+            f"  ↳ min_p enabled! Tokens with p < {args.min_p} * max_p will be filtered."
+        )
+    if args.output_dir:
+        print(f"\n=== Output ===")
+        print(f"Results will be saved to: {args.output_dir}")
 
     spec_config = {
         "method": args.method,
@@ -206,18 +405,33 @@ def main() -> None:
         "max_model_len": args.max_model_len,
     }
 
-    tokens_per_s, total_tokens = _benchmark(args, spec_config)
-    print("=== EAGLE3 tree decode ===")
+    print(f"\n=== Running EAGLE3 tree decode ===")
+    tokens_per_s, total_tokens, results = _benchmark(
+        args, spec_config, tree, is_baseline=False
+    )
     print(f"tokens/sec: {tokens_per_s:.2f}")
     print(f"total tokens: {total_tokens}")
 
+    # Display sample output
+    if results:
+        print(f"\n=== Sample Output (prompt 0) ===")
+        print(f"Text: {results[0]['output_text'][:200]}...")
+
     if args.compare_baseline:
-        baseline_tps, baseline_tokens = _benchmark(args, None)
-        print("=== Baseline (no spec decode) ===")
+        print(f"\n=== Running Baseline (no spec decode) ===")
+        baseline_tps, baseline_tokens, _ = _benchmark(
+            args, None, tree, is_baseline=True
+        )
         print(f"tokens/sec: {baseline_tps:.2f}")
         print(f"total tokens: {baseline_tokens}")
         if baseline_tps > 0:
-            print(f"speedup: {tokens_per_s / baseline_tps:.2f}x")
+            speedup = tokens_per_s / baseline_tps
+            print(f"\n=== Summary ===")
+            print(f"Speedup: {speedup:.2f}x")
+            if speedup < 1.0:
+                print("WARNING: Speculative decoding is slower than baseline!")
+            elif speedup >= 2.0:
+                print("EXCELLENT: Achieved 2x+ speedup!")
 
 
 if __name__ == "__main__":

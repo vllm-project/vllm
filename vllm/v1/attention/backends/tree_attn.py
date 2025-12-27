@@ -170,6 +170,20 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
 
         self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
 
+    def set_tree_attn_bias(self, tree_attn_bias: torch.Tensor) -> None:
+        """Set tree attention bias for dynamic tree support.
+
+        Allows SpecTreeManager to inject a custom tree bias at runtime,
+        enabling per-request or dynamic tree structures instead of the
+        static config-based tree.
+
+        Args:
+            tree_attn_bias: Float tensor [tree_len, tree_len] with 0.0 for
+                           allowed attention and -inf for blocked.
+        """
+        self.tree_attn_bias = tree_attn_bias
+        self.reorder_batch_threshold = tree_attn_bias.shape[0]
+
     def build(
         self,
         common_prefix_len: int,
