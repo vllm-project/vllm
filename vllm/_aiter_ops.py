@@ -820,6 +820,9 @@ class rocm_aiter_ops:
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+    _TRITON_FUSED_ADD_RMSNORM_PAD_ENABLED = (
+        envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD
+    )
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -875,6 +878,12 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_triton_fused_add_rmsnorm_pad_enabled(cls) -> bool:
+        """ "Verifies device specs and availability of env variable."""
+        return cls._AITER_ENABLED and cls._TRITON_FUSED_ADD_RMSNORM_PAD_ENABLED
 
     @classmethod
     @if_aiter_supported
