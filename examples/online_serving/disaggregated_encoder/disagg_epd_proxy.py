@@ -278,7 +278,7 @@ async def forward_non_stream(
     try:
         # Step 1: Process through Encoder instance (if has MM input)
         async def run_encoder():
-            await fanout_encoder_primer(req_data, e_urls, req_id)
+            await fanout_encoder_primer(req_data, e_url, req_id)
 
         if has_mm_input(req_data):
             await non_stream_retry_wrap(run_encoder)
@@ -357,12 +357,12 @@ async def non_stream_retry_wrap(
 
 
 async def forward_stream(
-    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
+    req_data: dict, req_id: str, e_url: str, p_url: str, d_url: str
 ) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
         async def run_encoder():
-            await fanout_encoder_primer(req_data, e_urls, req_id)
+            await fanout_encoder_primer(req_data, e_url, req_id)
 
         if has_mm_input(req_data):
             await non_stream_retry_wrap(run_encoder)
@@ -415,7 +415,7 @@ async def chat_completions(request: Request):
         req_data = await request.json()
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
-        e_urls = app.state.e_urls  # we want the full list for fan-out
+        e_url = random.choice(app.state.e_urls)
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
         d_url = random.choice(app.state.d_urls)
 
@@ -423,10 +423,10 @@ async def chat_completions(request: Request):
 
         if is_streaming:
             return StreamingResponse(
-                forward_stream(req_data, req_id, e_urls, p_url, d_url),
+                forward_stream(req_data, req_id, e_url, p_url, d_url),
                 media_type="text/event-stream",
             )
-        result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
+        result = await forward_non_stream(req_data, req_id, e_url, p_url, d_url)
         return JSONResponse(content=result)
 
     except HTTPException:
