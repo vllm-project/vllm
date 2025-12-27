@@ -161,6 +161,25 @@ class Worker(WorkerBase):
         ):
             self.model_runner.init_fp8_kv_scales()
 
+        # Reset attention backend internal state after sleep.
+        # Some backends (e.g., FlashInfer) cache internal buffers that may be
+        # freed during sleep mode and need to be recreated on wake_up.
+        if tags is None or "kv_cache" in tags:
+            self._reset_attention_backends_after_sleep()
+
+    def _reset_attention_backends_after_sleep(self) -> None:
+        """Reset attention backends after sleep mode.
+
+        Iterates through all attention groups and calls reset_after_sleep()
+        on each metadata builder to invalidate cached internal state.
+        """
+        if not hasattr(self.model_runner, "attn_groups"):
+            return
+        for kv_cache_group in self.model_runner.attn_groups:
+            for attn_group in kv_cache_group:
+                for builder in attn_group.metadata_builders:
+                    builder.reset_after_sleep()
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator

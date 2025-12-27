@@ -454,6 +454,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
+    def reset_after_sleep(self) -> None:
+        """
+        Reset internal state after sleep mode.
+
+        Some attention backends cache internal buffers (e.g., FlashInfer
+        wrappers) that may be freed during sleep mode. This method should
+        be called after wake_up to invalidate those caches so they get
+        recreated with fresh buffers on next use.
+
+        By default, this is a no-op. Backends that cache stateful objects
+        should override this method.
+        """
+        pass
+
 
 @functools.lru_cache
 def get_kv_cache_layout():
