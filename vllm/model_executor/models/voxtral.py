@@ -17,7 +17,11 @@ from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChu
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
-from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder, TranscriptionFormat
+from mistral_common.tokens.tokenizers.audio import (
+    Audio,
+    AudioEncoder,
+    TranscriptionFormat,
+)
 from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
@@ -157,7 +161,10 @@ class VoxtralProcessorAdapter:
 
             # pad if necessary
             # TODO(Patrick) - remove once mistral-common is bumped
-            if self._audio_processor.audio_config.transcription_format != TranscriptionFormat.STREAMING:
+            if (
+                self._audio_processor.audio_config.transcription_format
+                != TranscriptionFormat.STREAMING
+            ):
                 sig = inspect.signature(self._audio_processor.pad)
                 if "is_online_streaming" in sig.parameters:
                     audio = self._audio_processor.pad(
