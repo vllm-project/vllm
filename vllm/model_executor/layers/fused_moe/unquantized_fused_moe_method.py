@@ -10,6 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -62,16 +63,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.rocm_aiter_fused_experts = None  # type: ignore
 
         # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
+        # Note: FlashInfer MoE is non-deterministic, so disable it when
+        # batch invariant mode is enabled for deterministic inference.
         self.flashinfer_cutlass_moe_enabled = (
             has_flashinfer_cutlass_fused_moe()
             and envs.VLLM_USE_FLASHINFER_MOE_FP16
             and self.moe.moe_parallel_config.use_ep
             and self.moe.moe_parallel_config.dp_size == 1
             and current_platform.get_device_capability()[0] >= 9
+            and not vllm_is_batch_invariant()
         )
         if self.flashinfer_cutlass_moe_enabled:
             logger.info_once(
-                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
+                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod. "
+                "Note: This kernel may produce non-deterministic results. "
+                "Use VLLM_BATCH_INVARIANT=1 for deterministic inference."
             )
             from functools import partial
 
@@ -86,14 +92,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 ep_size=self.moe.moe_parallel_config.ep_size,
             )
         else:
-            if (
+            if vllm_is_batch_invariant() and envs.VLLM_USE_FLASHINFER_MOE_FP16:
+                logger.info_once(
+                    "FlashInfer CUTLASS MoE is disabled in batch invariant mode "
+                    "because it produces non-deterministic results. "
+                    "Using the default MoE implementation for deterministic "
+                    "inference.",
+                    scope="local",
+                )
+            elif (
                 self.moe.moe_parallel_config.use_ep
                 and self.moe.moe_parallel_config.dp_size == 1
             ):
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it."
+                    " Note: FlashInfer MoE produces non-deterministic results.",
                     scope="local",
                 )
             elif self.moe.moe_parallel_config.dp_size > 1:
