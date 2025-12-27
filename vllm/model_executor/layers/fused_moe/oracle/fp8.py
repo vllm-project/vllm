@@ -4,9 +4,32 @@ from enum import Enum
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import (
+    TritonOrDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+    FlashInferAllGatherMoEPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    MarlinExperts,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    AiterExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -37,13 +60,15 @@ class Fp8MoeBackend(Enum):
     MARLIN = 4
     TRITON = 5
     AITER = 6
+    VLLM_CUTLASS = 7
 
 
 def get_fp8_moe_backend(
     block_quant: bool,
     tp_size: int,
     with_lora_support: bool,
-) -> Fp8MoeBackend | None:
+    allow_vllm_cutlass: bool = False,
+) -> Fp8MoeBackend:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -51,8 +76,6 @@ def get_fp8_moe_backend(
     # TODO(rob): update so that each mk expresses supported features.
     # TODO(rob): update so that we have priority order for each.
 
-    if current_platform.is_xpu():
-        return None
     if with_lora_support:
         return Fp8MoeBackend.TRITON
 
@@ -120,6 +143,9 @@ def get_fp8_moe_backend(
         logger.info_once(_make_log_backend("ROCm AITER"), scope="local")
         return Fp8MoeBackend.AITER
 
+    if allow_vllm_cutlass:
+        return Fp8MoeBackend.VLLM_CUTLASS
+
     # default to Triton
     logger.info_once(_make_log_backend("Triton"))
     return Fp8MoeBackend.TRITON
@@ -183,3 +209,63 @@ def convert_weights_to_kernel_format(
         # Activations not quantized for marlin.
         del layer.w13_input_scale
         del layer.w2_input_scale
+
+
+def setup_kernel(
+    moe_quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    fp8_backend: Fp8MoeBackend,
+) -> tuple[mk.FusedMoEModularKernel, bool]:
+    # NOTE(rob): this is a WIP refactor. We are first migrating
+    # all of the kernels in the TP case to use mk. Once this is
+    # done, then we will initialzie the TP case and DP/EP case
+    # via the same code path (i.e. via maybe_init_modular_kernel).
+    # NOTE(rob): in progress migrating all into this format.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+        kernel = mk.FusedMoEModularKernel(
+            # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
+            # with the changes to defer input quantization
+            FlashInferAllGatherMoEPrepareAndFinalize(
+                use_dp=(moe_config.dp_size > 1),
+                use_deepseek_fp8_block_scale=moe_quant_config.is_block_quantized,
+            ),
+            FlashInferExperts(
+                out_dtype=torch.get_default_dtype(),
+                quant_config=moe_quant_config,
+                ep_rank=moe_config.ep_rank,
+                ep_size=moe_config.ep_size,
+                tp_rank=moe_config.tp_rank,
+                tp_size=moe_config.tp_size,
+                use_dp=(moe_config.dp_size > 1),
+                use_deepseek_fp8_block_scale=moe_quant_config.is_block_quantized,
+            ),
+        )
+        use_inplace = False
+
+    elif fp8_backend in [
+        Fp8MoeBackend.DEEPGEMM,
+        Fp8MoeBackend.TRITON,
+        Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.AITER,
+    ]:
+        if fp8_backend == Fp8MoeBackend.AITER:
+            kernel = mk.FusedMoEModularKernel(
+                # TODO: make defer_input_quant an attr of the AiterExperts
+                MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+                AiterExperts(quant_config=moe_quant_config),
+            )
+        elif fp8_backend == Fp8MoeBackend.MARLIN:
+            kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                MarlinExperts(quant_config=moe_quant_config),
+            )
+        else:
+            kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonOrDeepGemmExperts(
+                    quant_config=moe_quant_config,
+                    allow_deep_gemm=(fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                ),
+            )
+        use_inplace = True
+    return kernel, use_inplace

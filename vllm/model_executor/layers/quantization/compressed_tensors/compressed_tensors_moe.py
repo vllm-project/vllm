@@ -16,7 +16,6 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -46,11 +45,14 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    convert_weights_to_kernel_format,
+    get_fp8_moe_backend,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
 )
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
@@ -82,12 +84,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
-    is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -648,10 +649,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         moe: FusedMoEConfig,
         layer_name: str | None = None,
     ):
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-            CompressedTensorsConfig,
-        )
-
         super().__init__(moe)
         self.weight_quant = weight_quant
         self.input_quant = input_quant
@@ -679,40 +676,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization."
             )
 
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (
-            not current_platform.has_device_capability(89)
-            or envs.VLLM_TEST_FORCE_FP8_MARLIN
-            and not self.block_quant
-        )
-        # Disable marlin for rocm
-        if current_platform.is_rocm():
-            self.use_marlin = False
-
-        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
-        # cutlass path
-        self.is_fp8_w8a8_sm100 = CompressedTensorsConfig._is_fp8_w8a8_sm100(
-            self.weight_quant, self.input_quant
-        )
-        self.use_cutlass = not self.block_quant and (
-            CompressedTensorsConfig._is_fp8_w8a8_sm90(
-                self.weight_quant, self.input_quant
-            )
-            or self.is_fp8_w8a8_sm100
-        )
-        self.disable_expert_map = False
-        self.layer_name = layer_name
-        self.marlin_input_dtype = (
-            get_marlin_input_dtype(layer_name) if self.use_marlin else None
-        )
-
-        self.allow_deep_gemm = (
-            self.block_quant
-            and envs.VLLM_MOE_USE_DEEP_GEMM
-            and is_deep_gemm_supported()
-            and list(self.weight_block_size) == get_mk_alignment_for_contiguous_layout()
+        self.fp8_backend = get_fp8_moe_backend(
+            block_quant=self.block_quant,
+            tp_size=moe.tp_size,
+            with_lora_support=moe.is_lora_enabled,
+            # TODO(rob): enable selecting this externally.
+            allow_vllm_cutlass=True,
         )
 
     def create_weights(
@@ -871,8 +840,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from vllm.model_executor.utils import replace_parameter
-
         # Allow for accessing weights and scales in standard way.
         w13_weight = layer.w13_weight
         w2_weight = layer.w2_weight
@@ -903,7 +870,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
                 layer.w2_input_scale
             ):
-                logger.warning_once(
+                logger.info_once(
                     "Found input_scales that are not equal for "
                     "fp8 MoE layer. Using the maximum across experts "
                     "for each layer."
@@ -952,10 +919,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 dtype=torch.int64,
             )
 
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            convert_weights_to_kernel_format,
-        )
-
         convert_weights_to_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
@@ -966,6 +929,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             weight_scale_name="weight_scale",
             marlin_input_dtype=self.marlin_input_dtype,
         )
+
+        config = self.get_fused_moe_quant_config(layer)
+        assert config is not None
+        self.moe_quant_config = config
 
     def maybe_make_prepare_finalize(
         self,

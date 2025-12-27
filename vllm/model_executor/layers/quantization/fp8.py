@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_weights_to_kernel_format,
     get_fp8_moe_backend,
+    setup_kernel,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -636,9 +637,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
         self.fp8_backend = get_fp8_moe_backend(
-            self.block_quant,
-            layer.moe_parallel_config.tp_size,
-            self.moe.is_lora_enabled,
+            block_quant=self.block_quant,
+            tp_size=layer.moe_parallel_config.tp_size,
+            with_lora_support=self.moe.is_lora_enabled,
         )
 
         self.marlin_input_dtype = None
@@ -794,89 +795,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def _setup_kernel(self, layer: Module) -> None:
-        """Setup Modular Kernel for TP Case"""
-        # NOTE(rob): this is a WIP refactor. We are first migrating
-        # all of the kernels in the TP case to use mk. Once this is
-        # done, then we will initialzie the TP case and DP/EP case
-        # via the same code path (i.e. via maybe_init_modular_kernel).
-        # NOTE(rob): in progress migrating all into this format.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-                FlashInferExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-                FlashInferAllGatherMoEPrepareAndFinalize,
-            )
-
-            config = self.get_fused_moe_quant_config(layer)
-            assert config is not None
-            self.moe_quant_config = config
-
-            self.kernel = mk.FusedMoEModularKernel(
-                # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
-                # with the changes to defer input quantization
-                FlashInferAllGatherMoEPrepareAndFinalize(
-                    use_dp=(self.moe.dp_size > 1),
-                    use_deepseek_fp8_block_scale=self.block_quant,
-                ),
-                FlashInferExperts(
-                    out_dtype=torch.get_default_dtype(),
-                    quant_config=self.moe_quant_config,
-                    ep_rank=self.moe.ep_rank,
-                    ep_size=self.moe.ep_size,
-                    tp_rank=self.moe.tp_rank,
-                    tp_size=self.moe.tp_size,
-                    use_dp=(self.moe.dp_size > 1),
-                    use_deepseek_fp8_block_scale=self.block_quant,
-                ),
-            )
-            self.use_inplace = False
-
-        elif self.fp8_backend in [
-            Fp8MoeBackend.DEEPGEMM,
-            Fp8MoeBackend.TRITON,
-            Fp8MoeBackend.MARLIN,
-            Fp8MoeBackend.AITER,
-        ]:
-            from vllm.model_executor.layers.fused_moe import (
-                TritonOrDeepGemmExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-                MarlinExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
-            )
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                AiterExperts,
-            )
-
-            config = self.get_fused_moe_quant_config(layer)
-            assert config is not None
-            self.moe_quant_config = config
-
-            if self.fp8_backend == Fp8MoeBackend.AITER:
-                self.kernel = mk.FusedMoEModularKernel(
-                    # TODO: make defer_input_quant an attr of the AiterExperts
-                    MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
-                    AiterExperts(quant_config=self.moe_quant_config),
-                )
-            elif self.fp8_backend == Fp8MoeBackend.MARLIN:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    MarlinExperts(quant_config=self.moe_quant_config),
-                )
-            else:
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonOrDeepGemmExperts(
-                        quant_config=self.moe_quant_config,
-                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                    ),
-                )
-            self.use_inplace = True
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -947,7 +865,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         # Setup modular kernel for TP case.
-        self._setup_kernel(layer)
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.kernel, self.use_inplace = setup_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+        )
 
     def maybe_make_prepare_finalize(
         self,
