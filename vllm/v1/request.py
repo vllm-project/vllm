@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import time
-import weakref
 from collections.abc import Callable, Mapping
-from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -131,12 +128,9 @@ class Request:
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
-        if block_hasher is not None:
-            # Use weakref to avoid circular reference: Request -> partial -> Request
-            # This allows immediate reclamation by refcounting without waiting for GC.
-            self.get_hash_new_full_blocks = partial(block_hasher, weakref.proxy(self))
-            self.block_hashes = self.get_hash_new_full_blocks()
+        self.block_hasher = block_hasher
+        if self.block_hasher is not None:
+            self.block_hashes = self.block_hasher(self)
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
@@ -174,8 +168,8 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
-        if self.get_hash_new_full_blocks is not None:
-            self.block_hashes.extend(self.get_hash_new_full_blocks())
+        if self.block_hasher is not None:
+            self.block_hashes.extend(self.block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
