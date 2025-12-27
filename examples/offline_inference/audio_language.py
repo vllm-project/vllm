@@ -213,37 +213,6 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-def run_phi4_multimodal(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process audio inputs.
-    """
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    speech_lora_path = os.path.join(model_path, "speech-lora")
-    placeholders = "<|audio|>" * audio_count
-
-    prompts = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=12800,
-        max_num_seqs=2,
-        enable_lora=True,
-        max_lora_rank=320,
-        limit_mm_per_prompt={"audio": audio_count},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompts,
-        lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
-    )
-
-
 # Qwen2-Audio
 def run_qwen2_audio(question: str, audio_count: int) -> ModelRequestData:
     model_name = "Qwen/Qwen2-Audio-7B-Instruct"
@@ -416,7 +385,6 @@ model_example_map = {
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
-    "phi4_multimodal": run_phi4_multimodal,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,
