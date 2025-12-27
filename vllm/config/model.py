@@ -11,7 +11,6 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +28,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -164,7 +164,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, gt=0)
+    max_model_len: int = Field(default=None, ge=-1)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -172,7 +172,10 @@ class ModelConfig:
     format. Examples:\n
     - 1k -> 1000\n
     - 1K -> 1024\n
-    - 25.6k -> 25,600"""
+    - 25.6k -> 25,600\n
+    - -1 or 'auto' -> Automatically choose the maximum model length that fits in
+    GPU memory. This will use the model's maximum context length if it fits,
+    otherwise it will find the largest length that can be accommodated."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: QuantizationMethods | str | None = None
@@ -593,7 +596,7 @@ class ModelConfig:
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
-
+        self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -1006,6 +1009,23 @@ class ModelConfig:
                 "when expert parallelism is enabled."
             )
 
+    def _try_verify_and_update_model_config(self):
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self, "config_updated", False):
+            return
+
+        architecture = self.architecture
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+        )
+
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_model_config(self)
+
     def verify_dual_chunk_attention_config(
         self,
         load_config: LoadConfig,
@@ -1095,11 +1115,10 @@ class ModelConfig:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
         # embedding models like CLIP and SigLIP
-        for target_attr in ("projection_dim", "projection_size"):
-            if hasattr(self.hf_text_config, target_attr):
-                return getattr(self.hf_text_config, target_attr)
-
-        return self.get_hidden_size()
+        names = ("projection_dim", "projection_size")
+        return getattr_iter(
+            self.hf_text_config, names, default_factory=self.get_hidden_size
+        )
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1232,14 +1251,12 @@ class ModelConfig:
             # For ChatGLM:
             "multi_query_group_num",
         ]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_text_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_text_config.num_attention_heads
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
@@ -1542,6 +1559,10 @@ class ModelConfig:
     @property
     def is_multimodal_raw_input_only_model(self) -> bool:
         return self._model_info.supports_multimodal_raw_input_only
+
+    @property
+    def requires_raw_input_tokens(self) -> bool:
+        return self._model_info.requires_raw_input_tokens
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -2126,9 +2147,7 @@ def _get_and_verify_max_len(
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
-    ):
+    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
@@ -2153,9 +2172,10 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
-    # If the user didn't specify `max_model_len`, then use that derived from
-    # the model config as a default value.
-    if max_model_len is None:
+    # If the user didn't specify `max_model_len` or specified -1 (auto-fit),
+    # then use that derived from the model config as a default value.
+    # When -1 is specified, the engine will later auto-fit to available memory.
+    if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
         if rope_parameters is not None and any(

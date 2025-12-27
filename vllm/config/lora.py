@@ -54,6 +54,11 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
+    enable_tower_connector_lora: bool = False
+    """If `True`, LoRA support for the tower (vision encoder) and connector 
+    of multimodal models will be enabled. This is an experimental feature and 
+    currently only supports some MM models such as the Qwen VL series. The default 
+    is False."""
 
     def compile_factors(self) -> CompileFactors:
         """
