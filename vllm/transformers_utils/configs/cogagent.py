@@ -25,7 +25,6 @@ class CLIPVisionConfig:
     pt_hw_seq_len: int = 16
     
     qk_scale: float | Literal['auto'] = 'auto'
-    qkv_sequential: bool = True
 
     # Whether the original weights were split into q,k,v before loading
     # Used during weight loading.

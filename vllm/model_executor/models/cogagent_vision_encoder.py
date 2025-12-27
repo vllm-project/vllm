@@ -376,7 +376,6 @@ class EVAAttention(nn.Module):
         self.attn_name = attn_name
         self.linear_name = linear_name
         self.attn_bias = config.attn_bias
-        self.qkv_sequential = config.qkv_sequential
         self.dim = config.hidden_size
         self.num_heads = config.num_heads
         self.head_dim = config.head_width
@@ -485,8 +484,8 @@ class EVAAttention(nn.Module):
             params_dict=params_dict, weights=weights, weights_mapper=weights_mapper
         )
         if self.split_qkv:
-            # easier than calculating bitsandbytes size.
-            # QKVLinear initialized with empty(). Not garunteed zero values so zero out.
+            # Assumes Quantization is not applied to bias.
+            # QKVLinear initialized with empty(). Not garunteed zero, so zero out.
             shard_offset = self.num_heads * self.head_dim
             shard_size = self.num_heads * self.head_dim
             param = params_dict[f"{self.attn_name}.bias"].data
