@@ -1208,13 +1208,19 @@ class OpenAIServingChat(OpenAIServing):
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
+                            # preserve id/type/name from original delta_message
+                            original_tc = delta_message.tool_calls[0]
+                            original_fn = original_tc.function if original_tc else None
                             delta_message = DeltaMessage(
                                 tool_calls=[
                                     DeltaToolCall(
                                         index=index,
+                                        id=original_tc.id if original_tc else None,
+                                        type=original_tc.type if original_tc else None,
                                         function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
+                                            name=original_fn.name if original_fn else None,
+                                            arguments=remaining_call,
+                                        ),
                                     )
                                 ]
                             )
