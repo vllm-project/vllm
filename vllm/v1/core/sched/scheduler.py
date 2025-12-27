@@ -1103,7 +1103,7 @@ class Scheduler(SchedulerInterface):
                 num_tokens_after_step >= request.num_prompt_tokens
                 # note that we only care about requests that are still in prefill phase
                 # if it's in decoding phase, we don't prioritize it
-                and self._is_prefill_with_tokens(request, num_tokens_after_step)
+                and self._is_prefill_with_tokens(request, request.num_computed_tokens)
             ):
                 finishing_prefills.append(request)
             else:
