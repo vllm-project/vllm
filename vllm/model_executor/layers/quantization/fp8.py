@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.oracle import (
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_weights_to_kernel_format,
     get_fp8_moe_backend,
