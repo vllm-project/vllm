@@ -1137,6 +1137,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_b_proj: ColumnParallelLinear,
         indexer=None,
         q_pad_num_heads: int | None = None,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1157,6 +1158,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.rotary_emb = rotary_emb
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1929,63 +1931,67 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        rotary_dim: int,
     ) -> torch.Tensor:
-        """Apply RoPE to a tensor.
+        """Apply RoPE to a tensor using stored rotary_emb.
 
         Args:
             x: Tensor to apply RoPE to. Shape: [num_tokens, num_heads, head_dim]
                 or [num_tokens, 1, head_dim] for k_pe.
             positions: Position indices. Shape: [num_tokens]
-            cos_sin_cache: Precomputed cos/sin cache from rotary_emb.
-            rotary_dim: Dimension of the rotary embedding (typically qk_rope_head_dim).
 
         Returns:
             Tensor with RoPE applied.
         """
-        from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+        assert self.rotary_emb is not None, "rotary_emb must be set to use _apply_rope"
+        from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
+        # TODO: use self.rotary_emb(positions, x, None)[0] once flashinfer
+        # rope supports key=None
         return RotaryEmbedding.forward_static(
-            positions=positions,
-            query=x,
-            key=None,
-            head_size=rotary_dim,
-            rotary_dim=rotary_dim,
-            cos_sin_cache=cos_sin_cache,
-            is_neox_style=False,  # MLA uses GPT-J style (not NeoX)
+            positions,
+            x,
+            None,
+            self.rotary_emb.head_size,
+            self.rotary_emb.rotary_dim,
+            self.rotary_emb.cos_sin_cache,
+            self.rotary_emb.is_neox_style,
         )[0]
 
     def _apply_rope_q(
         self,
         q: torch.Tensor,
         positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        rotary_dim: int,
-    ) -> torch.Tensor:
-        """Apply RoPE to the q_pe portion of q.
+    ) -> None:
+        """Apply RoPE to the q_pe portion of q in-place.
 
         Args:
             q: Query tensor. Shape: [num_tokens, num_heads, qk_head_dim]
                 where qk_head_dim = qk_nope_head_dim + qk_rope_head_dim.
+                Modified in-place.
             positions: Position indices.
-            cos_sin_cache: Precomputed cos/sin cache.
-            rotary_dim: Dimension of the rotary embedding (qk_rope_head_dim).
-
-        Returns:
-            Query tensor with RoPE applied to the q_pe portion.
         """
-        q_nope = q[..., : self.qk_nope_head_dim]
-        q_pe = q[..., self.qk_nope_head_dim :]
-        q_pe_roped = self._apply_rope(q_pe, positions, cos_sin_cache, rotary_dim)
-        return torch.cat([q_nope, q_pe_roped], dim=-1)
+        assert self.rotary_emb is not None, (
+            "rotary_emb must be set to use _apply_rope_q"
+        )
+        from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+
+        # TODO: use self.rotary_emb(positions, q_pe, None)[0] once flashinfer
+        # rope supports key=None
+        q[..., self.qk_nope_head_dim :] = RotaryEmbedding.forward_static(
+            positions,
+            q[..., self.qk_nope_head_dim :],
+            None,
+            self.rotary_emb.head_size,
+            self.rotary_emb.rotary_dim,
+            self.rotary_emb.cos_sin_cache,
+            self.rotary_emb.is_neox_style,
+        )[0]
 
     def _fused_rope_quant(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
         q_scale: torch.Tensor,
     ) -> torch.Tensor:
         """Fused RoPE + FP8 quantization for decode Q.
@@ -1997,7 +2003,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
             q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
             positions: Position indices. Shape: [B]
-            cos_sin_cache: Precomputed cos/sin cache.
             q_scale: Scale for FP8 quantization.
 
         Returns:
@@ -2030,7 +2035,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-        cos_sin_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -2098,10 +2102,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         # Apply RoPE to k_pe before storing to cache
         # k_pe needs RoPE for both prefill and decode paths
-        if cos_sin_cache is not None and positions is not None:
-            k_pe = self._apply_rope(
-                k_pe, positions, cos_sin_cache, self.qk_rope_head_dim
-            )
+        if self.rotary_emb is not None and positions is not None:
+            k_pe = self._apply_rope(k_pe, positions)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -2118,11 +2120,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
-            # Apply RoPE to prefill q_pe before attention
-            if cos_sin_cache is not None and prefill_positions is not None:
-                prefill_q = self._apply_rope_q(
-                    prefill_q, prefill_positions, cos_sin_cache, self.qk_rope_head_dim
-                )
+            # Apply RoPE to prefill q_pe before attention (in-place)
+            if self.rotary_emb is not None and prefill_positions is not None:
+                self._apply_rope_q(prefill_q, prefill_positions)
             # Re-slice prefill_k_pe since k_pe was modified by RoPE
             prefill_k_pe = k_pe[num_decode_tokens:]
 
@@ -2184,25 +2184,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # Check for fused RoPE+quant path (FlashInfer MLA + FP8)
             use_fused = fp8_attention and getattr(self, "use_fused_rope_quant", False)
 
-            if use_fused and cos_sin_cache is not None and decode_positions is not None:
+            if (
+                use_fused
+                and self.rotary_emb is not None
+                and decode_positions is not None
+            ):
                 # Fused RoPE + FP8 quant path
                 # decode_q_pe is raw (no RoPE yet), fused kernel will apply it
                 decode_q = self._fused_rope_quant(
                     decode_ql_nope,
                     decode_q_pe,
                     decode_positions,
-                    cos_sin_cache,
                     layer._q_scale,
                 )
             elif fp8_attention:
                 # Non-fused FP8 path: apply RoPE first, then quantize
-                if cos_sin_cache is not None and decode_positions is not None:
-                    decode_q_pe = self._apply_rope(
-                        decode_q_pe,
-                        decode_positions,
-                        cos_sin_cache,
-                        self.qk_rope_head_dim,
-                    )
+                if self.rotary_emb is not None and decode_positions is not None:
+                    decode_q_pe = self._apply_rope(decode_q_pe, decode_positions)
 
                 ql_nope_shape = decode_ql_nope.shape
                 q_pe_shape = decode_q_pe.shape
@@ -2230,13 +2228,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q = decode_q.view(decode_q_shape)
             else:
                 # Non-FP8 path: apply RoPE to decode_q_pe
-                if cos_sin_cache is not None and decode_positions is not None:
-                    decode_q_pe = self._apply_rope(
-                        decode_q_pe,
-                        decode_positions,
-                        cos_sin_cache,
-                        self.qk_rope_head_dim,
-                    )
+                if self.rotary_emb is not None and decode_positions is not None:
+                    decode_q_pe = self._apply_rope(decode_q_pe, decode_positions)
                 decode_q = (decode_ql_nope, decode_q_pe)
 
             if self.dcp_world_size > 1:

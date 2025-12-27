@@ -103,6 +103,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
@@ -162,18 +163,12 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
-        # Get cos_sin_cache for impl to apply RoPE
-        cos_sin_cache = None
-        if self.rotary_emb is not None:
-            cos_sin_cache = self.rotary_emb.cos_sin_cache
-
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             positions=positions,
-            cos_sin_cache=cos_sin_cache,
         )
 
         return self.o_proj(attn_out)[0]
