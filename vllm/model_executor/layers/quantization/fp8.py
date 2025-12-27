@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
     maybe_post_process_fp8_weight_block,
+    process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -80,7 +81,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
-    all_close_1d,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
     maybe_create_device_identity,
@@ -822,18 +822,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Per tensor kernels require single activation scale. Use the max.
         if self.quant_config.activation_scheme == "static":
             assert not self.block_quant
-            assert layer.w13_input_scale is not None
-            assert layer.w2_input_scale is not None
-            if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
-                layer.w2_input_scale
-            ):
-                logger.warning_once(
-                    "Found input_scales that are not equal for "
-                    "fp8 MoE layer. Using the maximum across experts "
-                    "for each layer."
-                )
-            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
-            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
+            assert (
+                layer.w13_input_scale is not None and layer.w2_input_scale is not None
+            )
+            w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
+                layer.w13_input_scale, layer.w2_input_scale
+            )
+            replace_parameter(layer, "w13_input_scale", w13_input_scale)
+            replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
         # Per tensor kernels require single weight scale for w13 per expert, but
         # on disk there is a scale for w1 and w3. Use the max to requantize.
@@ -844,7 +840,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Shuffle weights into the runtime format.
-        (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale) = (
+        w13_weight, w13_weight_scale, w2_weight, w2_weight_scale = (
             convert_weights_to_kernel_format(
                 fp8_backend=self.fp8_backend,
                 layer=layer,

@@ -67,6 +67,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -88,7 +89,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d,
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
@@ -871,34 +871,26 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # Per tensor kernels require single activation scale. Use the max.
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
-            if layer.w13_input_scale is None or layer.w2_input_scale is None:
-                raise ValueError(
-                    "QuantConfig has static quantization, but found "
-                    "activation scales are None."
-                )
-            if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
-                layer.w2_input_scale
-            ):
-                logger.info_once(
-                    "Found input_scales that are not equal for "
-                    "fp8 MoE layer. Using the maximum across experts "
-                    "for each layer."
-                )
-            replace_parameter(layer, "w13_input_scale", layer.w13_input_scale.max())
-            replace_parameter(layer, "w2_input_scale", layer.w2_input_scale.max())
+            assert (
+                layer.w13_input_scale is not None and layer.w2_input_scale is not None
+            )
+            w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
+                layer.w13_input_scale, layer.w2_input_scale
+            )
+            replace_parameter(layer, "w13_input_scale", w13_input_scale)
+            replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
         # Per-tensor kernels use a single scale, for W13, but on disk there
         # is a separate scale for W1 and W3. Requantize with the max scale.
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
-            shard_size = layer.intermediate_size_per_partition
             process_fp8_weight_tensor_strategy_moe(
                 w13_weight,
                 w13_weight_scale,
-                shard_size,
-                layer.num_local_experts,
+                shard_size=layer.intermediate_size_per_partition,
+                num_experts=layer.num_local_experts,
             )
 
-        (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale) = (
+        w13_weight, w13_weight_scale, w2_weight, w2_weight_scale = (
             convert_weights_to_kernel_format(
                 fp8_backend=self.fp8_backend,
                 layer=layer,
@@ -908,12 +900,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w2_weight_scale=w2_weight_scale,
             )
         )
+
         # Replace parameters with updated versions. Note that this helper
         # function ensures the replacement is compatible with RL weight reloads.
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
+        replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
 
         # TODO(rob): we do this after replace_parameter() because
         # prepare_moe_fp8_layer_for_marlin uses on the layer's params
