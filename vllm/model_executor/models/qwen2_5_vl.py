@@ -88,6 +88,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.distributed.parallel_state import get_tp_group
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -118,7 +119,7 @@ from .vision import (
 
 logger = init_logger(__name__)
 
-from vllm.distributed.parallel_state import get_tp_group
+
 def get_rank_world():
     rank = get_tp_group().rank
     tp_size = get_tp_group().world_size
@@ -399,12 +400,12 @@ class Qwen2_5_VisionAttention(nn.Module):
             x = x[:, :true_seq, :, :]
         
             qkv = einops.rearrange(
-	            x,
-	            '(b three) s head head_dim -> b s three head head_dim',
-	            b=1,
-	            three=3,
-	            head=self.num_attention_heads_per_partition,
-	        )
+                x,
+                '(b three) s head head_dim -> b s three head head_dim',
+                b=1,
+                three=3,
+                head=self.num_attention_heads_per_partition,
+            )
             used_len = true_seq
         else :
             qkv = einops.rearrange(
@@ -445,11 +446,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             max_seqlen=max_seqlen,
         )
 
-
-        if self.use_data_parallel == False :
+        if not self.use_data_parallel:
             padding = (0, 0, 0, 0, 0, cur_seq - true_seq)
             context_layer = F.pad(context_layer, padding)
-            context_layer = context_layer.reshape(seq_len * self.tp_world_size, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head) 
+            context_layer = context_layer.reshape(
+                seq_len * self.tp_world_size,
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head
+            )
             context_layer = all_to_all_3d(context_layer, is_seq_to_head=False, group=self.tp_group)
             context_layer = einops.rearrange(
                 context_layer, "(b s) h d -> s b (h d)", b=batch_size
