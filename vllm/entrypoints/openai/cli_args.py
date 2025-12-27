@@ -85,6 +85,8 @@ class FrontendArgs:
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_metrics_access_log: bool = False
+    """Disable access log for /metrics and /health endpoints only."""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])

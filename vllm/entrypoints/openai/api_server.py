@@ -1354,6 +1354,7 @@ async def run_server_worker(
             app,
             sock=sock,
             enable_ssl_refresh=args.enable_ssl_refresh,
+            disable_metrics_access_log=args.disable_metrics_access_log,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,

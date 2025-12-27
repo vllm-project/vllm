@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 import signal
 import socket
 from http import HTTPStatus
@@ -24,16 +25,43 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 logger = init_logger(__name__)
 
 
+class MetricsEndpointFilter(logging.Filter):
+    """Filter to exclude /metrics and /health endpoints from access logs.
+
+    This reduces log noise from monitoring systems that frequently poll
+    these endpoints.
+    """
+
+    # Endpoints to exclude from access logs
+    EXCLUDED_PATHS = {"/metrics", "/health"}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn access log format includes the path as the third argument
+        # Format: '%s - "%s %s HTTP/%s" %d' % (client, method, path, ...)
+        args = record.args
+        if args and isinstance(args, tuple) and len(args) >= 3:
+            path = args[2]
+            if isinstance(path, str) and path in self.EXCLUDED_PATHS:
+                return False  # Exclude this log record
+        return True  # Include all other log records
+
+
 async def serve_http(
     app: FastAPI,
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
+    disable_metrics_access_log: bool = False,
     **uvicorn_kwargs: Any,
 ):
     """
     Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
+
+    Args:
+        disable_metrics_access_log: If True, filter out access logs for
+            /metrics and /health endpoints to reduce log noise from
+            monitoring systems.
     """
     logger.info("Available routes are:")
     for route in app.routes:
@@ -62,6 +90,11 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
+
+    # Apply filter to exclude /metrics and /health from access logs
+    if disable_metrics_access_log:
+        uvicorn_access_logger = logging.getLogger("uvicorn.access")
+        uvicorn_access_logger.addFilter(MetricsEndpointFilter())
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 
