@@ -21,6 +21,7 @@ from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
+from .hasher import configure_fips_hashing
 from .inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
@@ -598,6 +599,11 @@ def processor_cache_from_config(
 ) -> BaseMultiModalProcessorCache | None:
     """Return a `BaseMultiModalProcessorCache`, if enabled."""
     model_config = vllm_config.model_config
+
+    # Configure FIPS-compliant hashing based on MultiModalConfig
+    mm_config = model_config.multimodal_config
+    if mm_config is not None:
+        configure_fips_hashing(mm_config.use_fips_hashing)
 
     if not _enable_processor_cache(model_config, mm_registry):
         return None
