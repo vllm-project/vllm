@@ -495,11 +495,7 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return input_
-
-        if self.use_custom_op_call:
-            return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
-        else:
-            return self._all_reduce_out_place(input_)
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:

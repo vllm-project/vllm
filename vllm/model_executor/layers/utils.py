@@ -3,7 +3,7 @@
 """Utility methods for model layers."""
 
 from collections.abc import Callable
-
+from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
@@ -95,6 +95,25 @@ def apply_penalties(
     logits -= presence_penalties.unsqueeze(dim=1) * output_mask
     return logits
 
+def unquantized_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return torch.nn.functional.linear(x, weight, bias)
+
+def unquantized_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+direct_register_custom_op(
+    op_name="unquantized_gemm",
+    op_func=unquantized_gemm_impl,
+    fake_impl=unquantized_gemm_fake,
+)
 
 def default_unquantized_gemm(
     layer: torch.nn.Module,
@@ -102,7 +121,7 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
-    return torch.nn.functional.linear(x, weight, bias)
+    return torch.ops.vllm.unquantized_gemm(x, weight, bias)
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
