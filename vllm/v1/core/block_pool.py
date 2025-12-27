@@ -254,6 +254,10 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
+            # Some blocks may be null blocks when enabling sparse attention like
+            # sliding window attention. We skip null blocks here.
+            if blk.is_null:
+                continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
@@ -361,7 +365,7 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -369,15 +373,14 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
-        for blocks_per_group in blocks:
-            for block in blocks_per_group:
-                # ref_cnt=0 means this block is in the free list (i.e. eviction
-                # candidate), so remove it.
-                if block.ref_cnt == 0 and not block.is_null:
-                    self.free_block_queue.remove(block)
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_accessed(block)
+        for block in blocks:
+            # ref_cnt=0 means this block is in the free list (i.e. eviction
+            # candidate), so remove it.
+            if block.ref_cnt == 0 and not block.is_null:
+                self.free_block_queue.remove(block)
+            block.ref_cnt += 1
+            if self.metrics_collector:
+                self.metrics_collector.on_block_accessed(block)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
