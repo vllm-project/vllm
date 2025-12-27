@@ -74,7 +74,10 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
+        assert kv_cache_dtype == "auto", (
+            f"IPEX paged_attention_v1 only supports kv_cache_dtype='auto', "
+            f"got {kv_cache_dtype!r}"
+        )
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
         ipex.llm.modules.PagedAttention.single_query_kv_attention(
@@ -116,7 +119,10 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
+        assert kv_cache_dtype == "auto", (
+            f"IPEX paged_attention_v2 only supports kv_cache_dtype='auto', "
+            f"got {kv_cache_dtype!r}"
+        )
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
         ipex.llm.modules.PagedAttention.single_query_kv_attention(
@@ -188,8 +194,14 @@ class ipex_ops:
         if ipex.__version__.endswith("cpu"):
             if logits_soft_cap != 0.0:
                 raise ValueError("IPEX CPU does not support logits_soft_cap")
-            assert alibi_slopes is None
-            assert window_size_left < 0 and window_size_right < 0
+            assert alibi_slopes is None, (
+                "IPEX CPU varlen_attention does not support alibi_slopes"
+            )
+            assert window_size_left < 0 and window_size_right < 0, (
+                f"IPEX CPU varlen_attention requires infinite window size "
+                f"(negative values), got window_size_left={window_size_left}, "
+                f"window_size_right={window_size_right}"
+            )
             ipex.llm.functional.varlen_attention(
                 query.contiguous(),
                 key.contiguous(),
@@ -239,7 +251,10 @@ class ipex_ops:
         k_scale: float,
         v_scale: float,
     ) -> None:
-        assert kv_cache_dtype == "auto"
+        assert kv_cache_dtype == "auto", (
+            f"IPEX reshape_and_cache only supports kv_cache_dtype='auto', "
+            f"got {kv_cache_dtype!r}"
+        )
         ipex.llm.modules.PagedAttention.reshape_and_cache(
             key, value, key_cache, value_cache, slot_mapping
         )
@@ -303,7 +318,9 @@ class ipex_ops:
         if window_size is None:
             real_window_size = (-1, -1)
         else:
-            assert len(window_size) == 2
+            assert len(window_size) == 2, (
+                f"window_size must have exactly 2 elements, got {len(window_size)}"
+            )
             real_window_size = (window_size[0], window_size[1])
 
         if block_table is None:
@@ -423,7 +440,10 @@ class ipex_ops:
                 scaling factor.
         """
         # This code assumes batch_dim and num_tokens are flattened
-        assert input.ndim == 2
+        assert input.ndim == 2, (
+            f"input tensor must be 2D (batch_dim and num_tokens flattened), "
+            f"got {input.ndim}D"
+        )
         shape: tuple[int, int] | torch.Size = input.shape
         out_dtype: torch.dtype = current_platform.fp8_dtype()
         if num_token_padding:
@@ -434,7 +454,9 @@ class ipex_ops:
             assert num_token_padding is None, (
                 "padding not supported if output passed in"
             )
-            assert output.dtype == out_dtype
+            assert output.dtype == out_dtype, (
+                f"output dtype mismatch: expected {out_dtype}, got {output.dtype}"
+            )
         assert scale is None, "only dynamic fp8 quantization supported on XPU"
         assert not use_per_token_if_dynamic, (
             "per token dynamic fp8 quantization not supported on XPU"
