@@ -1,0 +1,63 @@
+ruff check..........................................................................................[42mPassed[m
+ruff format.........................................................................................[42mPassed[m
+typos...............................................................................................[42mPassed[m
+clang-format........................................................................................[42mPassed[m
+Lint GitHub Actions workflow files..................................................................[42mPassed[m
+pip-compile.........................................................................................[42mPassed[m
+reformat nightly_torch_test.txt to be in sync with test.in..........................................[42mPassed[m
+Run mypy locally for lowest supported Python version................................................[41mFailed[m
+[2m- hook id: mypy-local[m
+[2m- exit code: 1[m
+
+$ mypy --python-version 3.10 --follow-imports skip 
+vllm/entrypoints/openai/tool_parsers/abstract_tool_parser.py:230: [1m[31merror:[m Incompatible types in assignment (expression has type [m[1m"list[str] | None"[m, variable has type [m[1m"list[str]"[m)  [m[33m[assignment][m
+[1m[31mFound 1 error in 1 file (checked 253 source files)[m
+$ mypy --python-version 3.10 --follow-imports skip tests
+[1m[32mSuccess: no issues found in 765 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/attention
+[1m[32mSuccess: no issues found in 14 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/compilation
+[1m[32mSuccess: no issues found in 26 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/engine
+[1m[32mSuccess: no issues found in 5 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/lora
+[1m[32mSuccess: no issues found in 40 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/model_executor
+[1m[32mSuccess: no issues found in 207 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/plugins
+[1m[32mSuccess: no issues found in 5 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/attention
+[1m[32mSuccess: no issues found in 30 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/executor
+[1m[32mSuccess: no issues found in 7 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/kv_offload
+[1m[32mSuccess: no issues found in 13 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/metrics
+[1m[32mSuccess: no issues found in 6 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/pool
+[1m[32mSuccess: no issues found in 2 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/sample
+[1m[32mSuccess: no issues found in 16 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/spec_decode
+[1m[32mSuccess: no issues found in 8 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/structured_output
+[1m[32mSuccess: no issues found in 8 source files[m
+$ mypy --python-version 3.10 --follow-imports skip vllm/v1/worker
+[1m[32mSuccess: no issues found in 20 source files[m
+
+Lint shell scripts..................................................................................[42mPassed[m
+Lint PNG exports from excalidraw....................................................................[42mPassed[m
+Check SPDX headers..................................................................................[42mPassed[m
+Check root lazy imports.............................................................................[42mPassed[m
+Check for spaces in all filenames...................................................................[42mPassed[m
+Update Dockerfile dependency graph..................................................................[42mPassed[m
+Enforce import regex as re..........................................................................[42mPassed[m
+Forbid direct 'import triton'.......................................................................[42mPassed[m
+Prevent new pickle/cloudpickle imports..............................................................[42mPassed[m
+Validate configuration has default values and that each field has a docstring.......................[42mPassed[m
+Suggestion..........................................................................................[42mPassed[m
+[2m- hook id: suggestion[m
+[2m- duration: 0s[m
+
+To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>.
+
