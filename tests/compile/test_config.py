@@ -13,7 +13,10 @@ from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmCo
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+)
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -26,6 +29,29 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
+
+
+def test_get_raw_stream_patch():
+    """Test that get_raw_stream patch is applied only for torch 2.9.0 or 2.9.1."""
+    import builtins
+
+    # Check if get_raw_stream exists in builtins
+    has_patch = hasattr(builtins, "get_raw_stream")
+
+    # Import torch to get actual version
+
+    is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
+
+    if is_torch_2_9:
+        # For torch 2.9.x, the patch should be applied
+        assert has_patch, "get_raw_stream should be patched for torch 2.9.x"
+        # Verify it's callable (it should be the _cuda_getCurrentRawStream function)
+        get_raw_stream = builtins.get_raw_stream  # type: ignore[attr-defined]
+        assert callable(get_raw_stream)
+        # Verify it's the correct function from torch._C
+        from torch._C import _cuda_getCurrentRawStream
+
+        assert get_raw_stream is _cuda_getCurrentRawStream
 
 
 def test_copy_pass():
