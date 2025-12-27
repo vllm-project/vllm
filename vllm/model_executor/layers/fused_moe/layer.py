@@ -655,16 +655,18 @@ class FusedMoE(CustomOp):
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
-        prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
-        )
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            self.quant_method = FusedMoEModularMethod.make(
-                self, self.quant_method, prepare_finalize, self.shared_experts
-            )
+        assert routing_tables is None
+        # prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
+        #     routing_tables=routing_tables
+        # )
+        # print(f"{prepare_finalize=}")
+        # if prepare_finalize is not None:
+        #     logger.debug(
+        #         "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
+        #     )
+        #     self.quant_method = FusedMoEModularMethod.make(
+        #         self, self.quant_method, prepare_finalize, self.shared_experts
+        #     )
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -1562,7 +1564,8 @@ class FusedMoE(CustomOp):
                 return False
             return num_experts % self.num_expert_group == 0
 
-        indices_type = self.quant_method.topk_indices_dtype
+        # indices_type = self.quant_method.topk_indices_dtype
+        indices_type = self.quant_method.kernel.prepare_finalize.topk_indices_dtype()
 
         # Check if we should use a routing simulation strategy
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
@@ -1879,9 +1882,10 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
+        # do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
+        #     self.quant_method, FusedMoEModularMethod
+        # )
+        do_naive_dispatch_combine = False
 
         ctx = get_forward_context()
         sp_ctx = (
