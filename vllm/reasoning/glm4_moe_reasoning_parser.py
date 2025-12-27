@@ -169,3 +169,100 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
 
         final_content = content or None
         return reasoning, final_content
+
+
+class Glm47ReasoningParser(Glm4MoeModelReasoningParser):
+    """
+    Reasoning parser for GLM-4.7 models.
+
+    GLM-4.7 chat templates include the <think> token at the end of the prompt
+    (after <|assistant|>), so the model output starts directly with thinking
+    content but ends with </think>. This parser handles this case by prepending
+    <think> when needed.
+
+    Use this parser with: --reasoning-parser glm47
+    """
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        """
+        Extract reasoning content from a delta message.
+        Handles the case where <think> is injected by the template.
+        """
+        # Skip single start token to avoid issues when templates inject it
+        if (
+            len(delta_token_ids) == 1
+            and delta_token_ids[0] == self.think_start_token_id
+        ):
+            return None
+
+        # At the very start, if we don't see <think>, treat output as reasoning
+        # since GLM-4.7 templates inject <think> in the prompt
+        if (
+            len(previous_token_ids) == 0
+            and self.think_start_token_id not in delta_token_ids
+        ):
+            # No <think> in first delta, this is reasoning content
+            if self.think_end_token_id in delta_token_ids:
+                # </think> in first delta - extract and split
+                end_index = delta_text.find(self.think_end_token)
+                reasoning = delta_text[:end_index]
+                content = delta_text[end_index + len(self.think_end_token) :]
+                return DeltaMessage(
+                    reasoning=reasoning,
+                    content=content if content else None,
+                )
+            return DeltaMessage(reasoning=delta_text)
+
+        # For subsequent tokens, use parent behavior but with adjustment
+        # If we've been streaming reasoning (no <think> seen but also no
+        # </think> yet), continue as reasoning
+        if (
+            self.think_start_token_id not in previous_token_ids
+            and self.think_end_token_id not in previous_token_ids
+        ):
+            # We're in "implicit reasoning mode" (template injected <think>)
+            if self.think_end_token_id in delta_token_ids:
+                end_index = delta_text.find(self.think_end_token)
+                reasoning = delta_text[:end_index]
+                content = delta_text[end_index + len(self.think_end_token) :]
+                return DeltaMessage(
+                    reasoning=reasoning,
+                    content=content if content else None,
+                )
+            return DeltaMessage(reasoning=delta_text)
+
+        # Fall back to parent implementation for other cases
+        return super().extract_reasoning_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        )
+
+    def extract_reasoning(
+        self, model_output: str, request: ChatCompletionRequest
+    ) -> tuple[str | None, str | None]:
+        """
+        Extract reasoning content from the model output.
+        Handles the case where <think> is in the template but not in output.
+        """
+        # If we have </think> but no <think>, prepend <think>
+        # This handles GLM-4.7 templates that inject <think> in the prompt
+        if (
+            self.think_end_token in model_output
+            and self.think_start_token not in model_output
+        ):
+            model_output = self.think_start_token + model_output
+
+        # Now use parent implementation
+        return super().extract_reasoning(model_output, request)
