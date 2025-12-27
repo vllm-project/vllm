@@ -1062,7 +1062,7 @@ class FusedMoE(CustomOp):
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
     ):
-        if self.num_fused_shared_experts > 0:
+        if self.num_fused_shared_experts > 0 and self.rocm_aiter_fmoe_enabled:
             init_aiter_topK_meta_data(
                 n_routed_experts=self.global_num_experts,
                 n_shared_experts=self.num_fused_shared_experts,
@@ -1073,6 +1073,7 @@ class FusedMoE(CustomOp):
                 max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
                 * dp_size,
                 is_EP=self.use_ep,
+                device=torch.cuda.current_device(),
             )
         self.local_num_experts += self.num_fused_shared_experts
 
