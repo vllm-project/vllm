@@ -196,7 +196,7 @@ def _run_hf(
         else:
             raise ValueError(f"Unsupported document format at index {idx}")
 
-    scores: list[None | float] = [None] * len(document_strs)
+    scores = [None] * len(document_strs)
 
     with hf_runner(
         model,
