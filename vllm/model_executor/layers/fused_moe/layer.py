@@ -1931,11 +1931,11 @@ class FusedMoE(CustomOp):
                 else:
                     hidden_states_combined, router_logits = dispatch_res
 
-            # Run shared experts before matrix multiply.
-            # because matrix multiply maybe modify the hidden_states.
-            if has_separate_shared_experts and not use_shared_experts_stream:
-                assert self.shared_experts is not None
-                shared_output = self.shared_experts(hidden_states)
+                # Run shared experts before matrix multiply.
+                # because matrix multiply maybe modify the hidden_states.
+                if has_separate_shared_experts and not use_shared_experts_stream:
+                    assert self.shared_experts is not None
+                    shared_output = self.shared_experts(hidden_states)
 
             # NOTE: Similar with DP, PCP also needs dispatch and combine. For
             # simplicity, AgRsAll2All was added separately for PCP here. Maybe
@@ -1950,6 +1950,12 @@ class FusedMoE(CustomOp):
                     dim=0,
                 )
 
+            # Run shared experts before matrix multiply.
+            # because matrix multiply maybe modify the hidden_states.
+            if has_separate_shared_experts and not use_shared_experts_stream:
+                assert self.shared_experts is not None
+                shared_output = self.shared_experts(hidden_states)
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -1958,6 +1964,7 @@ class FusedMoE(CustomOp):
                 else hidden_states,
                 router_logits=router_logits,
             )
+            zero_expert_result: torch.Tensor | None = None
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None
@@ -1978,8 +1985,14 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
+            elif (
+                self.zero_expert_num is not None
+                and self.zero_expert_num > 0
+                and isinstance(final_hidden_states, tuple)
+            ):
+                final_hidden_states, zero_expert_result = final_hidden_states
 
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
+            def reduce_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
 
@@ -1994,10 +2007,13 @@ class FusedMoE(CustomOp):
             if self.shared_experts is not None:
                 return (
                     final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
+                    reduce_output(final_hidden_states[1]),
                 )
+            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+                assert isinstance(final_hidden_states, torch.Tensor)
+                return (reduce_output(final_hidden_states), zero_expert_result)
             else:
-                return combine_output(final_hidden_states)
+                return reduce_output(final_hidden_states)
 
     @classmethod
     def make_expert_params_mapping(

@@ -92,13 +92,18 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
+        prepare_finalize = self.fused_experts.prepare_finalize
+        hidden_states, router_logits = prepare_finalize.preprocess_inputs(
+            x, router_logits, layer
+        )
+
+        topk_weights, topk_ids, zero_expert_result = layer.select_experts(
+            hidden_states=hidden_states,
             router_logits=router_logits,
         )
 
         result = self.fused_experts(
-            hidden_states=x,
+            hidden_states=hidden_states,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
@@ -110,4 +115,14 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=None if self.disable_expert_map else layer.expert_map,
         )
 
-        return result
+        result = prepare_finalize.postprocess_output(result, layer)
+
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+        if zero_expert_num != 0 and zero_expert_type is not None:
+            assert not isinstance(result, tuple), (
+                "Shared + zero experts are mutually exclusive not yet supported"
+            )
+            return result, zero_expert_result
+        else:
+            return result
