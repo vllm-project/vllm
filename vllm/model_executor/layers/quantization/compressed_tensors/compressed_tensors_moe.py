@@ -870,16 +870,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def _convert_weights_to_kernel_format(
-        self,
-        layer: torch.nn.Module,
-        w13_weight: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w13_weight_scale: torch.Tensor,
-        w2_weight_scale: torch.Tensor,
-    ) -> None:
-        pass
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.utils import replace_parameter
 
@@ -961,11 +951,21 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 device=device,
                 dtype=torch.int64,
             )
-        else:
-            # Shuffle weights into the runtime format.
-            self._convert_weights_to_kernel_format(
-                layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
-            )
+
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+            convert_weights_to_kernel_format,
+        )
+
+        convert_weights_to_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            weight_scale_name="weight_scale",
+            marlin_input_dtype=self.marlin_input_dtype,
+        )
 
     def maybe_make_prepare_finalize(
         self,
