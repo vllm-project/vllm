@@ -233,38 +233,37 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Handle deprecated "audios" key
+        # Normalize input: handle deprecated key and list conversion.
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
 
-        audio_list = mm_data.get("audio", [])
+        audio = mm_data.get("audio", [])
+        audio_list = [audio] if audio and not isinstance(audio, list) else audio
+
+        # Early return for text-only.
         if not audio_list:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        if not isinstance(audio_list, list):
-            audio_list = [audio_list]
-
         processor = self.info.get_hf_processor(**mm_kwargs)
-        feature_extractor = processor.feature_extractor
-        mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
-
-        # Calculate chunk counts
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, feature_extractor, processor
-        )
-
         outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs={
+                **mm_kwargs,
+                "sampling_rate": processor.feature_extractor.sampling_rate,
+            },
             tok_kwargs=tok_kwargs,
         )
 
-        # Rename mask key and add chunk_counts
+        # Postprocess: rename mask and add chunk counts.
         if "input_features_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+
+        chunk_counts = self._calculate_chunk_counts(
+            audio_list, processor.feature_extractor, processor
+        )
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
 
         return outputs
