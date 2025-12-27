@@ -2546,10 +2546,13 @@ class TestMLAFusedRopeQuant:
         )  # [num_tokens, num_heads, kv_lora_rank]
 
         # Run fused RoPE + quantize
+        # Note: quant_scale_q and quant_scale_kv are set to 1.0 because
+        # the fused kernel does per-tensor quantization without additional scaling.
+        # In production, these would come from layer._q_scale and layer._k_scale.
         mla_rope_quantize_fp8(
             q_rope=q_pe,
             k_rope=k_pe_raw_cat.squeeze(1),
-            q_nope=ql_nope,  # Already projected
+            q_nope=ql_nope,  # Already projected through W_UK
             k_nope=kv_c_cat,  # kv_c_normed
             cos_sin_cache=cos_sin_cache,
             pos_ids=positions_cat,
@@ -2563,22 +2566,73 @@ class TestMLAFusedRopeQuant:
             quant_scale_kv=1.0,
         )
 
-        # For the new path, we also need to apply RoPE to k_pe for the current tokens
-        # to be stored in cache (matching what old path does)
-        _, k_pe_roped_new = rotary_emb(
-            positions_cat,
-            torch.zeros(
-                num_tokens,
-                config.num_heads,
-                config.qk_rope_head_dim,
-                dtype=dtype,
-                device=device,
-            ),
-            k_pe_raw_cat.clone(),
+        # Verify the fused kernel outputs are valid FP8
+        assert torch.isfinite(q_fused_out.float()).all(), (
+            "Fused Q output has non-finite values"
+        )
+        assert torch.isfinite(k_nope_fused_out.float()).all(), (
+            "Fused K_nope has non-finite values"
+        )
+        assert torch.isfinite(k_pe_fused_out.float()).all(), (
+            "Fused K_pe has non-finite values"
         )
 
-        # Create FP8 KV cache for new path
-        # (same context, different current tokens handling)
+        # Compare the fused outputs with manually computed values
+        # OLD: separate RoPE then quantize
+        # q_nope is already ql_nope (projected), just quantize
+        ql_nope_fp8_old = ql_nope.to(torch.float8_e4m3fn)
+        # q_pe needs RoPE then quantize
+        q_pe_roped_fp8_old = q_pe_roped_old.to(torch.float8_e4m3fn)
+        # k_nope just quantize
+        k_nope_fp8_old = kv_c_cat.to(torch.float8_e4m3fn)
+        # k_pe needs RoPE then quantize
+        k_pe_roped_fp8_old = k_pe_roped_old.squeeze(1).to(torch.float8_e4m3fn)
+
+        # Compare fused vs separate for q_nope part
+        q_nope_fused = q_fused_out[..., : config.kv_lora_rank]
+        q_nope_diff = torch.max(
+            torch.abs(ql_nope_fp8_old.float() - q_nope_fused.float())
+        ).item()
+
+        # Compare fused vs separate for q_pe part (RoPE applied)
+        q_pe_fused = q_fused_out[..., config.kv_lora_rank :]
+        q_pe_diff = torch.max(
+            torch.abs(q_pe_roped_fp8_old.float() - q_pe_fused.float())
+        ).item()
+
+        # Compare fused vs separate for k_nope
+        k_nope_diff = torch.max(
+            torch.abs(k_nope_fp8_old.float() - k_nope_fused_out.float())
+        ).item()
+
+        # Compare fused vs separate for k_pe (RoPE applied)
+        k_pe_diff = torch.max(
+            torch.abs(k_pe_roped_fp8_old.float() - k_pe_fused_out.float())
+        ).item()
+
+        # Allow for FP8 quantization differences
+        atol = 0.5  # FP8 has limited precision
+
+        assert q_nope_diff <= atol, f"Q_nope mismatch: {q_nope_diff}"
+        assert q_pe_diff <= atol, f"Q_pe mismatch: {q_pe_diff}"
+        assert k_nope_diff <= atol, f"K_nope mismatch: {k_nope_diff}"
+        assert k_pe_diff <= atol, f"K_pe mismatch: {k_pe_diff}"
+
+        # Now run attention using the fused FP8 outputs
+        # For decode, the backend expects:
+        # - q: [num_tokens, num_heads, qk_head_dim] with RoPE already applied
+        # - kv_c: [num_tokens, kv_lora_rank]
+        # - k_pe: [num_tokens, 1, qk_rope_head_dim] with RoPE already applied
+
+        # The fused path produces FP8 tensors that would be used directly
+        # in the decode attention kernel. Here we verify the outputs match
+        # by dequantizing and comparing.
+
+        # Create FP8 KV cache for new path using fused k outputs
+        # Convert fused FP8 k outputs back to dtype for cache population
+        k_nope_from_fused = k_nope_fused_out.to(dtype)
+        k_pe_from_fused = k_pe_fused_out.unsqueeze(1).to(dtype)
+
         kv_cache_new = create_and_prepopulate_kv_cache(
             kv_c_contexts=kv_c_contexts,
             k_pe_contexts=k_pe_contexts_roped,
@@ -2593,11 +2647,17 @@ class TestMLAFusedRopeQuant:
             scale=1.0,
         )
 
-        # For the new path, we use the same q with RoPE applied (like old path)
-        # because the attention backend expects RoPE'd inputs.
-        # The fused kernel output is FP8, used differently in full integration.
+        # Build q from fused output (dequantize for the backend)
+        # q_fused_out is [num_tokens, num_heads, kv_lora_rank + qk_rope_head_dim]
+        # But the backend expects q with shape [num_tokens, num_heads, qk_head_dim]
+        # where qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        # The fused q_nope is already projected (ql_nope), not the original q_nope
+
+        # For comparison, use the old path q (already computed with RoPE)
+        # and compare with dequantized fused q_pe
         q_new = q_raw_cat.clone()
-        q_new[..., config.qk_nope_head_dim :] = q_pe_roped_old  # Same RoPE as old
+        # Use fused RoPE'd q_pe (dequantized)
+        q_new[..., config.qk_nope_head_dim :] = q_pe_fused.to(dtype)
 
         new_output = run_mla_attention_backend(
             AttentionBackendEnum.FLASHINFER_MLA,
@@ -2607,8 +2667,8 @@ class TestMLAFusedRopeQuant:
             device,
             common_attn_metadata,
             q_new.clone(),
-            kv_c_cat.clone(),
-            k_pe_roped_new.clone(),
+            k_nope_from_fused.clone(),
+            k_pe_from_fused.clone(),
             kv_cache_new.clone(),
             config,
             mock_kv_b_proj,
@@ -2616,8 +2676,8 @@ class TestMLAFusedRopeQuant:
         )
 
         # Compare outputs
-        assert torch.isfinite(old_output).all(), "Old path output has non-finite values"
-        assert torch.isfinite(new_output).all(), "New path output has non-finite values"
+        assert torch.isfinite(old_output).all(), "Old path output has non-finite"
+        assert torch.isfinite(new_output).all(), "New path output has non-finite"
         assert old_output.shape == new_output.shape, (
             f"Shape mismatch: old={old_output.shape}, new={new_output.shape}"
         )
@@ -2625,28 +2685,22 @@ class TestMLAFusedRopeQuant:
         max_diff = torch.max(torch.abs(old_output - new_output)).item()
         mean_diff = torch.mean(torch.abs(old_output - new_output)).item()
 
-        # Both paths use same RoPE and same backend, so should be identical
-        atol = 1e-5
-        assert torch.allclose(old_output, new_output, atol=atol), (
+        # Allow larger tolerance due to FP8 round-trip (quant -> dequant)
+        # FP8 e4m3 has limited precision, and cumulative errors from
+        # multiple operations (RoPE + quant + attention) can add up.
+        atol_output = 1.5
+        assert torch.allclose(old_output, new_output, atol=atol_output), (
             f"Old vs New path mismatch. "
             f"Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}"
         )
 
-        # Also verify the fused kernel outputs are valid FP8
-        assert torch.isfinite(q_fused_out.float()).all(), (
-            "Fused Q output has non-finite"
-        )
-        assert torch.isfinite(k_nope_fused_out.float()).all(), (
-            "Fused K_nope has non-finite"
-        )
-        assert torch.isfinite(k_pe_fused_out.float()).all(), "Fused K_pe has non-finite"
-
-        print("✓ Old path vs New path comparison PASSED")
-        print(f"  Max diff: {max_diff:.6f}")
-        print(f"  Mean diff: {mean_diff:.6f}")
-        print(f"  Fused Q output shape: {q_fused_out.shape}")
-        print(f"  Fused K_nope output shape: {k_nope_fused_out.shape}")
-        print(f"  Fused K_pe output shape: {k_pe_fused_out.shape}")
+        print("✓ Old path vs Fused path comparison PASSED")
+        print(f"  Attention output max diff: {max_diff:.6f}")
+        print(f"  Attention output mean diff: {mean_diff:.6f}")
+        print(f"  Q_nope fused diff: {q_nope_diff:.6f}")
+        print(f"  Q_pe fused diff: {q_pe_diff:.6f}")
+        print(f"  K_nope fused diff: {k_nope_diff:.6f}")
+        print(f"  K_pe fused diff: {k_pe_diff:.6f}")
 
 
 if __name__ == "__main__":
