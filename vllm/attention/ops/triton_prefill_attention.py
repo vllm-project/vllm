@@ -52,6 +52,7 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
     Lk: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
@@ -95,12 +96,21 @@ def _fwd_kernel(
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
 
+    # Calculate the end position for attention computation
     end_n = (
         cur_batch_seq_len
         if not IS_CAUSAL
         else tl.minimum((start_m + 1) * BLOCK_M, cur_batch_seq_len)
     )
-    for start_n in range(0, block_mask * end_n, BLOCK_N):
+
+    # Calculate the start position for sliding window
+    start_n_limit = (
+        tl.maximum(0, block_start_loc - SLIDING_WINDOW + BLOCK_M)
+        if SLIDING_WINDOW > 0
+        else 0
+    )
+
+    for start_n in range(start_n_limit, block_mask * end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(
@@ -110,20 +120,38 @@ def _fwd_kernel(
         )
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        # Apply attention mask (causal + sliding window)
+        if IS_CAUSAL:
+            # Causal mask: position i can only attend to positions <= i
+            causal_mask = offs_m[:, None] >= (start_n + offs_n[None, :])
+            # SWA: position i can only attend to positions >= i - window_size
+            if SLIDING_WINDOW > 0:
+                window_mask = (
+                    offs_m[:, None] < (start_n + offs_n[None, :]) + SLIDING_WINDOW
+                )
+                mask = (
+                    (start_n + offs_n[None, :] < cur_batch_seq_len)
+                    & causal_mask
+                    & window_mask
+                )
+            else:
+                mask = (start_n + offs_n[None, :] < cur_batch_seq_len) & causal_mask
+
+            qk += tl.where(mask, 0, float("-inf"))
+        else:
+            # Non-causal case with optional sliding window
+            if SLIDING_WINDOW > 0:
+                window_mask = (offs_m[:, None] >= (start_n + offs_n[None, :])) | (
+                    offs_m[:, None] < (start_n + offs_n[None, :]) - SLIDING_WINDOW
+                )
+                mask = (start_n + offs_n[None, :] < cur_batch_seq_len) & ~window_mask
+                qk += tl.where(mask, 0, float("-inf"))
+            else:
+                qk += tl.where(
+                    (start_n + offs_n[None, :]) < cur_batch_seq_len, 0, float("-inf")
+                )
         qk += tl.dot(q, k)
         qk *= sm_scale
-
-        if IS_CAUSAL:
-            qk += tl.where(
-                (start_n + offs_n[None, :] < cur_batch_seq_len)
-                & (offs_m[:, None] >= (start_n + offs_n[None, :])),
-                0,
-                float("-inf"),
-            )
-        else:
-            qk += tl.where(
-                (start_n + offs_n[None, :]) < cur_batch_seq_len, 0, float("-inf")
-            )
 
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
@@ -166,7 +194,15 @@ def _fwd_kernel(
 
 
 def context_attention_fwd(
-    q, k, v, o, b_start_loc, b_seq_len, max_input_len, is_causal=True
+    q,
+    k,
+    v,
+    o,
+    b_start_loc,
+    b_seq_len,
+    max_input_len,
+    is_causal=True,
+    sliding_window=None,
 ):
     """
     q, k, v: [b * s, head, head_dim]
@@ -174,7 +210,6 @@ def context_attention_fwd(
     b_seq_len: [b]
     out: [b * s, head, head_dim]
     """
-    # if (_is_cuda or _is_hip) and CUDA_CAPABILITY[0] > 8:
     if (
         current_platform.is_cuda_alike()
     ) and current_platform.get_device_capability().major > 8:
@@ -190,6 +225,9 @@ def context_attention_fwd(
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
+
+    # Set sliding window size (0 means no sliding window)
+    sliding_window_size = sliding_window if sliding_window is not None else 0
 
     _fwd_kernel[grid](
         q,
@@ -212,6 +250,7 @@ def context_attention_fwd(
         BLOCK_DMODEL=triton.next_power_of_2(Lk),
         BLOCK_N=BLOCK,
         IS_CAUSAL=is_causal,
+        SLIDING_WINDOW=sliding_window_size,
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
