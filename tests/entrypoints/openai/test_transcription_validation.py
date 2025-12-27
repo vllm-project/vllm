@@ -110,3 +110,114 @@ async def test_basic_audio_gemma(foscolo, rocm_aiter_fa_attention):
         )
         out = json.loads(transcription)["text"]
         assert "da cui vergine nacque Venere" in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
+async def test_transcription_with_logprobs(mary_had_lamb, model_name):
+    """Test that logprobs are returned when requested (vLLM extension)."""
+    server_args = ["--enforce-eager"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+
+        # Test with logprobs=5 - should return top-5 alternatives
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="json",
+            temperature=0.0,
+            extra_body={"logprobs": 5},
+        )
+        out = json.loads(transcription)
+        assert "text" in out
+        assert "Mary had a little lamb" in out["text"]
+
+        # Verify logprobs structure
+        assert "logprobs" in out
+        assert out["logprobs"] is not None
+        logprobs = out["logprobs"]
+
+        assert "tokens" in logprobs
+        assert "token_logprobs" in logprobs
+        assert "top_logprobs" in logprobs
+
+        # Verify we have tokens and logprobs
+        assert len(logprobs["tokens"]) > 0
+        assert len(logprobs["token_logprobs"]) == len(logprobs["tokens"])
+        assert len(logprobs["top_logprobs"]) == len(logprobs["tokens"])
+
+        # Verify top_logprobs has at most 6 alternatives (5 + 1 for the chosen token)
+        for top_lp in logprobs["top_logprobs"]:
+            if top_lp is not None:
+                assert len(top_lp) <= 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
+async def test_transcription_without_logprobs(mary_had_lamb, model_name):
+    """Test that logprobs are not returned when not requested."""
+    server_args = ["--enforce-eager"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+
+        # Test without logprobs - should return null
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="json",
+            temperature=0.0,
+        )
+        out = json.loads(transcription)
+        assert "text" in out
+        assert "Mary had a little lamb" in out["text"]
+
+        # logprobs should be null or not present
+        assert out.get("logprobs") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
+async def test_transcription_verbose_json_with_logprobs(mary_had_lamb, model_name):
+    """Test that logprobs work with verbose_json response format."""
+    server_args = ["--enforce-eager"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="verbose_json",
+            temperature=0.0,
+            extra_body={"logprobs": 3},
+        )
+        out = json.loads(transcription)
+
+        # Verify verbose_json fields
+        assert "text" in out
+        assert "language" in out
+        assert "duration" in out
+
+        # Verify logprobs in verbose_json format
+        assert "logprobs" in out
+        assert out["logprobs"] is not None
+        logprobs = out["logprobs"]
+
+        assert "tokens" in logprobs
+        assert "token_logprobs" in logprobs
+        assert "top_logprobs" in logprobs
+        assert len(logprobs["tokens"]) > 0
