@@ -91,23 +91,45 @@ def triton_kernel_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    output = torch.empty_like(hidden_states)
+    if (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a16
+        and quant_config.ocp_mx_scheme == "w_mxfp4"
+    ):
+        output = torch.empty_like(hidden_states)
 
-    return triton_kernel_fused_experts(
-        output,
-        hidden_states,
-        w1,
-        w2,
-        routing_data,
-        gather_idx,
-        scatter_idx,
-        topk=topk,
-        activation=activation,
-        quant_config=quant_config,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-    )
+        return triton_kernel_fused_experts(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            routing_data,
+            gather_idx,
+            scatter_idx,
+            topk=topk,
+            activation=activation,
+            quant_config=quant_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+        )
+
+    elif (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a8
+        and quant_config.ocp_mx_scheme is not None
+        and quant_config.ocp_mx_scheme.startswith("w_mxfp4")
+    ):
+        raise NotImplementedError(
+            "Native kernel for weight in ocp_mx_scheme (MXFP4) and activation in FP8 "
+            "is currently not provided or integrated. Please open an issue."
+        )
+
+    else:
+        raise NotImplementedError(
+            f"The quant_config={quant_config} for fused experts with triton kernel "
+            "is currently not provided or integrated. Please open an issue."
+        )
 
 
 # This is a triton implementation of the fused_experts function
@@ -170,13 +192,39 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
+    from triton_kernels.matmul_ogs import PrecisionConfig
+
+    if isinstance(quant_config._w1.scale, torch.nn.Parameter):
+        w1_scale = quant_config._w1.scale.detach()
+        w1_scale = w1_scale.to(dtype=torch.float32, device=w1_scale.device).contiguous()
+        w1_precision = PrecisionConfig(weight_scale=w1_scale)
+    elif isinstance(quant_config._w1.scale, PrecisionConfig):
+        w1_precision = quant_config.w1_precision
+    else:
+        raise TypeError(
+            "quant_config._w1.scale is expected to be in type of "
+            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
+        )
+
+    if isinstance(quant_config._w2.scale, torch.nn.Parameter):
+        w2_scale = quant_config._w2.scale.detach()
+        w2_scale = w1_scale.to(dtype=torch.float32, device=w2_scale.device).contiguous()
+        w2_precision = PrecisionConfig(weight_scale=w2_scale)
+    elif isinstance(quant_config._w2.scale, PrecisionConfig):
+        w2_precision = quant_config.w2_precision
+    else:
+        raise TypeError(
+            "quant_config._w2.scale is expected to be in type of "
+            "either 'torch.nn.Parameter' or 'PrecisionConfig'."
+        )
+
     matmul_ogs(
         hidden_states,
         w1,
         quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
-        precision_config=quant_config.w1_precision,
+        precision_config=w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
         y=intermediate_cache,
@@ -188,7 +236,7 @@ def triton_kernel_fused_experts(
         quant_config.w2_bias,
         routing_data,
         scatter_indx=scatter_indx,
-        precision_config=quant_config.w2_precision,
+        precision_config=w2_precision,
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
