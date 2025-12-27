@@ -160,7 +160,10 @@ class HadamardTransform(torch.nn.Module):
             elif args.location == TransformLocation.OUTPUT:
                 return input_size
 
-        raise ValueError()
+        raise ValueError(
+            f"Unsupported layer type {type(layer).__name__} for transform. "
+            f"Expected LinearBase or VocabParallelEmbedding."
+        )
 
     def _validate_input_transforms(self):
         assert len(self.transforms) > 0
@@ -170,4 +173,8 @@ class HadamardTransform(torch.nn.Module):
             first_data = self.weight.partitions[0].data
             for partition in self.weight.partitions.values():
                 if partition.data.data_ptr() != first_data.data_ptr():
-                    raise ValueError("")
+                    raise ValueError(
+                        "Input transforms require all weight partitions to "
+                        "share the same underlying data pointer, but found "
+                        "partitions with different data pointers."
+                    )

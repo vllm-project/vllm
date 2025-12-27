@@ -1135,7 +1135,15 @@ class AudioEmbedding(nn.Module):
             audio_dim_out = encoder_config["attention_dim"]
             n_mels = encoder_config["input_size"]
         else:
-            raise NotImplementedError("")
+            processor_name = (
+                config.audio_processor.get("name", None)
+                if isinstance(config.audio_processor, dict)
+                else config.audio_processor
+            )
+            raise NotImplementedError(
+                f"Audio processor '{processor_name}' is not supported. "
+                f"Only 'cascades' audio processor is currently implemented."
+            )
 
         assert audio_dim_out is not None, "Remember to set values for audio_dim_out"
         self.audio_dim_out = audio_dim_out
