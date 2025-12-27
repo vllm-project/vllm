@@ -379,13 +379,15 @@ class CompressedTensors24(CompressedTensorsScheme):
             ]
             decompressed = combine_shards(decompressed_shards)
         else:
+            # Use the shape loaded from the model checkpoint rather than
+            # computing from layer attributes, as some layer types (e.g.,
+            # RowParallelLinear in vision models) may not have logical_widths
+            # or input_size_per_partition properly initialized.
+            out_dim, in_dim = layer.shape.data.view(-1).tolist()
             decompressed = sparsity_compressor.decompress_weight(
                 dict(
                     compressed=compressed,
-                    shape=(
-                        layer.logical_widths[0],
-                        layer.input_size_per_partition,
-                    ),
+                    shape=(out_dim, in_dim),
                     bitmask=bitmask,
                 )
             )
