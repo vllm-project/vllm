@@ -45,6 +45,10 @@ from vllm.v1.spec_decode.utils import (
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
 )
+from vllm.v1.worker.gpu.spec_decode.spec_tree_manager import (
+    SpecTreeManager,
+    create_spec_tree_manager_from_choices,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -52,6 +56,80 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
+
+
+def sample_draft_tokens(
+    logits: torch.Tensor,
+    sampling_metadata: "SamplingMetadata | None" = None,
+    num_samples: int = 1,
+    return_probs: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Sample draft tokens with temperature support.
+
+    When sampling_metadata is provided and temperature > 0, applies temperature
+    scaling before sampling. Otherwise falls back to argmax (greedy).
+
+    Args:
+        logits: [batch_size, vocab_size] logits from draft model
+        sampling_metadata: Optional sampling params with temperature
+        num_samples: Number of tokens to sample per position (for tree decoding)
+        return_probs: If True, also return probability distribution for rejection sampling
+
+    Returns:
+        If return_probs=False: Token IDs [batch_size] or [batch_size, num_samples]
+        If return_probs=True: (token_ids, probs) where probs is [batch_size, vocab_size]
+    """
+    # Fast path: no metadata or all greedy
+    if sampling_metadata is None or sampling_metadata.all_greedy:
+        if num_samples == 1:
+            tokens = logits.argmax(dim=-1)
+        else:
+            tokens = torch.topk(logits, num_samples, dim=-1).indices
+
+        if return_probs:
+            # For greedy, we set draft_prob=1 (handled by rejection sampler)
+            return tokens, None
+        return tokens
+
+    assert sampling_metadata.temperature is not None
+    temperature = sampling_metadata.temperature
+
+    # Handle mixed greedy/random requests
+    if not sampling_metadata.all_random:
+        is_greedy = temperature < _SAMPLING_EPS
+        # Avoid division by zero for greedy requests
+        temperature = torch.where(is_greedy, torch.ones_like(temperature), temperature)
+    else:
+        is_greedy = None
+
+    # Apply temperature scaling
+    logits_scaled = logits / temperature.unsqueeze(-1)
+    probs = logits_scaled.softmax(dim=-1, dtype=torch.float32)
+
+    if num_samples == 1:
+        # Gumbel-max trick for efficient sampling
+        u = torch.empty_like(probs).uniform_(1e-10, 1.0)
+        gumbel = -torch.log(-torch.log(u))
+        draft_tokens = (probs.log() + gumbel).argmax(dim=-1)
+
+        # Override with argmax for greedy requests
+        if is_greedy is not None:
+            greedy_tokens = logits.argmax(dim=-1)
+            draft_tokens = torch.where(is_greedy, greedy_tokens, draft_tokens)
+    else:
+        # For multi-sample (tree decoding), sample without replacement
+        draft_tokens = torch.multinomial(probs, num_samples, replacement=False)
+
+        # Override with topk for greedy requests
+        if is_greedy is not None:
+            greedy_tokens = torch.topk(logits, num_samples, dim=-1).indices
+            # Expand is_greedy for broadcasting
+            is_greedy_expanded = is_greedy.unsqueeze(-1).expand_as(draft_tokens)
+            draft_tokens = torch.where(is_greedy_expanded, greedy_tokens, draft_tokens)
+
+    if return_probs:
+        return draft_tokens, probs
+    return draft_tokens
 
 
 class EagleProposer:
@@ -210,6 +288,20 @@ class EagleProposer:
             device=device,
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
+
+        # Initialize SpecTreeManager for tree-aware attention masks.
+        # This provides consistent tree attention bias for TreeAttentionBackend
+        # and enables future integration with TreeDraftingLoopWrapper.
+        self.spec_tree_manager = create_spec_tree_manager_from_choices(
+            eagle_choices=self.tree_choices,
+            max_num_requests=max_batch_size,
+            device=str(device),
+        )
+        logger.info(
+            "Initialized SpecTreeManager: max_draft_len=%d, max_total_draft_tokens=%d",
+            self.spec_tree_manager.max_draft_len,
+            self.spec_tree_manager.max_total_draft_tokens,
+        )
 
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
@@ -1196,9 +1288,11 @@ class EagleProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                if cudagraphs_enabled
-                else CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=(
+                    CUDAGraphMode.PIECEWISE
+                    if cudagraphs_enabled
+                    else CUDAGraphMode.NONE
+                ),
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1234,9 +1328,9 @@ class EagleProposer:
             if builder is not None:
                 break
 
-        assert builder is not None, (
-            "Failed to find attention metadata builder for EAGLE layers."
-        )
+        assert (
+            builder is not None
+        ), "Failed to find attention metadata builder for EAGLE layers."
         return builder
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:

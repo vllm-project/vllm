@@ -1056,9 +1056,9 @@ class GPUModelRunner(
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         assert supports_mrope(model), "M-RoPE support is not implemented."
-        assert req_state.prompt_token_ids is not None, (
-            "M-RoPE requires prompt_token_ids to be available."
-        )
+        assert (
+            req_state.prompt_token_ids is not None
+        ), "M-RoPE requires prompt_token_ids to be available."
         mrope_model = cast(SupportsMRoPE, model)
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
@@ -1071,9 +1071,9 @@ class GPUModelRunner(
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
+        assert (
+            req_state.prompt_token_ids is not None
+        ), "XD-RoPE requires prompt_token_ids to be available."
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
 
         req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
@@ -2448,9 +2448,11 @@ class GPUModelRunner(
 
         return IntermediateTensors(
             {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
+                k: (
+                    v[: num_tokens // tp]
+                    if k == "residual" and is_rs
+                    else v[:num_tokens]
+                )
                 for k, v in self.intermediate_tensors.items()
             }
         )
@@ -2477,9 +2479,9 @@ class GPUModelRunner(
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == len(self.input_batch.pooling_params), (
-            "Either all or none of the requests in a batch must be pooling request"
-        )
+        assert self.input_batch.num_reqs == len(
+            self.input_batch.pooling_params
+        ), "Either all or none of the requests in a batch must be pooling request"
 
         hidden_states = hidden_states[:num_scheduled_tokens]
         seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
@@ -2669,7 +2671,7 @@ class GPUModelRunner(
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            spec_decode_metadata.draft_probs,  # Pass draft probs for temp-aware rejection
             logits,
             sampling_metadata,
         )
@@ -2915,8 +2917,8 @@ class GPUModelRunner(
         )
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3441,9 +3443,9 @@ class GPUModelRunner(
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
-                ec_connector_output=ec_connector_output
-                if self.supports_mm_inputs
-                else None,
+                ec_connector_output=(
+                    ec_connector_output if self.supports_mm_inputs else None
+                ),
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
             )
@@ -3557,9 +3559,9 @@ class GPUModelRunner(
             else:
                 indices = []
                 offset = 0
-                assert spec_decode_metadata is not None, (
-                    "No spec decode metadata for medusa"
-                )
+                assert (
+                    spec_decode_metadata is not None
+                ), "No spec decode metadata for medusa"
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
                 ):
@@ -3894,9 +3896,9 @@ class GPUModelRunner(
         return None
 
     def reload_weights(self) -> None:
-        assert getattr(self, "model", None) is not None, (
-            "Cannot reload weights before model is loaded."
-        )
+        assert (
+            getattr(self, "model", None) is not None
+        ), "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.get_model(), model_config=self.model_config)
@@ -4920,12 +4922,16 @@ class GPUModelRunner(
                 attn_group.create_metadata_builders(
                     self.vllm_config,
                     self.device,
-                    kernel_block_sizes[kv_cache_group_id]
-                    if kv_cache_group_id < len(kernel_block_sizes)
-                    else None,
-                    num_metadata_builders=1
-                    if not self.parallel_config.use_ubatching
-                    else self.parallel_config.num_ubatches,
+                    (
+                        kernel_block_sizes[kv_cache_group_id]
+                        if kv_cache_group_id < len(kernel_block_sizes)
+                        else None
+                    ),
+                    num_metadata_builders=(
+                        1
+                        if not self.parallel_config.use_ubatching
+                        else self.parallel_config.num_ubatches
+                    ),
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
@@ -5248,9 +5254,9 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_raw_tensors.keys()), (
-            "Some layers are not correctly initialized"
-        )
+        assert layer_names == set(
+            kv_cache_raw_tensors.keys()
+        ), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
@@ -5582,9 +5588,9 @@ class GPUModelRunner(
                 encoder_only_attn_specs[attn_spec].append(layer_name)
                 self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
-            assert len(encoder_only_attn_specs) == 1, (
-                "Only support one encoder-only attention spec now"
-            )
+            assert (
+                len(encoder_only_attn_specs) == 1
+            ), "Only support one encoder-only attention spec now"
             spec, layer_names = encoder_only_attn_specs.popitem()
             self.kv_cache_config.kv_cache_groups.append(
                 KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
