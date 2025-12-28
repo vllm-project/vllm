@@ -112,12 +112,13 @@ def _fwd_kernel(
 
     # Calculate the start position for backward sliding window
     start_n_limit = (
-        tl.maximum(0, block_start_loc - SLIDING_WINDOW_K + BLOCK_M)
+        tl.maximum(0, block_start_loc - SLIDING_WINDOW_K - BLOCK_N + 1)
         if SLIDING_WINDOW_K > 0
         else 0
     )
+    end_n_limit = block_mask * end_n
 
-    for start_n in range(start_n_limit, block_mask * end_n, BLOCK_N):
+    for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(
