@@ -731,6 +731,38 @@ def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
         return layer_index
 
 
+def get_layer_intermediate_size(
+    config: PretrainedConfig,
+    prefix: str,
+    *,
+    attr_name: str = "layer_intermediate_sizes",
+    default_attr: str = "intermediate_size",
+) -> int:
+    layer_sizes = getattr(config, attr_name, None)
+    if layer_sizes is None:
+        return getattr(config, default_attr)
+    if not isinstance(layer_sizes, (list, tuple)):
+        raise TypeError(f"{attr_name} must be a list or tuple of integers.")
+    layer_idx = extract_layer_index(prefix)
+    if layer_idx < 0 or layer_idx >= len(layer_sizes):
+        raise ValueError(
+            f"{attr_name} length {len(layer_sizes)} does not match layer index "
+            f"{layer_idx}."
+        )
+    intermediate_size = int(layer_sizes[layer_idx])
+    if intermediate_size <= 0:
+        raise ValueError(
+            f"Invalid intermediate_size {intermediate_size} for layer {layer_idx}."
+        )
+    tp_size = get_tensor_model_parallel_world_size()
+    if intermediate_size % tp_size != 0:
+        raise ValueError(
+            f"intermediate_size {intermediate_size} for layer {layer_idx} must be "
+            f"divisible by tensor parallel size {tp_size}."
+        )
+    return intermediate_size
+
+
 def cast_overflow_tensors(
     tensors: torch.Tensor,
     offset: float = 1000,

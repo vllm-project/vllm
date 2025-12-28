@@ -65,6 +65,7 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
+    get_layer_intermediate_size,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -271,7 +272,7 @@ class Qwen2DecoderLayer(nn.Module):
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=get_layer_intermediate_size(config, prefix),
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
