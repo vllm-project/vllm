@@ -373,10 +373,10 @@ class Scheduler(SchedulerInterface):
                 self.enable_concurrent_partial_prefill_scheduling
                 and partial_prefill_slot_budget is not None
             ):
-                prefill_state = self._get_request_prefill_state(
+                running_req_prefill_state = self._get_request_prefill_state(
                     request, request.num_computed_tokens
                 )
-                if prefill_state.is_prefill:
+                if running_req_prefill_state.is_prefill:
                     num_new_tokens = min(num_new_tokens, partial_prefill_slot_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -617,7 +617,7 @@ class Scheduler(SchedulerInterface):
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
-                prefill_state = (
+                waiting_req_prefill_state = (
                     self._get_request_prefill_state(request, num_computed_tokens)
                     if self.enable_concurrent_partial_prefill_scheduling
                     else None
@@ -625,10 +625,10 @@ class Scheduler(SchedulerInterface):
                 if (
                     self.enable_concurrent_partial_prefill_scheduling
                     and partial_prefill_metadata is not None
-                    and prefill_state is not None
-                    and prefill_state.is_prefill
+                    and waiting_req_prefill_state is not None
+                    and waiting_req_prefill_state.is_prefill
                     and not partial_prefill_metadata.can_schedule(
-                        prefill_state.remaining_tokens
+                        waiting_req_prefill_state.remaining_tokens
                     )
                 ):
                     # if we enabled concurrent partial prefill scheduling, and we decide
@@ -668,8 +668,8 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, token_budget)
                     if (
                         self.enable_concurrent_partial_prefill_scheduling
-                        and prefill_state is not None
-                        and prefill_state.is_prefill
+                        and waiting_req_prefill_state is not None
+                        and waiting_req_prefill_state.is_prefill
                         and partial_prefill_slot_budget is not None
                     ):
                         num_new_tokens = min(
@@ -772,14 +772,14 @@ class Scheduler(SchedulerInterface):
                 if (
                     self.enable_concurrent_partial_prefill_scheduling
                     and partial_prefill_metadata is not None
-                    and prefill_state is not None
-                    and prefill_state.is_prefill
-                    and prefill_state.remaining_tokens > 0
+                    and waiting_req_prefill_state is not None
+                    and waiting_req_prefill_state.is_prefill
+                    and waiting_req_prefill_state.remaining_tokens > 0
                 ):
                     # update the partial prefill metadata
                     # before moving on to next waiting request
                     partial_prefill_metadata.record_new_prefill(
-                        prefill_state.remaining_tokens
+                        waiting_req_prefill_state.remaining_tokens
                     )
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
