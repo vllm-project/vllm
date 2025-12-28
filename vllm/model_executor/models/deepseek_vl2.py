@@ -370,8 +370,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.projector_config = config.projector_config
         self.text_config = config.text_config
 
-        renderer_config = vllm_config.renderer_config
-        tokenizer = cached_tokenizer_from_config(renderer_config)
+        model_config = vllm_config.model_config
+        tokenizer = cached_tokenizer_from_config(model_config)
         self.image_token_id: int = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.vision = self._init_vision_module(

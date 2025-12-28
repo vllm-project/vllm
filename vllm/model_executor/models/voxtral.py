@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
@@ -20,7 +21,7 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
 from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.config import RendererConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -51,7 +52,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import MistralTokenizer, cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix
@@ -115,10 +117,7 @@ class VoxtralProcessorAdapter:
         self,
         audio_length: int,
     ) -> int:
-        pad_audio_length = self._audio_processor.next_multiple_of_chunk_frames(
-            audio_length, self.sampling_rate
-        )
-        return ceil(pad_audio_length / (self.sampling_rate // self.frame_rate))
+        return ceil(audio_length / (self.sampling_rate // self.frame_rate))
 
     def __call__(
         self,
@@ -157,7 +156,14 @@ class VoxtralProcessorAdapter:
             assert audio.ndim == 1
 
             # pad if necessary
-            audio = self._audio_processor.pad(audio, self.sampling_rate)
+            # TODO(Patrick) - remove once mistral-common is bumped
+            sig = inspect.signature(self._audio_processor.pad)
+            if "is_online_streaming" in sig.parameters:
+                audio = self._audio_processor.pad(
+                    audio, self.sampling_rate, is_online_streaming=False
+                )
+            else:
+                audio = self._audio_processor.pad(audio, self.sampling_rate)
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id
@@ -176,7 +182,7 @@ class VoxtralProcessorAdapter:
 
 class VoxtralProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> MistralTokenizer:
-        tokenizer = cached_tokenizer_from_config(self.ctx.renderer_config)
+        tokenizer = cached_tokenizer_from_config(self.ctx.model_config)
         if not isinstance(tokenizer, MistralTokenizer):
             raise ValueError("This model requires `--tokenizer-mode mistral`")
 
@@ -339,7 +345,7 @@ class VoxtralForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.tokenizer = cached_tokenizer_from_config(vllm_config.renderer_config)
+        self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
         # update quant config to so that ignored module and target module names
         # match the vLLM model names
@@ -450,11 +456,9 @@ class VoxtralForConditionalGeneration(
 
     @classmethod
     def get_speech_to_text_config(
-        cls,
-        renderer_config: RendererConfig,
-        task_type: str,
+        cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
-        tokenizer = cached_tokenizer_from_config(renderer_config)
+        tokenizer = cached_tokenizer_from_config(model_config)
         audio_config = tokenizer.instruct.audio_encoder.audio_config
         max_audio_clip_s = audio_config.chunk_length_s
         sample_rate = audio_config.sampling_rate
@@ -470,17 +474,17 @@ class VoxtralForConditionalGeneration(
     def get_generation_prompt(
         cls,
         audio: np.ndarray,
-        renderer_config: RendererConfig,  # not needed here
+        model_config: ModelConfig,
         stt_config: SpeechToTextConfig,
         language: str | None,
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        tokenizer = cached_tokenizer_from_config(renderer_config)
+        tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
-            model=renderer_config.model_config.model,
+            model=model_config.model,
             audio=RawAudio.from_audio(audio),
             language=language,
         )
@@ -496,14 +500,14 @@ class VoxtralForConditionalGeneration(
         cls,
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
-        renderer_config: RendererConfig,
+        model_config: ModelConfig,
     ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
         """
-        tokenizer = cached_tokenizer_from_config(renderer_config)
+        tokenizer = cached_tokenizer_from_config(model_config)
         adapter = VoxtralProcessorAdapter(tokenizer)
         return adapter.get_num_audio_tokens(
             int(audio_duration_s * stt_config.sample_rate)
@@ -511,6 +515,7 @@ class VoxtralForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         remapping_rules = [
+            (r"mm_streams_embeddings.embedding_module\.(.*)", r"\1"),
             (r"mm_whisper_embeddings\.(.*)", r"\1"),
             (r"audio_language_projection\.(.*)", r"audio_language_adapter.\1"),
             (
@@ -536,13 +541,16 @@ class VoxtralForConditionalGeneration(
         def llm_weights_generator():
             nonlocal loaded_weights
             for name, w in weights:
-                is_encoder = (
-                    name.startswith("mm_whisper_embeddings")
-                    and not name.startswith("mm_whisper_embeddings.tok_embeddings")
-                    and not name.startswith(
-                        "mm_whisper_embeddings.audio_language_projection"
+                is_encoder = False
+                for k in [
+                    "mm_whisper_embeddings",
+                    "mm_streams_embeddings.embedding_module",
+                ]:
+                    is_encoder |= (
+                        name.startswith(k)
+                        and not name.startswith(f"{k}.tok_embeddings")
+                        and not name.startswith(f"{k}.audio_language_projection")
                     )
-                )
 
                 for pattern, repl in remapping_rules:
                     if re.fullmatch(pattern, name):
@@ -677,6 +685,7 @@ class VoxtralEncoderModel(nn.Module):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     mistral_remapping = [
+        (r"mm_streams_embeddings.embedding_module\.(.*)", r"\1"),
         (
             r"whisper_encoder\.conv_layers\.0\.(weight|bias)",
             r"whisper_encoder.conv1.\1",
@@ -685,6 +694,14 @@ class VoxtralEncoderModel(nn.Module):
             r"whisper_encoder\.conv_layers\.1\.(weight|bias)",
             r"whisper_encoder.conv2.\1",
         ),
+        (
+            r"whisper_encoder\.conv_layers\.0\.conv\.(weight|bias)",
+            r"whisper_encoder.conv1.\1",
+        ),  # noqa: E501
+        (
+            r"whisper_encoder\.conv_layers\.1\.conv\.(weight|bias)",
+            r"whisper_encoder.conv2.\1",
+        ),  # noqa: E501
         (
             r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.w([qkv])\.(weight|bias)",  # noqa: E501
             r"whisper_encoder.layers.\1.self_attn.\2_proj.\3",

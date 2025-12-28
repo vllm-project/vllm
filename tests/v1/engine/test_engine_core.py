@@ -15,7 +15,6 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -41,10 +40,16 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request() -> EngineCoreRequest:
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=PROMPT_TOKENS,
         mm_features=None,
         sampling_params=SamplingParams(),
@@ -508,7 +513,7 @@ def test_encoder_instance_zero_kv_cache(
     )
     kv_transfer_config = (
         KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -516,14 +521,13 @@ def test_encoder_instance_zero_kv_cache(
         else None
     )
     ec_transfer_config = ECTransferConfig(
-        ec_connector="ECSharedStorageConnector",
+        ec_connector="ECExampleConnector",
         ec_role=ec_role,
         ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test_encoder"},
     )
 
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         kv_transfer_config=kv_transfer_config,

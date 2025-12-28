@@ -9,7 +9,6 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
-    RendererConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -109,7 +108,7 @@ def create_scheduler(
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -122,7 +121,7 @@ def create_scheduler(
 
     ec_transfer_config = (
         ECTransferConfig(
-            ec_connector="ECSharedStorageConnector",
+            ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
@@ -133,7 +132,6 @@ def create_scheduler(
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,

@@ -7,7 +7,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch.nn as nn
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -23,7 +23,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
@@ -60,7 +60,6 @@ class LLMEngine:
     ) -> None:
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
@@ -84,15 +83,15 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.renderer_config.skip_tokenizer_init:
+        if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_config(self.renderer_config)
+            tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
-            self.renderer_config.io_processor_plugin,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
@@ -136,14 +135,6 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
-
-    @property
-    @deprecated(
-        "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.13."
-    )
-    def processor(self):
-        return self.input_processor
 
     @classmethod
     def from_vllm_config(
@@ -214,10 +205,10 @@ class LLMEngine:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
-    def abort_request(self, request_ids: list[str]) -> None:
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
+        request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
     def add_request(
@@ -239,6 +230,12 @@ class LLMEngine:
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -256,6 +253,8 @@ class LLMEngine:
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        self.input_processor.assign_request_id(request)
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -269,7 +268,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, params)
+        parent_req = ParentRequest(request)
         for idx in range(n):
             request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
@@ -358,10 +357,6 @@ class LLMEngine:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:

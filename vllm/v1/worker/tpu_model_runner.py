@@ -31,7 +31,8 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
@@ -143,7 +144,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         original_parallel_config: ParallelConfig | None = None,
     ):
         self.vllm_config = vllm_config
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -223,7 +223,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.renderer_config
+            model_config
         )
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
         assert not self.uses_mrope, "TPU does not support M-RoPE yet."
@@ -354,7 +354,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.mm_budget = (
             MultiModalBudget(
-                self.renderer_config,
+                self.model_config,
                 self.scheduler_config,
                 self.mm_registry,
             )
@@ -1284,7 +1284,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
-                self.input_batch.num_tokens[i] += 1
+                self.input_batch.num_tokens_no_spec[i] += 1
 
         else:
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
@@ -1292,7 +1292,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_sampled_token_ids = [
                 seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
-            self.input_batch.num_tokens[:num_reqs] += gen_lens
+            self.input_batch.num_tokens_no_spec[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
                 target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
                 self.input_batch.token_ids_cpu[i, target_slice] = (
@@ -1469,11 +1469,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._hidden_states_dtype = out.dtype
 
     def _set_active_loras(
-        self, prompt_lora_mapping, token_lora_mapping, lora_requests
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         torch_xla.sync(wait=False)  # Captures input updates
         super()._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests
+            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
         torch_xla.sync(wait=False)  # Captures metadata updates
 
@@ -2039,7 +2043,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            renderer_config=self.renderer_config,
+            model_config=self.model_config,
             seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,

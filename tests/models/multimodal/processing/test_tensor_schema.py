@@ -8,10 +8,11 @@ from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
+import torch
 import torch.nn as nn
 from PIL import Image
 
-from vllm.config import ModelConfig, RendererConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -31,9 +32,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.platforms import current_platform
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
 from .test_common import get_model_ids_to_test, get_text_token_prompts
@@ -135,6 +138,7 @@ def create_batched_mm_kwargs(
     )
 
 
+# TODO(Isotr0py): Don't initialize model during test
 @contextmanager
 def initialize_dummy_model(
     model_cls: type[nn.Module],
@@ -149,24 +153,30 @@ def initialize_dummy_model(
         backend="nccl",
     )
     initialize_model_parallel(tensor_model_parallel_size=1)
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
-    )
+
+    current_device = torch.get_default_device()
+    vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
         with set_default_torch_dtype(model_config.dtype):
+            torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
+            torch.set_default_device(current_device)
         yield model
 
     del model
     cleanup_dist_env_and_memory()
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
 def test_model_tensor_schema(model_id: str):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_arch = next(
         arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info
@@ -184,12 +194,19 @@ def test_model_tensor_schema(model_id: str):
     else:
         dtype = model_info.dtype
 
-    renderer_config = model_info.build_renderer_config(
+    model_config = ModelConfig(
         model_id,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
         dtype=dtype,
     )
-    model_config = renderer_config.model_config
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert supports_multimodal(model_cls)
@@ -207,7 +224,10 @@ def test_model_tensor_schema(model_id: str):
     if not any(inputs_parse_methods):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
-    ctx = InputProcessingContext.from_config(renderer_config)
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
     limit_mm_per_prompt = {

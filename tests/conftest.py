@@ -202,6 +202,27 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def workspace_init():
+    """Initialize the workspace manager for tests that need it.
+
+    This fixture initializes the workspace manager with a CUDA device
+    if available, and resets it after the test completes. Tests that
+    create a full vLLM engine should NOT use this fixture as the engine
+    will initialize the workspace manager itself.
+    """
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        init_workspace_manager(device)
+    yield
+    reset_workspace_manager()
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield
@@ -389,7 +410,7 @@ class HfRunner:
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
@@ -681,10 +702,16 @@ class HfRunner:
                 **kwargs,
             )
 
+            # Encoder-decoder models return decoder_hidden_states instead of
+            # hidden_states
+            hidden_states = (
+                getattr(output, "hidden_states", None) or output.decoder_hidden_states
+            )
+
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(output.hidden_states, num_logprobs)
+            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
@@ -741,7 +768,7 @@ class VllmRunner:
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
-        seed: int | None = 0,
+        seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,

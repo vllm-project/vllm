@@ -9,7 +9,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
 from functools import cached_property, lru_cache, partial
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
 import jinja2
 import jinja2.ext
@@ -24,6 +24,7 @@ from openai.types.chat import (
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -44,18 +45,36 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 from typing_extensions import Required, TypedDict
 
 from vllm import envs
-from vllm.config import ModelConfig, RendererConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import random_uuid
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.func_utils import supports_kw
+from vllm.utils.import_utils import LazyLoader
+
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.tokenizers.mistral import MistralTokenizer
+else:
+    torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
+
+
+class ChatTemplateResolutionError(ValueError):
+    """Raised when chat template resolution fails.
+
+    This is a subclass of ValueError for backward compatibility with
+    existing exception handlers.
+    """
+
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -260,6 +279,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -290,6 +312,9 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
 
 
 # Passed in by user
@@ -452,10 +477,9 @@ This is needed because `lru_cache` does not cache when an exception happens.
 
 def _try_get_processor_chat_template(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-    *,
-    trust_remote_code: bool,
+    model_config: ModelConfig,
 ) -> str | None:
-    cache_key = (tokenizer.name_or_path, trust_remote_code)
+    cache_key = (tokenizer.name_or_path, model_config.trust_remote_code)
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -467,7 +491,7 @@ def _try_get_processor_chat_template(
                 PreTrainedTokenizerFast,
                 ProcessorMixin,
             ),
-            trust_remote_code=trust_remote_code,
+            trust_remote_code=model_config.trust_remote_code,
         )
         if (
             isinstance(processor, ProcessorMixin)
@@ -500,10 +524,7 @@ def resolve_hf_chat_template(
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
-        chat_template = _try_get_processor_chat_template(
-            tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
-        )
+        chat_template = _try_get_processor_chat_template(tokenizer, model_config)
         if chat_template is not None:
             return chat_template
 
@@ -517,10 +538,10 @@ def resolve_hf_chat_template(
             exc_info=True,
         )
 
-    # 4th priority: Predefined fallbacks]
+    # 4th priority: Predefined fallbacks
     path = get_chat_template_fallback_path(
         model_type=model_config.hf_config.model_type,
-        tokenizer_name_or_path=tokenizer.name_or_path,
+        tokenizer_name_or_path=model_config.tokenizer,
     )
     if path is not None:
         logger.info_once(
@@ -542,14 +563,14 @@ def _resolve_chat_template_content_format(
     tools: list[dict[str, Any]] | None,
     tokenizer: TokenizerLike | None,
     *,
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         hf_chat_template = resolve_hf_chat_template(
             tokenizer,
             chat_template=chat_template,
             tools=tools,
-            model_config=renderer_config.model_config,
+            model_config=model_config,
         )
     else:
         hf_chat_template = None
@@ -599,7 +620,7 @@ def resolve_chat_template_content_format(
     given_format: ChatTemplateContentFormatOption,
     tokenizer: TokenizerLike | None,
     *,
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
     if given_format != "auto":
         return given_format
@@ -608,7 +629,7 @@ def resolve_chat_template_content_format(
         chat_template,
         tools,
         tokenizer,
-        renderer_config=renderer_config,
+        model_config=model_config,
     )
 
     _log_chat_template_content_format(
@@ -624,6 +645,44 @@ ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
+def _extract_embeds(tensors: list[torch.Tensor]):
+    if len(tensors) == 0:
+        return tensors
+
+    if len(tensors) == 1:
+        tensors[0]._is_single_item = True  # type: ignore
+        return tensors[0]  # To keep backwards compatibility for single item input
+
+    first_shape = tensors[0].shape
+    if all(t.shape == first_shape for t in tensors):
+        return torch.stack(tensors)
+
+    return tensors
+
+
+def _get_embeds_data(items_by_modality: dict[str, list[Any]], modality: str):
+    embeds_key = f"{modality}_embeds"
+    embeds = items_by_modality[embeds_key]
+
+    if len(embeds) == 0:
+        return embeds
+    if is_list_of(embeds, torch.Tensor):
+        return _extract_embeds(embeds)
+    if is_list_of(embeds, dict):
+        if not embeds:
+            return {}
+
+        first_keys = set(embeds[0].keys())
+        if any(set(item.keys()) != first_keys for item in embeds[1:]):
+            raise ValueError(
+                "All dictionaries in the list of embeddings must have the same keys."
+            )
+
+        return {k: _extract_embeds([item[k] for item in embeds]) for k in first_keys}
+
+    return embeds
+
+
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
     """
     Tracks multi-modal items in a given request and ensures that the number
@@ -631,32 +690,32 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, renderer_config: RendererConfig):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
 
-        self._renderer_config = renderer_config
+        self._model_config = model_config
 
         self._items_by_modality = defaultdict[str, list[_T | None]](list)
         self._uuids_by_modality = defaultdict[str, list[str | None]](list)
 
     @property
-    def renderer_config(self) -> RendererConfig:
-        return self._renderer_config
+    def model_config(self) -> ModelConfig:
+        return self._model_config
 
     @cached_property
     def model_cls(self) -> type[SupportsMultiModal]:
         from vllm.model_executor.model_loader import get_model_cls
 
-        model_cls = get_model_cls(self.renderer_config.model_config)
+        model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsMultiModal], model_cls)
 
     @property
     def allowed_local_media_path(self):
-        return self._renderer_config.allowed_local_media_path
+        return self._model_config.allowed_local_media_path
 
     @property
     def allowed_media_domains(self):
-        return self._renderer_config.allowed_media_domains
+        return self._model_config.allowed_media_domains
 
     @property
     def mm_registry(self):
@@ -664,7 +723,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @cached_property
     def mm_processor(self):
-        return self.mm_registry.create_processor(self.renderer_config)
+        return self.mm_registry.create_processor(self.model_config)
 
     def add(
         self,
@@ -692,11 +751,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def all_mm_uuids(self) -> MultiModalUUIDDict | None:
         if not self._items_by_modality:
             return None
-        mm_uuids = {}
+
         uuids_by_modality = dict(self._uuids_by_modality)
         if "image" in uuids_by_modality and "image_embeds" in uuids_by_modality:
             raise ValueError("Mixing raw image and embedding inputs is not allowed")
+        if "audio" in uuids_by_modality and "audio_embeds" in uuids_by_modality:
+            raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
+        mm_uuids = {}
         if "image_embeds" in uuids_by_modality:
             mm_uuids["image"] = uuids_by_modality["image_embeds"]
         if "image" in uuids_by_modality:
@@ -707,6 +769,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             mm_uuids["audio"] = uuids_by_modality["audio"]  # UUIDs of audios
         if "video" in uuids_by_modality:
             mm_uuids["video"] = uuids_by_modality["video"]  # UUIDs of videos
+
         return mm_uuids
 
     @abstractmethod
@@ -718,29 +781,25 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
     def all_mm_data(self) -> MultiModalDataDict | None:
         if not self._items_by_modality:
             return None
-        mm_inputs = {}
+
         items_by_modality = dict(self._items_by_modality)
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
             raise ValueError("Mixing raw image and embedding inputs is not allowed")
         if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
             raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
+        mm_inputs = {}
         if "image_embeds" in items_by_modality:
-            image_embeds_lst = items_by_modality["image_embeds"]
-            mm_inputs["image"] = (
-                image_embeds_lst if len(image_embeds_lst) != 1 else image_embeds_lst[0]
-            )
+            mm_inputs["image"] = _get_embeds_data(items_by_modality, "image")
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"]  # A list of images
         if "audio_embeds" in items_by_modality:
-            audio_embeds_lst = items_by_modality["audio_embeds"]
-            mm_inputs["audio"] = (
-                audio_embeds_lst if len(audio_embeds_lst) != 1 else audio_embeds_lst[0]
-            )
+            mm_inputs["audio"] = _get_embeds_data(items_by_modality, "audio")
         if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"]  # A list of audios
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
+
         return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -751,38 +810,32 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
     async def all_mm_data(self) -> MultiModalDataDict | None:
         if not self._items_by_modality:
             return None
-        mm_inputs = {}
-        items_by_modality = {}
-        for modality, items in self._items_by_modality.items():
-            coros = []
-            for item in items:
-                if item is not None:
-                    coros.append(item)
-                else:
-                    coros.append(asyncio.sleep(0))
-            items_by_modality[modality] = await asyncio.gather(*coros)
 
+        coros_by_modality = {
+            modality: [item or asyncio.sleep(0) for item in items]
+            for modality, items in self._items_by_modality.items()
+        }
+        items_by_modality: dict[str, list[object | None]] = {
+            modality: await asyncio.gather(*coros)
+            for modality, coros in coros_by_modality.items()
+        }
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
             raise ValueError("Mixing raw image and embedding inputs is not allowed")
         if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
             raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
+        mm_inputs = {}
         if "image_embeds" in items_by_modality:
-            image_embeds_lst = items_by_modality["image_embeds"]
-            mm_inputs["image"] = (
-                image_embeds_lst if len(image_embeds_lst) != 1 else image_embeds_lst[0]
-            )
+            mm_inputs["image"] = _get_embeds_data(items_by_modality, "image")
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"]  # A list of images
         if "audio_embeds" in items_by_modality:
-            audio_embeds_lst = items_by_modality["audio_embeds"]
-            mm_inputs["audio"] = (
-                audio_embeds_lst if len(audio_embeds_lst) != 1 else audio_embeds_lst[0]
-            )
+            mm_inputs["audio"] = _get_embeds_data(items_by_modality, "audio")
         if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"]  # A list of audios
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
+
         return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -855,20 +908,19 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
+        multimodal_config = self._tracker.model_config.multimodal_config
+        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
+
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self.renderer_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
 
     @property
-    def renderer_config(self) -> RendererConfig:
-        return self._tracker.renderer_config
-
-    @property
     def model_config(self) -> ModelConfig:
-        return self.renderer_config.model_config
+        return self._tracker.model_config
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image = self._connector.fetch_image(image_url) if image_url else None
@@ -968,20 +1020,18 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
+        multimodal_config = self._tracker.model_config.multimodal_config
+        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=self.renderer_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
 
     @property
-    def renderer_config(self) -> RendererConfig:
-        return self._tracker.renderer_config
-
-    @property
     def model_config(self) -> ModelConfig:
-        return self.renderer_config.model_config
+        return self._tracker.model_config
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image_coro = self._connector.fetch_image_async(image_url) if image_url else None
@@ -1585,6 +1635,8 @@ def _parse_chat_message_content(
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
 
+        if role == "developer":
+            result_msg["tools"] = message.get("tools", None)
     return result
 
 
@@ -1595,12 +1647,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # so, for messages that have tool_calls, parse the string (which we get
     # from openAI format) to dict
     for message in messages:
-        if (
-            message["role"] == "assistant"
-            and "tool_calls" in message
-            and isinstance(message["tool_calls"], list)
-        ):
-            for item in message["tool_calls"]:
+        if message["role"] == "assistant" and "tool_calls" in message:
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+
+            if len(tool_calls) == 0:
+                # Drop empty tool_calls to keep templates on the normal assistant path.
+                message.pop("tool_calls", None)
+                continue
+
+            for item in tool_calls:
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):
@@ -1611,17 +1668,15 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
-    model_config = renderer_config.model_config
-
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(renderer_config)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1644,17 +1699,15 @@ def parse_chat_messages(
 
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
     Awaitable[MultiModalDataDict | None],
     MultiModalUUIDDict | None,
 ]:
-    model_config = renderer_config.model_config
-
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(renderer_config)
+    mm_tracker = AsyncMultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1759,18 +1812,18 @@ def apply_hf_chat_template(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     *,
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=chat_template,
         tools=tools,
-        model_config=renderer_config.model_config,
+        model_config=model_config,
     )
 
     if hf_chat_template is None:
-        raise ValueError(
+        raise ChatTemplateResolutionError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
@@ -1803,7 +1856,7 @@ def apply_hf_chat_template(
 
 
 def apply_mistral_chat_template(
-    tokenizer: MistralTokenizer,
+    tokenizer: "MistralTokenizer",
     messages: list[ChatCompletionMessageParam],
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,

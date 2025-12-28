@@ -7,6 +7,7 @@ import torch
 import transformers
 from transformers import AutoConfig, PreTrainedModel
 
+from vllm.config import ModelConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.config import try_get_safetensors_metadata
@@ -49,11 +50,37 @@ def test_hf_model_weights_mapper(model_arch: str):
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    model_config = model_info.build_model_config(config_format="hf")
+    is_mistral_model = model_arch in [
+        "Mistral3ForConditionalGeneration",
+        "PixtralForConditionalGeneration",
+        "VoxtralForConditionalGeneration",
+    ]
+
+    if not is_mistral_model or model_info.tokenizer_mode == "mistral":
+        tokenizer_mode = model_info.tokenizer_mode
+    else:
+        tokenizer_mode = "hf"
+
+    model_id = model_info.default
+
+    model_config = ModelConfig(
+        model_id,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
+    )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
-    original_weights = create_repo_dummy_weights(model_config.model)
-    hf_dummy_model = create_dummy_model(model_config.model, model_arch)
+    original_weights = create_repo_dummy_weights(model_id)
+    hf_dummy_model = create_dummy_model(model_id, model_arch)
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
     mapper: WeightsMapper = model_cls.hf_to_vllm_mapper

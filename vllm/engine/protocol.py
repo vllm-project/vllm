@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
-from vllm.config import ModelConfig, RendererConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -22,7 +22,6 @@ class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
 
     vllm_config: VllmConfig
-    renderer_config: RendererConfig
     model_config: ModelConfig
     input_processor: InputProcessor
     io_processor: IOProcessor | None
@@ -72,7 +71,11 @@ class EngineClient(ABC):
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model."""
+        """Generate outputs for a request from a pooling model.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove this argument in v0.15.
+        """
         ...
 
     @abstractmethod

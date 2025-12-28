@@ -71,7 +71,6 @@ class OpenAIServingModels:
 
         self.input_processor = self.engine_client.input_processor
         self.io_processor = self.engine_client.io_processor
-        self.renderer_config = self.engine_client.renderer_config
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
 
@@ -120,7 +119,7 @@ class OpenAIServingModels:
         lora_cards = [
             ModelCard(
                 id=lora.lora_name,
-                root=lora.local_path,
+                root=lora.path,
                 parent=lora.base_model_name
                 if lora.base_model_name
                 else self.base_model_paths[0].name,

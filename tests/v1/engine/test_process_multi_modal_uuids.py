@@ -5,14 +5,8 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import (
-    CacheConfig,
-    DeviceConfig,
-    ModelConfig,
-    MultiModalConfig,
-    RendererConfig,
-    VllmConfig,
-)
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
+from vllm.multimodal import MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
@@ -51,21 +45,22 @@ def _mock_input_processor(
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
+        skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
-    )
-    model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
-
-    renderer_config = RendererConfig(
-        model_config=model_config,
         tokenizer="dummy",
-        skip_tokenizer_init=True,
     )
 
+    # Minimal multimodal_config to satisfy references in
+    # Processor.process_inputs.
+    class _MockMMConfig:
+        def __init__(self, gb: float):
+            self.mm_processor_cache_gb = gb
+
+    model_config.multimodal_config = _MockMMConfig(mm_cache_gb)  # type: ignore[attr-defined]
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=renderer_config,
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
         device_config=DeviceConfig(device="cpu"),
     )
@@ -172,7 +167,7 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
         monkeypatch, mm_cache_gb=0.0, enable_prefix_caching=False
     )
 
-    captured: dict[str, object] = {}
+    captured: dict[str, MultiModalUUIDDict] = {}
 
     def fake_preprocess(
         prompt, *, tokenization_kwargs=None, lora_request=None, mm_uuids=None
@@ -202,7 +197,16 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     )
 
     # Expect request-id-based overrides are passed through
-    assert captured["mm_uuids"] == {
-        "image": [f"{request_id}-image-0", f"{request_id}-image-1"],
-        "video": [f"{request_id}-video-0"],
-    }
+    mm_uuids = captured["mm_uuids"]
+    assert set(mm_uuids.keys()) == {"image", "video"}
+    assert len(mm_uuids["image"]) == 2
+    assert len(mm_uuids["video"]) == 1
+    assert mm_uuids["image"][0].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][0].endswith("-0")
+    assert mm_uuids["image"][1].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][1].endswith("-1")
+    assert mm_uuids["video"][0].startswith(f"{request_id}-video-") and mm_uuids[
+        "video"
+    ][0].endswith("-0")

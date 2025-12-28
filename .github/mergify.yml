@@ -35,6 +35,20 @@ pull_request_rules:
 
         For future commits, `pre-commit` will run automatically on changed files before each commit.
 
+        > [!TIP]
+        > <details>
+        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <br/>
+        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        >
+        > ```bash
+        > # For mypy (substitute "3.10" with the failing version if needed)
+        > pre-commit run --hook-stage manual mypy-3.10
+        > # For markdownlint
+        > pre-commit run --hook-stage manual markdownlint
+        > ```
+        > </details>
+
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
   conditions:
@@ -172,7 +186,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
-      - files~=^vllm/entrypoints/harmony_utils.py
+      - files~=^vllm/entrypoints/openai/parser/harmony_utils.py
       - files~=^vllm/entrypoints/tool_server.py
       - files~=^vllm/entrypoints/tool.py
       - files~=^vllm/entrypoints/context.py
@@ -220,6 +234,20 @@ pull_request_rules:
     label:
       add:
         - rocm
+
+- name: label-cpu
+  description: Automatically apply cpu label
+  conditions:
+    - label != stale
+    - files~=^(?!.*kv_offload)(?!.*cpu_offload).*\bcpu.*
+  actions:
+    label:
+      add:
+        - cpu
+    assign:
+      users:
+        - "fadara01"
+        - "aditew01"
 
 - name: label-structured-output
   description: Automatically apply structured-output label
@@ -320,6 +348,18 @@ pull_request_rules:
     label:
       add:
         - tool-calling
+
+- name: auto-rebase if approved, ready, and 40 commits behind main
+  conditions:
+    - base = main
+    - label=ready
+    - "#approved-reviews-by >= 1"
+    - "#commits-behind >= 40"
+    - -closed
+    - -draft
+    - -conflict
+  actions:
+    rebase: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:

@@ -39,7 +39,7 @@ def test_processor_override(
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass

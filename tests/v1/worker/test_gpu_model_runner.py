@@ -13,7 +13,6 @@ from vllm.config import (
     CacheConfig,
     ModelConfig,
     ParallelConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -102,7 +101,6 @@ def get_vllm_config():
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         parallel_config=parallel_config,
@@ -813,7 +811,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         parallel_config=parallel_config,
@@ -1113,3 +1110,87 @@ def test_hybrid_cache_integration(model_runner, dist_init):
     runner._update_states(scheduler_output)
     assert _is_req_scheduled(runner, req_id)
     assert _is_req_state_block_table_match(runner, req_id)
+
+
+def test_is_uniform_decode() -> None:
+    # Normal
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+    )
+    # Spec decoding
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=30,
+        num_reqs=6,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=4,
+        num_tokens=30,
+        num_reqs=6,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=30,
+        num_reqs=7,
+    )
+    # Force uniform decode
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=True,
+    )
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=True,
+    )
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+        force_uniform_decode=True,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=False,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=False,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+        force_uniform_decode=False,
+    )

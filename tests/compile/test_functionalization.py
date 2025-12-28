@@ -15,7 +15,6 @@ from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PassConfig,
-    RendererConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -129,14 +128,12 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
 
 class TestRotaryEmbedding(torch.nn.Module):
-    def __init__(self, head_dim=64, rotary_dim=None, max_position=2048, base=10000):
+    def __init__(self, head_dim=64, max_position=2048, base=10000):
         super().__init__()
         self.head_dim = head_dim
-        self.rotary_dim = rotary_dim or head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=max_position,
             rope_parameters={"rope_type": "default", "rope_theta": base},
         )
@@ -171,7 +168,6 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters={"rope_type": "default", "rope_theta": base},
         )
@@ -220,11 +216,8 @@ def test_fix_functionalization(
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
 
-    model_config = ModelConfig(dtype=dtype)
-
     vllm_config = VllmConfig(
-        model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
+        model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
             pass_config=PassConfig(

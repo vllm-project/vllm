@@ -3,7 +3,7 @@
 import pytest
 
 from vllm.assets.image import ImageAsset
-from vllm.config import ModelConfig, RendererConfig
+from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
@@ -13,9 +13,8 @@ def test_multimodal_processor(model_id):
         model=model_id,
         model_impl="transformers",
     )
-    renderer_config = RendererConfig(model_config=model_config)
 
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(renderer_config)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     image_pil = ImageAsset("cherry_blossom").pil_image
     mm_data = {"image": image_pil}

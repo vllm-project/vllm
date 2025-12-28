@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import init_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -63,7 +63,7 @@ class StructuredOutputManager:
             max_workers = max(1, min(multiprocessing.cpu_count() // 2, 8))
             self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)
 
-        if not vllm_config.renderer_config.skip_tokenizer_init:
+        if not self.vllm_config.model_config.skip_tokenizer_init:
             # The default max_workers if not specified is the number of
             # CPUs * 5, which is way too high since these tasks are CPU-bound,
             # not I/O bound. We also know we would never dominate CPU usage
@@ -71,15 +71,21 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = init_tokenizer_from_config(vllm_config.renderer_config)
-            reasoning_parser = vllm_config.structured_outputs_config.reasoning_parser
+            self.tokenizer = cached_tokenizer_from_config(
+                model_config=self.vllm_config.model_config
+            )
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
             reasoning_parser_plugin = (
-                vllm_config.structured_outputs_config.reasoning_parser_plugin
+                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
             )
             if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
                 ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
 
-            reasoning_parser = vllm_config.structured_outputs_config.reasoning_parser
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
             if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
@@ -87,7 +93,7 @@ class StructuredOutputManager:
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         self.enable_in_reasoning = (
-            vllm_config.structured_outputs_config.enable_in_reasoning
+            self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
 
     def grammar_init(self, request: Request) -> None:
@@ -333,7 +339,10 @@ class StructuredOutputManager:
             return True
 
         # Check if reasoning ends in *this* step
-        if self.reasoner.is_reasoning_end(request.all_token_ids):
+        delta_from = request.num_computed_tokens - request.num_output_placeholders
+        if self.reasoner.is_reasoning_end_streaming(
+            request.all_token_ids, request.all_token_ids[delta_from:]
+        ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass
             structured_req.reasoning_ended = True
