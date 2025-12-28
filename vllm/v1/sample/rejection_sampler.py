@@ -242,6 +242,7 @@ class RejectionSampler(nn.Module):
 
         # Get bonus logits from the bonus sampler output
         # The bonus_sampler_output was run with logprobs_mode_override to get logits
+        assert bonus_sampler_output.logprobs_tensors is not None
         bonus_logits = bonus_sampler_output.logprobs_tensors.logprobs
 
         # Create combined logits tensor
