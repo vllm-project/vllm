@@ -26,7 +26,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"Multi-Token Prediction (MTP) with "
                     f"cp_kv_cache_interleave_size > 1 is not supported by "
                     f"'{layer_impl.__class__.__name__}'. Try using a different "
-                    f"attention backend by setting VLLM_ATTENTION_BACKEND."
+                    f"attention backend by setting VLLM_ATTENTION_BACKEND=FLASH_ATTN "
+                    f"or VLLM_ATTENTION_BACKEND=FLASHINFER."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
