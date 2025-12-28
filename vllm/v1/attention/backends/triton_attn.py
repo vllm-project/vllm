@@ -553,11 +553,12 @@ class TritonAttentionImpl(AttentionImpl):
             q=query,
             k=key,
             v=value,
-            out=output,
+            o=output,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
             max_input_len=max_query_len,
             is_causal=False,  # Encoder attention is bidirectional
-            sliding_window=self.sliding_window,
+            sliding_window_q=self.sliding_window[0],
+            sliding_window_k=self.sliding_window[1],
         )
         return output
