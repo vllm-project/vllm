@@ -2126,6 +2126,10 @@ class TranscriptionRequest(OpenAIBaseModel):
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
 
+    prev_token: int | None = None
+
+    resumable: bool = False
+
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
     # --8<-- [end:transcription-sampling-params]
@@ -2223,6 +2227,8 @@ class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
     usage: TranscriptionUsageAudio
+
+    tokens: list[int] | None = None
 
 
 class TranscriptionWord(OpenAIBaseModel):

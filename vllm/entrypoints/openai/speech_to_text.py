@@ -290,6 +290,7 @@ class OpenAISpeechToText(OpenAIServing):
                 task_type=self.task_type,
                 request_prompt=request.prompt,
                 to_language=to_language,
+                prev_token=request.prev_token,
             )
             if request.response_format == "verbose_json":
                 if not isinstance(prompt, dict):
@@ -456,6 +457,7 @@ class OpenAISpeechToText(OpenAIServing):
                     sampling_params,
                     f"{request_id}_{i}",
                     lora_request=lora_request,
+                    resumable=request.resumable,
                 )
                 for i, prompt in enumerate(prompts)
             ]
@@ -477,6 +479,7 @@ class OpenAISpeechToText(OpenAIServing):
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
+            tokens = []
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
@@ -493,6 +496,7 @@ class OpenAISpeechToText(OpenAIServing):
                         text_parts.extend([seg.text for seg in segments])
                     else:
                         text_parts.append(op.outputs[0].text)
+                        tokens.extend(op.outputs[0].token_ids)
             text = "".join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
@@ -504,7 +508,7 @@ class OpenAISpeechToText(OpenAIServing):
                 }
                 if request.response_format != "verbose_json":
                     final_response = cast(
-                        T, TranscriptionResponse(text=text, usage=usage)
+                        T, TranscriptionResponse(text=text, usage=usage, tokens=tokens)
                     )
                 else:
                     final_response = cast(

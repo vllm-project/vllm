@@ -17,7 +17,7 @@ class SpeechToTextConfig:
     16kHz audio input. The input audio will be automatically resampled to this
     rate before processing."""
 
-    max_audio_clip_s: int = 30
+    max_audio_clip_s: int | None = 30
     """Maximum duration in seconds for a single audio clip without chunking.
     Audio longer than this will be split into smaller chunks if
     `allow_audio_chunking` evaluates to True, otherwise it will be rejected."""
