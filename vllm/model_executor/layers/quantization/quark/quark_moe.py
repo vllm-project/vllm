@@ -6,6 +6,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
@@ -36,7 +36,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -320,6 +319,9 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
+        # Setup modular kernel for TP case.
+        self._setup_kernel(layer)
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -332,6 +334,45 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             per_out_ch_quant=self.weight_qscheme == "per_channel",
         )
 
+    def _setup_kernel(self, layer: torch.nn.Module) -> None:
+        """Setup Modular Kernel for TP Case."""
+        from vllm.model_executor.layers.fused_moe import (
+            TritonOrDeepGemmExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            MarlinExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            MoEPrepareAndFinalizeNoEP,
+        )
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            AiterExperts,
+        )
+
+        config = self.get_fused_moe_quant_config(layer)
+        assert config is not None
+        self.moe_quant_config = config
+
+        if self.rocm_aiter_moe_enabled:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+                AiterExperts(quant_config=self.moe_quant_config),
+            )
+        elif self.use_marlin:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                MarlinExperts(quant_config=self.moe_quant_config),
+            )
+        else:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonOrDeepGemmExperts(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=False,
+                ),
+            )
+        self.use_inplace = True
+
     def apply(
         self,
         layer: FusedMoE,
@@ -343,58 +384,18 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             router_logits=router_logits,
         )
 
-        if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                rocm_aiter_fused_experts,
-            )
-
-            return rocm_aiter_fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                quant_config=self.moe_quant_config,
-                expert_map=layer.expert_map,
-            )
-        elif self.use_marlin:
-            assert layer.activation == "silu", (
-                f"{layer.activation} not supported for Marlin MoE."
-            )
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            return fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-            )
+        return self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
 
 class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
