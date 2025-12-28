@@ -143,7 +143,7 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers: bool
+    vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -970,6 +970,8 @@ class NixlConnectorWorker:
 
         start_time = time.perf_counter()
 
+        assert self.kv_topo is not None, "kv_topo is not initialized"
+
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
@@ -1006,6 +1008,7 @@ class NixlConnectorWorker:
             )
 
             # Check compatibility hash BEFORE decoding agent metadata
+            assert self.compat_hash is not None, "compat_hash is not initialized"
             if (
                 self.enforce_compat_hash
                 and handshake_payload.compatibility_hash != self.compat_hash
@@ -1177,6 +1180,8 @@ class NixlConnectorWorker:
             tensor_shape=next(iter(kv_caches.values())).shape,
         )
 
+        assert self.kv_topo is not None, "kv_topo is not initialized"
+
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
         )
@@ -1229,9 +1234,7 @@ class NixlConnectorWorker:
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = (
-                cache_or_caches
-                if self.kv_topo.split_k_and_v
-                else [cache_or_caches]
+                cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
             )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
@@ -1355,6 +1358,7 @@ class NixlConnectorWorker:
             block_size=self.block_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
+        assert self.compat_hash is not None, "compat_hash is not initialized"
         encoder = msgspec.msgpack.Encoder()
         self.xfer_handshake_metadata = NixlHandshakePayload(
             compatibility_hash=self.compat_hash,
@@ -1376,6 +1380,8 @@ class NixlConnectorWorker:
         register another local_xfer_handler using remote block len to ensure
         data copy correctness.
         """
+        assert self.kv_topo is not None, "kv_topo is not initialized"
+
         block_size_ratio = self.block_size // block_size
         blocks_data = []
         for i, base_addr in enumerate(self.seen_base_addresses):
@@ -1479,6 +1485,7 @@ class NixlConnectorWorker:
             nixl_agent_meta.agent_metadata
         )
 
+        assert self.kv_topo is not None, "kv_topo is not initialized"
         # Handle tp_size>num_kv_heads: replicate KV cache.
         replicates_kv_cache = self.kv_topo.replicates_kv_cache(engine_id)
 
@@ -1574,6 +1581,7 @@ class NixlConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self._tp_size[remote_engine_id] == remote_tp_size
+        assert self.kv_topo is not None, "kv_topo is not initialized"
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -1698,6 +1706,7 @@ class NixlConnectorWorker:
         - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
 
         """
+        assert self.kv_topo is not None, "kv_topo is not initialized"
         split_k_and_v = self.kv_topo.split_k_and_v
         inv_order = [0, 2, 1, 3]
         sample_cache = list(self.device_kv_caches.values())[0][0]
@@ -1739,13 +1748,11 @@ class NixlConnectorWorker:
             )
             return permuted_blocks
 
+        assert self.kv_topo is not None, "kv_topo is not initialized"
+
         if len(self.device_kv_caches) == 0:
             return
-        split_k_and_v = not (
-            self.use_mla
-            or self.kv_topo.use_pallas
-            or self.kv_topo.is_kv_layout_blocks_first
-        )
+
         sample_cache = list(self.device_kv_caches.values())[0][0]
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             assert block_size_ratio > 1, "Only nP < nD supported currently."
@@ -1755,7 +1762,11 @@ class NixlConnectorWorker:
                 indices = torch.tensor(block_ids, device=sample_cache.device)
 
                 for _, cache_or_caches in self.device_kv_caches.items():
-                    cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+                    cache_list = (
+                        cache_or_caches
+                        if self.kv_topo.split_k_and_v
+                        else [cache_or_caches]
+                    )
                     for cache in cache_list:
                         blocks_to_update = cache.index_select(0, indices)
                         # because kv_cache is always using original layout NHD as
@@ -1775,6 +1786,8 @@ class NixlConnectorWorker:
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+
+        assert self.kv_topo is not None, "kv_topo is not initialized"
 
         # add requests that skipped transfer to done_recving
         done_recving.update(self._failed_recv_reqs)
@@ -2007,6 +2020,8 @@ class NixlConnectorWorker:
         request_id: str,
         remote_request_id: str,
     ):
+        assert self.kv_topo is not None, "kv_topo is not initialized"
+
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
             local_block_ids = self.get_mapped_blocks(
@@ -2243,6 +2258,7 @@ class NixlConnectorWorker:
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
         """
+        assert self.kv_topo is not None, "kv_topo is not initialized"
         if self.kv_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
             block_len = self.block_len_per_layer[layer_idx] // 2

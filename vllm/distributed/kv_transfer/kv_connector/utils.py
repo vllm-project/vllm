@@ -221,6 +221,7 @@ class TpKVTopology:
             num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
         )
 
+        self._cross_layers_blocks = False
         if self.tensor_shape is not None:
             self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
             if self._cross_layers_blocks:
