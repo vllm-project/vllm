@@ -11,12 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -121,10 +115,10 @@ def apply_flashinfer_per_tensor_scale_fp8(
     assert layer.output1_scales_scalar is not None, (
         "Expected output1_scales_scalar to be initialized"
     )
-    assert layer.output1_scales_scalar is not None, (
+    assert layer.output1_scales_gate_scalar is not None, (
         "Expected output1_scales_gate_scalar to be initialized"
     )
-    assert layer.output1_scales_scalar is not None, (
+    assert layer.output2_scales_scalar is not None, (
         "Expected output2_scales_scalar to be initialized"
     )
 
@@ -195,6 +189,11 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
     moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
+    # Import here to avoid circular dependency
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+        create_flashinfer_prepare_finalize,
+    )
+
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
     # Propagate block-scale flag so prepare/finalize can skip act quantization
     # and inform the kernel to consume per-block weight scales.
@@ -210,6 +209,10 @@ def select_cutlass_fp8_gemm_impl(
     use_deepseek_fp8_block_scale: bool = False,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
+    # Import here to avoid circular dependency
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
 
     if moe is not None:
         return FlashInferExperts(
