@@ -2125,6 +2125,10 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
+
+    prev_token: int | None = None
+
+    resumable: bool = False
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2219,6 +2223,8 @@ class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
     usage: TranscriptionUsageAudio
+
+    tokens: list[int] | None = None
 
 
 class TranscriptionWord(OpenAIBaseModel):

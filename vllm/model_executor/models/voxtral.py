@@ -155,14 +155,7 @@ class VoxtralProcessorAdapter:
             assert isinstance(audio, np.ndarray)
             assert audio.ndim == 1
 
-            # pad if necessary
-            # TODO(Patrick) - remove once mistral-common is bumped
-            sig = inspect.signature(self._audio_processor.pad)
-            if "is_online_streaming" in sig.parameters:
-                audio = self._audio_processor.pad(
-                    audio, self.sampling_rate, is_online_streaming=False
-                )
-            else:
+            if False:
                 audio = self._audio_processor.pad(audio, self.sampling_rate)
 
             audio_tokens = [self.begin_audio_token_id] + [
@@ -771,7 +764,12 @@ class VoxtralEncoderModel(nn.Module):
         magnitudes = stft[..., :-1].abs() ** 2
         mel_spec = self.mel_filters.T @ magnitudes
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+
+        max = log_spec.max()
+        # max = torch.tensor(-0.35).to(audio_waveforms.device)
+        # max = torch.tensor(-5.2).to(audio_waveforms.device)
+
+        log_spec = torch.maximum(log_spec, max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

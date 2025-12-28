@@ -1456,7 +1456,9 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None and existing.streaming_queue is not None:
-            existing.streaming_queue.append(StreamingUpdate.from_request(request))
+            new_request = StreamingUpdate.from_request(request)
+            existing.streaming_queue.append(new_request)
+            self._update_request_as_session(existing)
         else:
             self.waiting.add_request(request)
             self.requests[request.request_id] = request

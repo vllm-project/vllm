@@ -15,6 +15,18 @@ from vllm.model_executor.models.voxtral import (
     VoxtralMultiModalProcessor,
     VoxtralProcessingInfo,
 )
+from typing import Literal, cast
+
+import numpy as np
+from mistral_common.protocol.instruct.chunk import RawAudio
+from mistral_common.protocol.transcription.request import (
+    StreamingMode,
+    TranscriptionRequest,
+)
+from mistral_common.tokens.tokenizers.audio import Audio
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.inputs.data import PromptType
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
@@ -242,3 +254,48 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             for e in audio_embeddings_per_sample
         ]
         return audio_embeddings_per_sample
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        sample_rate = audio_config.sampling_rate
+        return SpeechToTextConfig(
+            max_audio_clip_s=None,  # only limited by memory
+            sample_rate=sample_rate,
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    # for speech-to-text transcription
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+        prev_token: int | None,
+    ) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
+
+        req = TranscriptionRequest(
+            model=model_config.model,
+            audio=RawAudio.from_audio(audio),
+            language=language,
+            streaming=StreamingMode.ONLINE,
+        )
+
+        tokenized = tokenizer.instruct.encode_transcription(req)
+
+        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
+        prompts_dict = {"multi_modal_data": {"audio": audio}}
+
+        prompts_dict["prompt_token_ids"] = [prev_token] if prev_token else tokenized.tokens 
+        return cast(PromptType, prompts_dict)
+ 

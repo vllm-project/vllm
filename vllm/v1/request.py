@@ -191,6 +191,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            resumable=request.resumable,
         )
 
     def append_output_token_ids(
