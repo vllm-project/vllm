@@ -319,7 +319,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        # Setup modular kernel for TP case.
         self._setup_kernel(layer)
 
     def get_fused_moe_quant_config(
@@ -335,7 +334,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         )
 
     def _setup_kernel(self, layer: torch.nn.Module) -> None:
-        """Setup Modular Kernel for TP Case."""
         from vllm.model_executor.layers.fused_moe import (
             TritonOrDeepGemmExperts,
         )
@@ -518,12 +516,32 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w13_weight_scale_2[expert_id] *= max_w13_scales[expert_id]
             layer.w2_weight_scale_2[expert_id] *= layer.w2_weight_scale[expert_id]
 
+        self._setup_kernel(layer)
+
     def get_fused_moe_quant_config(self, layer):
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale_2,
             w2_scale=layer.w2_weight_scale_2,
             per_out_ch_quant=True,
         )
+
+    def _setup_kernel(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            MoEPrepareAndFinalizeNoEP,
+        )
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            AiterExperts,
+        )
+
+        config = self.get_fused_moe_quant_config(layer)
+        assert config is not None
+        self.moe_quant_config = config
+
+        self.kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            AiterExperts(quant_config=self.moe_quant_config),
+        )
+        self.use_inplace = True
 
     def apply(
         self,
@@ -536,20 +554,17 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             router_logits=router_logits,
         )
 
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            rocm_aiter_fused_experts,
-        )
-
-        return rocm_aiter_fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+        return self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
             activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            quant_config=self.moe_quant_config,
+            global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
 
 
@@ -688,33 +703,33 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
     def process_weights_after_loading(self, layer):
-        if self.emulate:
-            return
+        if not self.emulate:
+            from aiter.utility.fp4_utils import e8m0_shuffle
 
-        from aiter.utility.fp4_utils import e8m0_shuffle
+            # Pre-shuffle weight scales
+            s0, s1, _ = layer.w13_weight_scale.shape
+            w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
+            w13_weight_scale = e8m0_shuffle(w13_weight_scale)
+            layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
 
-        # Pre-shuffle weight scales
-        s0, s1, _ = layer.w13_weight_scale.shape
-        w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
-        w13_weight_scale = e8m0_shuffle(w13_weight_scale)
-        layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
+            s0, s1, _ = layer.w2_weight_scale.shape
+            w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
+            w2_weight_scale = e8m0_shuffle(w2_weight_scale)
+            layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
 
-        s0, s1, _ = layer.w2_weight_scale.shape
-        w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
-        w2_weight_scale = e8m0_shuffle(w2_weight_scale)
-        layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
+            if self.fp4_dtype is not None:
+                layer.w13_weight = torch.nn.Parameter(
+                    layer.w13_weight.view(self.fp4_dtype),
+                    requires_grad=layer.w13_weight.requires_grad,
+                )
+                layer.w2_weight = torch.nn.Parameter(
+                    layer.w2_weight.view(self.fp4_dtype),
+                    requires_grad=layer.w2_weight.requires_grad,
+                )
 
-        if self.fp4_dtype is not None:
-            layer.w13_weight = torch.nn.Parameter(
-                layer.w13_weight.view(self.fp4_dtype),
-                requires_grad=layer.w13_weight.requires_grad,
-            )
-            layer.w2_weight = torch.nn.Parameter(
-                layer.w2_weight.view(self.fp4_dtype),
-                requires_grad=layer.w2_weight.requires_grad,
-            )
+            torch.cuda.empty_cache()
 
-        torch.cuda.empty_cache()
+        self._setup_kernel(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -729,9 +744,35 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             block_shape=None,
         )
 
-    @property
-    def allow_inplace(self) -> bool:
-        return True
+    def _setup_kernel(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe import (
+            TritonOrDeepGemmExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            MoEPrepareAndFinalizeNoEP,
+        )
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            AiterExperts,
+        )
+
+        config = self.get_fused_moe_quant_config(layer)
+        assert config is not None
+        self.moe_quant_config = config
+
+        if not self.emulate:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+                AiterExperts(quant_config=self.moe_quant_config),
+            )
+        else:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonOrDeepGemmExperts(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=False,
+                ),
+            )
+        self.use_inplace = True
 
     def apply(
         self,
@@ -744,36 +785,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             router_logits=router_logits,
         )
 
-        if not self.emulate:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                rocm_aiter_fused_experts,
-            )
-
-            out = rocm_aiter_fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                quant_config=self.moe_quant_config,
-                expert_map=layer.expert_map,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            out = fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-            )
-
-        return out
+        return self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
