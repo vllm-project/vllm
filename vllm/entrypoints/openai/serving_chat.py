@@ -1822,8 +1822,8 @@ class OpenAIServingChat(OpenAIServing):
         if not remaining_call:
             return delta_message
 
-        current_args = delta_message.tool_calls[0].function.arguments
-        if remaining_call == current_args:
+        func = delta_message.tool_calls[0].function
+        if func and remaining_call == func.arguments:
             return delta_message
 
         return DeltaMessage(
