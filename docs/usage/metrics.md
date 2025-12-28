@@ -35,15 +35,15 @@ The following metrics are exposed:
 
 ## General Metrics
 
---8<-- "docs/generated/metrics/general.md"
+--8<-- "docs/generated/metrics/general.inc.md"
 
 ## Speculative Decoding Metrics
 
---8<-- "docs/generated/metrics/spec_decode.md"
+--8<-- "docs/generated/metrics/spec_decode.inc.md"
 
 ## NIXL KV Connector Metrics
 
---8<-- "docs/generated/metrics/nixl_connector.md"
+--8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
 ## Deprecation Policy
 
