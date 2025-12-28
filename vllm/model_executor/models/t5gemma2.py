@@ -14,7 +14,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import GeluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -23,16 +23,14 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .gemma2 import Gemma2Attention, Gemma2MLP, Gemma2Model
+from .gemma2 import Gemma2Attention, Gemma2MLP
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
-    extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -322,10 +320,10 @@ class T5Gemma2DecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         if encoder_hidden_states is not None:
-            hidden_states = self.encoder_attn(
-                hidden_states, encoder_hidden_states
-            )
-        hidden_states, residual = self.post_feedforward_layernorm(hidden_states, residual)
+            hidden_states = self.encoder_attn(hidden_states, encoder_hidden_states)
+        hidden_states, residual = self.post_feedforward_layernorm(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -434,11 +432,13 @@ class T5Gemma2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.config = config
-        self.encoder = T5Gemma2Encoder(vllm_config=vllm_config, prefix=f"{prefix}.encoder")
-        self.decoder = T5Gemma2Decoder(vllm_config=vllm_config, prefix=f"{prefix}.decoder")
+        self.encoder = T5Gemma2Encoder(
+            vllm_config=vllm_config, prefix=f"{prefix}.encoder"
+        )
+        self.decoder = T5Gemma2Decoder(
+            vllm_config=vllm_config, prefix=f"{prefix}.decoder"
+        )
 
     def forward(
         self,
@@ -467,8 +467,12 @@ class T5Gemma2Model(nn.Module):
         return self.encoder(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        encoder_weights = [(name, weight) for name, weight in weights if name.startswith("encoder.")]
-        decoder_weights = [(name, weight) for name, weight in weights if name.startswith("decoder.")]
+        encoder_weights = [
+            (name, weight) for name, weight in weights if name.startswith("encoder.")
+        ]
+        decoder_weights = [
+            (name, weight) for name, weight in weights if name.startswith("decoder.")
+        ]
         loaded_params = set()
         loaded_params.update(self.encoder.load_weights(encoder_weights))
         loaded_params.update(self.decoder.load_weights(decoder_weights))
@@ -491,7 +495,6 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         assert config.tie_word_embeddings

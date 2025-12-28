@@ -64,8 +64,14 @@ def run_test(
 @pytest.fixture
 def input_texts() -> list[tuple[list[str], list[str]]]:
     inputs = [
-        (["Translate English to French: Hello world"], ["Translate English to French: Hello world"]),
-        (["Summarize: The quick brown fox jumps over the lazy dog."], ["Summarize: The quick brown fox jumps over the lazy dog."]),
+        (
+            ["Translate English to French: Hello world"],
+            ["Translate English to French: Hello world"],
+        ),
+        (
+            ["Summarize: The quick brown fox jumps over the lazy dog."],
+            ["Summarize: The quick brown fox jumps over the lazy dog."],
+        ),
     ]
     return inputs
 
