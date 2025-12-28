@@ -953,42 +953,29 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
+        # When explicitly set to 0 or False, honor the caller and skip truncation
         disable_truncation = (
             truncate_prompt_tokens == 0 or truncate_prompt_tokens is False
         )
-        default_truncation = truncate_prompt_tokens is None
-        default_max_length = self.max_model_len + 1
 
-        # Protective truncation on the default path prevents runaway tokenization
-        # for extremely large prompts.
+        truncation = not disable_truncation
         if disable_truncation:
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=False,
-            )
-        elif default_truncation:
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=default_max_length,
-            )
+            max_length = None
+        elif truncate_prompt_tokens is None:
+            # Default path applies a safety cap to avoid runaway tokenization on huge
+            # prompts; use max_model_len+1 so the tokenizer trims past the model window.
+            max_length = self.max_model_len + 1
         elif truncate_prompt_tokens < 0:
-            # Negative means we cap at the model's max length
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=self.max_model_len,
-            )
+            max_length = self.max_model_len
         else:
-            encoded = await async_tokenizer(
-                prompt,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=truncate_prompt_tokens,
-            )
+            max_length = truncate_prompt_tokens
+
+        encoded = await async_tokenizer(
+            prompt,
+            add_special_tokens=add_special_tokens,
+            truncation=truncation,
+            max_length=max_length,
+        )
 
         input_ids = encoded.input_ids
         input_text = prompt
