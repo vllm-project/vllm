@@ -774,8 +774,9 @@ steps:
   - csrc/
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
+  - tools/
   commands: # LMEval+Transcription WER check
-  # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
+  - bash ../tools/install_torchcodec_rocm.sh || exit 1
   - pytest -s entrypoints/openai/correctness/
 
 
@@ -1604,6 +1605,8 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
+
+##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
