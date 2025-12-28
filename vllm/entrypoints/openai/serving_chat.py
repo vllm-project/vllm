@@ -1817,19 +1817,23 @@ class OpenAIServingChat(OpenAIServing):
             Either the original delta (if no remaining args) or a new delta
             with the remaining arguments.
         """
-        # Only create a new delta when there are remaining arguments to send.
-        # Otherwise, preserve the original delta to keep name/id/type.
-        # Fix for issue #31443
-        if remaining_call:
-            delta_message = DeltaMessage(
-                tool_calls=[
-                    DeltaToolCall(
-                        index=index,
-                        function=DeltaFunctionCall(arguments=remaining_call),
-                    )
-                ]
-            )
-        return delta_message
+        # Preserve original delta if no remaining args or if remaining_call
+        # equals current args (e.g. GLM parser emits complete tool calls)
+        if not remaining_call:
+            return delta_message
+
+        current_args = delta_message.tool_calls[0].function.arguments
+        if remaining_call == current_args:
+            return delta_message
+
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    function=DeltaFunctionCall(arguments=remaining_call),
+                )
+            ]
+        )
 
     def _make_request_with_harmony(
         self,

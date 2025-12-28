@@ -1512,17 +1512,10 @@ async def test_tool_choice_validation_without_parser():
 
 
 class TestMaybeCreateRemainingArgsDelta:
-    """
-    Tests for _maybe_create_remaining_args_delta method.
-
-    For issue #31443: Tool function name lost in streaming
-    delta messages.
-    """
+    """Tests for _maybe_create_remaining_args_delta method (issue #31443)."""
 
     def test_preserves_delta_when_remaining_call_empty(self):
-        """
-        Test that when remaining_call is empty, the original delta is preserved.
-        """
+        """When remaining_call is empty, preserve original delta."""
         original_delta = DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -1537,29 +1530,17 @@ class TestMaybeCreateRemainingArgsDelta:
             ]
         )
 
-        remaining_call = ""
-
         result = OpenAIServingChat._maybe_create_remaining_args_delta(
-            original_delta, remaining_call, index=0
+            original_delta, remaining_call="", index=0
         )
 
-        assert result.tool_calls[0].function.name == "get_weather", (
-            "Function name should be preserved when remaining_call is empty"
-        )
-        assert result.tool_calls[0].id == "call_123", (
-            "Tool call ID should be preserved when remaining_call is empty"
-        )
-        assert result.tool_calls[0].type == "function", (
-            "Tool call type should be preserved when remaining_call is empty"
-        )
-        assert result.tool_calls[0].function.arguments == '{"location": "Beijing"}', (
-            "Arguments should be preserved when remaining_call is empty"
-        )
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.tool_calls[0].id == "call_123"
+        assert result.tool_calls[0].type == "function"
+        assert result.tool_calls[0].function.arguments == '{"location": "Beijing"}'
 
     def test_overwrites_delta_when_remaining_call_not_empty(self):
-        """
-        Test that when remaining_call is NOT empty, a new delta is created.
-        """
+        """When remaining_call has new content, create new delta."""
         original_delta = DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -1574,21 +1555,19 @@ class TestMaybeCreateRemainingArgsDelta:
             ]
         )
 
-        remaining_call = '"Beijing"}'
-
         result = OpenAIServingChat._maybe_create_remaining_args_delta(
-            original_delta, remaining_call, index=0
+            original_delta, remaining_call='"Beijing"}', index=0
         )
 
         assert result.tool_calls[0].function.arguments == '"Beijing"}'
         assert result.tool_calls[0].function.name is None
 
-    def test_glm_parser_scenario(self):
+    def test_preserves_delta_when_remaining_equals_current_args(self):
         """
-        Simulate the GLM parser scenario from issue #31443.
+        When remaining_call equals current args, preserve original delta.
 
-        GLM parser only emits tool calls when detecting </tool_call>,
-        so remaining_call is typically empty and delta should be preserved.
+        This happens with GLM parser: actual_call becomes empty due to
+        truncation, so remaining_call = expected_call (full arguments).
         """
         import json
 
@@ -1608,11 +1587,8 @@ class TestMaybeCreateRemainingArgsDelta:
             ]
         )
 
-        expected_call = tool_arguments
-        actual_call = tool_arguments
-        remaining_call = expected_call.replace(actual_call, "", 1)
-
-        assert remaining_call == ""
+        # Simulate: actual_call = "" after truncation, so remaining = full args
+        remaining_call = tool_arguments
 
         result = OpenAIServingChat._maybe_create_remaining_args_delta(
             glm_delta, remaining_call, index=0
