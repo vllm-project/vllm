@@ -15,6 +15,9 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -1506,3 +1509,115 @@ async def test_tool_choice_validation_without_parser():
     assert isinstance(response_named, ErrorResponse)
     assert "tool_choice" in response_named.error.message
     assert "--tool-call-parser" in response_named.error.message
+
+
+class TestMaybeCreateRemainingArgsDelta:
+    """
+    Tests for _maybe_create_remaining_args_delta method.
+
+    For issue #31443: Tool function name lost in streaming
+    delta messages.
+    """
+
+    def test_preserves_delta_when_remaining_call_empty(self):
+        """
+        Test that when remaining_call is empty, the original delta is preserved.
+        """
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_123",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="get_weather",
+                        arguments='{"location": "Beijing"}',
+                    ),
+                )
+            ]
+        )
+
+        remaining_call = ""
+
+        result = OpenAIServingChat._maybe_create_remaining_args_delta(
+            original_delta, remaining_call, index=0
+        )
+
+        assert result.tool_calls[0].function.name == "get_weather", (
+            "Function name should be preserved when remaining_call is empty"
+        )
+        assert result.tool_calls[0].id == "call_123", (
+            "Tool call ID should be preserved when remaining_call is empty"
+        )
+        assert result.tool_calls[0].type == "function", (
+            "Tool call type should be preserved when remaining_call is empty"
+        )
+        assert result.tool_calls[0].function.arguments == '{"location": "Beijing"}', (
+            "Arguments should be preserved when remaining_call is empty"
+        )
+
+    def test_overwrites_delta_when_remaining_call_not_empty(self):
+        """
+        Test that when remaining_call is NOT empty, a new delta is created.
+        """
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_123",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="get_weather",
+                        arguments='{"location": ',
+                    ),
+                )
+            ]
+        )
+
+        remaining_call = '"Beijing"}'
+
+        result = OpenAIServingChat._maybe_create_remaining_args_delta(
+            original_delta, remaining_call, index=0
+        )
+
+        assert result.tool_calls[0].function.arguments == '"Beijing"}'
+        assert result.tool_calls[0].function.name is None
+
+    def test_glm_parser_scenario(self):
+        """
+        Simulate the GLM parser scenario from issue #31443.
+
+        GLM parser only emits tool calls when detecting </tool_call>,
+        so remaining_call is typically empty and delta should be preserved.
+        """
+        import json
+
+        tool_arguments = json.dumps({"code": "print(114 * 514)"}, ensure_ascii=False)
+
+        glm_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_glm_001",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="python_executor",
+                        arguments=tool_arguments,
+                    ),
+                )
+            ]
+        )
+
+        expected_call = tool_arguments
+        actual_call = tool_arguments
+        remaining_call = expected_call.replace(actual_call, "", 1)
+
+        assert remaining_call == ""
+
+        result = OpenAIServingChat._maybe_create_remaining_args_delta(
+            glm_delta, remaining_call, index=0
+        )
+
+        assert result.tool_calls[0].function.name == "python_executor"
+        assert result.tool_calls[0].id == "call_glm_001"
+        assert result.tool_calls[0].type == "function"

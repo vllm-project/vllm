@@ -1208,15 +1208,8 @@ class OpenAIServingChat(OpenAIServing):
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=index,
-                                        function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
+                            delta_message = self._maybe_create_remaining_args_delta(
+                                delta_message, remaining_call, index
                             )
 
                         # Send the finish response for each request.n only once
@@ -1802,6 +1795,41 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
         )
+
+    @staticmethod
+    def _maybe_create_remaining_args_delta(
+        delta_message: DeltaMessage,
+        remaining_call: str,
+        index: int,
+    ) -> DeltaMessage:
+        """
+        Create a delta message for remaining tool arguments if needed.
+
+        If remaining_call is not empty, creates a new delta with just the
+        remaining arguments. Otherwise, returns the original delta unchanged.
+
+        Args:
+            delta_message: The original delta message from tool parser
+            remaining_call: The remaining arguments that haven't been streamed
+            index: The tool call index
+
+        Returns:
+            Either the original delta (if no remaining args) or a new delta
+            with the remaining arguments.
+        """
+        # Only create a new delta when there are remaining arguments to send.
+        # Otherwise, preserve the original delta to keep name/id/type.
+        # Fix for issue #31443
+        if remaining_call:
+            delta_message = DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=index,
+                        function=DeltaFunctionCall(arguments=remaining_call),
+                    )
+                ]
+            )
+        return delta_message
 
     def _make_request_with_harmony(
         self,
