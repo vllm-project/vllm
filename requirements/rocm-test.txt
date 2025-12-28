@@ -74,10 +74,6 @@ torchgeo==0.7.0
 # MTEB Benchmark Test
 mteb==2.1.2
 
-# Data processing
-xgrammar @ git+https://github.com/divakar-amd/xgrammar@3272f7c520564858056a60480d5afdf69ae79c84
-# Test async scheduling
-
 # Utilities
 num2words==0.5.14
     # via lm-eval
