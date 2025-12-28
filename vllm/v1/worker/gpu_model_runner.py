@@ -1636,7 +1636,7 @@ class GPUModelRunner(
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            
+
             maybe_pcp_full_tokens = (
                 num_tokens_padded
                 if self.pcp_world_size == 1
@@ -1701,14 +1701,14 @@ class GPUModelRunner(
             self.cp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
             cm_base.cp_local_seq_lens = self.cp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[
-                :num_reqs_padded
-            ]
+            cm_base.cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[:num_reqs_padded]
 
         if self.pcp_world_size > 1:
-            cm_base.pcp_allgather_restore_idx=self.pcp_manager.pcp_allgather_restore_idx.gpu[
+            cm_base.pcp_allgather_restore_idx = (
+                self.pcp_manager.pcp_allgather_restore_idx.gpu[
                     : num_tokens * self.pcp_world_size
                 ]
+            )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)

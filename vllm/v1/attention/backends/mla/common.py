@@ -589,6 +589,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.cp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.cp_world_size
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # TODO(yyj) Remove this once the PCP bug for decode_length > 1 is fixed.
         supports_cp_with_varlen = supports_cp_with_varlen and self.pcp_world_size == 1
 
@@ -807,9 +808,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         cp_local_seq_lens = common_attn_metadata.cp_local_seq_lens
-        cp_local_seq_lens_cpu = common_attn_metadata.cp_local_seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -1051,15 +1050,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             cp_tot_seq_lens_device = None
             if self.cp_world_size > 1:
                 cp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens_cpu = cp_local_seq_lens_cpu
                 seq_lens = cp_local_seq_lens
 
-                # After DCP distribution, the maximum number of tokens for any rank is
+                # After CP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
                 # and I is cp_kv_cache_interleave_size.
                 # This eliminates GPU->CPU sync while minimizing workspace
                 # over-allocation.
-                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                num_partitions = self.cp_world_size * self.cp_kv_cache_interleave_size
                 max_seq_len = (
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size

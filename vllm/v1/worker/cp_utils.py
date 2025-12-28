@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING, Any, cast
-import torch
+
 import numpy as np
+import torch
+
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.distributed.parallel_state import get_pcp_group
+from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
