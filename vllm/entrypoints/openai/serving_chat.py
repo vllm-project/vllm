@@ -1209,7 +1209,9 @@ class OpenAIServingChat(OpenAIServing):
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
                             # preserve id/type/name from original delta_message
-                            original_tc = delta_message.tool_calls[0]
+                            original_tc = next(
+                                (tc for tc in delta_message.tool_calls
+                                 if tc.index == index), None)
                             original_fn = original_tc.function if original_tc else None
                             delta_message = DeltaMessage(
                                 tool_calls=[
