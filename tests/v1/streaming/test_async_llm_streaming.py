@@ -46,7 +46,7 @@ async def test_generate_normal_flow(mock_async_llm):
     sampling_params = SamplingParams(max_tokens=10)
 
     # Create a mock queue with outputs
-    queue = RequestOutputCollector(output_kind=RequestOutputKind.FINAL_ONLY)
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
     output1 = RequestOutput(
         request_id=request_id,
         prompt="Tell me about Paris",
@@ -102,7 +102,7 @@ async def test_generate_multiple_streaming_requests(mock_async_llm):
     sampling_params = SamplingParams(max_tokens=10)
 
     # First streaming request (sequence_id=0)
-    queue1 = RequestOutputCollector(output_kind=RequestOutputKind.FINAL_ONLY)
+    queue1 = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
     output1 = RequestOutput(
         request_id=request_id,
         prompt=prompt1,
@@ -133,7 +133,7 @@ async def test_generate_multiple_streaming_requests(mock_async_llm):
     assert outputs1[0].finished is True
 
     # Second streaming request (sequence_id=1)
-    queue2 = RequestOutputCollector(output_kind=RequestOutputKind.FINAL_ONLY)
+    queue2 = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
     output2 = RequestOutput(
         request_id=request_id,
         prompt=prompt2,
@@ -172,7 +172,7 @@ async def test_generate_generator_exit(mock_async_llm):
     sampling_params = SamplingParams(max_tokens=10)
 
     # Create a queue with one output
-    queue = RequestOutputCollector(output_kind=RequestOutputKind.FINAL_ONLY)
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
     output1 = RequestOutput(
         request_id=request_id,
         prompt="Test prompt",
