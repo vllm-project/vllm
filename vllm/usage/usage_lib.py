@@ -32,8 +32,9 @@ _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
 _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
-# Interval between continuous usage reports (10 minutes in seconds)
-_CONTINUOUS_USAGE_REPORT_INTERVAL_S = 600
+# Default interval between continuous usage reports (10 minutes in seconds)
+# Can be overridden via VLLM_USAGE_REPORT_INTERVAL environment variable
+_DEFAULT_USAGE_REPORT_INTERVAL_S = 600
 
 _GLOBAL_RUNTIME_DATA = dict[str, str | int | bool]()
 
@@ -267,7 +268,7 @@ class UsageMessage:
         This function can also help send over performance metrics over time.
         """
         while True:
-            time.sleep(_CONTINUOUS_USAGE_REPORT_INTERVAL_S)
+            time.sleep(envs.VLLM_USAGE_REPORT_INTERVAL)
             data = {
                 "uuid": self.uuid,
                 "log_time": _get_current_timestamp_ns(),

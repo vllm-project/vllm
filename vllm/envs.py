@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
+    VLLM_USAGE_REPORT_INTERVAL: float = 600.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
@@ -637,6 +638,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     "VLLM_USAGE_SOURCE": lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
+    # Interval for continuous usage reports in seconds (default: 600 = 10 minutes)
+    "VLLM_USAGE_REPORT_INTERVAL": lambda: val
+    if (val := float(os.getenv("VLLM_USAGE_REPORT_INTERVAL", "600."))) > 0.0
+    else 600.0,
     # Logging configuration
     # If set to 0, vllm will not configure logging
     # If set to 1, vllm will configure logging using the default configuration
@@ -1679,6 +1684,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_USAGE_REPORT_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
