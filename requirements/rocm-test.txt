@@ -88,3 +88,5 @@ pqdm==0.2.0
 arctic-inference == 0.1.1
 # Required for Nemotron test
 open-clip-torch==2.32.0
+# Required for isaac Multi-Modal generation test
+perceptron==0.1.4
