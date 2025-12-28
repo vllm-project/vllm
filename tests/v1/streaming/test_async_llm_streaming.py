@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
@@ -203,3 +204,184 @@ async def test_generate_generator_exit(mock_async_llm):
 
     # Closing the generator should not raise or abort (streaming session continues)
     await gen.aclose()
+
+
+@pytest.fixture
+def mock_async_llm_streaming():
+    """Create a mock AsyncLLM for generate_streaming and generate_from_stream."""
+    llm = MagicMock(spec=AsyncLLM)
+
+    llm.vllm_config = MagicMock()
+    llm.vllm_config.cache_config.kv_sharing_fast_prefill = False
+    llm.model_config = MagicMock()
+    llm.model_config.max_model_len = 2048
+    llm.log_requests = False
+    llm.errored = False
+    llm._pause_cond = asyncio.Condition()
+    llm._paused = False
+
+    llm._run_output_handler = MagicMock()
+    llm.abort = AsyncMock()
+
+    # Bind the real methods
+    llm.generate_streaming = AsyncLLM.generate_streaming.__get__(llm, AsyncLLM)
+    llm.generate_from_stream = AsyncLLM.generate_from_stream.__get__(llm, AsyncLLM)
+
+    return llm
+
+
+def make_output(request_id: str, finished: bool) -> RequestOutput:
+    """Helper to create a RequestOutput."""
+    return RequestOutput(
+        request_id=request_id,
+        prompt="test",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[],
+        finished=finished,
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_streaming_single_input(mock_async_llm_streaming):
+    """Test generate_streaming with a single non-resumable input."""
+    request_id = "test"
+    sampling_params = SamplingParams(max_tokens=10)
+
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
+    queue.put(make_output(request_id, finished=True))
+
+    async def mock_add_request(*args, **kwargs):
+        return queue
+
+    mock_async_llm_streaming.add_request = mock_add_request
+
+    initial_input = StreamingInput(
+        prompt="Hello",
+        sampling_params=sampling_params,
+        resumable=False,
+    )
+
+    outputs = []
+    async for output in mock_async_llm_streaming.generate_streaming(
+        initial_input, request_id
+    ):
+        outputs.append(output)
+
+    assert len(outputs) == 1
+    assert outputs[0].finished is True
+
+
+@pytest.mark.asyncio
+async def test_generate_streaming_with_asend(mock_async_llm_streaming):
+    """Test generate_streaming with multiple inputs via asend()."""
+    request_id = "test"
+    sampling_params = SamplingParams(max_tokens=10)
+
+    # Track which segment we're on
+    segment = 0
+    queues = []
+
+    async def mock_add_request(*args, **kwargs):
+        nonlocal segment
+        queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
+        queues.append(queue)
+        # Each segment produces one finished output
+        queue.put(make_output(request_id, finished=True))
+        segment += 1
+        return queue
+
+    mock_async_llm_streaming.add_request = mock_add_request
+
+    # First input (resumable)
+    input1 = StreamingInput(
+        prompt="Hello", sampling_params=sampling_params, resumable=True
+    )
+
+    gen = mock_async_llm_streaming.generate_streaming(input1, request_id)
+
+    # Get first output
+    out1 = await gen.__anext__()
+    assert out1.finished is True
+
+    # Send second input via asend
+    input2 = StreamingInput(
+        prompt=" world", sampling_params=sampling_params, resumable=False
+    )
+    out2 = await gen.asend(input2)
+    assert out2.finished is True
+
+    # Generator should be done
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+
+    assert segment == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_from_stream_basic(mock_async_llm_streaming):
+    """Test generate_from_stream with an async input generator."""
+    request_id = "test"
+    sampling_params = SamplingParams(max_tokens=10)
+
+    segment = 0
+    # Use a single shared queue to simulate real behavior where
+    # streaming session outputs go to the same queue
+    shared_queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
+
+    async def mock_add_request(*args, **kwargs):
+        nonlocal segment
+        # Add output to shared queue for each segment
+        shared_queue.put(make_output(request_id, finished=True))
+        segment += 1
+        return shared_queue
+
+    mock_async_llm_streaming.add_request = mock_add_request
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(
+            prompt="Hello", sampling_params=sampling_params, resumable=True
+        )
+        yield StreamingInput(
+            prompt=" world", sampling_params=sampling_params, resumable=False
+        )
+
+    outputs = []
+    async for output in mock_async_llm_streaming.generate_from_stream(
+        input_generator(), request_id
+    ):
+        outputs.append(output)
+
+    assert len(outputs) == 2
+    assert segment == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_streaming_abort_on_early_close(mock_async_llm_streaming):
+    """Test that closing generator before session ends triggers abort."""
+    request_id = "test"
+    sampling_params = SamplingParams(max_tokens=10)
+
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
+    # Use finished=True so generator exits inner loop and waits for next input
+    queue.put(make_output(request_id, finished=True))
+
+    async def mock_add_request(*args, **kwargs):
+        return queue
+
+    mock_async_llm_streaming.add_request = mock_add_request
+
+    # Resumable input - session stays open after this segment
+    input1 = StreamingInput(
+        prompt="Hello", sampling_params=sampling_params, resumable=True
+    )
+
+    gen = mock_async_llm_streaming.generate_streaming(input1, request_id)
+    await gen.__anext__()  # Get finished output, generator now waits for next input
+
+    # Close generator while session is still open (no resumable=False sent)
+    # Use wait_for to avoid hanging if aclose() blocks
+    await asyncio.wait_for(gen.aclose(), timeout=1.0)
+
+    # Should have called abort since session wasn't closed
+    mock_async_llm_streaming.abort.assert_called_once()
