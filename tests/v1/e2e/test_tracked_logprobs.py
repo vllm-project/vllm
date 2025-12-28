@@ -1598,7 +1598,7 @@ async def run_streaming_demo():
             track_token_ids=track_ids,
             output_kind=RequestOutputKind.DELTA,
         )
-        stream_tracked: dict[int, list[float]] = {tid: [] for tid in track_ids}
+        stream_tracked_validate: dict[int, list[float]] = {tid: [] for tid in track_ids}
 
         async for output in engine.generate(
             request_id="demo-stream-validate",
@@ -1609,14 +1609,14 @@ async def run_streaming_demo():
             if tracked:
                 for tid in track_ids:
                     if tid in tracked:
-                        stream_tracked[tid].extend(tracked[tid])
+                        stream_tracked_validate[tid].extend(tracked[tid])
             if output.finished:
                 break
 
         print(f"Tracked tokens: {track_ids}")
         all_valid = True
         for tid in track_ids:
-            values = stream_tracked[tid]
+            values = stream_tracked_validate[tid]
             valid = all(
                 v <= 0 and not math.isnan(v) and not math.isinf(v) for v in values
             )
