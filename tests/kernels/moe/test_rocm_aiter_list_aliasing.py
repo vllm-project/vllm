@@ -79,8 +79,7 @@ class TestListAliasingFix:
 
         # Fixed pattern (from the PR)
         s_topk_ids_list = [
-            [fake_expertid] * (n_shared_experts + is_EP)
-            for _ in range(max_num_tokens)
+            [fake_expertid] * (n_shared_experts + is_EP) for _ in range(max_num_tokens)
         ]
 
         # Verify initial state
