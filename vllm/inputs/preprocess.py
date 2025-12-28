@@ -241,7 +241,7 @@ class InputPreprocessor:
 
         token_ids = tokenizer.encode(prompt, **tokenization_kwargs)
 
-        if default_truncation_applied and len(token_ids) >= self.model_config.max_model_len:
+        if default_truncation_applied and len(token_ids) > self.model_config.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.model_config.max_model_len} tokens. The input text is too "
