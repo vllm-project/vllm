@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -132,7 +131,25 @@ class OffloadingConnector(KVConnectorBase_V1):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = OffloadingConnectorWorker(spec)
+            self.connector_worker = OffloadingConnectorWorker(
+                spec, self.calculate_bytes_per_block(kv_cache_config, vllm_config)
+            )
+
+    def calculate_bytes_per_block(
+        self, kv_cache_config: KVCacheConfig, vllm_config: VllmConfig
+    ) -> int:
+        page_sizes = {
+            kv_cache_group.kv_cache_spec.page_size_bytes
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        }
+        assert len(page_sizes) == 1
+        page_size_bytes = page_sizes.pop()
+        kv_bytes_per_block = (
+            page_size_bytes
+            * len(kv_cache_config.kv_cache_tensors)
+            * vllm_config.parallel_config.world_size
+        )
+        return kv_bytes_per_block
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
@@ -510,7 +527,7 @@ class OffloadingConnectorScheduler:
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, spec: OffloadingSpec):
+    def __init__(self, spec: OffloadingSpec, bytes_per_block: int):
         self.spec = spec
         self.worker = OffloadingWorker()
 
@@ -526,22 +543,7 @@ class OffloadingConnectorWorker:
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
 
-        self._bytes_per_token = self.calculate_bytes_per_token()
-
-    def calculate_bytes_per_token(self) -> int:
-        model_config = self.spec.vllm_config.model_config
-        cache_config = self.spec.vllm_config.cache_config
-
-        num_kv_heads = model_config.get_num_kv_heads(
-            self.spec.vllm_config.parallel_config
-        )
-        head_size = model_config.get_head_size()
-        cache_dtype = cache_config.cache_dtype
-        model_dtype = model_config.dtype
-        dtype_size = get_dtype_size(get_kv_cache_torch_dtype(cache_dtype, model_dtype))
-
-        bytes_per_token = 2 * num_kv_heads * head_size * dtype_size
-        return bytes_per_token
+        self._bytes_per_block = bytes_per_block
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -613,11 +615,8 @@ class OffloadingConnectorWorker:
             assert success
             req_id, store = self._jobs.pop(job_id)
             num_blocks, transfer_time, transfer_type = self.worker.get_stats(job_id)
-            block_size_bytes = (
-                self.spec.gpu_block_size if store else self.spec.offloaded_block_size
-            ) * self._bytes_per_token
             self.kv_connector_stats.record_transfer(
-                num_blocks * block_size_bytes, transfer_time, transfer_type
+                num_blocks * self._bytes_per_block, transfer_time, transfer_type
             )
             if store:
                 req_jobs = self._store_jobs[req_id]
@@ -671,31 +670,24 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.total_cpu_to_gpu_bytes = 0
         self.total_gpu_to_cpu_bytes = 0
 
-        # buckets = [  # In bytes per sec
-        #     500000000000,
-        #     750000000000,
-        #     1000000000000,
-        #     5000000000000,
-        #     10000000000000,
-        #     50000000000000,
-        #     75000000000000,
-        #     100000000000000,
-        # ]
-
-        size_buckets = [
-            "0_50k",
-            "50k_100k",
-            "100k_500k",
-            "500k_1m",
-            "1m_2m",
-            "2m_3m",
-            "3m_4m",
-            "4m_5m",
-            "5m_plus",
+        buckets = [  # In bytes
+            1e6,
+            5e6,
+            10e6,
+            20e6,
+            40e6,
+            60e6,
+            80e6,
+            100e6,
+            150e6,
+            200e6,
         ]
+
+        self.size_buckets = self.create_size_buckets(buckets)
+
         self.gauge_cpu_to_gpu_throughput_by_bucket = {}
         self.gauge_gpu_to_cpu_throughput_by_bucket = {}
-        for bucket in size_buckets:
+        for bucket in self.size_buckets:
             gauge = self._gauge_cls(
                 name=f"vllm:kv_offload_cpu_to_gpu_throughput_{bucket}",
                 documentation=f"Average throughput for CPU-GPU transfers {bucket}",
@@ -717,23 +709,9 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             )
 
         self.cpu_to_gpu_bucket_stats = {
-            bucket: [0, 0] for bucket in size_buckets
+            bucket: [0, 0] for bucket in self.size_buckets
         }  # [total_bytes, total_time]
-        self.gpu_to_cpu_bucket_stats = {bucket: [0, 0] for bucket in size_buckets}
-
-        buckets = [  # In bytes
-            100000,
-            500000,
-            1000000,
-            1500000,
-            2000000,
-            2500000,
-            3000000,
-            3500000,
-            4000000,
-            4500000,
-            5000000,
-        ]
+        self.gpu_to_cpu_bucket_stats = {bucket: [0, 0] for bucket in self.size_buckets}
 
         offload_histogram_size_cpu_to_gpu = self._histogram_cls(
             name="vllm:kv_offload_size_cpu_to_gpu",
@@ -789,25 +767,43 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         )
         self.counter_num_gpu_to_cpu = self.make_per_engine(counter_num_gpu_to_cpu)
 
+    def create_size_buckets(self, buckets):
+        current_bucket = "0m"
+        size_buckets: list[str] = []
+        for bucket in buckets:
+            scale_char = "k"
+            if bucket < 1e6:
+                next_bucket_val = bucket / 1000
+            elif bucket < 1e9:
+                next_bucket_val = bucket / 1e6
+                scale_char = "m"
+            else:
+                next_bucket_val = bucket / 1e9
+                scale_char = "g"
+            next_bucket = str(next_bucket_val)
+            first, second = next_bucket.split(".")
+            next_bucket = first + scale_char
+            arg_to_append = current_bucket + "_" + next_bucket
+            size_buckets.append(arg_to_append)
+            current_bucket = next_bucket
+        size_buckets.append(current_bucket + "_plus")
+        return size_buckets
+
     def get_size_bucket(self, size_bytes):
-        if size_bytes < 50000:
-            return "0_50k"
-        if size_bytes < 100000:
-            return "0_100k"
-        elif size_bytes < 500000:
-            return "100k_500k"
-        elif size_bytes < 1000000:
-            return "500k_1m"
-        elif size_bytes < 2000000:
-            return "1m_2m"
-        elif size_bytes < 3000000:
-            return "2m_3m"
-        elif size_bytes < 4000000:
-            return "3m_4m"
-        elif size_bytes < 5000000:
-            return "4m_5m"
-        else:
-            return "5m_plus"
+        for bucket in self.size_buckets:
+            lower_str, upper_str = bucket.split("_")
+            if upper_str == "plus":
+                return bucket
+            multiplier = 1.0
+            if upper_str.endswith("k"):
+                multiplier = 1000.0
+            elif upper_str.endswith("m"):
+                multiplier = 1e6
+            elif upper_str.endswith("g"):
+                multiplier = 1e9
+            if size_bytes < float(upper_str[:-1]) * multiplier:
+                return bucket
+        return self.size_buckets[-1]
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
