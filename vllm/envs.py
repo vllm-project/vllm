@@ -10,8 +10,6 @@ import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
-from vllm.config.utils import normalize_value
-
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
@@ -1648,6 +1646,8 @@ def is_set(name: str):
 
 def compile_factors() -> dict[str, object]:
     """Collect env vars used for torch.compile cache keys."""
+    from vllm.config.utils import normalize_value
+
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
