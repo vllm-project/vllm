@@ -8,64 +8,71 @@
 
 namespace vllm {
 
-// STRIDE_0_ZERO: true if scale_stride_0 == 0 (per-tensor or per-channel)
-// STRIDE_1_ZERO: true if scale_stride_1 == 0 (per-tensor or per-token)
-template <typename scalar_t, typename fp8_type, bool STRIDE_0_ZERO,
-          bool STRIDE_1_ZERO>
+// STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
+// STRIDE_J_ZERO: true if scale_stride_j == 0 (per-tensor or per-token)
+template <typename scalar_t, typename fp8_type, bool STRIDE_I_ZERO,
+          bool STRIDE_J_ZERO>
 __global__ void scaled_fp8_quant_kernel_strided_group_shape(
     fp8_type* __restrict__ out, const scalar_t* __restrict__ input,
     const float* __restrict__ scale, int hidden_size, int64_t in_row_stride,
-    int64_t out_row_stride, int group_m, int group_n, int64_t scale_stride_0,
-    int64_t scale_stride_1) {
+    int64_t out_row_stride, int group_m, int group_n, int64_t scale_stride_i,
+    int64_t scale_stride_j) {
   const int64_t token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
   const scalar_t* token_in = input + token_idx * in_row_stride;
   fp8_type* token_out = out + token_idx * out_row_stride;
 
-  // Row group index - compile-time eliminated when STRIDE_0_ZERO
-  const int gi = STRIDE_0_ZERO ? 0 : static_cast<int>(token_idx) / group_m;
+  // Precompute row-level base offset for scale access (compile-time eliminated
+  // when STRIDE_I_ZERO)
+  const int64_t scale_row_base =
+      STRIDE_I_ZERO ? 0
+                    : static_cast<int>(token_idx) / group_m * scale_stride_i;
 
-  constexpr int VEC_SIZE = 16;
+  auto get_inv_scale = [&](int gj) {
+    return 1.0f / scale[scale_row_base + gj * scale_stride_j];
+  };
 
-  if constexpr (STRIDE_1_ZERO) {
-    // Per-tensor or per-token: single scale per row, vectorize full row
-    const float inv_scale =
-        STRIDE_0_ZERO ? 1.0f / (*scale) : 1.0f / scale[gi * scale_stride_0];
+  int cached_gj = -1;
+  float cached_inv_scale = 0.0f;
+  auto get_inv_scale_cached = [&](int gj) {
+    if (gj != cached_gj) {
+      cached_inv_scale = 1.0f / scale[scale_row_base + gj * scale_stride_j];
+      cached_gj = gj;
+    }
+    return cached_inv_scale;
+  };
 
+  constexpr int VEC_SIZE = 16;  // FP8 so vectorize to 128 bits
+  auto scaled_fp8_conversion_vectorized = [&](const scalar_t* in, fp8_type* out,
+                                              int size, float inv_scale) {
     vectorize_with_alignment<VEC_SIZE>(
-        token_in, token_out, hidden_size, tid, blockDim.x,
+        in, out, size, tid, blockDim.x,
         [=] __device__(fp8_type & dst, const scalar_t& src) {
           dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
                                                       inv_scale);
         });
-  } else if (group_n >= VEC_SIZE) {
+  };
+
+  if (STRIDE_J_ZERO && hidden_size % VEC_SIZE == 0) {
+    // Per-tensor or per-token: single scale per row, vectorize full row
+    scaled_fp8_conversion_vectorized(token_in, token_out, hidden_size,
+                                     get_inv_scale(0));
+  } else if (group_n % VEC_SIZE == 0) {
     // Multiple column groups with vectorization
     const int num_groups_n = hidden_size / group_n;
 
     for (int gj = 0; gj < num_groups_n; gj++) {
-      const float inv_scale =
-          STRIDE_0_ZERO
-              ? 1.0f / scale[gj * scale_stride_1]
-              : 1.0f / scale[gi * scale_stride_0 + gj * scale_stride_1];
-
-      vectorize_with_alignment<VEC_SIZE>(
-          token_in + gj * group_n, token_out + gj * group_n, group_n, tid,
-          blockDim.x, [=] __device__(fp8_type & dst, const scalar_t& src) {
-            dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
-                                                        inv_scale);
-          });
+      scaled_fp8_conversion_vectorized(token_in + gj * group_n,
+                                       token_out + gj * group_n, group_n,
+                                       get_inv_scale(gj));
     }
   } else {
     // Scalar path for small column groups (group_n < VEC_SIZE)
     for (int n = tid; n < hidden_size; n += blockDim.x) {
       const int gj = n / group_n;
-      const float inv_scale =
-          STRIDE_0_ZERO
-              ? 1.0f / scale[gj * scale_stride_1]
-              : 1.0f / scale[gi * scale_stride_0 + gj * scale_stride_1];
       token_out[n] = scaled_fp8_conversion<true, fp8_type>(
-          static_cast<float>(token_in[n]), inv_scale);
+          static_cast<float>(token_in[n]), get_inv_scale_cached(gj));
     }
   }
 }
@@ -191,17 +198,17 @@ void static_scaled_fp8_quant(
   const int num_tokens = input.numel() / hidden_size;  // M (rows)
 
   // Determine group_m, group_n, and scale strides from scale shape
-  // Scale indexing: scale[gi * scale_stride_1 + gj * scale_stride_0]
+  // Scale indexing: scale[gi * scale_stride_j + gj * scale_stride_i]
   // where gi = m / group_m, gj = n / group_n
   int group_m, group_n;
-  int64_t scale_stride_0, scale_stride_1;
+  int64_t scale_stride_i, scale_stride_j;
 
   if (scale.dim() == 0 || scale.numel() == 1) {
     // Per-tensor: one scale for the entire tensor
     group_m = num_tokens;
     group_n = hidden_size;
-    scale_stride_0 = 0;
-    scale_stride_1 = 0;
+    scale_stride_i = 0;
+    scale_stride_j = 0;
   } else if (scale.dim() == 1) {
     // 1D scale: require explicit group_shape to disambiguate per-channel vs
     // per-token (avoids edge case where num_tokens == hidden_size)
@@ -228,18 +235,18 @@ void static_scaled_fp8_quant(
                 hidden_size, ")");
 
     // For 1D scale, determine strides based on which dim is trivial
-    // Scale indexing: scale[gi * scale_stride_0 + gj * scale_stride_1]
+    // Scale indexing: scale[gi * scale_stride_i + gj * scale_stride_j]
     // where gi = m / group_m (row group), gj = n / group_n (col group)
     if (expected_scale_m == 1) {
       // Per-channel style: one scale in M dim, scale varies along N
       // gi = 0 always, gj varies, so stride_1 traverses the scale
-      scale_stride_0 = 0;
-      scale_stride_1 = scale.stride(0);
+      scale_stride_i = 0;
+      scale_stride_j = scale.stride(0);
     } else if (expected_scale_n == 1) {
       // Per-token style: one scale in N dim, scale varies along M
       // gj = 0 always, gi varies, so stride_0 traverses the scale
-      scale_stride_0 = scale.stride(0);
-      scale_stride_1 = 0;
+      scale_stride_i = scale.stride(0);
+      scale_stride_j = 0;
     } else {
       TORCH_CHECK(
           false,
@@ -278,8 +285,8 @@ void static_scaled_fp8_quant(
       group_n = inferred_group_n;
     }
 
-    scale_stride_0 = scale.stride(0);
-    scale_stride_1 = scale.stride(1);
+    scale_stride_i = scale.stride(0);
+    scale_stride_j = scale.stride(1);
   } else {
     TORCH_CHECK(false, "scale must be 0D, 1D, or 2D tensor, but got ",
                 scale.dim(), "D");
@@ -302,17 +309,17 @@ void static_scaled_fp8_quant(
       <<<grid, block, 0, stream>>>(                                            \
           out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),                   \
           scale.data_ptr<float>(), hidden_size, in_row_stride, out_row_stride, \
-          group_m, group_n, scale_stride_0, scale_stride_1)
+          group_m, group_n, scale_stride_i, scale_stride_j)
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
-              if (scale_stride_0 == 0 && scale_stride_1 == 0)
+              if (scale_stride_i == 0 && scale_stride_j == 0)
                 LAUNCH_KERNEL(true, true);
-              else if (scale_stride_0 == 0)
+              else if (scale_stride_i == 0)
                 LAUNCH_KERNEL(true, false);
-              else if (scale_stride_1 == 0)
+              else if (scale_stride_j == 0)
                 LAUNCH_KERNEL(false, true);
               else
                 LAUNCH_KERNEL(false, false);
