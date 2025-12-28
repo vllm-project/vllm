@@ -970,14 +970,13 @@ class NixlConnectorWorker:
 
         start_time = time.perf_counter()
 
-        assert self.kv_topo is not None, "kv_topo is not initialized"
-
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
+        assert self.kv_topo is not None, "kv_topo is not initialized"
         p_remote_rank = self.kv_topo.get_target_remote_rank(remote_tp_size)
         path = make_zmq_path("tcp", host, port)
         logger.debug(
@@ -1179,8 +1178,6 @@ class NixlConnectorWorker:
             attn_backend=self.attn_backend,
             tensor_shape=next(iter(kv_caches.values())).shape,
         )
-
-        assert self.kv_topo is not None, "kv_topo is not initialized"
 
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
