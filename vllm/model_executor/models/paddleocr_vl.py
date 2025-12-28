@@ -504,6 +504,25 @@ class SiglipVisionEmbeddings(nn.Module):
             )
 
 
+def all_gather_interleave(local_tensor: torch.Tensor, hidden_size: int, tp_size: int):
+    """All-gather the input tensor interleavely across model parallel group."""
+    import torch.distributed as dist
+
+    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
+    dist.all_gather(
+        gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group
+    )
+
+    gathered_tensors_split = [
+        torch.split(tensor, hidden_size // tp_size, -1) for tensor in gathered_tensors
+    ]
+    ordered_tensors = [
+        tensor for pair in zip(*gathered_tensors_split) for tensor in pair
+    ]
+    result_tensor = torch.cat(ordered_tensors, dim=-1)
+    return result_tensor
+
+
 class SiglipAttention(nn.Module):
     """SigLIP vision attention adapted from Qwen2.5-VisionAttention."""
 
@@ -556,8 +575,18 @@ class SiglipAttention(nn.Module):
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
+        if self.tp_size > 1:
+            qkv = all_gather_interleave(qkv, self.qkv_proj.hidden_size, self.tp_size)
 
         q, k, v = qkv.chunk(3, dim=2)
+
+        if self.tp_size > 1:
+            splitter = partial(
+                dist_utils.split_tensor_along_last_dim, num_partitions=self.tp_size
+            )
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+            v = splitter(v)[self.tp_rank]
 
         new_shape = (
             seq_len,
