@@ -100,24 +100,15 @@ def _fwd_kernel(
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
 
     # Calculate the end position for attention computation
-    if not IS_CAUSAL:
-        # For non-causal: can attend forward up to SLIDING_WINDOW_Q tokens
-        if SLIDING_WINDOW_Q > 0:
-            end_n = tl.minimum(
-                block_start_loc + BLOCK_M + SLIDING_WINDOW_Q, cur_batch_seq_len
-            )
-        else:
-            end_n = cur_batch_seq_len
-    else:
-        # For causal: limited by position and optionally by forward window
-        causal_end = (start_m + 1) * BLOCK_M
-        if SLIDING_WINDOW_Q > 0:
-            end_n = tl.minimum(
-                tl.minimum(block_start_loc + BLOCK_M + SLIDING_WINDOW_Q, causal_end),
-                cur_batch_seq_len,
-            )
-        else:
-            end_n = tl.minimum(causal_end, cur_batch_seq_len)
+    end_n = cur_batch_seq_len
+
+    # Apply causal attention pruning and sliding window attention pruning
+    end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
+    end_n = (
+        tl.minimum(end_n, block_start_loc + BLOCK_M + SLIDING_WINDOW_Q)
+        if SLIDING_WINDOW_Q > 0
+        else end_n
+    )
 
     # Calculate the start position for backward sliding window
     start_n_limit = (
@@ -142,18 +133,16 @@ def _fwd_kernel(
 
         # Valid sequence mask
         mask = pos_k < cur_batch_seq_len
-        if IS_CAUSAL:
-            # Causal mask: position i can only attend to positions <= i
-            causal_mask = pos_q >= pos_k
-            mask = mask & causal_mask
-            if SLIDING_WINDOW_Q > 0:
-                mask = mask & (pos_k <= pos_q + SLIDING_WINDOW_Q)
-        else:
-            # Non-causal case with bidirectional sliding window
-            if SLIDING_WINDOW_K > 0:
-                mask = mask & (pos_k >= pos_q - SLIDING_WINDOW_K)
-            if SLIDING_WINDOW_Q > 0:
-                mask = mask & (pos_k <= pos_q + SLIDING_WINDOW_Q)
+        # Causal mask
+        mask = mask & (pos_q >= pos_k) if IS_CAUSAL else mask
+        # Bidirectional sliding window masks
+        mask = (
+            mask & (pos_k <= pos_q + SLIDING_WINDOW_Q) if SLIDING_WINDOW_Q > 0 else mask
+        )
+        mask = (
+            mask & (pos_k >= pos_q - SLIDING_WINDOW_K) if SLIDING_WINDOW_K > 0 else mask
+        )
+
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.where(mask, 0, float("-inf"))
         qk += tl.dot(q, k)
