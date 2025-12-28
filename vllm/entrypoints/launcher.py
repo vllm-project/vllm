@@ -36,14 +36,64 @@ class MetricsEndpointFilter(logging.Filter):
     EXCLUDED_PATHS = {"/metrics", "/health"}
 
     def filter(self, record: logging.LogRecord) -> bool:
-        # Uvicorn access log format includes the path as the third argument
-        # Format: '%s - "%s %s HTTP/%s" %d' % (client, method, path, ...)
+        path = self._extract_path(record)
+        # Return False to exclude, True to include
+        return not (path and path in self.EXCLUDED_PATHS)
+
+    def _extract_path(self, record: logging.LogRecord) -> str | None:
+        """Extract the request path from a uvicorn access log record.
+
+        Handles different uvicorn versions:
+        - Tuple format with path at index 2: (client, method, path, ...)
+        - Tuple format with request_line at index 1
+        - Dictionary format with 'request_line' key
+        """
         args = record.args
-        if args and isinstance(args, tuple) and len(args) >= 3:
-            path = args[2]
-            if isinstance(path, str) and path in self.EXCLUDED_PATHS:
-                return False  # Exclude this log record
-        return True  # Include all other log records
+        if not args:
+            return None
+
+        # Handle dictionary format (newer uvicorn versions)
+        if isinstance(args, dict):
+            request_line = args.get("request_line", "")
+            if isinstance(request_line, str):
+                return self._parse_path_from_request_line(request_line)
+            return None
+
+        # Handle tuple format
+        if isinstance(args, tuple):
+            # Try path at index 2 first (common format)
+            if len(args) >= 3:
+                path = args[2]
+                if isinstance(path, str):
+                    # Check if it looks like a path (starts with /)
+                    if path.startswith("/"):
+                        return path
+                    # It might be a request line like "GET /path HTTP/1.1"
+                    return self._parse_path_from_request_line(path)
+
+            # Try request_line at index 1 (older format)
+            if len(args) >= 2:
+                request_line = args[1]
+                if isinstance(request_line, str):
+                    return self._parse_path_from_request_line(request_line)
+
+        return None
+
+    def _parse_path_from_request_line(self, request_line: str) -> str | None:
+        """Parse path from HTTP request line like 'GET /path HTTP/1.1'."""
+        if not request_line:
+            return None
+        try:
+            parts = request_line.split()
+            if len(parts) >= 2:
+                path = parts[1]
+                # Remove query string if present
+                if "?" in path:
+                    path = path.split("?")[0]
+                return path
+        except (AttributeError, IndexError):
+            pass
+        return None
 
 
 async def serve_http(
