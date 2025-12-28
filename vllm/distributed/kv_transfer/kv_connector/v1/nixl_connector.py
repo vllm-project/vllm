@@ -973,6 +973,7 @@ class NixlConnectorWorker:
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
+        # lazy initialized in register_kv_caches
         self.compat_hash: str | None = None
         self.kv_topo: TpKVTopology | None = None
 
