@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
 
 import pytest
 from transformers import AutoModel
@@ -13,7 +14,7 @@ from vllm.entrypoints.score_utils import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 
-MODELS = ["jinaai/jina-reranker-m0"]
+MODELS = ["/data/models/jina-reranker-m0"]
 
 MM_PROCESSOR_KWARGS = {
     "min_pixels": 3136,
@@ -183,7 +184,7 @@ def _run_hf(
     dtype: str,
     query_strs: list[dict[str, str]],
     document_strs: list[dict[str, str]],
-) -> list[None | float]:
+) -> list[float]:
     """Run HuggingFace reranker and return scores."""
     query = query_strs[0]
     if "text" in query:
@@ -242,7 +243,8 @@ def _run_hf(
             for i, s in zip(image_indices, image_scores):
                 scores[i] = s
 
-    return scores
+    assert all(s is not None for s in scores)
+    return cast(list[float], scores)
 
 
 def _run_test(
