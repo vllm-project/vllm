@@ -1210,8 +1210,10 @@ class OpenAIServingChat(OpenAIServing):
                             # set that as a delta message, preserving id, type,
                             # and name from the original tool call
                             original_tool_call = next(
-                                tc for tc in reversed(delta_message.tool_calls)
-                                if tc.index == index)
+                                tc
+                                for tc in reversed(delta_message.tool_calls)
+                                if tc.index == index
+                            )
                             delta_message = DeltaMessage(
                                 tool_calls=[
                                     DeltaToolCall(
@@ -1219,10 +1221,12 @@ class OpenAIServingChat(OpenAIServing):
                                         id=original_tool_call.id,
                                         type=original_tool_call.type,
                                         function=DeltaFunctionCall(
-                                            name=(original_tool_call.function.name
-                                                  if original_tool_call.function
-                                                  else None),
-                                            arguments=remaining_call
+                                            name=(
+                                                original_tool_call.function.name
+                                                if original_tool_call.function
+                                                else None
+                                            ),
+                                            arguments=remaining_call,
                                         ).model_dump(exclude_none=True),
                                     )
                                 ]
