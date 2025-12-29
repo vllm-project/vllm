@@ -80,9 +80,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
@@ -908,18 +905,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
         replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
-
-        # TODO(rob): we do this after replace_parameter() because
-        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
-        # directly. We will refactor this in a follow up PR to move
-        # it inside convert_weights_to_kernel_format.
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=get_marlin_input_dtype(prefix="")
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
