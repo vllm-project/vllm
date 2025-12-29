@@ -12,6 +12,8 @@ Please find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example
 on how the EPLB algorithm works.
 """
 
+import heapq
+
 import numpy as np
 import torch
 
@@ -58,21 +60,27 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         # Run the packing algorithm
         for i in range(num_layers):
-            pack_weights = [0.0] * num_packs
-            pack_items = [0] * num_packs
+            # Initialize heap: (current_weight, pack_id, num_items)
+            # Heap is ordered by current_weight (first element of tuple)
+            heap = [(0.0, pack_id, 0) for pack_id in range(num_packs)]
+            heapq.heapify(heap)
 
             for group in indices_np[i]:
-                # Find a pack with capacity that has the lowest weight
-                pack = min(
-                    (j for j in range(num_packs) if pack_items[j] < groups_per_pack),
-                    key=pack_weights.__getitem__,
-                )
+                # Pop the pack with minimum weight
+                current_weight, pack_id, num_items = heapq.heappop(heap)
 
-                assert pack_items[pack] < groups_per_pack
-                pack_index_np[i, group] = pack
-                rank_in_pack_np[i, group] = pack_items[pack]
-                pack_weights[pack] += weight_np[i, group]
-                pack_items[pack] += 1
+                # Assign group to this pack
+                assert num_items < groups_per_pack
+                pack_index_np[i, group] = pack_id
+                rank_in_pack_np[i, group] = num_items
+
+                # Update pack weight and item count
+                new_weight = current_weight + weight_np[i, group].item()
+                new_num_items = num_items + 1
+
+                # Push back to heap if pack is not full
+                if new_num_items < groups_per_pack:
+                    heapq.heappush(heap, (new_weight, pack_id, new_num_items))
 
         pack_index = torch.from_numpy(pack_index_np).to(device)
         rank_in_pack = torch.from_numpy(rank_in_pack_np).to(device)
