@@ -964,9 +964,38 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
+            res = prepare_moe_fp8_layer_for_marlin(
+                layer,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                getattr(layer, "w13_bias", None),
+                getattr(layer, "w2_bias", None),
+                size_k_first=False,
+                input_dtype=self.marlin_input_dtype,
             )
+            (
+                workspace,
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                w13_bias,
+                w2_bias,
+            ) = res
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(
+                w13_weight_scale, requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                w2_weight_scale, requires_grad=False
+            )
+            if w13_bias is not None:
+                layer.w13_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
+            if w2_bias is not None:
+                layer.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
