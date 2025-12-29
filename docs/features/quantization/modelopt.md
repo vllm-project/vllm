@@ -41,7 +41,7 @@ Notes:
 You can also patch the sizes into the local `config.json` once:
 
 ```bash
-python -m vllm.utils.patch_qwen2_layer_intermediate_sizes --model_dir <path_to_checkpoint>
+python examples/modelopt/patch_qwen2_layer_intermediate_sizes.py --model_dir <path_to_checkpoint>
 ```
 
 ## Quantizing HuggingFace Models with PTQ
