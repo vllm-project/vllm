@@ -47,6 +47,7 @@ from vllm.model_executor.models.transformers.utils import (
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    replace_conv_class,
     replace_linear_class,
     replace_rms_norm_class,
 )
@@ -314,6 +315,8 @@ class Base(
                     new_module = replace_linear_class(
                         child_module, style, self.quant_config, prefix=qual_name
                     )
+                elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
+                    new_module = replace_conv_class(child_module)
                 elif child_module.__class__.__name__.endswith("RMSNorm"):
                     new_module = replace_rms_norm_class(
                         child_module, self.text_config.hidden_size
