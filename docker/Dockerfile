@@ -107,6 +107,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
     && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
     && ln -s /opt/venv/bin/pip /usr/bin/pip \
+    && /opt/venv/bin/python3 -m pip install uv \
     && python3 --version && python3 -m pip --version
 
 # Activate virtual environment and add uv to PATH
@@ -159,7 +160,6 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    export PATH="/opt/venv/bin:/root/.local/bin:$PATH" && \
     . /etc/environment && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
