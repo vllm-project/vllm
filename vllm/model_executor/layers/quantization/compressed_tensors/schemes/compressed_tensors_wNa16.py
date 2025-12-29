@@ -115,7 +115,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         if isinstance(kernel_type, MarlinLinearKernel):
-            input_dtype = get_marlin_input_dtype()
+            input_dtype = get_marlin_input_dtype(self.layer_name)
             if input_dtype is not None:
                 mp_linear_kernel_config.act_type = input_dtype
 
