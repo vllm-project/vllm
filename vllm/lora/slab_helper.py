@@ -383,6 +383,14 @@ def build_target_matched_slab(
 
         # Store extraction_map in metadata for zero-overhead extraction
         global_metadata.extraction_map = extraction_map
+
+        slab_dtype = torch.float16  # Default fallback
+        if lora_config and hasattr(lora_config, "lora_dtype"):
+            slab_dtype = lora_config.lora_dtype
+        elif all_flattened_tensors:
+            # Use dtype from first tensor if available
+            slab_dtype = all_flattened_tensors[0].dtype
+
         if all_flattened_tensors:
             # Calculate tensor sizes for view allocation
             tensor_sizes = [t.numel() for t in all_flattened_tensors]
@@ -391,7 +399,7 @@ def build_target_matched_slab(
 
             # Allocate slab + individual views DIRECTLY in pinned pool - ZERO copy!
             full_slab, tensor_views = pool.allocate_slab_views_directly(
-                tensor_sizes, torch.bfloat16
+                tensor_sizes, slab_dtype
             )
 
             for i, (source_tensor, view_tensor) in enumerate(
@@ -400,7 +408,7 @@ def build_target_matched_slab(
                 view_tensor.copy_(source_tensor)
         else:
             # Empty slab case
-            full_slab, _ = pool.allocate_slab_views_directly([], torch.bfloat16)
+            full_slab, _ = pool.allocate_slab_views_directly([], slab_dtype)
             global_metadata.total_size = 0
 
         slab_tensor = full_slab
