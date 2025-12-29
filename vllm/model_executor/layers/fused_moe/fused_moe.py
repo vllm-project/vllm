@@ -538,7 +538,7 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def invoke_fused_moe_triton_kernel_wna16(
+def invoke_fused_moe_wna16_cuda_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
@@ -594,7 +594,7 @@ def invoke_fused_moe_triton_kernel_wna16(
     )
 
 
-def invoke_fused_moe_triton_kernel_gptq_awq(
+def invoke_fused_moe_wna16_triton_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
@@ -833,7 +833,7 @@ def dispatch_fused_moe_kernel(
         )
 
         if use_moe_wna16_cuda:
-            invoke_fused_moe_triton_kernel_wna16(
+            invoke_fused_moe_wna16_cuda_kernel(
                 A,
                 B,
                 C,
@@ -849,7 +849,7 @@ def dispatch_fused_moe_kernel(
                 block_shape,
             )
             return
-        invoke_fused_moe_triton_kernel_gptq_awq(
+        invoke_fused_moe_wna16_triton_kernel(
             A,
             B,
             C,
