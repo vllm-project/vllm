@@ -30,10 +30,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
-           &get_cuda_view_from_cpu_tensor);
-
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -254,9 +250,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   ScalarType? group_scales_type"
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
-
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
 
   // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
   ops.def(
