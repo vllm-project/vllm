@@ -1153,6 +1153,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         layer.w13_input_scale = None
         layer.w2_input_scale = None
@@ -1163,23 +1165,21 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
-        w13_weight = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2_weight = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_weight_scale = layer.w13_weight_scale
-        w2_weight_scale = layer.w2_weight_scale
+        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
 
         for expert in range(layer.local_num_experts):
-            w13_weight[expert, :, :], w13_weight_scale[expert] = ops.scaled_fp8_quant(
+            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
                 layer.w13_weight[expert, :, :]
             )
-            w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w2_weight[expert, :, :])
+            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+                layer.w2_weight[expert, :, :]
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(
-            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
-        )
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
