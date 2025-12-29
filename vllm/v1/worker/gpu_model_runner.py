@@ -173,6 +173,7 @@ from .utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     sanity_check_mm_encoder_outputs,
+    unbind_kv_cache,
 )
 
 if TYPE_CHECKING:
@@ -5561,6 +5562,11 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+    def free_kv_cache(self) -> None:
+        if not self.kv_caches:
+            return
+        unbind_kv_cache(self.compilation_config.static_forward_context, self.kv_caches)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

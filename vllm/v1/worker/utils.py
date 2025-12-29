@@ -363,6 +363,36 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
+def unbind_kv_cache(
+    forward_context: dict[str, "Attention"],
+    runner_kv_caches: list[torch.Tensor],
+) -> None:
+    """
+    Unbind the KV cache from both ModelRunner and forward context,
+    releasing GPU memory references.
+
+    This is the reverse of bind_kv_cache() and should be called during
+    shutdown to ensure GPU memory is properly freed.
+
+    This function:
+      1) Clears the ModelRunner's kv cache list (`runner_kv_caches`).
+      2) Clears the KV cache reference from each attention layer in the
+         `forward_context`.
+
+    Args:
+        forward_context: The global forward context containing all Attention
+            layers with layer names as keys.
+        runner_kv_caches: The kv_cache list declared by ModelRunner.
+    """
+    # Unbind kv_caches from forward context
+    for layer_name in forward_context:
+        if hasattr(forward_context[layer_name], "kv_cache"):
+            forward_context[layer_name].kv_cache = []
+
+    # Clear the ModelRunner's kv cache list
+    runner_kv_caches.clear()
+
+
 def is_residual_scattered_for_sp(
     vllm_config: VllmConfig, num_input_tokens: int
 ) -> bool:
