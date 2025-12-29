@@ -282,10 +282,12 @@ def _support_torch_compile(
 
         sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
-        annotations = {p.annotation for p in sig.parameters.values()}
-        for arg in args:
-            if type(arg) not in annotations:
-                init = f"'{self.__class__.__name__}.__init__'"
+        annotations = [p.annotation for p in sig.parameters.values()]
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
+            if not isinstance(arg, annotation):
+                init = f"'{type(self).__name__}.__init__'"
                 arg_type = f"'{type(arg).__name__}'"
                 raise TypeError(
                     f"{init} received a positional argument of type {arg_type}, "
