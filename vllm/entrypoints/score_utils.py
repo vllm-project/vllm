@@ -24,7 +24,9 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.tokenizers import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
-    ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
+    ChatCompletionContentPartImageParam
+    | ChatCompletionContentPartImageEmbedsParam
+    | ChatCompletionContentPartTextParam
 )
 
 
