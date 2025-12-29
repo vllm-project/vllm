@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import msgspec
 import zmq
@@ -420,7 +420,7 @@ class EngineCore:
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
-                future = exec_future
+                future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 exec_future.add_done_callback(self._log_err_callback(scheduler_output))
 
