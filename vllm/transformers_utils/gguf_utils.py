@@ -234,9 +234,9 @@ def extract_eos_token_id_from_gguf(model: str) -> int | None:
     Returns:
         EOS token ID from GGUF metadata, or None if not found
     """
-    if not model.endswith(".gguf"):
-        return None
-
+    # Note: We don't check for .gguf extension here because HuggingFace Hub
+    # stores GGUF files as blob hashes without extensions. The caller is
+    # responsible for ensuring this is a valid GGUF file (via check_gguf_file).
     try:
         model_path = Path(model)
         if not model_path.is_file():

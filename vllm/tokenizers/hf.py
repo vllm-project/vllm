@@ -79,6 +79,9 @@ class CachedHfTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> HfTokenizer:
+        # Save gguf_file before AutoTokenizer.from_pretrained() pops it from kwargs
+        gguf_file = kwargs.get("gguf_file")
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
@@ -123,7 +126,8 @@ class CachedHfTokenizer(TokenizerLike):
         # Patch EOS token ID from GGUF metadata if available
         # GGUF files may have a different EOS token ID than HF tokenizer config
         # (e.g., Gemma uses <end_of_turn> ID 106 as EOS, but HF reports <eos> ID 1)
-        gguf_file = kwargs.get("gguf_file")
+        # Note: gguf_file was saved above before
+        # AutoTokenizer.from_pretrained() popped it
         if gguf_file:
             gguf_path = Path(path_or_repo_id) / gguf_file
             gguf_eos_id = extract_eos_token_id_from_gguf(str(gguf_path))
