@@ -411,25 +411,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_float16.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_float16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
+      CUDA_ARCHS "${MARLIN_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+      set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
+    list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
-      file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_bfloat16.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
+    file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_bfloat16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
+      CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+      set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
+    list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
     endif()
 
     if (MARLIN_SM75_ARCHS) 
@@ -947,7 +947,8 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu")
+  "csrc/moe/topk_softmax_kernels.cu"
+  "csrc/moe/topk_sigmoid_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1031,15 +1032,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_MOE_ARCHS)
-      file(GLOB MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/sm80_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
+    file(GLOB MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/sm80_kernel_*.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_MOE_SRC}"
+      CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+      set_source_files_properties(${MARLIN_MOE_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
+    list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
     endif()
 
     if (MARLIN_MOE_SM75_ARCHS) 
