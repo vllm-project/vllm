@@ -95,7 +95,7 @@ class ResponsesParser:
                     for tool_call in tool_call_info.tool_calls
                 )
                 content = tool_call_info.content
-                if content and content.strip() == "":
+                if not content:
                     content = None
 
         if content:
@@ -411,7 +411,7 @@ class StreamableResponsesParser:
                             )
 
         # 3. Get content text
-        content_text = self.accumulated_content.strip()
+        content_text = self.accumulated_content
 
         # 4. Create ResponseOutputMessage if there's content
         if content_text:
