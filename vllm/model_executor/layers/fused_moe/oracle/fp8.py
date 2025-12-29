@@ -118,7 +118,7 @@ def select_fp8_moe_backend(
     if current_platform.is_rocm():
         use_marlin = False
     if use_marlin:
-        logger.info_once(_make_log_backend("Marlin"))
+        logger.info_once(_make_log_backend("Marlin"), scope="local")
         return Fp8MoeBackend.MARLIN
 
     # Determine if we should use DeepGEMM with block-quantized weights:
@@ -151,7 +151,7 @@ def select_fp8_moe_backend(
         return Fp8MoeBackend.VLLM_CUTLASS
 
     # default to Triton
-    logger.info_once(_make_log_backend("Triton"))
+    logger.info_once(_make_log_backend("Triton"), scope="local")
     return Fp8MoeBackend.TRITON
 
 

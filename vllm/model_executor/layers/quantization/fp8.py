@@ -34,8 +34,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
-    convert_weights_to_kernel_format,
-    make_kernel,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -794,6 +792,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+    def _setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        pass
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -837,32 +845,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w13_weight, w13_weight_scale, shard_size, layer.local_num_experts
             )
 
-        # Shuffle weights into the runtime format.
-        w13_weight, w13_weight_scale, w2_weight, w2_weight_scale = (
-            convert_weights_to_kernel_format(
-                fp8_backend=self.fp8_backend,
-                layer=layer,
-                w13_weight=w13_weight,
-                w2_weight=w2_weight,
-                w13_weight_scale=w13_weight_scale,
-                w2_weight_scale=w2_weight_scale,
-            )
-        )
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
-        replace_parameter(layer, "w13_weight", w13_weight)
-        replace_parameter(layer, "w2_weight", w2_weight)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
-
-        # Setup modular kernel for TP case.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        self.kernel, self.use_inplace = make_kernel(
-            layer=layer,
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
         )
 
     def maybe_make_prepare_finalize(
@@ -1180,25 +1165,21 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         fp8_dtype = current_platform.fp8_dtype()
         w13_weight = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2_weight = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13_weight_scale = layer.w13_weight_scale
+        w2_weight_scale = layer.w2_weight_scale
 
         for expert in range(layer.local_num_experts):
-            w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w13_weight[expert, :, :])
+            w13_weight[expert, :, :], w13_weight_scale[expert] = ops.scaled_fp8_quant(
+                layer.w13_weight[expert, :, :]
             )
             w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
                 ops.scaled_fp8_quant(layer.w2_weight[expert, :, :])
             )
-        replace_parameter(layer, "w13_weight", w13_weight)
-        replace_parameter(layer, "w2_weight", w2_weight)
 
-        # # Shuffle weights into the runtime format.
-        # self._convert_weights_to_kernel_format(
-        #     layer, w13_weight, w2_weight, layer.w13_weight_scale,
-        #   layer.w2_weight_scale
-        # )
-
-        # # Setup modular kernel for TP case.
-        # self._make_kernel(layer)
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        )
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
