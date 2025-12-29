@@ -144,8 +144,8 @@ RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         PRERELEASE_FLAG=""; \
     fi && \
     PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
-    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" >> /etc/environment && \
-    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /etc/environment && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" > /tmp/pytorch_vars.env && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /tmp/pytorch_vars.env && \
     echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && \
     echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
 
@@ -159,7 +159,7 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
         python3 use_existing_torch.py; \
@@ -193,7 +193,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
         python3 use_existing_torch.py; \
@@ -331,7 +331,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
         python3 use_existing_torch.py; \
@@ -399,7 +399,7 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 #################### DEV IMAGE ####################
@@ -416,10 +416,6 @@ ARG GET_PIP_URL
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
-
-# Python version string for paths (e.g., "312" for 3.12)
-RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
-    echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
 # Install Python and system dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -507,8 +503,8 @@ RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         PRERELEASE_FLAG=""; \
     fi && \
     PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
-    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" >> /etc/environment && \
-    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /etc/environment && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" > /tmp/pytorch_vars.env && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /tmp/pytorch_vars.env && \
     echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && \
     echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
 
@@ -519,7 +515,7 @@ COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 COPY use_existing_torch.py /tmp/use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
         cd /tmp && python3 use_existing_torch.py; \
@@ -582,13 +578,13 @@ ARG USE_TORCH_NIGHTLY
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-uv pip list
+    . /tmp/pytorch_vars.env && \
+    uv pip list
 
 # Install deepgemm wheel that has been built in the `build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -605,7 +601,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    . /etc/environment && \
+    . /tmp/pytorch_vars.env && \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 
@@ -648,7 +644,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        . /etc/environment && \
+        . /tmp/pytorch_vars.env && \
         uv pip install --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
     fi
