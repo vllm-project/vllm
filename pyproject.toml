@@ -303,3 +303,8 @@ windo = "windo"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# Limit dependency resolution to current platform to avoid resolving for incompatible platforms
+# This prevents errors when resolving torch+cpu variants that don't exist for macOS
+environments = [
+    "sys_platform == 'darwin'",
+]
