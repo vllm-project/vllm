@@ -139,19 +139,19 @@ ARG USE_TORCH_NIGHTLY
 # We compute the index URL once and reuse it across all stages
 RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         PYTORCH_SUFFIX="/nightly"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
     else \
         PYTORCH_SUFFIX=""; \
+        PRERELEASE_FLAG=""; \
     fi && \
-    echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment && \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
-    else \
-        echo "PRERELEASE_FLAG=" >> /etc/environment; \
-    fi
+    PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" >> /etc/environment && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /etc/environment && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
 
 ENV PYTORCH_INDEX=""
 ENV PRERELEASE_FLAG=""
-RUN . /etc/environment && echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
 
 WORKDIR /workspace
 
@@ -510,15 +510,16 @@ ARG USE_TORCH_NIGHTLY
 # We compute the index URL once and reuse it across all stages
 RUN if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
         PYTORCH_SUFFIX="/nightly"; \
+        PRERELEASE_FLAG="--prerelease=allow"; \
     else \
         PYTORCH_SUFFIX=""; \
+        PRERELEASE_FLAG=""; \
     fi && \
-    echo "PYTORCH_INDEX=${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" >> /etc/environment && \
-    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
-        echo "PRERELEASE_FLAG=--prerelease=allow" >> /etc/environment; \
-    else \
-        echo "PRERELEASE_FLAG=" >> /etc/environment; \
-    fi
+    PYTORCH_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}${PYTORCH_SUFFIX}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" >> /etc/environment && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}" >> /etc/environment && \
+    echo "PYTORCH_INDEX=${PYTORCH_INDEX}" && \
+    echo "PRERELEASE_FLAG=${PRERELEASE_FLAG}"
 
 ENV PYTORCH_INDEX=""
 ENV PRERELEASE_FLAG=""
