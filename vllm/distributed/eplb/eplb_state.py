@@ -345,17 +345,13 @@ class EplbState:
         global_expert_load: torch.Tensor | None = None,
         old_global_expert_indices: torch.Tensor | None = None,
         rank_mapping: dict[int, int] | None = None,
+        mix_placement: bool = False,
     ):
         """
         Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
-        additional_config = get_current_vllm_config().additional_config
-        if isinstance(additional_config, dict):
-            mix_placement = additional_config.get("mix_placement", False)
-        else:
-            mix_placement = getattr(additional_config, "mix_placement", False)
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(

@@ -1543,8 +1543,10 @@ class DeepseekV2ForCausalLM(
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if mix_placement else 0),
+            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
             num_redundant_experts=self.num_redundant_experts,
+            num_shared_experts=self.config.n_shared_experts,
+            mix_placement=mix_placement,
         )
 
         params_dict = dict(self.named_parameters())

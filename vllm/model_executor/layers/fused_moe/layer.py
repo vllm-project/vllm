@@ -141,6 +141,7 @@ def determine_expert_map(
     base_experts = global_num_experts // ep_size
     if mix_placement:
         base_experts += num_fused_shared_experts
+        global_num_experts += num_fused_shared_experts * ep_size
     remainder = global_num_experts % ep_size
     local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
@@ -454,7 +455,7 @@ class FusedMoE(CustomOp):
             else 0
         )
         if (
-            not self.aiter_fmoe_shared_expert_enabled
+            not (self.aiter_fmoe_shared_expert_enabled or self.mix_placement)
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
@@ -489,9 +490,11 @@ class FusedMoE(CustomOp):
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
+                mix_placement=self.mix_placement,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
+            self.global_num_experts = self.local_num_experts * self.ep_size
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
@@ -1646,11 +1649,9 @@ class FusedMoE(CustomOp):
             )
 
         if self.mix_placement:
-            if self.routed_scaling_factor != 1.0:
-                topk_weights *= self.routed_scaling_factor
-            shared_expert_routing_factor = 1.0
+            shared_expert_routing_factor = 1.0 / self.routed_scaling_factor
             batch_size = topk_ids.shape[0]
-            shared_expert_ids = torch.arrange(
+            shared_expert_ids = torch.arange(
                 self.logical_num_experts,
                 self.logical_num_experts + self.num_fused_shared_experts,
                 dtype=topk_ids.dtype,
@@ -2052,8 +2053,9 @@ class FusedMoE(CustomOp):
         ckpt_up_proj_name: str,
         num_experts: int,
         num_redundant_experts: int = 0,
+        num_shared_experts: int = 0,
+        mix_placement: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        num_physical_experts = num_experts + num_redundant_experts
 
         # In the returned mapping:
         # - `expert_id` is the physical expert id
@@ -2061,9 +2063,14 @@ class FusedMoE(CustomOp):
         # So that we should map the expert id to logical in `weight_name`
         physical_to_logical_map = (
             EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
+                num_experts,
+                num_redundant_experts,
+                num_shared_experts,
+                mix_placement,
             )
         )
+
+        num_physical_experts = len(physical_to_logical_map)
 
         return [
             # (param_name, weight_name, expert_id, shard_id)
