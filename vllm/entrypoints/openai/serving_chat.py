@@ -1208,15 +1208,8 @@ class OpenAIServingChat(OpenAIServing):
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=index,
-                                        function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
+                            delta_message = self._create_remaining_args_delta(
+                                delta_message, remaining_call, index
                             )
 
                         # Send the finish response for each request.n only once
@@ -1801,6 +1794,35 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+        )
+
+    @staticmethod
+    def _create_remaining_args_delta(
+        delta_message: DeltaMessage,
+        remaining_call: str,
+        index: int,
+    ) -> DeltaMessage:
+        """
+        Create a delta message for remaining tool arguments, preserving
+        id/type/name from the original delta.
+        """
+        original_tc = next(
+            (tc for tc in delta_message.tool_calls if tc.index == index),
+            None,
+        )
+        original_fn = original_tc.function if original_tc else None
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    id=original_tc.id if original_tc else None,
+                    type=original_tc.type if original_tc else None,
+                    function=DeltaFunctionCall(
+                        name=original_fn.name if original_fn else None,
+                        arguments=remaining_call,
+                    ),
+                )
+            ]
         )
 
     def _make_request_with_harmony(
