@@ -1054,8 +1054,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEQuantConfig | None:
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
             return fp8_w8a16_moe_quant_config(
-                w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
-                w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
                 block_shape=self.weight_block_size,
             )
 
