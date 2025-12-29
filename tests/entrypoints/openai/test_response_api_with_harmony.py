@@ -999,9 +999,15 @@ async def test_function_call_with_previous_input_messages(
 async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str):
     response = await client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": "What is the role of AI in medicine?"}],
+        messages=[
+            {
+                "role": "user",
+                "content": "What is the role of AI in medicine?"
+                "The response must exceed 350 words.",
+            }
+        ],
         temperature=0.0,
-        max_tokens=250,
+        max_tokens=350,
     )
 
     choice = response.choices[0]
