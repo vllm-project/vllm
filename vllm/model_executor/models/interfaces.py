@@ -136,6 +136,24 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the tower module of the multi-modal model.
+        Given the number of image tokens, output the number of
+        multi-modal encoder tokens.
+        """
+        ...
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model.
+        Given the number of vision tokens, output the number of
+        multi-modal connector tokens.
+        """
+        ...
+
     @classmethod
     def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
         """
