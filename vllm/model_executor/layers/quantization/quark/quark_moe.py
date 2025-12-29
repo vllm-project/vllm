@@ -325,7 +325,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
             )
             layer.workspace = workspace
-            # TODO(rob): why is this file not using replace_parameter()?
+            # TODO(rob): once we apply refactor to Quark, switch to using
+            # replace_parameter for compatibility with reloading in RL.
             layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
             layer.w13_weight_scale = torch.nn.Parameter(
