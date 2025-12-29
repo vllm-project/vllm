@@ -246,15 +246,18 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 f"({self._adapter_manager.lora_slots})."
             )
         for lora in loras_map.values():
-            self.add_adapter(lora, force_load=False)
+            self.add_adapter(lora)
 
-    def add_adapter(self, lora_request: LoRARequest, force_load: bool = True) -> bool:
+    def add_adapter(self, lora_request: LoRARequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters() or force_load:
+        if (
+            lora_request.lora_int_id not in self.list_adapters()
+            or lora_request.load_inplace
+        ):
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
