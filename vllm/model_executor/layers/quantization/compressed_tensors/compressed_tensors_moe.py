@@ -702,7 +702,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             raise NotImplementedError(
                 "FlashInfer TRTLLM backend not supported for compressed-tensors yet."
             )
-
         self.disable_expert_map = False
 
     def create_weights(
