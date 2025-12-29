@@ -35,27 +35,30 @@ def ref_masked_attention(
         pos_k = torch.arange(total_tokens, device=q.device).unsqueeze(0)
 
         # Start with valid mask (False = no masking)
-        mask = torch.zeros(
+        mask = torch.ones(
             (total_tokens, total_tokens), dtype=torch.bool, device=q.device
         )
 
         # Apply causal mask
         if is_causal:
-            mask = mask | (pos_k > pos_q)
+            mask = mask & (pos_q >= pos_k)
 
         # Apply sliding window masks
+        sliding_window_mask = (
+            torch.zeros_like(mask)
+            if any([sliding_window_q, sliding_window_k])
+            else None
+        )
         if sliding_window_q is not None and sliding_window_q > 0:
-            mask = mask | (pos_k > pos_q + sliding_window_q)
+            sliding_window_mask |= pos_q - pos_k > sliding_window_q
 
         if sliding_window_k is not None and sliding_window_k > 0:
-            mask = mask | (pos_k < pos_q - sliding_window_k)
+            sliding_window_mask |= pos_k - pos_q < sliding_window_k
 
-        # Convert bool mask to float (SDPA expects float mask)
-        # True (masked) -> -inf, False (not masked) -> 0
-        attn_mask = torch.zeros(
-            (total_tokens, total_tokens), dtype=q.dtype, device=q.device
-        )
-        attn_mask.masked_fill_(mask, float("-inf"))
+        if sliding_window_mask is not None:
+            mask = mask & sliding_window_mask
+
+        attn_mask = torch.where(mask, 0.0, float("-inf")).to(q.dtype)
         use_causal = False  # Don't use is_causal when providing explicit mask
 
     # Use SDPA
@@ -174,7 +177,7 @@ def test_context_attention_sliding_window(
         b_start_loc,
         seq_lens,
         max_seq_len,
-        is_causal=True,
+        is_causal=False,
         sliding_window_q=sliding_window_q,
         sliding_window_k=sliding_window_k,
     )
@@ -204,5 +207,6 @@ def test_context_attention_sliding_window(
             sliding_window_k=sliding_window_k if sliding_window_k > 0 else None,
         )
 
+    print(o.mean())
     # Compare outputs
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)

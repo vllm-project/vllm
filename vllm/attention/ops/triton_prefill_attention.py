@@ -135,14 +135,23 @@ def _fwd_kernel(
         # Valid sequence mask
         mask = pos_k < cur_batch_seq_len
         # Causal mask
-        mask = mask & (pos_q >= pos_k) if IS_CAUSAL else mask
+        causal_mask = pos_q >= pos_k if IS_CAUSAL else None
+        if causal_mask is not None:
+            mask &= causal_mask
+
         # Bidirectional sliding window masks
-        mask = (
-            mask & (pos_k <= pos_q + SLIDING_WINDOW_Q) if SLIDING_WINDOW_Q > 0 else mask
+        sliding_mask_q = (
+            pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
         )
-        mask = (
-            mask & (pos_k >= pos_q - SLIDING_WINDOW_K) if SLIDING_WINDOW_K > 0 else mask
+        sliding_mask_k = (
+            pos_k - pos_q <= SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
         )
+        if sliding_mask_q is not None and sliding_mask_k is not None:
+            mask &= sliding_mask_q | sliding_mask_k
+        elif sliding_mask_q is not None:
+            mask &= sliding_mask_q
+        elif sliding_mask_k is not None:
+            mask &= sliding_mask_k
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.where(mask, 0, float("-inf"))
