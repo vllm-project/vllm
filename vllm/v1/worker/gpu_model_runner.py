@@ -407,11 +407,11 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
-        async_sps_zero_bubble_mode = False
+        async_spec_zero_bubble_mode = False
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
-            async_sps_zero_bubble_mode = (
-                self.speculative_config.async_sps_zero_bubble_mode
+            async_spec_zero_bubble_mode = (
+                self.speculative_config.async_spec_zero_bubble_mode
             )
 
         # Request states.
@@ -608,8 +608,8 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         )
 
-        self.async_sps_zero_bubble_mode = (
-            async_sps_zero_bubble_mode
+        self.async_spec_zero_bubble_mode = (
+            async_spec_zero_bubble_mode
             and self.use_async_scheduling
             and self.num_spec_tokens > 0
             and not self.cascade_attn_enabled
@@ -876,7 +876,7 @@ class GPUModelRunner(
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
         valid_sampled_token_count = []
-        if not self.async_sps_zero_bubble_mode:
+        if not self.async_spec_zero_bubble_mode:
             valid_sampled_token_count = self._get_valid_sampled_token_count()
         else:
             self.async_spec_reqs_to_fix.clear()
@@ -906,10 +906,10 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # If async_sps_zero_bubble_mode, assume all tokens are accepted,
+                    # If async_spec_zero_bubble_mode, assume all tokens are accepted,
                     # and will adjust the inputs correctly in _adjust_inputs_on_gpu to
                     # avoid cpu sync, which may cause gpu bubble in async scheduling.
-                    if self.async_sps_zero_bubble_mode:
+                    if self.async_spec_zero_bubble_mode:
                         num_accepted = req_state.prev_num_draft_len
                         num_rejected = 0
                         self.async_spec_reqs_to_fix.add(req_id)
@@ -1021,7 +1021,7 @@ class GPUModelRunner(
             # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
                 if (
-                    self.async_sps_zero_bubble_mode
+                    self.async_spec_zero_bubble_mode
                     and req_id in self.async_spec_reqs_to_fix
                 ):
                     req_state.pending_prev_num_draft_len = num_spec_tokens
@@ -1057,7 +1057,7 @@ class GPUModelRunner(
            tokens were accepted so the next iteration can shift states.
         """
 
-        if self.async_sps_zero_bubble_mode:
+        if self.async_spec_zero_bubble_mode:
             self._finalize_async_spec_cpu_state()
 
         if not self.model_config.is_hybrid or not self.speculative_config:
@@ -1090,7 +1090,7 @@ class GPUModelRunner(
     def _finalize_async_spec_cpu_state(self) -> None:
         """Synchronize CPU metadata after deferred speculative acceptance."""
 
-        if not self.async_sps_zero_bubble_mode:
+        if not self.async_spec_zero_bubble_mode:
             return
 
         assert self.parallel_config.pipeline_parallel_size == 1, (
@@ -1391,7 +1391,7 @@ class GPUModelRunner(
         are accepted in update_states to avoid cpu sync, and will adjust the
         inputs correctly based on the actual accepted token count in GPU."""
 
-        if not self.async_sps_zero_bubble_mode:
+        if not self.async_spec_zero_bubble_mode:
             return
 
         pre_valid_sampled_token_count = self.input_batch.pre_valid_sampled_token_count
@@ -1762,14 +1762,25 @@ class GPUModelRunner(
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+
+        # NOTE: In async spec zero bubble mode, we keep _seq_lens_cpu and
+        # _num_computed_tokens_cpu as None. Attn Backends needing these
+        # values will auto-compute them via seq_lens.to("cpu")
+        if self.async_spec_zero_bubble_mode:
+            seq_lens_cpu = None
+            num_computed_tokens_cpu = None
+        else:
+            seq_lens_cpu = self.seq_lens.cpu[:num_reqs_padded]
+            num_computed_tokens_cpu = (
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded]
+            )
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
-            _seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
-            _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                :num_reqs_padded
-            ],
+            _seq_lens_cpu=seq_lens_cpu,
+            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -5007,11 +5018,6 @@ class GPUModelRunner(
         # Check if attention backend supports PCP&DCP and related features.
         check_attention_cp_compatibility(self.vllm_config)
 
-        # Check if all backends support async SPS zero bubble mode
-        self._check_async_sps_zero_bubble_support(
-            attention_backend_list, kv_cache_config.kv_cache_groups
-        )
-
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
@@ -5192,35 +5198,6 @@ class GPUModelRunner(
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
-
-    def _check_async_sps_zero_bubble_support(
-        self,
-        attention_backends: list[set[type[AttentionBackend]]],
-        kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> None:
-        """
-        Check if all attention backends support async SPS zero bubble mode.
-        If any backend doesn't support it, disable the mode.
-        """
-        if not self.async_sps_zero_bubble_mode:
-            return
-
-        for attn_backend_set, kv_cache_group in zip(
-            attention_backends, kv_cache_groups
-        ):
-            for attn_backend in attn_backend_set:
-                builder_cls = attn_backend.get_builder_cls()
-                if not builder_cls.supports_async_sps_zero_bubble(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
-                ):
-                    logger.warning(
-                        "Disabling async SPS zero bubble mode: attention backend "
-                        "%s does not support it (build() may depend on correct "
-                        "seq_lens_cpu or num_computed_tokens_cpu values).",
-                        attn_backend.__name__,
-                    )
-                    self.async_sps_zero_bubble_mode = False
-                    return
 
     def calculate_reorder_batch_threshold(self) -> None:
         """

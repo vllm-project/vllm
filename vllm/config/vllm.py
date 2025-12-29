@@ -887,6 +887,20 @@ class VllmConfig:
                 self.model_config.disable_cascade_attn = True
                 logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.async_spec_zero_bubble_mode
+            and self.model_config is not None
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when async_spec_zero_bubble_mode is "
+                "enabled. Cascade attention computes common_prefix_len from "
+                "num_computed_tokens_cpu which may be incorrect in this mode, "
+                "leading to wrong suffix_kv_lens."
+            )
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 

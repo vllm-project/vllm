@@ -101,7 +101,7 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    async_sps_zero_bubble_mode: bool = False
+    async_spec_zero_bubble_mode: bool = False
     """Enable async speculative decoding zero bubble mode. If set to True,
     optimistically assumes all pre-step speculated tokens were accepted to skip the
     cpu sync in _update_states, and correct the inputs based on GPU operations. It

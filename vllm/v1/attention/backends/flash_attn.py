@@ -251,7 +251,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
     )
-    _supports_async_sps_zero_bubble = True
     supports_update_block_table: bool = True
 
     def __init__(
