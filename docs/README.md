@@ -6,10 +6,13 @@ hide:
 
 # Welcome to vLLM
 
-<figure markdown="span">
-  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM Light" class="logo-light" width="60%" }
-  ![](./assets/logos/vllm-logo-text-dark.png){ align="center" alt="vLLM Dark" class="logo-dark" width="60%" }
-</figure>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logos/vllm-logo-text-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/logos/vllm-logo-text-light.png">
+    <img src="./assets/logos/vllm-logo-text-light.png" alt="vLLM Logo" width="60%">
+  </picture>
+</p>
 
 <p style="text-align:center">
 <strong>Easy, fast, and cheap LLM serving for everyone
