@@ -141,7 +141,7 @@ class OpenAIServingModels:
                 lora_name=lora_name,
                 lora_int_id=lora_int_id,
                 lora_path=lora_path,
-                load_inplace=True,
+                load_inplace=request.load_inplace,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
