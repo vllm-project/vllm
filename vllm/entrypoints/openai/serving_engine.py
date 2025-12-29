@@ -970,12 +970,14 @@ class OpenAIServing:
         else:
             max_length = truncate_prompt_tokens
 
-        encoded = await async_tokenizer(
-            prompt,
-            add_special_tokens=add_special_tokens,
-            truncation=truncation,
-            max_length=max_length,
-        )
+        tokenizer_kwargs = {
+            "add_special_tokens": add_special_tokens,
+            "truncation": truncation,
+        }
+        if max_length is not None:
+            tokenizer_kwargs["max_length"] = max_length
+
+        encoded = await async_tokenizer(prompt, **tokenizer_kwargs)
 
         input_ids = encoded.input_ids
         input_text = prompt
