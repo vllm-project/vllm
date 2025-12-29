@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
-
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
