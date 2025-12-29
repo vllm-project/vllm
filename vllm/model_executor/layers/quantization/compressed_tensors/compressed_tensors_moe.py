@@ -13,7 +13,6 @@ from compressed_tensors.quantization import (
 )
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -92,10 +91,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.deep_gemm import (
-    get_mk_alignment_for_contiguous_layout,
-)
-from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
 
@@ -974,6 +969,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     quant_config=self.moe_quant_config,
                 )
 
+            # TODO(rob): investigate disable_expert_map
             self.disable_expert_map = (
                 num_dispatchers > 1 or not experts.supports_expert_map()
             )
@@ -990,9 +986,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.rocm_aiter_moe_enabled and not self.use_marlin
-
-        use_deep_gemm = envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+        assert self.fp8_backend not in [Fp8MoeBackend.AITER, Fp8MoeBackend.MARLIN]
 
         if (
             prepare_finalize.activation_format
@@ -1001,28 +995,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
 
-            if use_deep_gemm and not has_deep_gemm():
-                raise RuntimeError(
-                    "DeepGEMM requested for MoE layer but not installed."
-                )
-
-            compatible_with_deep_gemm = (
-                self.moe_quant_config.use_fp8_w8a8
-                and self.moe_quant_config.block_shape
-                == get_mk_alignment_for_contiguous_layout()
-            )
-
-            # If this MoE layer is compatible with DeepGEMM, the proper env
-            # vars are set and DeepGEMM is not installed, throw an error.
-            if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
-                raise RuntimeError(
-                    f"MoE layer incompatible with DeepGEMM, expected "
-                    f"fp8==True, got {self.moe_quant_config.use_fp8_w8a8}"
-                    f"or block_shape {self.moe_quant_config.block_shape}"
-                    f"=={get_mk_alignment_for_contiguous_layout()}."
-                )
-
-            if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
+            if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
                 logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
                 return BatchedDeepGemmExperts(
                     max_num_tokens=max_num_tokens_per_rank,
@@ -1041,7 +1014,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
             return TritonOrDeepGemmExperts(
                 self.moe_quant_config,
-                allow_deep_gemm=use_deep_gemm,
+                allow_deep_gemm=self.fp8_backend == Fp8MoeBackend.DEEPGEMM,
             )
 
     def get_fused_moe_quant_config(
