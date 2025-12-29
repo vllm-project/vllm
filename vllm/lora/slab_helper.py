@@ -51,6 +51,28 @@ class UltraFastPinnedPool:
         self.current_slab = None
         self.current_metadata = None
 
+    def _ensure_capacity(self, required_bytes: int) -> None:
+        """
+        Ensure the pinned memory pool has sufficient capacity.
+
+        Expands the pool if needed by doubling the size or adding required space.
+        Preserves existing data when expanding the pool.
+
+        Args:
+            required_bytes: The number of bytes required
+        """
+        if required_bytes > self.pool_size:
+            new_size = max(self.pool_size * 2, required_bytes + self.pool_size)
+            new_pool = torch.empty(new_size, dtype=torch.uint8).pin_memory()
+
+            # Copy existing data if any
+            if self.used_ranges and self.pinned_pool is not None:
+                total_used = max(end for start, end in self.used_ranges)
+                new_pool[:total_used] = self.pinned_pool[:total_used]
+
+            self.pinned_pool = new_pool
+            self.pool_size = new_size
+
     def allocate_slab_views_directly(
         self, tensor_sizes: list[int], dtype: torch.dtype
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
@@ -64,18 +86,7 @@ class UltraFastPinnedPool:
 
         with self.pool_lock:
             # Expand pool if needed
-            if tensor_bytes > self.pool_size:
-                new_size = max(self.pool_size * 2, tensor_bytes + self.pool_size)
-
-                new_pool = torch.empty(new_size, dtype=torch.uint8).pin_memory()
-
-                # Copy existing data if any
-                if self.used_ranges and self.pinned_pool is not None:
-                    total_used = max(end for start, end in self.used_ranges)
-                    new_pool[:total_used] = self.pinned_pool[:total_used]
-
-                self.pinned_pool = new_pool
-                self.pool_size = new_size
+            self._ensure_capacity(tensor_bytes)
 
             # Find available space
             start_offset = max((end for start, end in self.used_ranges), default=0)
@@ -118,17 +129,7 @@ class UltraFastPinnedPool:
 
         with self.pool_lock:
             # Expand pool if needed
-            if tensor_bytes > self.pool_size:
-                new_size = max(self.pool_size * 2, tensor_bytes + self.pool_size)
-                new_pool = torch.empty(new_size, dtype=torch.uint8).pin_memory()
-
-                # Copy existing data if any
-                if self.used_ranges and self.pinned_pool is not None:
-                    total_used = max(end for start, end in self.used_ranges)
-                    new_pool[:total_used] = self.pinned_pool[:total_used]
-
-                self.pinned_pool = new_pool
-                self.pool_size = new_size
+            self._ensure_capacity(tensor_bytes)
 
             # Find available space
             start_offset = max((end for start, end in self.used_ranges), default=0)
@@ -154,21 +155,8 @@ class UltraFastPinnedPool:
         tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size()
 
         with self.pool_lock:
-            # Find available space in pool
-            if tensor_bytes > self.pool_size:
-                # Expand pool if needed
-                new_size = max(self.pool_size * 2, tensor_bytes + self.pool_size)
-
-                # Create larger pool
-                new_pool = torch.empty(new_size, dtype=torch.uint8).pin_memory()
-
-                # Copy existing data if any
-                if self.used_ranges and self.pinned_pool is not None:
-                    total_used = max(end for start, end in self.used_ranges)
-                    new_pool[:total_used] = self.pinned_pool[:total_used]
-
-                self.pinned_pool = new_pool
-                self.pool_size = new_size
+            # Expand pool if needed
+            self._ensure_capacity(tensor_bytes)
 
             # Simple allocation strategy - find space at end
             start_offset = max((end for start, end in self.used_ranges), default=0)
