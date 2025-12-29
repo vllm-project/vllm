@@ -33,8 +33,6 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -43,6 +41,12 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .audioflamingo3 import (
+    AudioFlamingo3MultiModalDataParser,
+    AudioFlamingo3MultiModalProcessor,
+    AudioFlamingo3ProcessingInfo,
+    _audioflamingo3_field_config,
+)
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
@@ -133,7 +137,7 @@ class GlmAsrMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class GlmAsrProcessingInfo(BaseProcessingInfo):
+class GlmAsrProcessingInfo(AudioFlamingo3ProcessingInfo):
     def get_hf_config(self) -> GlmAsrConfig:
         return self.ctx.get_hf_config(GlmAsrConfig)
 
@@ -141,13 +145,10 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(GlmAsrProcessor, **kwargs)
 
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
+        # Reuse parent implementation, but add type annotation and assertion
+        feature_extractor = super().get_feature_extractor(**kwargs)
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
 
 
 class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
@@ -179,28 +180,11 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         }
 
 
-def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    chunk_counts = hf_inputs.get("chunk_counts")
-    if chunk_counts is not None:
-        return dict(
-            audio_embeds=MultiModalFieldConfig.batched("audio"),
-            input_features=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
-        )
-    return dict(
-        audio_embeds=MultiModalFieldConfig.batched("audio"),
-        input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
-    )
+# Reuse field config from AudioFlamingo3
+_glmasr_field_config = _audioflamingo3_field_config
 
 
-class GlmAsrMultiModalDataParser(MultiModalDataParser):
+class GlmAsrMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[Any],
@@ -215,7 +199,7 @@ class GlmAsrMultiModalDataParser(MultiModalDataParser):
         return super()._parse_audio_data(data)
 
 
-class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
+class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return GlmAsrMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
@@ -275,6 +259,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor[GlmAsrProcessingInfo]):
         if "input_features_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
 
+        # Override chunk counts calculation with GLM-ASR specific logic
         chunk_counts = self._calculate_chunk_counts(
             audio_list, processor.feature_extractor, processor
         )
