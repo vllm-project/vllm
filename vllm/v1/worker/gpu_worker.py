@@ -385,6 +385,19 @@ class Worker(WorkerBase):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Update max_model_len after auto-fit to GPU memory.
+
+        This is called when max_model_len=-1 is used and the engine
+        automatically determines the maximum context length that fits
+        in GPU memory. Workers need to update their cached max_model_len
+        to match the engine's decision.
+        """
+        self.model_config.max_model_len = max_model_len
+        if self.model_runner is not None:
+            self.model_runner.max_model_len = max_model_len
+        logger.debug("Updated max_model_len to %d", max_model_len)
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
@@ -609,7 +622,7 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, (ModelRunnerOutput, NoneType)):
+            if isinstance(output, ModelRunnerOutput | NoneType):
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -632,7 +645,12 @@ class Worker(WorkerBase):
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
-            raise RuntimeError("Profiling is not enabled.")
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+            )
         if is_start:
             self.profiler.start()
         else:
