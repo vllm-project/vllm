@@ -366,7 +366,6 @@ def test_lm_head_logits_processor(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-
     def _pretest():
         linear = ParallelLMHead(
             num_embeddings=vocab_size,
@@ -489,7 +488,6 @@ def test_linear_replicated(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-
     def create_random_linear_replicated_layer():
         linear = ReplicatedLinear(4096, 4096, bias=False, params_dtype=torch.float16)
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -597,7 +595,6 @@ def test_linear_parallel(
     )
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
-
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -723,7 +720,6 @@ def test_column_parallel_packed(
     )
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
-
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
