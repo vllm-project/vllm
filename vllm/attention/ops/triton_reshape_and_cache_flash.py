@@ -136,7 +136,6 @@ def triton_reshape_and_cache_flash(
         dim_stride_v = value_cache.stride(2)
     else:
         block_size = key_cache.shape[1]
-        print(f"is pow2 block size reshape and cache {block_size}")
         x = 1
         dim_stride_k = 0
         dim_stride_v = 0
