@@ -292,7 +292,9 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        tokenization_kwargs = _validate_truncation_size(
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+        _validate_truncation_size(
             self.model_config.max_model_len,
             params.truncate_prompt_tokens,
             tokenization_kwargs,

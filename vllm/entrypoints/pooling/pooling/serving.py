@@ -106,7 +106,9 @@ class OpenAIServingPooling(OpenAIServing):
                 )
 
             truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
-            _validate_truncation_size(self.max_model_len, truncate_prompt_tokens)
+            truncate_prompt_tokens = _validate_truncation_size(
+                self.max_model_len, truncate_prompt_tokens
+            )
 
             if is_io_processor_request:
                 if self.io_processor is None:
