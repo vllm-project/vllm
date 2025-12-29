@@ -38,4 +38,4 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("gelu_quick", TORCH_BOX(&gelu_quick));
 }
 
-REGISTER_EXTENSION(_C_stable)
+REGISTER_EXTENSION(_C_stable_libtorch)

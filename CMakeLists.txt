@@ -942,7 +942,7 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   #
-  # _C_stable extension (ops registered via STABLE_TORCH_LIBRARY)
+  # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/activation_kernels.cu"
@@ -954,7 +954,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   message(STATUS "Enabling C_stable extension.")
   define_extension_target(
-    _C_stable
+    _C_stable_libtorch
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_STABLE_EXT_SRC}
@@ -965,11 +965,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Set TORCH_TARGET_VERSION for stable ABI compatibility.
   # This ensures we only use C-shim APIs available in PyTorch 2.10+.
-  target_compile_definitions(_C_stable PRIVATE
+  target_compile_definitions(_C_stable_libtorch PRIVATE
     TORCH_TARGET_VERSION=0x020A000000000000ULL)
 
   # Needed to use cuda APIs from C-shim
-  target_compile_definitions(_C_stable PRIVATE
+  target_compile_definitions(_C_stable_libtorch PRIVATE
     USE_CUDA)
 endif()
 

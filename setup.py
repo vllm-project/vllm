@@ -858,7 +858,7 @@ if _is_cuda():
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
     if _is_cuda():
-        ext_modules.append(CMakeExtension(name="vllm._C_stable"))
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
