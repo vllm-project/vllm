@@ -468,7 +468,7 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b.shape[2]
 
-    # fully_sharded 或 shrink_split_k>1（atomic_add）时必须清零
+    # When using fully_sharded or shrink_split_k>1 (atomic_add), it must be zeroed.
     must_zero_a = fully_sharded or (shrink_split_k != 1)
 
     a_intermediate_cache1 = _get_a_workspace(
