@@ -193,7 +193,7 @@ def run_with_expert_maps(
 
             yield cutlass_moe_kwargs
 
-    out_tensor = torch.zeros_like(cutlass_moe_kwargs["a"])
+    out_tensor = torch.zeros_like(cutlass_moe_kwargs["hidden_states"])
     for kwargs in slice_experts():
         out_tensor = out_tensor + kernel(**kwargs)
 
