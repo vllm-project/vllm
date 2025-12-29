@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 from typing import TypeAlias
 
+from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
@@ -79,6 +80,9 @@ class CachedHfTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> HfTokenizer:
+        # Save gguf_file before AutoTokenizer.from_pretrained() pops it from kwargs
+        gguf_file = kwargs.get("gguf_file")
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
@@ -123,19 +127,40 @@ class CachedHfTokenizer(TokenizerLike):
         # Patch EOS token ID from GGUF metadata if available
         # GGUF files may have a different EOS token ID than HF tokenizer config
         # (e.g., Gemma uses <end_of_turn> ID 106 as EOS, but HF reports <eos> ID 1)
-        gguf_file = kwargs.get("gguf_file")
+        # Note: gguf_file was saved above before
+        # AutoTokenizer.from_pretrained() popped it
         if gguf_file:
-            gguf_path = Path(path_or_repo_id) / gguf_file
-            gguf_eos_id = extract_eos_token_id_from_gguf(str(gguf_path))
-            if gguf_eos_id is not None:
-                hf_eos_id = tokenizer.eos_token_id
-                if hf_eos_id != gguf_eos_id:
-                    logger.info(
-                        "Patching tokenizer eos_token_id from %d to %d "
-                        "(using GGUF metadata)",
-                        hf_eos_id,
-                        gguf_eos_id,
+            # Resolve GGUF path - could be local or remote (HuggingFace Hub)
+            local_path = Path(path_or_repo_id) / gguf_file
+            if local_path.is_file():
+                # Local GGUF file
+                gguf_path = str(local_path)
+            else:
+                # Remote HuggingFace model - download/locate the cached GGUF file
+                try:
+                    gguf_path = hf_hub_download(
+                        repo_id=str(path_or_repo_id),
+                        filename=gguf_file,
+                        revision=revision,
+                        cache_dir=download_dir,
                     )
-                    tokenizer.eos_token_id = gguf_eos_id
+                except Exception as e:
+                    logger.debug(
+                        "Could not download GGUF file for EOS extraction: %s", e
+                    )
+                    gguf_path = None
+
+            if gguf_path:
+                gguf_eos_id = extract_eos_token_id_from_gguf(gguf_path)
+                if gguf_eos_id is not None:
+                    hf_eos_id = tokenizer.eos_token_id
+                    if hf_eos_id != gguf_eos_id:
+                        logger.info(
+                            "Patching tokenizer eos_token_id from %d to %d "
+                            "(using GGUF metadata)",
+                            hf_eos_id,
+                            gguf_eos_id,
+                        )
+                        tokenizer.eos_token_id = gguf_eos_id
 
         return get_cached_tokenizer(tokenizer)
