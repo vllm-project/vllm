@@ -9,7 +9,7 @@ from tests.conftest import HfRunner
 from tests.models.utils import RerankModelInfo
 from tests.utils import multi_gpu_test
 
-from .mteb_score_utils import mteb_test_rerank_models
+from .mteb_score_utils import MtebCrossEncoderMixin, mteb_test_rerank_models
 
 qwen3_reranker_hf_overrides = {
     "architectures": ["Qwen3ForSequenceClassification"],
@@ -21,8 +21,8 @@ RERANK_MODELS = [
     RerankModelInfo(
         "Qwen/Qwen3-Reranker-0.6B",
         architecture="Qwen3ForSequenceClassification",
-        mteb_score=0.25736,
         hf_overrides=qwen3_reranker_hf_overrides,
+        chat_template_name="qwen3_reranker.jinja",
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
@@ -32,13 +32,14 @@ RERANK_MODELS = [
     RerankModelInfo(
         "Qwen/Qwen3-Reranker-4B",
         architecture="Qwen3ForSequenceClassification",
+        chat_template_name="qwen3_reranker.jinja",
         hf_overrides=qwen3_reranker_hf_overrides,
         enable_test=False,
     ),
 ]
 
 
-class Qwen3RerankerHfRunner(HfRunner):
+class Qwen3RerankerHfRunner(HfRunner, MtebCrossEncoderMixin):
     def __init__(
         self, model_name: str, dtype: str = "auto", *args: Any, **kwargs: Any
     ) -> None:

@@ -20,12 +20,12 @@ RERANK_MODELS = [
     ),
     RerankModelInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
-        mteb_score=0.25736,
         architecture="Qwen3ForSequenceClassification",
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
+        chat_template_name="qwen3_reranker.jinja",
     ),
 ]
 
