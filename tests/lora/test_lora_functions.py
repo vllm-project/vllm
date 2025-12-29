@@ -19,9 +19,7 @@ LORA_RANK = 8
 
 
 def make_lora_request(lora_id: int):
-    return LoRARequest(
-        lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
-    )
+    return LoRARequest(lora_name=f"{lora_id}", lora_path=LORA_MODULE_PATH)
 
 
 def test_lora_functions_sync():

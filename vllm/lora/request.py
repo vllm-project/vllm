@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import warnings
 
 import msgspec
+
+from vllm.utils.counter import AtomicCounter
+
+lora_id_counter = AtomicCounter(0)
 
 
 class LoRARequest(
@@ -26,6 +31,13 @@ class LoRARequest(
     def __post_init__(self):
         if self.lora_int_id < 1:
             raise ValueError(f"id must be > 0, got {self.lora_int_id}")
+        warnings.warn(
+            "The 'lora_int_id' attribute is deprecated "
+            "and will be removed in a future version. ",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.lora_int_id = lora_id_counter.inc(1)
 
         # Ensure lora_path is not empty
         assert self.lora_path, "lora_path cannot be empty"

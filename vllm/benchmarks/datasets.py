@@ -180,7 +180,6 @@ class BenchmarkDataset(ABC):
         lora_id = random.randint(1, max_loras)
         lora_request = LoRARequest(
             lora_name=str(lora_id),
-            lora_int_id=lora_id,
             lora_path=lora_path_on_disk(lora_path),
         )
         return lora_request
