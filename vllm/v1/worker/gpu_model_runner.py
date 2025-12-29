@@ -1771,9 +1771,9 @@ class GPUModelRunner(
             num_computed_tokens_cpu = None
         else:
             seq_lens_cpu = self.seq_lens.cpu[:num_reqs_padded]
-            num_computed_tokens_cpu = (
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded]
-            )
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
 
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
