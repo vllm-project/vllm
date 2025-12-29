@@ -964,12 +964,25 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
+            (
+                workspace,
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+            ) = prepare_moe_fp8_layer_for_marlin(
+                layer,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                input_dtype=self.marlin_input_dtype,
             )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
+            layer.workspace = workspace
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w2_weight", w2_weight)
+            replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
 
         if self.use_cutlass:
             assert self.weight_quant.strategy != QuantizationStrategy.BLOCK
