@@ -209,10 +209,9 @@ class StreamableResponsesParser:
 
         Args:
             token_id: The token id to process
-            is_final: Whether this is the final token of the output
 
         Returns:
-            DeltaMessage containing the delta for this token, or None if no output
+            StreamableResponsesParser instance for chaining
         """
         # ignore special tokens
         if token_id in self.tokenizer.all_special_ids:
