@@ -194,6 +194,11 @@ class FrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint. 
     This is intended for use in a Disaggregated Everything setup.
     """
+    enable_offline_docs: bool = False
+    """
+    Enable offline FastAPI documentation for air-gapped environments.
+    Uses vendored static assets bundled with vLLM.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
