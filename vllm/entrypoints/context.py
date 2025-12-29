@@ -334,7 +334,7 @@ class ParsableContext(ConversationContext):
 
         # Update current turn input tokens
         self.current_turn_metrics.input_tokens = this_turn_input_tokens
-        self.num_prompt_tokens = this_turn_input_tokens
+        self.num_prompt_tokens += this_turn_input_tokens
 
         # Calculate tool tokens (except on first turn)
         if self.is_first_turn:
@@ -370,7 +370,7 @@ class ParsableContext(ConversationContext):
         # Update cached tokens
         num_cached_token = output.num_cached_tokens
         if num_cached_token is not None:
-            self.num_cached_tokens = num_cached_token
+            self.num_cached_tokens += num_cached_token
             self.current_turn_metrics.cached_input_tokens = num_cached_token
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:

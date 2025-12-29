@@ -93,12 +93,14 @@ def mock_request():
 @pytest.fixture
 def mock_streamable_parser():
     """Set up a mock StreamableResponsesParser."""
-    with patch("vllm.entrypoints.context.StreamableResponsesParser") as mock_parser_cls:
+    with patch(
+        "vllm.entrypoints.context.get_streamable_responses_parser"
+    ) as mock_factory:
         parser = MagicMock()
         parser.response_messages = []
         parser.current_channel = "final"
         parser.final_output = []
-        mock_parser_cls.return_value = parser
+        mock_factory.return_value = parser
         yield parser
 
 
@@ -199,6 +201,7 @@ async def test_parsable_context_multi_turn_token_counting(
     context.append_output(mock_output1)
 
     # At this point, we should have 5 prompt tokens and 3 output tokens
+    # num_prompt_tokens is accumulated across all turns
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3
     assert context.num_tool_output_tokens == 0
@@ -210,10 +213,12 @@ async def test_parsable_context_multi_turn_token_counting(
     # last_turn_output_tokens (3) = 7
     expected_tool_output = 7
 
-    assert context.num_prompt_tokens == 15
+    # num_prompt_tokens = 5 (turn1) + 15 (turn2) = 20
+    assert context.num_prompt_tokens == 5 + 15
     assert context.num_output_tokens == 3 + 4
     assert context.num_tool_output_tokens == expected_tool_output
-    assert context.num_cached_tokens == 5
+    # num_cached_tokens = 0 (turn1) + 5 (turn2) = 5
+    assert context.num_cached_tokens == 0 + 5
 
     # Third turn - final response
     mock_output3 = await anext(mock_generator)
@@ -223,10 +228,12 @@ async def test_parsable_context_multi_turn_token_counting(
     # last_turn_output_tokens (4) = 1
     expected_tool_output = 7 + 1
 
-    assert context.num_prompt_tokens == 20
+    # num_prompt_tokens = 5 (turn1) + 15 (turn2) + 20 (turn3) = 40
+    assert context.num_prompt_tokens == 5 + 15 + 20
     assert context.num_output_tokens == 3 + 4 + 5
     assert context.num_tool_output_tokens == expected_tool_output
-    assert context.num_cached_tokens == 15
+    # num_cached_tokens = 0 (turn1) + 5 (turn2) + 15 (turn3) = 20
+    assert context.num_cached_tokens == 0 + 5 + 15
 
     # Validate all turn metrics
     assert len(context.all_turn_metrics) == 3
@@ -390,7 +397,8 @@ async def test_parsable_context_negative_tool_tokens_edge_case(
         # Calculated negative tool tokens (12 - 10 - 5 = -3) should be clamped
         # to 0 and an error should be logged
         assert context.num_tool_output_tokens == 0
-        assert context.num_prompt_tokens == 12
+        # num_prompt_tokens = 10 (turn1) + 12 (turn2) = 22
+        assert context.num_prompt_tokens == 10 + 12
         assert context.num_output_tokens == 5 + 2
 
         # Verify the error was logged properly
