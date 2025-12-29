@@ -48,7 +48,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
-    convert_weights_to_kernel_format,
+    convert_to_fp8_moe_kernel_format,
     make_kernel,
     select_fp8_moe_backend,
 )
@@ -901,7 +901,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
         w13_weight, w13_weight_scale, w2_weight, w2_weight_scale = (
-            convert_weights_to_kernel_format(
+            convert_to_fp8_moe_kernel_format(
                 fp8_backend=self.fp8_backend,
                 layer=layer,
                 w13_weight=w13_weight,

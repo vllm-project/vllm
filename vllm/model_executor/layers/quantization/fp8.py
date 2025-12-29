@@ -34,7 +34,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
-    convert_weights_to_kernel_format,
+    convert_to_fp8_moe_kernel_format,
     make_kernel,
     select_fp8_moe_backend,
 )
@@ -802,7 +802,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        w13, w13_scale, w2, w2_scale = convert_weights_to_kernel_format(
+        w13, w13_scale, w2, w2_scale = convert_to_fp8_moe_kernel_format(
             self.fp8_backend,
             layer,
             w13,

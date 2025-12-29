@@ -155,7 +155,7 @@ def select_fp8_moe_backend(
     return Fp8MoeBackend.TRITON
 
 
-def convert_weights_to_kernel_format(
+def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     layer: torch.nn.Module,
     w13_weight: torch.Tensor,
