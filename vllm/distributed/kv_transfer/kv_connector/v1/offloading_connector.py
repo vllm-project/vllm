@@ -47,8 +47,6 @@ ReqId = str
 
 logger = init_logger(__name__)
 
-THRESHOLD = 100000000000
-
 
 @dataclass
 class OffloadingOperationMetrics:
