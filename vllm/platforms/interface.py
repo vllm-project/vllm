@@ -7,19 +7,19 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
-    from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -135,6 +135,11 @@ class Platform:
     _global_graph_pool: Any | None = None
 
     @property
+    def pass_key(self) -> str:
+        """Inductor config key for the PassManager custom pass"""
+        return "post_grad_custom_post_pass"
+
+    @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
         # Be careful with the order of the dtypes. The first dtype will
@@ -178,6 +183,21 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
+        return "vllm.compilation.pass_manager.PostGradPassManager"
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        """
+        Get the custom compile backend for current platform.
+        """
+        return cls.simple_compile_backend
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
@@ -203,29 +223,50 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> "AttentionBackendEnum":
-        # Import AttentionBackendEnum here to avoid circular import.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
-        return AttentionBackendEnum.TORCH_SDPA
-
-    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: "CacheDType | None",
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        """
+        Get the vision attention backend class of a device.
+
+        NOTE: ViT Attention should be checked and override in the platform-specific
+        implementation. we should not override this in any other places, like
+        the model_executor/models/<model_name>.py.
+
+        We check if the backend is None or not:
+            1. If not, check if the backend is supported by the platform.
+            2. If None, continue to the default selection logic.
+        """
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention"
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
+        )
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_device_capability(
@@ -282,6 +323,21 @@ class Platform:
             return current_capability == capability
 
         return current_capability.to_int() == capability
+
+    @classmethod
+    def is_device_capability_family(
+        cls,
+        capability: int,
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Returns True if the device capability is any <major>.x.
+        Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+        return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

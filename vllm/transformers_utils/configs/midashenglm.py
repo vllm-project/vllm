@@ -98,6 +98,6 @@ class MiDashengLMConfig(PretrainedConfig):
             if text_config
             else Qwen2_5OmniTextConfig()
         )
-        self.text_config.rope_scaling = None  # uses_mrope is false
+        self.text_config.rope_parameters = None  # uses_mrope is false
         self.audio_token_id = audio_token_id
         super().__init__(**kwargs)
