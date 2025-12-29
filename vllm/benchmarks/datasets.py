@@ -1847,7 +1847,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 disable_shuffle=args.disable_shuffle,
-                prefix_len=args.common_prefix_len,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
