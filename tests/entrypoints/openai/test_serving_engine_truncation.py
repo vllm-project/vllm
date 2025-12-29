@@ -109,4 +109,3 @@ async def test_prompt_too_long_raises_value_error(serving: OpenAIServing):
         await serving._normalize_prompt_text_to_input(
             request, prompt="too long", tokenizer=object(), add_special_tokens=True
         )
-
