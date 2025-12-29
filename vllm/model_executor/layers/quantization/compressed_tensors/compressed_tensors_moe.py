@@ -964,26 +964,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            assert not hasattr(layer, "w13_bias")
-            assert not hasattr(layer, "w2_bias")
             (
                 workspace,
                 w13_weight,
                 w2_weight,
                 w13_weight_scale,
                 w2_weight_scale,
-                w13_bias,
-                w2_bias,
             ) = prepare_moe_fp8_layer_for_marlin(
                 layer,
                 layer.w13_weight,
                 layer.w2_weight,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
-                size_k_first=False,
                 input_dtype=self.marlin_input_dtype,
             )
-            assert w13_bias is None and w2_bias is None
             layer.workspace = workspace
             replace_parameter(layer, "w13_weight", w13_weight)
             replace_parameter(layer, "w2_weight", w2_weight)

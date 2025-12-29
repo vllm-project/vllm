@@ -203,9 +203,6 @@ def prepare_moe_fp8_layer_for_marlin(
     w2_weight: torch.Tensor,
     w13_weight_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
-    w13_bias: torch.Tensor | None,
-    w2_bias: torch.Tensor | None,
-    size_k_first: bool = True,
     input_dtype: torch.dtype | None = None,
 ) -> tuple[
     torch.Tensor,  # workspace
@@ -213,9 +210,7 @@ def prepare_moe_fp8_layer_for_marlin(
     torch.Tensor,  # w2_weight
     torch.Tensor,  # w13_weight_scale
     torch.Tensor,  # w2_weight_scale
-    torch.Tensor | None,  # w13_bias
-    torch.Tensor | None,
-]:  # w2_bias
+]:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -244,15 +239,11 @@ def prepare_moe_fp8_layer_for_marlin(
         else:
             size_n, size_k = k, n
 
-        if size_k_first:
-            assert weight.shape == (e, size_k, size_n)
-        else:
-            assert weight.shape == (e, size_n, size_k)
+        assert weight.shape == (e, size_n, size_k)
 
         for i in range(e):
-            qweight = pack_fp8_to_int32(weight[i], size_k_first)
-            if not size_k_first:
-                qweight = qweight.T.contiguous()
+            qweight = pack_fp8_to_int32(weight[i], size_k_first=False)
+            qweight = qweight.T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=8
@@ -299,8 +290,7 @@ def prepare_moe_fp8_layer_for_marlin(
             # block-wise quantization -> group-wise quantization
             # (e, size_k // block_size[1], ceil(size_n / block_size[0]))
             #  =>(repeat)=> (e, size_k // block_size[1], size_n)
-            if not size_k_first:
-                scales = scales.permute(0, 2, 1)
+            scales = scales.permute(0, 2, 1)
             block_n = weight_block_size[0]
             scales = scales.repeat_interleave(block_n, 2)
             # size_n may not divisible by block_size[0]
@@ -320,34 +310,12 @@ def prepare_moe_fp8_layer_for_marlin(
     w13_weight_scale = permute_scales(w13_weight_scale, "w13")
     w2_weight_scale = permute_scales(w2_weight_scale, "w2")
 
-    # BIAS
-    # Permute bias
-    def permute_bias(bias: torch.Tensor) -> torch.Tensor:
-        bias = bias.to(layer.orig_dtype)
-        tensor_list = []
-        for i in range(e):
-            expert_bias = bias[i]
-
-            tensor_list.append(marlin_permute_bias(expert_bias))
-
-        bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-
-    assert (w13_bias is None and w2_bias is None) or (
-        w13_bias is not None and w2_bias is not None
-    )
-    if w13_bias is not None:
-        w13_bias = permute_bias(w13_bias)
-    if w2_bias is not None:
-        w2_bias = permute_bias(w2_bias)
-
     return (
         workspace,
         w13_weight,
         w2_weight,
         w13_weight_scale,
         w2_weight_scale,
-        w13_bias,
-        w2_bias,
     )
 
 

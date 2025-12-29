@@ -919,15 +919,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight,
                 w13_weight_scale,
                 w2_weight_scale,
-                _,
-                _,
             ) = prepare_moe_fp8_layer_for_marlin(
                 layer,
                 w13_weight,
                 w2_weight,
                 w13_weight_scale,
                 w2_weight_scale,
-                size_k_first=False,
                 input_dtype=self.marlin_input_dtype,
             )
             layer.workspace = workspace
