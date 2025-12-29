@@ -538,6 +538,8 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+# NOTE(zyongye): we can remove all the wna16 kernel
+# once we drop off sm70 support
 def invoke_fused_moe_wna16_cuda_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -594,6 +596,8 @@ def invoke_fused_moe_wna16_cuda_kernel(
     )
 
 
+# NOTE(zyongye): we can remove all the wna16 kernel
+# once we drop off sm70 support
 def invoke_fused_moe_wna16_triton_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
