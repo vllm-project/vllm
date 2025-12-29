@@ -25,15 +25,15 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport, KVCacheLayoutTy
 
 logger = init_logger(__name__)
 
-FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+TRTLLM_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
-class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+class TrtllmMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
 
-class FlashInferMLABackend(MLACommonBackend):
+class TrtllmMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -47,15 +47,15 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_MLA"
+        return "TRTLLM_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["FlashInferMLAImpl"]:
-        return FlashInferMLAImpl
+    def get_impl_cls() -> type["TrtllmMLAImpl"]:
+        return TrtllmMLAImpl
 
     @staticmethod
-    def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
-        return FlashInferMLAMetadataBuilder
+    def get_builder_cls() -> type["TrtllmMLAMetadataBuilder"]:
+        return TrtllmMLAMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -66,14 +66,14 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
+g_workspace = torch.zeros(
+    TRTLLM_MLA_WORKSPACE_BUFFER_SIZE,
     dtype=torch.uint8,
     device="cuda",
 )
 
 
-class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+class TrtllmMLAImpl(MLACommonImpl[MLACommonMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -106,7 +106,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
-                "FlashInferMLAImpl does not support one of the following: "
+                "TrtllmMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, logits_soft_cap"
             )
 
@@ -115,10 +115,10 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "Encoder self-attention and "
                 "encoder/decoder cross-attention "
                 "are not implemented for "
-                "FlashInferMLAImpl"
+                "TrtllmMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
+        self._workspace_buffer = g_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
@@ -139,7 +139,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # trtllm API requires extra dimension q_len_per_request for MTP
         if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
             logger.warning_once(
-                """FlashInferMLAImpl got a query of uneven length.
+                """TrtllmMLAImpl got a query of uneven length.
                 This usually indicates an issue in batch reordering
                 or incorrect setup in dummy_run."""
             )

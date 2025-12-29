@@ -206,7 +206,7 @@ def test_custom_compile_config(
         ("Qwen/Qwen2-0.5B", None),  # Standard attention model
         (
             "deepseek-ai/DeepSeek-V2-Lite",
-            AttentionBackendEnum.FLASHINFER_MLA,
+            AttentionBackendEnum.TRTLLM_MLA,
         ),  # MLA (Multi-head Latent Attention) model
     ],
 )
