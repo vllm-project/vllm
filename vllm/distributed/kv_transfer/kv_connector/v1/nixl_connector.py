@@ -84,8 +84,12 @@ logger = init_logger(__name__)
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
-    from nixl._api import nixl_agent as NixlWrapper
-    from nixl._bindings import nixlXferTelemetry
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent as NixlWrapper
+        from nixl._bindings import nixlXferTelemetry
+    else:
+        from rixl._api import nixl_agent as NixlWrapper
+        from rixl._bindings import nixlXferTelemetry
 
     logger.info("NIXL is available")
 except ImportError:
@@ -95,7 +99,10 @@ except ImportError:
 
 
 try:
-    from nixl._api import nixl_agent_config
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent_config
+    else:
+        from rixl._api import nixl_agent_config
 except ImportError:
     nixl_agent_config = None
     logger.warning("NIXL agent config is not available")
