@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Annotated, Literal, TypedDict, Union
+from typing import TYPE_CHECKING, Annotated, Literal, TypedDict
 
 import numpy as np
 import torch
@@ -35,12 +35,9 @@ from vllm.transformers_utils.configs.cogagent import (
     EVALargeVisionConfig,
 )
 from vllm.transformers_utils.processors.cogagent import CogAgentProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-ImageData = Union[
-    list[Image.Image | np.ndarray | torch.Tensor], np.ndarray, torch.Tensor
-]
+ImageData = list[Image.Image | np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor
 
 
 def get_max_image_tokens(hf_config: EVACLIPVisionConfig | EVALargeVisionConfig) -> int:
@@ -65,7 +62,10 @@ class CogAgentImagePixelInputs(TensorSchema):
 
 class CogAgentImageEmbeddingInputs(TensorSchema):
     """
-    image_embeds: bn, L, D. Combined Embeddings of EVAVisionEncoder and EVALargeEncoder.
+    image_embeds: bn, L, D.
+        Padded Embeddings of EVAVisionEncoder and EVALargeEncoder. Embeddings
+        are stored as [bn, : EVAVisionEncoder(L), : EVAVisionEncoder(D)] and
+        [bn, -EVALargeEncoder(L) :, : EVALargeEncoder(D)]
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -98,13 +98,11 @@ class CogAgentProcessingInfo(BaseProcessingInfo):
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int]
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         # max number of tokens generated per request is large encoder + small encoder
         # only tokens from the small encoder are embedded with text.
-        
+
         num_tokens = get_max_image_tokens(self.get_hf_config().vision_config)
         num_tokens += get_max_image_tokens(self.get_hf_config().cross_vision_config) - 2
 

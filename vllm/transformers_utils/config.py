@@ -114,11 +114,12 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
 
-def _get_model_type_from_architecture(config_dict: dict[str, Any]) -> str:
-    """ Get model name from architecture """
+
+def _get_model_type_from_architecture(config_dict: dict[str, Any]) -> str | None:
+    """Get model name from architecture"""
     # list copied from config.py suffix_to_preferred_task
     # https://github.com/vllm-project/vllm/blob/b877031d806e3d9ebc834e0191ae64de40c4ddc2/vllm/config.py#L531
-    common_suffixes: list[tuple[str, str]] = [
+    common_suffixes: list[str] = [
         # Other models follow this pattern
         "ForCausalLM",
         "ForConditionalGeneration",
@@ -126,32 +127,32 @@ def _get_model_type_from_architecture(config_dict: dict[str, Any]) -> str:
         "ChatModel",
         "LMHeadModel",
         "EmbeddingModel",
-        "RewardModel"
+        "RewardModel",
     ]
 
     # take the first until an example gives otherwise
-    arch = config_dict.get("architectures", None)
+    arch = config_dict.get("architectures")
     if arch is None:
         return None
-    
+
     arch = arch[0]
-    
+
     # case sensitivity. Original Case is more correct.
     if arch in _CONFIG_REGISTRY:
         return arch
     if arch.lower() in _CONFIG_REGISTRY:
         return arch.lower()
-    
+
     # Using common naming convention
     for suffix in common_suffixes:
         model_type = arch.replace(suffix, "", 1)
 
         if model_type in _CONFIG_REGISTRY:
             return model_type
-        
+
         if model_type.lower() in _CONFIG_REGISTRY:
             return model_type.lower()
-        
+
     return None
 
 

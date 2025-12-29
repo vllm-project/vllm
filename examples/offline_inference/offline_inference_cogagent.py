@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for text generation.
@@ -6,29 +8,30 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-from dataclasses import dataclass
 import os
 import random
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.image import convert_image_mode
-from vllm.entrypoints.chat_utils import apply_hf_chat_template
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.entrypoints.chat_utils import apply_hf_chat_template
+from vllm.multimodal.image import convert_image_mode
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 ImageData: TypeAlias = Any
 if TYPE_CHECKING:
-    import torch
     import numpy as np
+    import torch
     from PIL import Image
 
     ImageData: TypeAlias = torch.Tensor | np.ndarray | Image.Image
-    
+
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
 # lower-end GPUs.
 # Unless specified, these settings have been tested to work on a single L4.
+
 
 @dataclass
 class ChatTemplate:
@@ -40,23 +43,27 @@ class ChatTemplate:
         output = {
             "role": self.role,
             "content": [
-                {"type": "image" if not isinstance(content, str) else "text",
-                 "image" if not isinstance(content, str) else "text": content}
-                 for content in self.content
-            ]
+                {
+                    "type": "image" if not isinstance(content, str) else "text",
+                    "image" if not isinstance(content, str) else "text": content,
+                }
+                for content in self.content
+            ],
         }
         return output
+
 
 class GenerationData(TypedDict):
     prompt: str
     multi_modal_data: dict[str, ImageData]
     multi_modal_uuids: dict[str, str]
 
+
 # Cogagent
 def run_cogagent(
     prompts: GenerationData | list[GenerationData],
     tokenizer: str = "lmsys/vicuna-7b-v1.5",
-    **kwargs
+    **kwargs,
 ) -> tuple[LLM, list[str]]:
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     name = "zai-org/cogagent-vqa-hf"
@@ -71,21 +78,21 @@ def run_cogagent(
         gpu_memory_utilization=0.71,
         max_num_seqs=4,
         mm_encoder_attn_backend=AttentionBackendEnum.TORCH_SDPA,
-        **kwargs
+        **kwargs,
     )
-    
+
     if isinstance(prompts, dict):
         prompts = [prompts]
 
     new_prompts = list()
     for prompt in prompts:
-        image_data = prompt["multi_modal_data"].get('image')
+        image_data = prompt["multi_modal_data"].get("image")
         content = [prompt["prompt"]]
         if image_data is not None:
             content.append(image_data)
 
         new_prompt = ChatTemplate(
-            'chat_old',
+            "chat_old",
             content=content,
         )
 
@@ -98,17 +105,17 @@ def run_cogagent(
         )
         new_prompt = GenerationData(
             prompt=new_prompt,
-            multi_modal_data=prompt['multi_modal_data'],
-            multi_modal_uuids=prompt["multi_modal_uuids"]
+            multi_modal_data=prompt["multi_modal_data"],
+            multi_modal_uuids=prompt["multi_modal_uuids"],
         )
         new_prompts.append(new_prompt)
 
     return llm, new_prompts
 
+
 def get_multi_modal_input(args) -> tuple[list[GenerationData], list[GenerationData]]:
-    
     # Input image and question (Fixed input for testing)
-    
+
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
     img_questions = [
         "What is the content of this image?",
@@ -124,6 +131,7 @@ def get_multi_modal_input(args) -> tuple[list[GenerationData], list[GenerationDa
         modality=args.modality,
     )
     return data, data_with_empty_media
+
 
 def maybe_apply_image_repeat(
     image_repeat_prob, num_prompts, data, prompts: list[str], modality
@@ -169,12 +177,12 @@ def maybe_apply_image_repeat(
 
 def main(args):
     assert args.num_prompts > 0
-    
+
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=64,
         skip_special_tokens=False,
-        spaces_between_special_tokens=False
+        spaces_between_special_tokens=False,
     )
 
     kwargs = dict()
@@ -185,6 +193,7 @@ def main(args):
     llm, inputs = run_cogagent(inputs, args.tokenizer, **kwargs)
     if args.time_generate:
         import time
+
         start_time = time.time()
         outputs = llm.generate(inputs, sampling_params=sampling_params)
         elapsed_time = time.time() - start_time
@@ -195,65 +204,61 @@ def main(args):
     for inp, out in zip(inputs, outputs):
         generated_text = out.outputs[0].text
         print("_" * 80)
-        print(inp['prompt'])
+        print(inp["prompt"])
         print(generated_text)
         print("_" * 80)
 
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
+        description="Demo on using vLLM for offline inference with "
+        "vision language models for text generation"
+    )
     parser.add_argument(
-        '--model-type',
-        '-m',
+        "--model-type",
+        "-m",
         type=str,
         default="cogagent",
-        choices=['cogagent'],
-        help='Huggingface "model_type".'
+        choices=["cogagent"],
+        help='Huggingface "model_type".',
     )
     parser.add_argument(
-        '--tokenizer',
-        '-t',
+        "--tokenizer",
+        "-t",
         type=str,
-        default='lmsys/vicuna-7b-v1.5',
+        default="lmsys/vicuna-7b-v1.5",
     )
 
     parser.add_argument(
-        '--num-prompts',
-        type=int,
-        default=1,
-        help='Number of prompts to run.'
+        "--num-prompts", type=int, default=1, help="Number of prompts to run."
     )
-    
+
     parser.add_argument(
-        '--modality',
+        "--modality",
         type=str,
         default="image",
-        choices=['image'],
-        help='Modality of the input.'
+        choices=["image"],
+        help="Modality of the input.",
     )
-    
+
     parser.add_argument(
-        '--image-repeat-prob',
+        "--image-repeat-prob",
         type=float,
         default=1,
-        help='Simulates the hit-ratio for multi-modal preprocessor cache'
-             ' (if enabled)'
+        help="Simulates the hit-ratio for multi-modal preprocessor cache (if enabled)",
     )
 
     parser.add_argument(
-        '--disable_mm_preprocessor_cache',
-        action='store_true',
-        help='If True, enable caching of multi-modal preprocessor/mapper.'
+        "--disable_mm_preprocessor_cache",
+        action="store_true",
+        help="If True, enable caching of multi-modal preprocessor/mapper.",
     )
 
     parser.add_argument(
-        '--time-generate',
-        action='store_true',
-        help='If True, then print the total generate() call time')
+        "--time-generate",
+        action="store_true",
+        help="If True, then print the total generate() call time",
+    )
 
     args = parser.parse_args()
     main(args)
-
-

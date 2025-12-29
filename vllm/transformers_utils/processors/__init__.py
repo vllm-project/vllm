@@ -9,10 +9,10 @@ reasons:
 """
 
 from vllm.transformers_utils.processors.bagel import BagelProcessor
+from vllm.transformers_utils.processors.cogagent import CogAgentProcessor
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 from vllm.transformers_utils.processors.hunyuan_vl_image import HunYuanVLImageProcessor
-from vllm.transformers_utils.processors.cogagent import CogAgentProcessor
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 

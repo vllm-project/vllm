@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-import os
 from collections.abc import Iterable
 
 import torch
@@ -98,7 +97,7 @@ def get_layernorm(norm_type: str) -> nn.Module:
     return layernorm
 
 
-def broadcat(tensors, dim=-1):
+def broadconcat(tensors, dim=-1):
     num_tensors = len(tensors)
     shape_lens = set(list(map(lambda t: len(t.shape), tensors)))
     assert len(shape_lens) == 1, "tensors must all have the same number of dimensions"
@@ -137,7 +136,7 @@ class EVAVisionRotaryEmbeddingFast(nn.Module):
 
         freqs = torch.einsum("..., f -> ... f", t, freqs)
         freqs = repeat(freqs, "... n -> ... (n r)", r=2)
-        freqs = broadcat((freqs[:, None, :], freqs[None, :, :]), dim=-1)
+        freqs = broadconcat((freqs[:, None, :], freqs[None, :, :]), -1)
 
         freqs_cos = freqs.cos().view(-1, freqs.shape[-1])
         freqs_sin = freqs.sin().view(-1, freqs.shape[-1])
@@ -744,9 +743,7 @@ class Eva2LargeEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        os.environ["delRoPE"] = (
-            "1"  # to avoid error in rope params when changing image size
-        )
+
         self.model = EVALargeVisionTransformer(
             self.config,
             multimodal_config=multimodal_config,

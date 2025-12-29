@@ -3,13 +3,7 @@
 
 from collections.abc import Iterable
 from functools import cached_property
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Self,
-    TypeAlias,
-    overload,
-)
+from typing import TYPE_CHECKING, Any, Self, TypeAlias, overload
 
 import torch
 import torch.nn as nn
@@ -41,43 +35,39 @@ from vllm.model_executor.models.cogagent_processing import (
     CogAgentImagePixelInputs,
     CogAgentMultiModalProcessor,
     CogAgentProcessingInfo,
+    ImageData,
     get_max_image_tokens,
 )
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
-
-ImageData: TypeAlias = Any
-if TYPE_CHECKING:
-    import numpy as np
-    from PIL import Image
-
-    from vllm.transformers_utils.configs.cogagent import CogAgentConfig
-
-    ImageData: TypeAlias = np.ndarray | torch.Tensor | Image.Image
-
-from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-
-from .cogagent_vision_encoder import (
+from vllm.model_executor.models.cogagent_vision_encoder import (
     CrossVisionModel,
     EVA2CLIPModel,
     sharded_weight_loader,
 )
-from .interfaces import SupportsLoRA, SupportsMultiModal
-from .utils import (
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsMultiModal
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+
+CogAgentConfig: TypeAlias = Any
+if TYPE_CHECKING:
+    from vllm.transformers_utils.configs.cogagent import CogAgentConfig
 
 
 def build_positions(scheduler_config, num_image_tokens, device):
     """prebuilt position ids to overwrite passed in ids."""
+
     # we make two assumptions here.
     # 1. There is no text before the image.
-    #       - This is enforced via our processor.
+    #   - This is enforced via our processor.
     # 2. All prompts had an image during prefill.
+    #   - The model errors out on CrossAttention otherwise.
 
     max_position_length = scheduler_config.max_num_batched_tokens
     position_ids = [0, 1]
@@ -190,7 +180,7 @@ class VisionExpertAttention(nn.Module):
             head_size=self.head_dim,
             max_position=self.max_position_embeddings,
             is_neox_style=True,
-            dtype=config.dtype
+            dtype=config.dtype,
         )
 
         self.vision_expert_query_key_value = QKVParallelLinear(
@@ -260,7 +250,7 @@ class VisionExpertAttention(nn.Module):
             mixed_raw_layer[language_token_ids], bias = (
                 self.language_expert_query_key_value(hidden_states[language_token_ids])
             )
-        else: # NOTE: Investigate performance loss for a unified graph
+        else:  # NOTE: Investigate performance loss for a unified graph
             vision_states, bias = self.vision_expert_query_key_value(
                 hidden_states * vision_token_ids
             )
@@ -452,7 +442,7 @@ class CogAgentDecoderLayer(nn.Module):
     ) -> torch.FloatTensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        
+
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
@@ -462,7 +452,7 @@ class CogAgentDecoderLayer(nn.Module):
 
         hidden_states = residual + hidden_states
         cross_input = self.post_cross_attention_layernorm(hidden_states)
-        
+
         attention_output = self.cross_attn(
             hidden_states=cross_input, encoder_embeds=encoder_embeds
         )
@@ -500,15 +490,17 @@ class CogAgentModel(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
 
-        self.layers = nn.ModuleList([
-            CogAgentDecoderLayer(
-                self.hf_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layers.{i}",
-            )
-            for i in range(self.hf_config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                CogAgentDecoderLayer(
+                    self.hf_config,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{i}",
+                )
+                for i in range(self.hf_config.num_hidden_layers)
+            ]
+        )
 
         self.norm = RMSNorm(
             self.hf_config.hidden_size,
@@ -570,17 +562,17 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         "query_key_value": ["query_key_value"],
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
-    
+
     supported_lora_modules = [
         # EVA Large
-        #"qkv_proj",
+        # "qkv_proj",
         # Decoder
         "language_expert_query_key_value",
         "vision_expert_query_key_value",
         "query",
         "key_value",
         # EVA small
-        #"query_key_value",
+        # "query_key_value",
     ]
 
     embedding_modules = {
@@ -613,7 +605,7 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model.cross_vision"),
         )
-        
+
         self.lm_head = ParallelLMHead(
             self.hf_config.vocab_size,
             self.hf_config.hidden_size,
@@ -650,7 +642,7 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         language_token_mask = ~vision_token_mask
         # TODO: Investigate if this change is worth it. Affects the Attention and
         # MLP Layers
-        #language_token_mask = language_token_mask ^ (input_ids == self.pad_token_id)
+        # language_token_mask = language_token_mask ^ (input_ids == self.pad_token_id)
 
         return vision_token_mask, language_token_mask
 
@@ -667,10 +659,9 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         vision_token_ids = None
         language_token_ids = None
 
-        # NOTE: Images are fixed, so we index a precomputed version
-        # The downside is each request must have an image. 
-        # (An issue with the original as well)
-        
+        # NOTE: Images are fixed, so index a precomputed version
+        # See L63 build_positions() for reasoning.
+
         positions = self.position_ids.index_select(0, positions)
         encoder_outputs = self.embed_multimodal(**kwargs)
 
@@ -697,10 +688,10 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
             language_token_ids=language_token_ids,
         )
         return hidden_states
-    
+
     def get_num_mm_encoder_tokens(self, num_image_tokens):
         return self.num_vision_tokens + self.num_cross_vision_tokens
-    
+
     def get_num_mm_connector_tokens(self, num_vision_tokens):
         return self.num_vision_tokens
 
@@ -757,6 +748,9 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
 
         if image_embeds is not None and images is not None:
             raise ValueError("Cannot pass both images and embeddings")
+
+        if images is not None and cross_images is None:
+            raise ValueError("Cannot pass images without cross images")
 
         if image_embeds is None and cross_images is not None:
             inputs = self._parse_and_validate_image_input(

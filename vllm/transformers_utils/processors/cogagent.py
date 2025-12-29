@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Literal, TypeAlias, Union
+from typing import Any, Literal, TypeAlias, TypedDict, cast
 
 import numpy as np
 import torch
@@ -19,10 +19,22 @@ from transformers import (
     ProcessorMixin,
 )
 
-ChatTemplate: TypeAlias = dict[str, str | list[str]]
-ImageData = Union[
-    list[Image.Image | np.ndarray | torch.Tensor], np.ndarray, torch.Tensor, Image.Image
-]
+ImageData: TypeAlias = (
+    list[Image.Image | np.ndarray | torch.Tensor]
+    | np.ndarray
+    | torch.Tensor
+    | Image.Image
+)
+
+
+class ChatTemplate(TypedDict):
+    type: str
+    content: list[dict[str, Any]]
+
+
+class SizedDict(TypedDict):
+    size: int | tuple[int, int] | None
+    max_size: int | None
 
 
 def compose(
@@ -124,12 +136,14 @@ class CogAgentProcessor(ProcessorMixin):
         self.image_processor = compose(
             dtype=dtype,
             crop_size=self.crop_size,
-            **self.image_size,
+            size=self.image_size["size"],
+            max_size=self.image_size["max_size"],
         )
         self.cross_image_processor = compose(
             dtype=dtype,
             crop_size=self.cross_crop_size,
-            **self.cross_image_size,
+            size=self.cross_image_size["size"],
+            max_size=self.cross_image_size["max_size"],
         )
 
         # add image token
@@ -146,11 +160,11 @@ class CogAgentProcessor(ProcessorMixin):
     @staticmethod
     def get_size_dict(image_size: int, aspect_ratio: str = "square"):
         if aspect_ratio == "min":
-            size = dict(max_size=None, size=image_size)
+            size = SizedDict(size=image_size, max_size=None)
         elif aspect_ratio == "max":
-            size = dict(max_size=image_size, size=None)
+            size = SizedDict(size=None, max_size=image_size)
         elif aspect_ratio == "square":
-            size = dict(max_size=None, size=(image_size, image_size))
+            size = SizedDict(size=(image_size, image_size), max_size=None)
         else:
             raise NotImplementedError(
                 f"Resize format {aspect_ratio} is not Implemented"
@@ -161,22 +175,21 @@ class CogAgentProcessor(ProcessorMixin):
     def default_template(
         self, text: str | ChatTemplate | list[str] | list[ChatTemplate]
     ) -> str:
+        if isinstance(text, dict):
+            text = [text]
+
         if isinstance(text, list):
             if isinstance(text[0], dict):
+                text = cast(list[ChatTemplate], text)
                 text = [
-                    line[line["type"]]
+                    line["text"]
                     for lines in text
                     for line in lines["content"]
                     if line.get("type", "") == "text"
                 ]
 
+            text = cast(list[str], text)
             text = " ".join(text)
-
-        elif isinstance(text, dict):
-            text = " ".join(
-                line["text"] if isinstance(line, dict) and "text" in line else text
-                for line in text["content"]
-            )
 
         if self.template_version == "vqa":
             text = "Question: " + text + " Short answer: "
@@ -200,20 +213,23 @@ class CogAgentProcessor(ProcessorMixin):
 
     @property
     def num_image_tokens(self):
-        image_size = self.crop_size
-        if image_size is not None:
-            if not isinstance(image_size, Sequence):
-                image_size = (image_size, image_size)
-        else:
-            image_size = self.image_size
-            size_param = "max_size" if image_size["max_size"] is not None else "size"
-            image_size = image_size[size_param]
-            if not isinstance(image_size, Sequence):
-                image_size = (image_size, image_size)
+        crop_size = self.crop_size
+        size = (0, 0)
 
-        num_image_tokens = (image_size[0] / self.patch_size) * (
-            image_size[1] / self.patch_size
-        ) + 2
+        if crop_size is not None:
+            if not isinstance(crop_size, Sequence):
+                image_size = cast(int, crop_size)
+                size = (image_size, image_size)
+        else:
+            size_param = (
+                "max_size" if self.image_size["max_size"] is not None else "size"
+            )
+            image_size = self.image_size[size_param]
+            if not isinstance(image_size, tuple):
+                image_size = cast(int, image_size)
+                size = (image_size, image_size)
+
+        num_image_tokens = (size[0] / self.patch_size) * (size[1] / self.patch_size) + 2
 
         return int(round(num_image_tokens))
 
@@ -225,15 +241,17 @@ class CogAgentProcessor(ProcessorMixin):
     ) -> torch.Tensor:
         return_tensors = kwargs.get("return_tensors", "pt")
         bos_token: int = self.tokenizer.bos_token_id
-        image_pretoken_sequence: int = [
+        image_pretoken_sequence: list[int] = [
             self.tokenizer.vocab[self.image_token]
         ] * self.num_image_tokens
 
         if isinstance(token_ids[0], int):
-            token_ids = [token_ids]
+            flat = cast(list[int], token_ids)
+            token_ids = [flat]
 
         max_len = 0
         output_ids = []
+        token_ids = cast(list[list[int]], token_ids)
         for with_image, tokens in zip(has_image, token_ids):
             num_image_tokens = sum(
                 token == sequence_token
@@ -246,7 +264,8 @@ class CogAgentProcessor(ProcessorMixin):
                 tokens = [bos_token] + tokens
             if num_image_tokens != (self.num_image_tokens * int(with_image)):
                 raise RuntimeError(
-                    f"Wrong number of image tokens in {tokens}. Found {num_image_tokens}"
+                    f"Wrong number of image tokens in {tokens}. "
+                    f"Found {num_image_tokens}"
                 )
 
             output_ids.append(torch.tensor(tokens, dtype=torch.long))
@@ -268,7 +287,6 @@ class CogAgentProcessor(ProcessorMixin):
     def _process_text(
         self, text: str | list[str], has_image: Sequence[bool] = (True,), **kwargs
     ) -> dict[Literal["input_ids"], torch.Tensor | np.ndarray]:
-        
         return_tensors = kwargs.pop("return_tensors", "pt")
         image_token_sequence: str = self.image_token * self.num_image_tokens
 
@@ -280,23 +298,20 @@ class CogAgentProcessor(ProcessorMixin):
                 text_ids = image_token_sequence + text_ids
 
             text[text_index] = text_ids
-        
-        text_ids = self.tokenizer(
-            text=text,  # type: str | list[str]
+
+        return_ids = self.tokenizer(
+            text=text,
             return_tensors=return_tensors,
             padding=kwargs.pop("padding", "longest"),
             padding_side=kwargs.pop("padding_side", "left"),
             **kwargs,
         )
 
-        input_ids = text_ids["input_ids"]
-        text_ids = {"input_ids": input_ids}
-
-        return text_ids
+        return {"input_ids": return_ids["input_ids"]}
 
     def _process_images(
         self, images: ImageData
-    ) -> dict[Literal["images", "cross_images"], torch.Tensor]:
+    ) -> dict[Literal["pixel_values", "cross_pixel_values"], torch.Tensor]:
         """
         Resizes images into two different sizes, then batches them into torch tensors.
         Args:
@@ -332,77 +347,79 @@ class CogAgentProcessor(ProcessorMixin):
         | list[int]
         | list[ChatTemplate]  # single with history
         | list[str]  # batched input
-        | list[list[ChatTemplate]]  # batched input
-        | list[list[int]],
+        | list[list[ChatTemplate]]  # batched (with history)
+        | list[list[int]],  # batched tokens
         images: ImageData | None = None,
         **kwargs,
     ) -> BatchFeature:
         inputs = {}
-        has_image = [images is not None]
         return_tensors = kwargs.get("return_tensors", "pt")
-        if isinstance(text, (dict, str)):
+        if isinstance(text, str):
             text = [text]
+        if isinstance(text, dict):
+            text = [[text]]
 
-        if isinstance(text, list):
-            assert all(type(query) == type(text[0]) for query in text[1:]), (
-                f"{text}: Must be uniform type"
-            )
-            # Verify if image input is correct format.
-            # Must be:
-            # 1 shared image
-            # a list of images or None for each prompt
-            # a prompt dict with an image tag in "content"
-            if images is not None:
-                num_images = len(images)
-                if isinstance(images, (torch.Tensor, np.ndarray)) and images.ndim <= 3:
-                    num_images = 1
+        assert all(type(query) == type(text[0]) for query in text[1:]), (  # noqa: E721
+            f"{text}: Must be uniform type"
+        )
 
-                if num_images != len(text):
-                    if isinstance(text[0], list) and isinstance(text[0][0], dict):
-                        has_image = [
-                            any("image" in content for content in sample["content"])
-                            for samples in text
-                            for sample in samples
-                        ]
-                    elif isinstance(text[0], dict):
-                        if num_images > 1:
-                            raise RuntimeError("""CogAgent does not support multiple images. 
-                                               With history, pass only the most recent image.
-                                               """)
-                        has_image = [num_images == 1]
-                    else:
+        # Verify if image input is correct format.
+        # has_image allows for embedding input.
+
+        has_image = [images is not None]
+        if images is not None:
+            num_images = len(images)
+            num_queries = len(text)
+            if isinstance(images, (torch.Tensor, np.ndarray)) and images.ndim <= 3:
+                num_images = 1
+
+            if num_images == num_queries:
+                if isinstance(text[0], list) and isinstance(text[0][0], dict):
+                    text = cast(list[list[ChatTemplate]], text)
+                    total_num_images = [
+                        sum("image" in content for content in sample["content"])
+                        for samples in text
+                        for sample in samples
+                    ]
+                    if max(total_num_images) > 1:
                         raise RuntimeError(
-                            "Must pass ChatTemplate when image length does not match text length"
+                            "CogAgent does not Support Multi-Image Queries. "
+                            "In chat mode, pass the same image only once."
                         )
-                else:
-                    has_image = [image is not None for image in images]
+                    has_image = [num_images > 0 for num_images in total_num_images]
+            else:
+                raise RuntimeError(
+                    "Number images of images does not match text queries."
+                )
 
-            if isinstance(text[0], (str, dict)) or (
+            # preprocess single or batched non tokenized inputs
+            if isinstance(text[0], str) or (
                 isinstance(text[0], list) and isinstance(text[0][0], dict)
             ):
+                text = cast(list[str] | list[list[ChatTemplate]], text)
                 if "chat_template" in kwargs or self.chat_template is not None:
                     text = self.apply_chat_template(
                         text, chat_template=kwargs.get("chat_template"), tokenize=False
                     )
                 else:
-                    # list[dict] -> list[list[dict]]
-                    # preserves structure for applying template properly.
-                    if isinstance(text[0], dict):
-                        text = [text]
-
-                    for index, sample in enumerate(text):
+                    results: list[str] = list()
+                    for sample in text:
                         if isinstance(sample, str) and self.applied_template(sample):
                             pass
                         else:
-                            text[index] = self.default_template(sample).strip()
+                            results.append(self.default_template(sample).strip())
 
-        if images is not None:
+                    text = cast(list[str], results)
+
             processed_images = self._process_images(images)
             inputs.update(processed_images)
 
+        text = cast(list[int] | list[list[int]] | list[str] | str, text)
         if isinstance(text[0], list) and isinstance(text[0][0], int):
+            text = cast(list[int] | list[list[int]], text)
             processed_text = self._process_token_ids(text, has_image, **kwargs)
         else:
+            text = cast(str | list[str], text)
             processed_text = self._process_text(text, has_image, **kwargs)
 
         inputs.update(processed_text)
