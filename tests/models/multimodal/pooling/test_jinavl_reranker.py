@@ -14,7 +14,7 @@ from vllm.entrypoints.score_utils import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 
-MODELS = ["/data/models/jina-reranker-m0"]
+MODELS = ["jinaai/jina-reranker-m0"]
 
 MM_PROCESSOR_KWARGS = {
     "min_pixels": 3136,
