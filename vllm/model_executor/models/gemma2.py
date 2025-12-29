@@ -428,8 +428,24 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Apply GGUF RMSNorm weight correction before loading.
+        # llama.cpp adds 1 to RMSNorm weights during GGUF conversion,
+        # so we need to subtract 1 to restore original values.
+        # See: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
+        def _process_weights(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, loaded_weight in weights:
+                if (
+                    self.quant_config
+                    and self.quant_config.get_name() == "gguf"
+                    and name.endswith("norm.weight")
+                ):
+                    loaded_weight = loaded_weight - 1
+                yield name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(_process_weights(weights))
