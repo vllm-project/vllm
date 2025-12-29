@@ -144,11 +144,12 @@ class SchedulerConfig:
     like full attention and sliding window attention.
     """
 
-    async_scheduling: bool = False
-    """If set to True, perform async scheduling. This helps to avoid gaps in
-    GPU utilization, leading to better latency and throughput.
-    Async scheduling is currently not supported with some features such as
-    speculative decoding and pipeline parallelism.
+    async_scheduling: bool = Field(default=None)
+    """If set to False, disable async scheduling. Async scheduling helps to
+    avoid gaps in GPU utilization, leading to better latency and throughput.
+    It is currently not supported with some features such as
+    speculative decoding and pipeline parallelism, and will be automatically
+    disabled in those cases.
     """
 
     stream_interval: int = Field(default=1, ge=1)
