@@ -85,7 +85,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         k_norm: "MiniMaxText01RMSNormTP",
         q: torch.Tensor,
         k: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = q.dtype
         q = q.to(torch.float32)
         k = k.to(torch.float32)
