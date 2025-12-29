@@ -870,6 +870,8 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
         )
+    elif args.enable_offline_docs:
+        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
