@@ -244,14 +244,14 @@ class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
+        # Get processor for chunk counts calculation
         processor = self.info.get_hf_processor(**mm_kwargs)
+
+        # Call parent method (it will handle sampling_rate)
         outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs={
-                **mm_kwargs,
-                "sampling_rate": processor.feature_extractor.sampling_rate,
-            },
+            mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
 
