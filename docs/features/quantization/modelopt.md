@@ -38,7 +38,6 @@ Notes:
   missing files on demand.
 - The inference logic supports gate_proj-style MLP weights (Qwen/LLaMA-style).
 
-
 You can also patch the sizes into the local `config.json` once:
 
 ```bash
