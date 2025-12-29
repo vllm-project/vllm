@@ -178,7 +178,7 @@ For the full and up-to-date list of models validated on CPU platforms, please se
 
 For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](../../../.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
 For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
-To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
 Below is an example command to benchmark all CPU-supported models using optimized configurations.
 
