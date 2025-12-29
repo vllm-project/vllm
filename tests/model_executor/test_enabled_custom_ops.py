@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm import _custom_ops as ops
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.activation import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     dispatch_topk_func,
-    vllm_topk_softmax,
 )
 from vllm.model_executor.layers.layernorm import (
     RMSNorm,
@@ -131,15 +131,24 @@ def test_enabled_ops_invalid(env: str):
 
 
 @pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+    "use_rocm_aiter",
+    [True, False] if current_platform.is_rocm() else [False],
+    "scoring_func",
+    ["softmax", "sigmoid"],
 )
-def test_topk_dispatch(use_rocm_aiter: bool):
-    topk_func = dispatch_topk_func(use_rocm_aiter)
+def test_topk_dispatch(use_rocm_aiter: bool, scoring_func: str):
+    topk_func = dispatch_topk_func(use_rocm_aiter, scoring_func)
 
     if current_platform.is_rocm() and use_rocm_aiter:
-        assert topk_func == rocm_aiter_ops.topk_softmax
+        if scoring_func == "softmax":
+            assert topk_func == rocm_aiter_ops.topk_softmax
+        elif scoring_func == "sigmoid":
+            assert topk_func == rocm_aiter_ops.topk_sigmoid
     else:
-        assert topk_func == vllm_topk_softmax
+        if scoring_func == "softmax":
+            assert topk_func == ops.topk_softmax
+        elif scoring_func == "sigmoid":
+            assert topk_func == ops.topk_sigmoid
 
 
 @pytest.mark.parametrize("add_residual", [True, False])

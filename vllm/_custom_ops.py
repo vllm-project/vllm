@@ -2104,6 +2104,19 @@ def topk_softmax(
     )
 
 
+def topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_sigmoid(
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize, e_score_correction_bias
+    )
+
+
 def grouped_topk(
     scores: torch.Tensor,
     num_expert_group: int,

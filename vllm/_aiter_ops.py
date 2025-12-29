@@ -196,6 +196,33 @@ def _rocm_aiter_topk_softmax_fake(
     pass
 
 
+
+def _rocm_aiter_topk_sigmoid_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> None:
+    from aiter import topk_sigmoid
+
+    topk_sigmoid(
+        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize, e_score_correction_bias
+    )
+
+
+def _rocm_aiter_topk_sigmoid_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> None:
+    pass
+
+
 def _rocm_aiter_biased_grouped_topk_impl(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
@@ -810,7 +837,7 @@ class rocm_aiter_ops:
         - RMS normalization: rms_norm, rms_norm2d_with_add
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
-        - Routing: topk_softmax, biased_grouped_topk, grouped_topk
+        - Routing: topk_softmax, topk_sigmoid, biased_grouped_topk, grouped_topk
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
@@ -954,6 +981,14 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_topk_softmax_impl,
                 mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
                 fake_impl=_rocm_aiter_topk_softmax_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_topk_sigmoid",
+                op_func=_rocm_aiter_topk_sigmoid_impl,
+                mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
+                fake_impl=_rocm_aiter_topk_sigmoid_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1234,6 +1269,19 @@ class rocm_aiter_ops:
         torch.ops.vllm.rocm_aiter_topk_softmax(
             topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
         )
+        return topk_weights, topk_indices
+
+    @staticmethod
+    def topk_sigmoid(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_sigmoid(
+            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize, e_score_correction_bias)
         return topk_weights, topk_indices
 
     @staticmethod

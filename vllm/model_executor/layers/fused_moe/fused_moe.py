@@ -1113,30 +1113,20 @@ def try_get_optimal_moe_config(
     return config
 
 
-def vllm_topk_softmax(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-) -> tuple[torch.Tensor, ...]:
-    ops.topk_softmax(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-    )
-
-    return topk_weights, topk_indices
-
-
 def dispatch_topk_func(
     use_rocm_aiter: bool = False,
-) -> Callable[..., tuple[torch.Tensor, ...]]:
-    if use_rocm_aiter:
-        return rocm_aiter_ops.topk_softmax
-    return vllm_topk_softmax
+    scoring_func: str = "softmax",
+) -> Callable[..., None]:
+    if scoring_func == "softmax":
+        if use_rocm_aiter:
+            return rocm_aiter_ops.topk_softmax
+        return ops.topk_softmax
+    elif scoring_func == "sigmoid":
+        if use_rocm_aiter:
+            return rocm_aiter_ops.topk_sigmoid
+        return ops.topk_sigmoid
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
 
 def fused_topk(
@@ -1163,23 +1153,32 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
-    topk_weights, topk_ids = topk_func(
+    topk_func = dispatch_topk_func(
+        use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+        scoring_func="softmax",
+    )
+    topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
     return topk_weights, topk_ids, token_expert_indices
 
 
-def fused_topk_bias(
+def fused_topk_bias_native(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
+    scoring_func: str = "softmax",
 ):
     n_routed_experts = gating_output.shape[-1]
-    scores = gating_output.softmax(dim=-1)
+    if scoring_func == "softmax":
+        scores = gating_output.softmax(dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
@@ -1191,6 +1190,52 @@ def fused_topk_bias(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
+
+def fused_topk_bias(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str = "softmax",
+):
+    if scoring_func == "softmax":
+        return fused_topk_bias_native(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            e_score_correction_bias=e_score_correction_bias,
+            topk=topk,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+        )
+    elif scoring_func == "sigmoid":
+        M, _ = hidden_states.size()
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+        topk_func = dispatch_topk_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+            scoring_func="sigmoid",
+        )
+        topk_func(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return topk_weights, topk_ids
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
