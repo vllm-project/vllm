@@ -12,6 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -153,9 +154,9 @@ class MOETensors8Bit(MOETensors):
 
 
 def run_with_expert_maps(
-    kernel: mk.FusedMoEModularKernel,
     num_experts: int,
     num_local_experts: int,
+    quant_config: FusedMoEQuantConfig,
     **cutlass_moe_kwargs,
 ):
     def slice_experts():
@@ -168,8 +169,6 @@ def run_with_expert_maps(
             for k, v in cutlass_moe_kwargs.items()
             if k in slice_params and k in cutlass_moe_kwargs
         }
-
-        quant_config = cutlass_moe_kwargs["quant_config"]
 
         for i in range(0, num_experts, num_local_experts):
             s, e = i, i + num_local_experts
@@ -189,12 +188,22 @@ def run_with_expert_maps(
             new_quant_config._w1.scale = quant_config.w1_scale[s:e]
             new_quant_config._w2.scale = quant_config.w2_scale[s:e]
 
-            cutlass_moe_kwargs["quant_config"] = new_quant_config
-
-            yield cutlass_moe_kwargs
+            yield cutlass_moe_kwargs, new_quant_config
 
     out_tensor = torch.zeros_like(cutlass_moe_kwargs["hidden_states"])
-    for kwargs in slice_experts():
+    for kwargs, new_quant_config in slice_experts():
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp8(
+                out_dtype=kwargs["hidden_states"].dtype,
+                # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
+                e=kwargs["w2"].shape[0],  # type: ignore[union-attr]
+                n=kwargs["w2"].shape[2],  # type: ignore[union-attr]
+                k=kwargs["w2"].shape[1],  # type: ignore[union-attr]
+                quant_config=new_quant_config,
+                device="cuda",
+            ),
+        )
         out_tensor = out_tensor + kernel(**kwargs)
 
     return out_tensor
@@ -231,19 +240,6 @@ def run_8_bit(
         a1_scale=None,
     )
 
-    kernel = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsFp8(
-            out_dtype=moe_tensors.a.dtype,
-            # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
-            e=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
-            n=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
-            k=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
-            quant_config=quant_config,
-            device="cuda",
-        ),
-    )
-
     kwargs = {
         "hidden_states": moe_tensors.a,
         "w1": moe_tensors.w1_q,  # type: ignore[union-attr]
@@ -255,13 +251,25 @@ def run_8_bit(
     num_experts = moe_tensors.w1.size(0)
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            CutlassExpertsFp8(
+                out_dtype=moe_tensors.a.dtype,
+                # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
+                e=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
+                n=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+                k=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
+                quant_config=quant_config,
+                device="cuda",
+            ),
+        )
         return kernel(**kwargs)
 
     assert num_local_experts is not None
     return run_with_expert_maps(
-        kernel,
         num_experts,
         num_local_experts,  # type: ignore[arg-type]
+        quant_config,
         **kwargs,
     )
 
