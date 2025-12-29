@@ -199,17 +199,17 @@ def prepare_fp8_layer_for_marlin(
 
 def prepare_moe_fp8_layer_for_marlin(
     layer: torch.nn.Module,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w13_weight_scale: torch.Tensor,
-    w2_weight_scale: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
     input_dtype: torch.dtype | None = None,
 ) -> tuple[
     torch.Tensor,  # workspace
-    torch.Tensor,  # w13_weight
-    torch.Tensor,  # w2_weight
-    torch.Tensor,  # w13_weight_scale
-    torch.Tensor,  # w2_weight_scale
+    torch.Tensor,  # w13
+    torch.Tensor,  # w2
+    torch.Tensor,  # w13_scale
+    torch.Tensor,  # w2_scale
 ]:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
@@ -252,8 +252,8 @@ def prepare_moe_fp8_layer_for_marlin(
 
         return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
 
-    w13_weight = repack_weight("w13", w13_weight)
-    w2_weight = repack_weight("w2", w2_weight)
+    w13 = repack_weight("w13", w13)
+    w2 = repack_weight("w2", w2)
 
     # WEIGHT SCALES
     # Permute scales
@@ -307,16 +307,10 @@ def prepare_moe_fp8_layer_for_marlin(
             scales = fp8_fused_exponent_bias_into_scales(scales)
         return scales
 
-    w13_weight_scale = permute_scales(w13_weight_scale, "w13")
-    w2_weight_scale = permute_scales(w2_weight_scale, "w2")
+    w13_scale = permute_scales(w13_scale, "w13")
+    w2_scale = permute_scales(w2_scale, "w2")
 
-    return (
-        workspace,
-        w13_weight,
-        w2_weight,
-        w13_weight_scale,
-        w2_weight_scale,
-    )
+    return workspace, w13, w2, w13_scale, w2_scale
 
 
 def pack_fp8_to_int32(

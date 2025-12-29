@@ -158,57 +158,53 @@ def select_fp8_moe_backend(
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     layer: torch.nn.Module,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w13_weight_scale: torch.Tensor,
-    w2_weight_scale: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
         assert block_quant
-        w13_weight, w13_weight_scale = deepgemm_post_process_fp8_weight_block(
-            wq=w13_weight,
-            ws=w13_weight_scale,
+        w13, w13_scale = deepgemm_post_process_fp8_weight_block(
+            wq=w13,
+            ws=w13_scale,
             quant_block_shape=tuple(layer.weight_block_size),
             use_e8m0=is_deep_gemm_e8m0_used(),
         )
-        w2_weight, w2_weight_scale = deepgemm_post_process_fp8_weight_block(
-            wq=w2_weight,
-            ws=w2_weight_scale,
+        w2, w2_scale = deepgemm_post_process_fp8_weight_block(
+            wq=w2,
+            ws=w2_scale,
             quant_block_shape=tuple(layer.weight_block_size),
             use_e8m0=is_deep_gemm_e8m0_used(),
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
-        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
+        w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
-        workspace, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale = (
-            prepare_moe_fp8_layer_for_marlin(
-                layer,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                input_dtype=get_marlin_input_dtype(prefix=""),
-            )
+        workspace, w13, w2, w13_scale, w2 = prepare_moe_fp8_layer_for_marlin(
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            input_dtype=get_marlin_input_dtype(prefix=""),
         )
         layer.workspace = workspace
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13_weight = swap_w13_to_w31(w13_weight)
+        w13 = swap_w13_to_w31(w13)
         if block_quant:
-            w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
+            w13_scale = swap_w13_to_w31(w13_scale)
         else:
             # TODO(rob): this function is a hack that renames the scaling
             # factors in the Module. This is a hack we should clean up.
             register_moe_scaling_factors(layer)
             if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
-    elif fp8_backend == Fp8MoeBackend.AITER:
-        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
+                rotate_flashinfer_fp8_moe_weights(w13, w2)
 
-    return w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+    return w13, w2, w13_scale, w2_scale
 
 
 def make_kernel(
