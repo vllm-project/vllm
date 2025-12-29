@@ -177,6 +177,12 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # req_id -> dict[layer_idx -> activation_tensor]
+    # Activations from intermediate layers during inference
+    # Note: This field contains torch.Tensor objects which are moved to CPU
+    # before being added to ModelRunnerOutput to aid serialization
+    activations: dict[str, dict[int, torch.Tensor]] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

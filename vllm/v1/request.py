@@ -123,6 +123,10 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # Activations from intermediate layers during inference
+        # dict[layer_idx -> activation_tensor]
+        self.activations: dict[int, torch.Tensor] | None = None
+
         # The number of requests being preempted by the scheduler
         self.num_preemptions = 0
 

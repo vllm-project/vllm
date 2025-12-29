@@ -1184,6 +1184,28 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            # Get activations for this request and pass through EngineCoreOutput
+            # Note: msgspec can serialize torch.Tensor, but we ensure they're on CPU
+            request_activations: dict[int, torch.Tensor] | None = None
+            if (
+                model_runner_output.activations is not None
+                and model_runner_output.activations
+            ):
+                req_activations = model_runner_output.activations.get(req_id)
+                if req_activations:
+                    # Ensure tensors are on CPU (they should already be from model_runner)
+                    # Keep as torch.Tensor - msgspec encoder hook will handle serialization
+                    request_activations = {
+                        layer_idx: act.cpu().contiguous() if act.device.type != "cpu" else act
+                        for layer_idx, act in req_activations.items()
+                    }
+                    # Also store in Request object for reference
+                    request.activations = request_activations
+                    logger.info(
+                        f"✓ Passing activations for req_id {req_id}: layers {list(request_activations.keys())}, "
+                        f"shapes: {[act.shape for act in request_activations.values()]}"
+                    )
+            
             if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -1193,6 +1215,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        activations=request_activations,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),

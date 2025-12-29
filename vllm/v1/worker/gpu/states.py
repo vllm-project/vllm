@@ -136,7 +136,22 @@ class RequestState:
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
-        self.extra_data[req_id] = ExtraData(lora_request)
+        # Store activation extraction settings in extra_data
+        extract_activations = getattr(sampling_params, "extract_activations", False)
+        activation_layers = getattr(sampling_params, "activation_layers", None)
+        self.extra_data[req_id] = ExtraData(
+            lora_request=lora_request,
+            extract_activations=extract_activations,
+            activation_layers=activation_layers,
+        )
+        # Debug log to verify flag is being set
+        if extract_activations:
+            from vllm.logger import init_logger
+            logger = init_logger(__name__)
+            logger.info(
+                f"✓ Stored activation extraction flag for req_id {req_id}: "
+                f"extract_activations={extract_activations}, layers={activation_layers}"
+            )
 
         self.prompt_len[req_idx] = prompt_len
         prefill_len = len(prefill_token_ids)
@@ -298,6 +313,8 @@ class Param:
 class ExtraData:
     lora_request: LoRARequest | None
     in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
+    extract_activations: bool = False
+    activation_layers: list[int] | None = None
 
 
 class UvaBuffer:

@@ -46,6 +46,8 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    activations: dict[int, torch.Tensor] | None = None
+    """Activations from intermediate layers. dict[layer_idx -> activation_tensor]."""
 
     def finished(self) -> bool:
         return self.finish_reason is not None

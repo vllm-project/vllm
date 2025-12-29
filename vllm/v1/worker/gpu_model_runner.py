@@ -97,6 +97,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.activation_collector import ActivationCollector
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
@@ -841,6 +842,13 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+            # Debug: Log activation extraction flag when request is added
+            if sampling_params:
+                extract_activations = getattr(sampling_params, "extract_activations", None)
+                logger.info(
+                    f"✓ Added request {req_id}: extract_activations={extract_activations}, "
+                    f"hasattr={hasattr(sampling_params, 'extract_activations')}"
+                )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3201,28 +3209,180 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
-        # Run the model.
-        # Use persistent buffers for CUDA graphs.
-        with (
-            set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_mode,
-                batch_descriptor=batch_desc,
-                ubatch_slices=ubatch_slices_padded,
-            ),
-            record_function_or_nullcontext("gpu_model_runner: forward"),
-            self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
-        ):
-            model_output = self._model_forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
+        # Check if any request needs activation extraction
+        needs_activations = False
+        all_layer_indices: set[int] | None = None
+        req_ids_needing_activations: set[str] = set()
+        logger.info(
+            f"Checking activation extraction for {len(req_ids)} requests: {req_ids}"
+        )
+        try:
+            for req_id in req_ids:
+                req_state = self.requests.get(req_id)
+                logger.info(
+                    f"  req_id {req_id}: req_state={req_state is not None}, "
+                    f"has_sampling_params={req_state.sampling_params is not None if req_state else False}"
+                )
+                if req_state and req_state.sampling_params:
+                    # Try direct attribute access first, then getattr as fallback
+                    extract_activations = False
+                    if hasattr(req_state.sampling_params, "extract_activations"):
+                        extract_activations = req_state.sampling_params.extract_activations
+                    else:
+                        extract_activations = getattr(
+                            req_state.sampling_params, "extract_activations", False
+                        )
+                    logger.info(
+                        f"  req_id {req_id}: extract_activations={extract_activations}, "
+                        f"hasattr={hasattr(req_state.sampling_params, 'extract_activations')}, "
+                        f"sampling_params type={type(req_state.sampling_params)}"
+                    )
+                    if extract_activations:
+                        needs_activations = True
+                        req_ids_needing_activations.add(req_id)
+                        activation_layers = getattr(
+                            req_state.sampling_params, "activation_layers", None
+                        )
+                        if activation_layers:
+                            if all_layer_indices is None:
+                                all_layer_indices = set()
+                            all_layer_indices.update(activation_layers)
+                        else:
+                            all_layer_indices = None  # Collect all layers
+                            break
+            
+            # If activation extraction is needed, automatically disable compilation
+            # PyTorch hooks don't work with compiled models
+            if needs_activations:
+                from vllm.config.compilation import CompilationMode
+                
+                # Check if model is already compiled
+                is_model_compiled = (
+                    hasattr(self.model, "_compiled_callable")
+                    or hasattr(self.model, "compiled")
+                    or (
+                        hasattr(self.model, "model")
+                        and (
+                            hasattr(self.model.model, "_compiled_callable")
+                            or hasattr(self.model.model, "compiled")
+                        )
+                    )
+                )
+                
+                if self.compilation_config.mode != CompilationMode.NONE:
+                    if is_model_compiled:
+                        logger.error(
+                            f"❌ Activation extraction requested, but the model is already compiled. "
+                            f"PyTorch hooks don't work with compiled models. "
+                            f"Please recreate the LLM with compilation disabled "
+                            f"(e.g., compilation_config={{'mode': 0}} or enforce_eager=True)."
+                        )
+                        # Still try to disable compilation for future model loads
+                        self.compilation_config.mode = CompilationMode.NONE
+                    else:
+                        logger.warning(
+                            f"⚠ Activation extraction requested, but compilation is enabled "
+                            f"(mode={self.compilation_config.mode}). "
+                            f"PyTorch hooks don't work with compiled models. "
+                            f"Automatically disabling compilation for activation extraction."
+                        )
+                        # Disable compilation for future requests
+                        self.compilation_config.mode = CompilationMode.NONE
+                        logger.info(
+                            f"✓ Compilation disabled. Mode set to: {self.compilation_config.mode}"
+                        )
+                
+                logger.info(
+                    f"✓ Activation extraction needed for req_ids: {req_ids_needing_activations}, "
+                    f"layers: {all_layer_indices}"
+                )
+            else:
+                logger.info("No activation extraction needed for any request")
+        except Exception as e:
+            logger.warning(
+                f"Error checking activation extraction: {e}. Skipping activation extraction.",
+                exc_info=True,
             )
+            needs_activations = False
+
+        # Run the model with activation collection if needed
+        collected_activations: dict[int, torch.Tensor] = {}
+        if needs_activations:
+            try:
+                with ActivationCollector(self.model, all_layer_indices) as collector:
+                    with (
+                        set_forward_context(
+                            attn_metadata,
+                            self.vllm_config,
+                            num_tokens=num_tokens_padded,
+                            num_tokens_across_dp=num_tokens_across_dp,
+                            cudagraph_runtime_mode=cudagraph_mode,
+                            batch_descriptor=batch_desc,
+                            ubatch_slices=ubatch_slices_padded,
+                        ),
+                        record_function_or_nullcontext("gpu_model_runner: forward"),
+                        self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+                    ):
+                        model_output = self._model_forward(
+                            input_ids=input_ids,
+                            positions=positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds,
+                            **model_kwargs,
+                        )
+                    collected_activations = collector.get_activations()
+                    logger.info(
+                        f"✓ Collected activations: {len(collected_activations)} layers"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error during activation collection: {e}. Continuing without activations.",
+                    exc_info=True,
+                )
+                collected_activations = {}
+                # Run model normally if activation collection failed
+                with (
+                    set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        cudagraph_runtime_mode=cudagraph_mode,
+                        batch_descriptor=batch_desc,
+                        ubatch_slices=ubatch_slices_padded,
+                    ),
+                    record_function_or_nullcontext("gpu_model_runner: forward"),
+                    self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+                ):
+                    model_output = self._model_forward(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
+        else:
+            # Normal execution without activation collection
+            with (
+                set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens_padded,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
+                    ubatch_slices=ubatch_slices_padded,
+                ),
+                record_function_or_nullcontext("gpu_model_runner: forward"),
+                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            ):
+                model_output = self._model_forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3294,6 +3454,9 @@ class GPUModelRunner(
             cudagraph_stats,
         )
         self.kv_connector_output = kv_connector_output
+        # Store collected activations temporarily (will be used in sample_tokens)
+        self.collected_activations = collected_activations
+        self.req_ids_needing_activations = req_ids_needing_activations
         return None
 
     @torch.inference_mode
@@ -3430,6 +3593,34 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+        
+        # Map collected activations to request IDs
+        activations_dict: dict[str, dict[int, torch.Tensor]] | None = None
+        collected_activations = getattr(self, "collected_activations", {})
+        req_ids_needing_activations = getattr(self, "req_ids_needing_activations", set())
+        if collected_activations and req_ids_needing_activations:
+            activations_dict = {}
+            # Get query start locations from input_batch to slice activations per request
+            # Note: This is a simplified approach - may need adjustment based on actual batch structure
+            for req_id in req_ids_output_copy:
+                if req_id in req_ids_needing_activations:
+                    req_activations: dict[int, torch.Tensor] = {}
+                    # For now, store full activations per request
+                    # TODO: Slice properly based on request's token range
+                    for layer_idx, activation in collected_activations.items():
+                        # Move to CPU and make contiguous for serialization
+                        req_activation = activation.cpu().contiguous()
+                        req_activations[layer_idx] = req_activation
+                    activations_dict[req_id] = req_activations
+            logger.info(
+                f"✓ Prepared activations_dict for {len(activations_dict)} requests"
+            )
+        # Clear temporary activation storage
+        if hasattr(self, "collected_activations"):
+            delattr(self, "collected_activations")
+        if hasattr(self, "req_ids_needing_activations"):
+            delattr(self, "req_ids_needing_activations")
+        
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -3444,6 +3635,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                activations=activations_dict,
             )
 
         if not self.use_async_scheduling:

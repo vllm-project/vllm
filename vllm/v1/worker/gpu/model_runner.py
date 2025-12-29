@@ -60,6 +60,7 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.activation_collector import ActivationCollector
 
 logger = init_logger(__name__)
 
@@ -920,30 +921,140 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.prepare_dummy_attn_metadata(input_batch)
                 sampling_metadata = None
 
-        # Run model.
-        if cudagraph_mode == CUDAGraphMode.FULL:
-            # Run CUDA graph.
-            # NOTE(woosuk): Here, we don't need to pass the input tensors,
-            # because they are already copied to the CUDA graph input buffers.
-            hidden_states = self.cudagraph_manager.run(
-                input_batch.num_tokens_after_padding
+        # Check if any request needs activation extraction
+        # Check all requests in the current batch (both new and cached)
+        needs_activations = False
+        all_layer_indices: set[int] | None = None
+        req_ids_needing_activations: set[str] = set()
+        if not dummy_run and sampling_metadata is not None and input_batch is not None:
+            try:
+                # Check ALL scheduled requests (both new and cached)
+                # Check all req_ids in the batch and get activation settings from extra_data
+                logger.info(
+                    f"Checking activation extraction for {len(input_batch.req_ids)} requests: {input_batch.req_ids}"
+                )
+                for req_id in input_batch.req_ids:
+                    extra_data = self.req_states.extra_data.get(req_id)
+                    if extra_data is None:
+                        logger.info(f"  req_id {req_id}: No extra_data found")
+                        continue
+                    logger.info(
+                        f"  req_id {req_id}: extra_data.extract_activations={extra_data.extract_activations}, "
+                        f"layers={extra_data.activation_layers}"
+                    )
+                    if extra_data.extract_activations:
+                        needs_activations = True
+                        req_ids_needing_activations.add(req_id)
+                        if extra_data.activation_layers:
+                            if all_layer_indices is None:
+                                all_layer_indices = set()
+                            all_layer_indices.update(extra_data.activation_layers)
+                        else:
+                            all_layer_indices = None  # Collect all layers
+                            break
+                        
+                logger.info(
+                    f"✓ Activation extraction check result: needs_activations={needs_activations}, "
+                    f"req_ids={req_ids_needing_activations}, layers={all_layer_indices}"
+                )
+                        
+            except Exception as e:
+                logger.warning(
+                    f"Error checking activation extraction requests: {e}. "
+                    "Skipping activation extraction.",
+                    exc_info=True,
+                )
+                needs_activations = False
+
+        # Run model with activation collection if needed
+        collected_activations: dict[int, torch.Tensor] = {}
+        if needs_activations:
+            try:
+                # Use activation collector as context manager
+                with ActivationCollector(self.model, all_layer_indices) as collector:
+                    if cudagraph_mode == CUDAGraphMode.FULL:
+                        # Run CUDA graph.
+                        # NOTE(woosuk): Here, we don't need to pass the input tensors,
+                        # because they are already copied to the CUDA graph input buffers.
+                        hidden_states = self.cudagraph_manager.run(
+                            input_batch.num_tokens_after_padding
+                        )
+                    else:
+                        # Run PyTorch model in eager mode.
+                        # TODO(woosuk): Support piecewise CUDA graph.
+                        with set_forward_context(
+                            input_batch.attn_metadata,
+                            self.vllm_config,
+                            num_tokens=input_batch.num_tokens_after_padding,
+                            cudagraph_runtime_mode=cudagraph_mode,
+                            num_tokens_across_dp=num_tokens_across_dp,
+                        ):
+                            hidden_states = self.model(
+                                input_ids=input_batch.input_ids,
+                                positions=input_batch.positions,
+                            )
+                    # Collect activations after forward pass
+                    collected_activations = collector.get_activations()
+            except Exception as e:
+                logger.error(
+                    f"Error during activation collection: {e}. "
+                    "Continuing without activations.",
+                    exc_info=True,
+                )
+                collected_activations = {}
+                # Still need to run the model if we haven't already
+                if cudagraph_mode == CUDAGraphMode.FULL:
+                    hidden_states = self.cudagraph_manager.run(
+                        input_batch.num_tokens_after_padding
+                    )
+                else:
+                    with set_forward_context(
+                        input_batch.attn_metadata,
+                        self.vllm_config,
+                        num_tokens=input_batch.num_tokens_after_padding,
+                        cudagraph_runtime_mode=cudagraph_mode,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                    ):
+                        hidden_states = self.model(
+                            input_ids=input_batch.input_ids,
+                            positions=input_batch.positions,
+                        )
+        else:
+            # Normal execution without activation collection
+            if cudagraph_mode == CUDAGraphMode.FULL:
+                # Run CUDA graph.
+                # NOTE(woosuk): Here, we don't need to pass the input tensors,
+                # because they are already copied to the CUDA graph input buffers.
+                hidden_states = self.cudagraph_manager.run(
+                    input_batch.num_tokens_after_padding
+                )
+            else:
+                # Run PyTorch model in eager mode.
+                # TODO(woosuk): Support piecewise CUDA graph.
+                with set_forward_context(
+                    input_batch.attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    cudagraph_runtime_mode=cudagraph_mode,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                ):
+                    hidden_states = self.model(
+                        input_ids=input_batch.input_ids,
+                        positions=input_batch.positions,
+                    )
+
+        # Use original 3-tuple format when activations are disabled
+        if needs_activations:
+            self.execute_model_state = (
+                hidden_states,
+                input_batch,
+                sampling_metadata,
+                collected_activations,
+                req_ids_needing_activations,
             )
         else:
-            # Run PyTorch model in eager mode.
-            # TODO(woosuk): Support piecewise CUDA graph.
-            with set_forward_context(
-                input_batch.attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=cudagraph_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-            ):
-                hidden_states = self.model(
-                    input_ids=input_batch.input_ids,
-                    positions=input_batch.positions,
-                )
-
-        self.execute_model_state = hidden_states, input_batch, sampling_metadata
+            # Original format - 3-tuple
+            self.execute_model_state = hidden_states, input_batch, sampling_metadata
         return None
 
     @torch.inference_mode()
@@ -952,7 +1063,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> AsyncOutput | ModelRunnerOutput:
         assert self.execute_model_state is not None
-        hidden_states, input_batch, sampling_metadata = self.execute_model_state
+        if len(self.execute_model_state) == 5:
+            (
+                hidden_states,
+                input_batch,
+                sampling_metadata,
+                collected_activations,
+                req_ids_needing_activations,
+            ) = self.execute_model_state
+        elif len(self.execute_model_state) == 4:
+            # Handle transition state format
+            (
+                hidden_states,
+                input_batch,
+                sampling_metadata,
+                collected_activations,
+            ) = self.execute_model_state
+            req_ids_needing_activations = set()
+        else:
+            # Backward compatibility: handle old state format
+            hidden_states, input_batch, sampling_metadata = self.execute_model_state
+            collected_activations = {}
+            req_ids_needing_activations = set()
         self.execute_model_state = None  # type: ignore
         assert sampling_metadata is not None
 
@@ -960,6 +1092,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             hidden_states, input_batch, sampling_metadata, grammar_output
         )
         prompt_logprobs_dict = self.compute_prompt_logprobs(hidden_states, input_batch)
+
+        # Map collected activations to request IDs
+        activations_dict: dict[str, dict[int, torch.Tensor]] | None = None
+        if collected_activations and req_ids_needing_activations:
+            activations_dict = {}
+            # Slice activations per request using query_start_loc
+            query_start_loc = input_batch.query_start_loc
+            for req_idx, req_id in enumerate(input_batch.req_ids):
+                if req_id in req_ids_needing_activations:
+                    req_activations: dict[int, torch.Tensor] = {}
+                    start_idx = query_start_loc[req_idx].item()
+                    end_idx = query_start_loc[req_idx + 1].item()
+                    for layer_idx, activation in collected_activations.items():
+                        # Slice activation for this request and move to CPU
+                        req_activation = activation[start_idx:end_idx].cpu().contiguous()
+                        req_activations[layer_idx] = req_activation
+                    activations_dict[req_id] = req_activations
+            logger.info(
+                f"✓ Collected activations for {len(activations_dict)} requests: {list(activations_dict.keys())}"
+            )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -973,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=None,
             num_nans_in_logits=None,
+            activations=activations_dict,
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

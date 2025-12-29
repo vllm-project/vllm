@@ -24,12 +24,15 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.logger import init_logger
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
@@ -140,6 +143,8 @@ class RequestState:
 
         # Stream Interval
         self.stream_interval = stream_interval
+        # Activations from intermediate layers
+        self.activations: dict[int, torch.Tensor] | None = None
         self.sent_tokens_offset = 0  # Offset of sent tokens
 
     @classmethod
@@ -329,7 +334,7 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
-        return CompletionOutput(
+        completion_output = CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
@@ -337,7 +342,15 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            activations=self.activations,
         )
+        if self.activations:
+            logger.info(
+                f"✓ Created CompletionOutput with activations: layers {list(self.activations.keys())}"
+            )
+        else:
+            logger.info(f"✗ Created CompletionOutput WITHOUT activations")
+        return completion_output
 
     def _new_pooling_output(
         self,
@@ -529,6 +542,14 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            # Store activations from EngineCoreOutput in RequestState
+            req_state.activations = engine_core_output.activations
+            if engine_core_output.activations:
+                logger.info(
+                    f"✓ Received activations for req_id {req_id}: layers {list(engine_core_output.activations.keys())}"
+                )
+            else:
+                logger.info(f"✗ No activations in EngineCoreOutput for req_id {req_id}")
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
