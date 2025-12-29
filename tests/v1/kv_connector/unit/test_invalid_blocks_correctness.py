@@ -164,7 +164,18 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
             "to recompute invalid portions."
         )
 
-    # 7. verify request can be rescheduled in next step
+    # 7. Connector prefix cache stats should not be recorded yet
+    # in SchedulerStats, but are recorded on the request
+    assert request.connector_prefix_cache_queries == num_prompt_tokens
+
+    # Reflect only successfully loaded blocks
+    expected_hits = invalid_block_idx * recompute_scheduler.block_size
+    assert request.connector_prefix_cache_hits == expected_hits, (
+        f"Request hits should be {expected_hits} (only valid blocks), "
+        f"got {request.connector_prefix_cache_hits}"
+    )
+
+    # Verify request can be rescheduled in next step
     scheduler_output_2 = recompute_scheduler.schedule()
 
     # request should appear in the new schedule to recompute invalid blocks
@@ -279,6 +290,15 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     assert block.block_hash is None, (
         f"Invalid block {invalid_block_id} should have been evicted from cache "
         f"(hash should be None), but hash is still {block.block_hash}"
+    )
+
+    # Verify connector prefix cache stats - request failed, no stats recorded
+    assert engine_outputs.scheduler_stats is not None
+    stats = engine_outputs.scheduler_stats
+    assert stats.connector_prefix_cache_stats is not None
+    assert stats.connector_prefix_cache_stats.requests == 0, (
+        f"Failed requests should not contribute to connector stats, got"
+        f"{stats.connector_prefix_cache_stats} requests recorded"
     )
 
 
@@ -421,7 +441,7 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     ):
         # call schedule() again - this triggers _update_waiting_for_remote_kv()
         # which should call cache_blocks with the truncated value
-        recompute_scheduler.schedule()
+        scheduler_output_3 = recompute_scheduler.schedule()
 
     # verify cache_blocks was called with the truncated value
     assert len(cache_blocks_calls) == 1, (
@@ -452,3 +472,27 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+    # Execute the request to trigger stats recording
+    model_runner_output_3 = create_model_runner_output(
+        [request],
+        invalid_block_ids=None,  # no more invalid blocks
+        use_eos=False,
+    )
+
+    outputs = recompute_scheduler.update_from_output(
+        scheduler_output_3, model_runner_output_3
+    )
+
+    # Verify connector prefix cache stats:
+    # - queries = num_prompt_tokens (total tokens not in local cache)
+    # - hits = only valid tokens (truncated at invalid block boundary)
+    assert len(outputs) == 1
+    engine_outputs = next(iter(outputs.values()))
+    assert engine_outputs.scheduler_stats is not None
+    stats = engine_outputs.scheduler_stats
+    assert stats.connector_prefix_cache_stats is not None
+    conn_stats = stats.connector_prefix_cache_stats
+    assert conn_stats.requests == 1
+    assert conn_stats.queries == num_prompt_tokens
+    assert conn_stats.hits == expected_valid_tokens
