@@ -912,6 +912,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
                 w13_weight, w2_weight
             )
+        elif self.fp8_backend == Fp8MoeBackend.MARLIN:
+            (
+                workspace,
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                _,
+                _,
+            ) = prepare_moe_fp8_layer_for_marlin(
+                layer,
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                size_k_first=False,
+                input_dtype=self.marlin_input_dtype,
+            )
+            layer.workspace = workspace
+
         elif self.fp8_backend in [
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -936,17 +956,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_weight_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_weight_scale)
-
-        # TODO(rob): we do this after replace_parameter() because
-        # prepare_moe_fp8_layer_for_marlin uses on the layer's params
-        # directly. We will refactor this in a follow up PR.
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
 
     def _setup_kernel(self, layer: Module) -> None:
         """Setup Modular Kernel for TP Case"""
