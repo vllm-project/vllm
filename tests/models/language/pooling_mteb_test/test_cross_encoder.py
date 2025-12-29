@@ -31,7 +31,5 @@ RERANK_MODELS = [
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(
-    hf_runner, vllm_runner, model_info: RerankModelInfo
-) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(vllm_runner, model_info)

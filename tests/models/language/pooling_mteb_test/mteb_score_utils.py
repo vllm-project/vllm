@@ -3,6 +3,7 @@
 
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import mteb
 import numpy as np
@@ -11,6 +12,7 @@ import torch
 from mteb.models import ModelMeta
 from torch.utils.data import DataLoader
 
+from tests.conftest import HfRunner
 from tests.models.utils import (
     RerankModelInfo,
     get_vllm_extra_kwargs,
@@ -137,10 +139,14 @@ class RerankClientMtebEncoder(ScoreClientMtebEncoder):
         return response["results"][0]["relevance_score"]
 
 
-class HFMtebCrossEncoder(MtebCrossEncoderMixin):
-    def __init__(self, hf_model):
-        self.hf_model = hf_model
-        self.chat_template: str | None = getattr(self.hf_model, "chat_template", None)
+class HFMtebCrossEncoder(MtebCrossEncoderMixin, HfRunner):
+    chat_template: str | None = None
+
+    def __init__(self, model_name: str, dtype: str = "auto", **kwargs: Any) -> None:
+        HfRunner.__init__(
+            self, model_name=model_name, is_cross_encoder=True, dtype=dtype, **kwargs
+        )
+        MtebCrossEncoderMixin.__init__(self, model_name=model_name, revision=None)
 
     @torch.no_grad
     def predict(
@@ -154,7 +160,7 @@ class HFMtebCrossEncoder(MtebCrossEncoderMixin):
         corpus = [text for batch in inputs2 for text in batch["text"]]
 
         if self.chat_template is not None:
-            tokenizer = self.hf_model.tokenizer
+            tokenizer = self.model.tokenizer
             prompts = []
             for query, document in zip(queries, corpus):
                 conversation = [
@@ -169,12 +175,12 @@ class HFMtebCrossEncoder(MtebCrossEncoderMixin):
                     tokenize=False,
                 )
                 prompts.append(prompt)
-            outputs = self.hf_model.classify(prompts)
+            outputs = HfRunner.classify(self, prompts)
             scores = np.array(outputs).squeeze(-1)
             return scores
         else:
             prompts = list(zip(queries, corpus))
-            outputs = self.hf_model.predict(prompts, show_progress_bar=False)
+            outputs = HfRunner.predict(self, prompts, show_progress_bar=False)
             return outputs.cpu().numpy()
 
 
@@ -217,11 +223,10 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
 
 
 def mteb_test_rerank_models(
-    hf_runner,
     vllm_runner,
     model_info: RerankModelInfo,
+    hf_runner=HFMtebCrossEncoder,
     vllm_extra_kwargs=None,
-    hf_mteb_encoder=HFMtebCrossEncoder,
     vllm_mteb_encoder=VllmMtebCrossEncoder,
     atol=MTEB_RERANK_TOL,
 ):
@@ -276,12 +281,10 @@ def mteb_test_rerank_models(
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
-        with hf_runner(
-            model_info.name, is_cross_encoder=True, dtype=model_info.hf_dtype
-        ) as hf_model:
+        with hf_runner(model_info.name, dtype=model_info.hf_dtype) as hf_model:
             hf_model.chat_template = chat_template
             st_main_score = run_mteb_rerank(
-                hf_mteb_encoder(hf_model),
+                hf_model,
                 tasks=MTEB_RERANK_TASKS,
                 languages=MTEB_RERANK_LANGS,
             )
