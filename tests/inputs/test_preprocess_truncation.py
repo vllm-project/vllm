@@ -75,4 +75,3 @@ def test_truncate_inputs_left_side():
     )
 
     assert truncated == inputs[-4:]
-
