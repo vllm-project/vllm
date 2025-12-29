@@ -131,6 +131,8 @@ class OffloadingConnector(KVConnectorBase_V1):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
+            if kv_cache_config is None:
+                raise ValueError("kv_cache_config cannot be None for WORKER role")
             self.connector_worker = OffloadingConnectorWorker(
                 spec, self.calculate_bytes_per_block(kv_cache_config, vllm_config)
             )
