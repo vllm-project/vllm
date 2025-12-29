@@ -13,18 +13,13 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.glmasr_utils import (
-    DEFAULT_CONV_PARAMS,
-    DEFAULT_MAX_AUDIO_LEN_S,
-    DEFAULT_MERGE_FACTOR,
-    _flatten_audio_features_by_length,
-    _get_audio_output_lengths_for_tower,
-    _get_num_features_for_item,
-    _group_audio_embeddings,
-    _normalize_chunk_counts,
-)
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -48,6 +43,16 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .glmasr_utils import (
+    DEFAULT_CONV_PARAMS,
+    DEFAULT_MAX_AUDIO_LEN_S,
+    DEFAULT_MERGE_FACTOR,
+    _flatten_audio_features_by_length,
+    _get_audio_output_lengths_for_tower,
+    _get_num_features_for_item,
+    _group_audio_embeddings,
+    _normalize_chunk_counts,
+)
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -71,11 +76,11 @@ class GlmAsrFeatureInputs(TensorSchema):
         TensorShape("num_chunks", "nmb", "chunk_length", dynamic_dims={"chunk_length"}),
     ]
     feature_attention_mask: Annotated[
-        torch.Tensor,
+        torch.Tensor | list[torch.Tensor],
         TensorShape("num_chunks", "chunk_length", dynamic_dims={"chunk_length"}),
     ]
     chunk_counts: Annotated[
-        torch.Tensor,
+        torch.Tensor | list[torch.Tensor],
         TensorShape("num_audios"),
     ]
 
@@ -100,22 +105,31 @@ GlmAsrInputs: TypeAlias = GlmAsrFeatureInputs | GlmAsrEmbeddingInputs
 
 
 class GlmAsrMultiModalProjector(nn.Module):
-    def __init__(self, config: GlmAsrConfig):
+    def __init__(
+        self,
+        config: GlmAsrConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.linear_1 = nn.Linear(
-            config.audio_config.intermediate_size,
-            config.text_config.hidden_size * 2,
+        self.linear_1 = ColumnParallelLinear(
+            input_size=config.audio_config.intermediate_size,
+            output_size=config.text_config.hidden_size * 2,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_1",
         )
         self.act = get_act_fn(config.projector_hidden_act)
-        self.linear_2 = nn.Linear(
-            config.text_config.hidden_size * 2,
-            config.text_config.hidden_size,
+        self.linear_2 = RowParallelLinear(
+            input_size=config.text_config.hidden_size * 2,
+            output_size=config.text_config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_2",
         )
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.linear_1(audio_features)
+        hidden_states, _ = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        hidden_states, _ = self.linear_2(hidden_states)
         return hidden_states
 
 
@@ -348,7 +362,11 @@ class GlmAsrForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         self.audio_tower = GlmAsrEncoder(config.audio_config)
-        self.multi_modal_projector = GlmAsrMultiModalProjector(config)
+        self.multi_modal_projector = GlmAsrMultiModalProjector(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "multi_modal_projector"),
+        )
         self.quant_config = quant_config
 
         self.language_model = init_vllm_registered_model(
