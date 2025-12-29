@@ -190,6 +190,7 @@ class VisionExpertAttention(nn.Module):
             head_size=self.head_dim,
             max_position=self.max_position_embeddings,
             is_neox_style=True,
+            dtype=config.dtype
         )
 
         self.vision_expert_query_key_value = QKVParallelLinear(
@@ -368,11 +369,9 @@ class CogAgentCrossAttention(nn.Module):
         self.cross_attn = CrossAttention(
             self.local_num_heads,
             self.cross_head_dim,
-            num_kv_heads=self.local_num_heads,
             scale=self.cross_head_dim**-0.5,
             cache_config=cache_config,
             quant_config=quant_config,
-            attn_type=AttentionType.ENCODER_DECODER,
             prefix=f"{prefix}.cross_attn",
         )
 
@@ -588,6 +587,7 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
+    requires_raw_input_tokens = True
     _no_split_modules = ["CogAgentDecoderLayer", "TransformerLayer", "Block"]
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
@@ -697,6 +697,12 @@ class CogAgentForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA):
             language_token_ids=language_token_ids,
         )
         return hidden_states
+    
+    def get_num_mm_encoder_tokens(self, num_image_tokens):
+        return self.num_vision_tokens + self.num_cross_vision_tokens
+    
+    def get_num_mm_connector_tokens(self, num_vision_tokens):
+        return self.num_vision_tokens
 
     def _parse_and_validate_image_input(self, images, cross_images):
         dtype = self.hf_config.torch_dtype

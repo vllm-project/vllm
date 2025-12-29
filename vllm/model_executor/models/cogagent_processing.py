@@ -158,8 +158,8 @@ class CogAgentMultiModalProcessor(EncDecMultiModalProcessor[CogAgentProcessingIn
     """
     Creates MultiModal Output for Cogagent in the form
     {
-        encoder: image, token_type_ids, prompt
-        decoder: prompt
+        encoder: image_tokens
+        decoder: image_tokens + prompt
     }
     """
 
@@ -169,10 +169,9 @@ class CogAgentMultiModalProcessor(EncDecMultiModalProcessor[CogAgentProcessingIn
 
     def create_encoder_prompt(self, prompt, mm_data):
         config = self.info.get_hf_config()
-        num_encoder_tokens = get_max_image_tokens(config.vision_config) - 2
-        num_encoder_tokens += get_max_image_tokens(config.cross_vision_config) - 2
+        num_encoder_tokens = get_max_image_tokens(config.cross_vision_config) - 2
 
-        # we ignore this prompt save for the size. so the actual value does not matter.
+        # For similar reasons as Whisper, we ignore this prompt.
         return [0] * num_encoder_tokens
 
     def create_decoder_prompt(self, prompt, mm_data):
@@ -229,7 +228,8 @@ class CogAgentMultiModalProcessor(EncDecMultiModalProcessor[CogAgentProcessingIn
         decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
 
         # decoder mixes the smaller image model embeds during prefill.
-        # so we need to ensure the position information exists.
+        # so we need to ensure the position information exists by applying
+        # the processor onto it instead.
         mm_inputs = super(EncDecMultiModalProcessor, self).apply(
             decoder_prompt,
             mm_data,
@@ -238,7 +238,7 @@ class CogAgentMultiModalProcessor(EncDecMultiModalProcessor[CogAgentProcessingIn
             mm_uuids=mm_uuids,
         )
 
-        # Skip over encoder prompt processing as result is fixed
+        # Skip over _get_enc_dec_inputs as result is fixed
         mm_inputs = MultiModalEncDecInputs(
             encoder_prompt_token_ids=encoder_prompt, **mm_inputs
         )
