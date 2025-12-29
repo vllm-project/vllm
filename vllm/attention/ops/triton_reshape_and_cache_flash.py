@@ -27,6 +27,7 @@ def reshape_and_cache_kernel_flash(
     num_heads: tl.constexpr,
     head_size: tl.constexpr,
     block_size: tl.constexpr,
+    x: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
     # tune parameters
@@ -64,9 +65,9 @@ def reshape_and_cache_kernel_flash(
     tgt_idx_k = (
         block_idx * block_stride
         + cur_head * head_stride
-        + (cur_dim // 8) * dim_stride_k
-        + block_offset * 8
-        + (cur_dim % 8)
+        + (cur_dim // x) * dim_stride_k
+        + block_offset * x
+        + (cur_dim % x)
     )
 
     # [TILE_SIZE]
@@ -123,6 +124,7 @@ def triton_reshape_and_cache_flash(
     head_size = key.shape[2]
     # block_size = key_cache.shape[1]
     block_size = key_cache.shape[3]
+    x = key_cache.shape[4]
     n = num_heads * head_size
     key_stride = key.stride()[0]
     value_stride = value.stride()[0]
@@ -200,6 +202,7 @@ def triton_reshape_and_cache_flash(
         num_heads=num_heads,
         head_size=head_size,
         block_size=block_size,
+        x=x,
         # FP8 flags
         FP8_KV_CACHE=FP8_KV_CACHE,
         # autotune parameters
