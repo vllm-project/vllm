@@ -21,12 +21,8 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
-<<<<<<< HEAD
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
-=======
-from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.slab_helper import process_slab_activation_loop
->>>>>>> 2ccff6432 (ran pre-commit command)
 from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
@@ -43,11 +39,7 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
-<<<<<<< HEAD
 from vllm.v1.worker.utils import MultiModalBudget
-from vllm.lora.slab_helper import process_slab_activation_loop
-=======
->>>>>>> 2ccff6432 (ran pre-commit command)
 
 logger = init_logger(__name__)
 
