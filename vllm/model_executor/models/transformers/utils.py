@@ -156,6 +156,7 @@ def replace_conv2d_class(conv2d: nn.Conv2d) -> Conv2dLayer:
         groups=conv2d.groups,
         bias=conv2d.bias is not None,
         padding_mode=conv2d.padding_mode,
+        params_dtype=conv2d.weight.dtype,
     )
 
 
