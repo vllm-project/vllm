@@ -160,6 +160,9 @@ def _fwd_kernel(
 
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
+        # For sliding window there's a chance the max is -inf due to masking of
+        # the entire row. In this case we need to set m_j 0 to avoid NaN
+        m_ij = tl.where(m_ij > float("-inf"), m_ij, 0.0)
         p = tl.exp(qk - m_ij[:, None])
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i

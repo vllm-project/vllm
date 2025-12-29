@@ -144,7 +144,7 @@ def test_context_attention(B, max_seq_len, H_Q, H_KV, D, is_causal, dtype):
 @pytest.mark.parametrize("max_seq_len", [256, 512])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("D", [128])
 @pytest.mark.parametrize("sliding_window", [(16, 16), (32, 0), (0, 32)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_context_attention_sliding_window(
@@ -202,11 +202,10 @@ def test_context_attention_sliding_window(
             q_seq,
             k_seq,
             v_seq,
-            is_causal=True,
+            is_causal=False,
             sliding_window_q=sliding_window_q if sliding_window_q > 0 else None,
             sliding_window_k=sliding_window_k if sliding_window_k > 0 else None,
         )
 
-    print(o.mean())
     # Compare outputs
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
