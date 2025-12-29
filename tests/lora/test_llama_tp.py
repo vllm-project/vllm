@@ -60,9 +60,8 @@ def do_sample(
             prompts,
             sampling_params,
             lora_request=LoRARequest(
-                str(lora_id),
-                lora_id,
-                lora_path,
+                lora_name=str(lora_id),
+                lora_path=lora_path,
                 tensorizer_config_dict=tensorizer_config_dict,
             )
             if lora_id
@@ -72,11 +71,13 @@ def do_sample(
         outputs = llm.generate(
             prompts,
             sampling_params,
-            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
+            lora_request=LoRARequest(lora_name=str(lora_id), lora_path=lora_path)
             if lora_id
             else None,
         )
-    lora_request = LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None
+    lora_request = (
+        LoRARequest(lora_name=str(lora_id), lora_path=lora_path) if lora_id else None
+    )
     generated_texts: list[str] = []
     for output in outputs:
         prompt = output.prompt

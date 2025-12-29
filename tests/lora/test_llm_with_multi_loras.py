@@ -20,7 +20,6 @@ LORA_NAME_PATH_MAP = {
 }
 
 LORA_NAME_ID_MAP = {}
-INCREASE_LORA_ID = 0
 LORA_RANK = 8
 
 LORA_TEST_PROMPTS = ["What is GitHub?", "Hi, tell me about you"]
@@ -38,15 +37,14 @@ def format_chatml_messages(prompt: str):
 
 
 def make_add_lora_request(name: str, path: str):
-    global INCREASE_LORA_ID, LORA_NAME_ID_MAP
+    global LORA_NAME_ID_MAP
 
-    INCREASE_LORA_ID += 1
-    LORA_NAME_ID_MAP[name] = INCREASE_LORA_ID
-
-    return LoRARequest(
+    lora_quest = LoRARequest(
         lora_name=name,
         lora_path=path,
     )
+    LORA_NAME_ID_MAP[name] = lora_quest.lora_int_id
+    return lora_quest
 
 
 @multi_gpu_test(num_gpus=2)
@@ -168,7 +166,9 @@ def test_multiple_lora_requests():
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
     lora_request = [
-        LoRARequest(LORA_NAME + str(idx), LORA_NAME_PATH_MAP[LORA_NAME])
+        LoRARequest(
+            lora_name=LORA_NAME + str(idx), lora_path=LORA_NAME_PATH_MAP[LORA_NAME]
+        )
         for idx in range(len(PROMPTS))
     ]
     # Multiple SamplingParams should be matched with each prompt

@@ -21,6 +21,7 @@ from vllm.lora.layers import (
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
+from vllm.lora.request import reset_lora_id_counter
 from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
@@ -367,6 +368,7 @@ class LoRAModelManager:
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        reset_lora_id_counter()
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
