@@ -14,7 +14,6 @@ vLLM supports the following hardware platforms:
 
 ## Hardware Plugins
 
-The backends below live **outside** the main `vllm` repository and follow the
-[Hardware-Pluggable RFC](../../design/plugin_system.md).
+vLLM supports third-party hardware plugins that live **outside** the main `vllm` repository. These follow the [Hardware-Pluggable RFC](../../design/plugin_system.md).
 
-All supported hardware can be found in the [vllm.ai](https://vllm.ai/#hardware) website. If you want to add new hardware, please contact us on [Slack](https://slack.vllm.ai/) or [Email](mailto:collaboration@vllm.ai).
+A list of all supported hardware can be found on the [vllm.ai website](https://vllm.ai/#hardware). If you want to add new hardware, please contact us on [Slack](https://slack.vllm.ai/) or [Email](mailto:collaboration@vllm.ai).
