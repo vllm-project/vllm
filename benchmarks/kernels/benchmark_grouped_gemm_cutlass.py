@@ -85,11 +85,6 @@ def bench_run(
         a, score, topk, renormalize=False
     )
 
-    ab_strides1 = torch.full((num_experts,), k, device="cuda", dtype=torch.int64)
-    ab_strides2 = torch.full((num_experts,), n, device="cuda", dtype=torch.int64)
-    c_strides1 = torch.full((num_experts,), 2 * n, device="cuda", dtype=torch.int64)
-    c_strides2 = torch.full((num_experts,), k, device="cuda", dtype=torch.int64)
-
     def run_triton_moe(
         a: torch.Tensor,
         w1: torch.Tensor,
@@ -134,11 +129,11 @@ def bench_run(
             per_act_token_quant=per_act_token,
         )
 
-        # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
         fn = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 out_dtype=a.dtype,
+                # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
                 e=w2.shape[0],
                 n=w2.shape[2],
                 k=w2.shape[1],
@@ -166,11 +161,11 @@ def bench_run(
             per_act_token_quant=per_act_token,
         )
 
-        # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
         fn = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 out_dtype=a.dtype,
+                # NOTE(rob): w2 is shaped as [E, hidden, intermediate]
                 e=w2.shape[0],
                 n=w2.shape[2],
                 k=w2.shape[1],
@@ -226,10 +221,6 @@ def bench_run(
             w2_q,
             w1_scale,
             w2_scale,
-            ab_strides1,
-            ab_strides2,
-            c_strides1,
-            c_strides2,
             topk_weights,
             topk_ids,
         )
@@ -267,10 +258,6 @@ def bench_run(
         "w1_scale": w1_scale,
         "w2_scale": w2_scale,
         "per_act_token": per_act_token,
-        "ab_strides1": ab_strides1,
-        "ab_strides2": ab_strides2,
-        "c_strides1": c_strides1,
-        "c_strides2": c_strides2,
         # cuda graph params
         "cutlass_graph": cutlass_graph,
         "triton_graph": triton_graph,
@@ -329,10 +316,6 @@ def bench_run(
         w2_q,
         w1_scale,
         w2_scale,
-        ab_strides1,
-        ab_strides2,
-        c_strides1,
-        c_strides2,
         topk_weights,
         topk_ids,
         per_act_token,
