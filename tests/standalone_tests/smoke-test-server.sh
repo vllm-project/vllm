@@ -32,9 +32,20 @@ TIMEOUT="${3:-30}"
 SERVER_PID=""
 cleanup() {
   if [ -n "$SERVER_PID" ]; then
-    echo "Cleaning up server process (PID: $SERVER_PID)"
+    echo "Cleaning up server process with PID $SERVER_PID..."
     kill "$SERVER_PID" 2>/dev/null || true
+
+    # Start a background "killer" process to force kill after timeout
+    # This prevents the CI job from hanging if the server process is stuck
+    ( sleep 10; kill -9 "$SERVER_PID" 2>/dev/null ) &
+    KILLER_PID=$!
+
+    # Wait for the server to exit (gracefully or via the killer)
+    # This reaps the zombie process status
     wait "$SERVER_PID" 2>/dev/null || true
+
+    # At this point, the server has exited. Cancel the pending killer.
+    kill "$KILLER_PID" 2>/dev/null || true
   fi
 }
 # trap for cleanup on exit, interrupt, or termination
