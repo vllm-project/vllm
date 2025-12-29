@@ -84,7 +84,7 @@ function cpu_tests() {
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -x -s -v \
-    tests/lora/test_qwen2vl.py"
+    tests/lora/test_qwenvl.py"
 
   # online serving: tp+pp
   docker exec cpu-test-"$NUMA_NODE" bash -c '
