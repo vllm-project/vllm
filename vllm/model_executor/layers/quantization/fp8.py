@@ -1053,12 +1053,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_weight, w2_weight_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
                 w2_weight, w2_weight_scale, w2_input_scale
             )
-            if self.quant_config.activation_scheme == "static":
-                assert w13_input_scale is not None and w2_input_scale is not None
-                replace_parameter(layer, "w13_input_scale", w13_input_scale)
-                replace_parameter(layer, "w2_input_scale", w2_input_scale)
-            else:
-                assert w13_input_scale is None and w2_input_scale is None
 
         # Per tensor kernels require single activation scale. Use the max.
         if self.quant_config.activation_scheme == "static":
