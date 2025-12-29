@@ -24,9 +24,8 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
@@ -38,8 +37,8 @@ class ResponsesParser:
     def __init__(
         self,
         *,
-        tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+        tokenizer: TokenizerLike,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
@@ -159,9 +158,9 @@ class StreamableResponsesParser:
     def __init__(
         self,
         *,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         response_messages: list[ResponseInputOutputItem],
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         request: ResponsesRequest,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
     ):
@@ -500,8 +499,8 @@ class StreamableResponsesParser:
 
 def get_responses_parser_for_simple_context(
     *,
-    tokenizer: AnyTokenizer,
-    reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+    tokenizer: TokenizerLike,
+    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls,
@@ -523,8 +522,8 @@ def get_responses_parser_for_simple_context(
 
 def get_streamable_responses_parser(
     *,
-    tokenizer: AnyTokenizer,
-    reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+    tokenizer: TokenizerLike,
+    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
