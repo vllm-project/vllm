@@ -34,6 +34,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
+    convert_weights_to_kernel_format,
+    make_kernel,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -800,31 +802,54 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        pass
+        w13, w13_scale, w2, w2_scale = convert_weights_to_kernel_format(
+            self.fp8_backend,
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+        )
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
+
+        # Setup modular kernel for TP case.
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.kernel, self.use_inplace = make_kernel(
+            layer=layer,
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+        )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         # Allow for accessing weights and scales in standard way.
-        w13_weight = layer.w13_weight
-        w2_weight = layer.w2_weight
-        w13_weight_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_weight_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         w13_input_scale = layer.w13_input_scale
         w2_input_scale = layer.w2_input_scale
 
         # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
         if current_platform.is_fp8_fnuz():
-            w13_weight, w13_weight_scale, w13_input_scale = (
-                normalize_e4m3fn_to_e4m3fnuz(
-                    w13_weight,
-                    w13_weight_scale,
-                    w13_input_scale,
-                )
+            w13, w13_scale, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                w13,
+                w13_scale,
+                w13_input_scale,
             )
-            w2_weight, w2_weight_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                w2_weight, w2_weight_scale, w2_input_scale
+            w2, w2_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                w2,
+                w2_scale,
+                w2_input_scale,
             )
 
         # Per tensor kernels require single activation scale. Use the max.
@@ -841,14 +866,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # on disk there is a scale for w1 and w3. Use the max to requantize.
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
-            w13_weight, w13_weight_scale = process_fp8_weight_tensor_strategy_moe(
-                w13_weight, w13_weight_scale, shard_size, layer.local_num_experts
+            w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
+                w13, w13_scale, shard_size, layer.local_num_experts
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(
-            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
-        )
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def maybe_make_prepare_finalize(
         self,
