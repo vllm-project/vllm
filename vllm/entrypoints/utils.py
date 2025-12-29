@@ -180,7 +180,7 @@ def _validate_truncation_size(
     max_model_len: int,
     truncate_prompt_tokens: int | None,
     tokenization_kwargs: dict[str, Any] | None = None,
-) -> int | None:
+) -> dict[str, Any] | None:
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -200,7 +200,7 @@ def _validate_truncation_size(
         if tokenization_kwargs is not None:
             tokenization_kwargs["truncation"] = False
 
-    return truncate_prompt_tokens
+    return tokenization_kwargs
 
 
 def get_max_tokens(
