@@ -45,7 +45,6 @@ def make_add_lora_request(name: str, path: str):
 
     return LoRARequest(
         lora_name=name,
-        lora_int_id=INCREASE_LORA_ID,
         lora_path=path,
     )
 
@@ -92,7 +91,6 @@ def test_multi_loras_with_tp_sync():
     def call_llm_get_outputs(prompt: str, lora_name: str):
         lora_request = LoRARequest(
             lora_name=lora_name,
-            lora_int_id=LORA_NAME_ID_MAP[lora_name],
             lora_path=LORA_NAME_PATH_MAP[lora_name],
         )
         messages = format_chatml_messages(prompt)
@@ -170,7 +168,7 @@ def test_multiple_lora_requests():
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
     lora_request = [
-        LoRARequest(LORA_NAME + str(idx), idx + 1, LORA_NAME_PATH_MAP[LORA_NAME])
+        LoRARequest(LORA_NAME + str(idx), LORA_NAME_PATH_MAP[LORA_NAME])
         for idx in range(len(PROMPTS))
     ]
     # Multiple SamplingParams should be matched with each prompt
