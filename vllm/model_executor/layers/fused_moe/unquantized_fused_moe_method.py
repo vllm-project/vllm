@@ -95,7 +95,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
-            self.flashinfer_cutlass_moe = None  # type: ignore
 
     @property
     def supports_eplb(self) -> bool:
