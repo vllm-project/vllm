@@ -12,7 +12,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 # 导入待测试的模块
-from your_module_path import (  # 替换为实际模块路径
+from vllm.model_executor.models.my_model import (
     LlamaForCausalLM,
     LlamaModel,
     MTPModule,
