@@ -228,7 +228,6 @@ class Fp8Config(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
             quant_method = Fp8LinearMethod(self)
-            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
@@ -312,7 +311,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.marlin_input_dtype = None
+        self.marlin_input_dtype = get_marlin_input_dtype()
         self.use_marlin = (
             not current_platform.has_device_capability(89)
             or envs.VLLM_TEST_FORCE_FP8_MARLIN

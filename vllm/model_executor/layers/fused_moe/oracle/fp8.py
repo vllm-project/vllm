@@ -43,9 +43,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
@@ -183,13 +180,8 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
-        workspace, w13, w2, w13_scale, w2 = prepare_moe_fp8_layer_for_marlin(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            input_dtype=get_marlin_input_dtype(prefix=""),
+        workspace, w13, w2, w13_scale, w2_scale = prepare_moe_fp8_layer_for_marlin(
+            layer, w13, w2, w13_scale, w2_scale
         )
         layer.workspace = workspace
     elif fp8_backend in [

@@ -8,6 +8,7 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
@@ -203,20 +204,14 @@ def prepare_moe_fp8_layer_for_marlin(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    input_dtype: torch.dtype | None = None,
-) -> tuple[
-    torch.Tensor,  # workspace
-    torch.Tensor,  # w13
-    torch.Tensor,  # w2
-    torch.Tensor,  # w13_scale
-    torch.Tensor,  # w2_scale
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    input_dtype = get_marlin_input_dtype()
     if input_dtype is not None and input_dtype.itemsize == 1:
         raise NotImplementedError("Marlin W8A8 is not supported.")
 
