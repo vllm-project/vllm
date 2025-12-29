@@ -45,30 +45,33 @@ def reshape_and_cache_kernel_flash(
     tile_i = tl.program_id(axis=1)
     tile_offs = tl.arange(0, TILE_SIZE)
     tile_pos = tile_i * TILE_SIZE + tile_offs
-
     src_key_idx = token_idx * key_stride
     src_value_idx = token_idx * value_stride
 
-    # Decompose the tile index back into head and dim coordinates.
-    cur_head = tile_pos // head_size
-    cur_dim = tile_pos % head_size
-
-    # Value addressing (4D): [Block, Head, Dim, Slot]
-    tgt_idx_v = (
-        block_idx * block_stride
-        + cur_head * head_stride
-        + cur_dim * dim_stride_v
-        + block_offset * 1
-    )
-
-    # Key addressing (5D): [Block, Head, Dim//8, Slot, 8]
-    tgt_idx_k = (
-        block_idx * block_stride
-        + cur_head * head_stride
-        + (cur_dim // x) * dim_stride_k
-        + block_offset * x
-        + (cur_dim % x)
-    )
+    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    if not is_pow2:
+        # Decompose the tile index back into head and dim coordinates.
+        cur_head = tile_pos // head_size
+        cur_dim = tile_pos % head_size
+        # Value addressing (4D): [Block, Head, Dim, Slot]
+        tgt_idx_v = (
+            block_idx * block_stride
+            + cur_head * head_stride
+            + cur_dim * dim_stride_v
+            + block_offset * 1
+        )
+        # Key addressing (5D): [Block, Head, Dim//8, Slot, 8]
+        tgt_idx_k = (
+            block_idx * block_stride
+            + cur_head * head_stride
+            + (cur_dim // x) * dim_stride_k
+            + block_offset * x
+            + (cur_dim % x)
+        )
+    else:
+        tgt_base = block_idx * block_stride + block_offset * page_stride
+        tgt_idx_k = tgt_base + tile_pos
+        tgt_idx_v = tgt_base + tile_pos
 
     # [TILE_SIZE]
     key_load = tl.load(
@@ -122,17 +125,27 @@ def triton_reshape_and_cache_flash(
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
-    # block_size = key_cache.shape[1]
-    block_size = key_cache.shape[3]
-    x = key_cache.shape[4]
+
+    temp_bs = key_cache.shape[3] if key_cache.ndim == 5 else key_cache.shape[1]
+    is_pow2 = temp_bs > 0 and (temp_bs & (temp_bs - 1) == 0)
+    if not is_pow2:
+        block_size = key_cache.shape[3]
+        x = key_cache.shape[4]
+        head_stride = key_cache.stride(1)
+        dim_stride_k = key_cache.stride(2)
+        dim_stride_v = value_cache.stride(2)
+    else:
+        block_size = key_cache.shape[1]
+        print(f"is pow2 block size reshape and cache {block_size}")
+        x = 1
+        dim_stride_k = 0
+        dim_stride_v = 0
+        head_stride = key_cache.stride()[2]
     n = num_heads * head_size
     key_stride = key.stride()[0]
     value_stride = value.stride()[0]
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
-    head_stride = key_cache.stride(1)
-    dim_stride_k = key_cache.stride(2)
-    dim_stride_v = value_cache.stride(2)
 
     assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
