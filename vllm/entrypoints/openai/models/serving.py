@@ -194,6 +194,17 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        # If not loading inplace
+        # Check if the lora adapter with the given name already exists
+        if not request.load_inplace and request.lora_name in self.lora_requests:
+            return create_error_response(
+                message=f"The lora adapter '{request.lora_name}' has already been "
+                "loaded. If you want to load the adapter in place, set 'load_inplace'"
+                " to True.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         return None
 
     async def _check_unload_lora_adapter_request(
