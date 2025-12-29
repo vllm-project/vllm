@@ -107,6 +107,22 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+
+        Args:
+            kv_caches: dictionary of layer names, kv cache
+        """
+        if hasattr(self._lmcache_engine, "register_kv_caches"):
+            self._lmcache_engine.register_kv_caches(kv_caches)
+        else:
+            logger.warning(
+                "LMCache engine does not support register_kv_caches, "
+                "please check and use the latest version"
+            )
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
