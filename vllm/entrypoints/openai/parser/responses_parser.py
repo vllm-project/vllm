@@ -164,9 +164,9 @@ class StreamableResponsesParser:
     def __init__(
         self,
         *,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         response_messages: list[ResponseInputOutputItem],
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         request: ResponsesRequest,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
     ):
@@ -528,8 +528,8 @@ def get_responses_parser_for_simple_context(
 
 def get_streamable_responses_parser(
     *,
-    tokenizer: AnyTokenizer,
-    reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+    tokenizer: TokenizerLike,
+    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
