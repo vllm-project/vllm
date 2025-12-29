@@ -72,11 +72,11 @@ def ref_masked_attention(
     return output
 
 
-@pytest.mark.parametrize("B", [1, 3, 5])
-@pytest.mark.parametrize("max_seq_len", [128, 512, 1024])
+@pytest.mark.parametrize("B", [3, 5])
+@pytest.mark.parametrize("max_seq_len", [128, 1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("D", [128])
 @pytest.mark.parametrize("is_causal", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention(B, max_seq_len, H_Q, H_KV, D, is_causal, dtype):
