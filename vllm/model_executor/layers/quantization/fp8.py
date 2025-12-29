@@ -800,7 +800,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        w13, w13_scale, w2, w2_scale = convert_to_fp8_moe_kernel_format(
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             self.fp8_backend,
             layer,
             w13,
