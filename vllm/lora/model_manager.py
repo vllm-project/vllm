@@ -128,7 +128,6 @@ class LoRAModelManager:
                 max_num_batched_tokens,
                 max_batches=self.max_num_seqs,
                 device=self.device,
-                max_loras=self.lora_config.max_loras,
                 lora_config=self.lora_config,
             )
 
@@ -149,7 +148,6 @@ class LoRAModelManager:
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
             lora_config=self.lora_config,
         )
         lm_prefix = self.mm_mapping.language_model[0]
@@ -188,7 +186,6 @@ class LoRAModelManager:
             num_encoder_tokens,
             max_batches=self.max_num_seqs * limit_per_prompt,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
             lora_config=self.lora_config,
         )
         for prefix in self.mm_mapping.tower_model:
@@ -204,7 +201,6 @@ class LoRAModelManager:
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
                     device=self.device,
-                    max_loras=self.lora_config.max_loras,
                     lora_config=self.lora_config,
                 )
                 for prefix in self.mm_mapping.connector:
