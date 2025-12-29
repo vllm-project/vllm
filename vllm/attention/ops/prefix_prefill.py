@@ -653,6 +653,7 @@ def context_attention_fwd(
     skip_decode=False,
     fp8_out_scale=None,
     sinks=None,
+    is_block_table_ptr: bool = False,
 ):
     q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -705,11 +706,13 @@ def context_attention_fwd(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    if b_loc.dtype == torch.int64 and b_loc.numel() > 0 and b_loc.max() > 1e10:
+    if is_block_table_ptr:
         kv_element_size = k_cache.element_size()
         block_byte_stride = k_cache.stride(0) * kv_element_size
+        # The physical starting point of the obtained KV Cache Pool
         base_addr = k_cache.data_ptr()
-        mask = b_loc > 1e10
+
+        mask = b_loc > 0
         processed_b_loc = torch.where(
             mask, (b_loc - base_addr) // block_byte_stride, b_loc
         ).to(torch.int32)
