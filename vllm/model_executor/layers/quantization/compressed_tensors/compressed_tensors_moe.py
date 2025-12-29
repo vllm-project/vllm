@@ -680,9 +680,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization."
             )
-
-        self.disable_expert_map = False
-
         self.fp8_backend = select_fp8_moe_backend(
             block_quant=self.block_quant,
             tp_size=moe.tp_size,
@@ -690,12 +687,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # TODO(rob): enable selecting this externally.
             allow_vllm_cutlass=True,
         )
-        # TODO(rob): hook this up in a follow up PR.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            raise NotImplementedError(
-                "FlashInfer TRTLLM backend not supported for compressed-tensors yet."
-            )
-
         if self.fp8_backend != Fp8MoeBackend.MARLIN:
             per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
             per_channel_quant = (
@@ -706,6 +697,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     "For FP8 Fused MoE layers, per-token and per-channel must be "
                     "used together."
                 )
+        # TODO(rob): hook this up in a follow up PR.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            raise NotImplementedError(
+                "FlashInfer TRTLLM backend not supported for compressed-tensors yet."
+            )
+
+        self.disable_expert_map = False
 
     def create_weights(
         self,
