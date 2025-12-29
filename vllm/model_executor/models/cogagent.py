@@ -376,7 +376,7 @@ class CogAgentCrossAttention(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, encoder_embeds: torch.LongTensor | None
+        self, hidden_states: torch.Tensor, encoder_embeds: torch.FloatTensor | None
     ) -> torch.Tensor:
         query_states, no_bias = self.query(hidden_states)
 
@@ -448,7 +448,7 @@ class CogAgentDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         vision_token_ids: torch.Tensor,
         language_token_ids: torch.Tensor,
-        encoder_embeds: torch.LongTensor | None = None,
+        encoder_embeds: torch.FloatTensor | None = None,
     ) -> torch.FloatTensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)

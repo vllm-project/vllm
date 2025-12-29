@@ -211,7 +211,7 @@ class CogAgentConfig(PretrainedConfig):
             vision_hidden_size = vision_config.pop("hidden_size", 1792)
             mlp_intermediate_size = vision_config.pop("intermediate_size", 15360)
             
-            vision_config["glu_intermedate_size"] = intermediate_size
+            vision_config["glu_intermediate_size"] = intermediate_size
             vision_config['torch_dtype'] = torch_dtype
 
             vision_config = EVACLIPVisionConfig(

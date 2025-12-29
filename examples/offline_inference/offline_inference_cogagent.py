@@ -79,13 +79,14 @@ def run_cogagent(
 
     new_prompts = list()
     for prompt in prompts:
-        image = []
-        if 'image' in prompt['multi_modal_data']:
-            image = prompt["multi_modal_data"]['image']
-        
+        image_data = prompt["multi_modal_data"].get('image')
+        content = [prompt["prompt"]]
+        if image_data is not None:
+            content.append(image_data)
+
         new_prompt = ChatTemplate(
-            'chat_old', 
-            content=[prompt["prompt"]] + image
+            'chat_old',
+            content=content,
         )
 
         new_prompt = apply_hf_chat_template(
@@ -178,7 +179,7 @@ def main(args):
 
     kwargs = dict()
     inputs, inputs_no_data = get_multi_modal_input(args)
-    if args.disable_preprocessor_cache:
+    if args.disable_mm_preprocessor_cache:
         kwargs["mm_processor_cache_gb"] = 0
 
     llm, inputs = run_cogagent(inputs, args.tokenizer, **kwargs)
