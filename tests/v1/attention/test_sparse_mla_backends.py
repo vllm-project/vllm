@@ -24,6 +24,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.ops import flashmla
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
@@ -125,6 +126,9 @@ def _quantize_dequantize_fp8_ds_mla(
 def test_sparse_backend_decode_correctness(
     dist_init, batch_name, kv_cache_dtype, tensor_parallel_size, workspace_init
 ):
+    if current_platform.is_rocm():
+        pytest.skip("ROCm does not support fp8_ds_mla data type for kv cache.")
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
