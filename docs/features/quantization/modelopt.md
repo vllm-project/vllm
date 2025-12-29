@@ -33,9 +33,11 @@ vllm serve <path_to_checkpoint> \
 ```
 
 Notes:
+
 - This requires local or cached safetensors weights; it does not download
   missing files on demand.
 - The inference logic supports gate_proj-style MLP weights (Qwen/LLaMA-style).
+
 
 You can also patch the sizes into the local `config.json` once:
 
