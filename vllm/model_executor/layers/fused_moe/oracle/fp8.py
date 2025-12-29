@@ -256,36 +256,14 @@ def make_kernel(
             MarlinExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
-        # TODO(rob): once the refactor is complete, switch to
-        # initializing these during the CutlassExpertsFp8 init.
-        device = layer.w13_weight.device
-        # ab_strides1 and c_strides2 are the same
-        ab_strides1_c_strides2 = torch.full(
-            (layer.local_num_experts,),
-            layer.hidden_size,
-            device=device,
-            dtype=torch.int64,
-        )
-        ab_strides2 = torch.full(
-            (layer.local_num_experts,),
-            layer.intermediate_size_per_partition,
-            device=device,
-            dtype=torch.int64,
-        )
-        c_strides1 = torch.full(
-            (layer.local_num_experts,),
-            2 * layer.intermediate_size_per_partition,
-            device=device,
-            dtype=torch.int64,
-        )
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                out_dtype=torch.get_default_dtype(),
-                ab_strides1=ab_strides1_c_strides2,
-                ab_strides2=ab_strides2,
-                c_strides1=c_strides1,
-                c_strides2=ab_strides1_c_strides2,
+                out_dtype=layer.moe.in_dtype,
+                e=layer.local_num_experts,
+                n=layer.intermediate_size_per_partition,
+                k=layer.hidden_size,
+                device=layer.w13_weight.device,
                 quant_config=moe_quant_config,
             ),
         )

@@ -931,7 +931,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
         assert self.moe_quant_config is not None
-        if self.use_cutlass:
+        if self.fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
             from vllm.model_executor.layers.fused_moe import (
                 CutlassBatchedExpertsFp8,
                 CutlassExpertsFp8,
@@ -947,23 +947,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             ):
                 logger.debug("CutlassBatchedExpertsFp8(%s)", self.__class__.__name__)
                 experts = CutlassBatchedExpertsFp8(
-                    self.moe.num_local_experts,
-                    num_dispatchers,
-                    self.moe.in_dtype,
-                    ab_strides1=self.ab_strides1_c_strides2,
-                    ab_strides2=self.ab_strides2,
-                    c_strides1=self.c_strides1,
-                    c_strides2=self.ab_strides1_c_strides2,
+                    max_experts_per_worker=self.moe.num_local_experts,
+                    num_dispatchers=num_dispatchers,
+                    out_dtype=self.moe.in_dtype,
+                    e=layer.local_num_experts,
+                    n=layer.intermediate_size_per_partition,
+                    k=layer.hidden_size,
+                    device=layer.w13_weight.device,
                     quant_config=self.moe_quant_config,
                 )
             else:
                 logger.debug("CutlassExpertsFp8(%s)", self.__class__.__name__)
                 experts = CutlassExpertsFp8(
-                    self.moe.in_dtype,
-                    ab_strides1=self.ab_strides1_c_strides2,
-                    ab_strides2=self.ab_strides2,
-                    c_strides1=self.c_strides1,
-                    c_strides2=self.ab_strides1_c_strides2,
+                    out_dtype=self.moe.in_dtype,
+                    e=layer.local_num_experts,
+                    n=layer.intermediate_size_per_partition,
+                    k=layer.hidden_size,
+                    device=layer.w13_weight.device,
                     quant_config=self.moe_quant_config,
                 )
 
