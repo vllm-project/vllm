@@ -940,7 +940,7 @@ define_extension_target(
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
@@ -948,9 +948,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/activation_kernels.cu"
     "csrc/torch_bindings_stable.cpp")
 
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_STABLE_EXT_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_STABLE_EXT_SRC}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+  endif()
 
   message(STATUS "Enabling C_stable extension.")
   define_extension_target(
