@@ -143,7 +143,7 @@ class TestScaledMMRSModel(_BaseScaledMMModel):
         return [torch.ops.vllm.reduce_scatter.default]
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter.default]
+        return [torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter.default]
 
 
 class TestAGScaledMMModel(_BaseScaledMMModel):
@@ -196,7 +196,7 @@ class TestCutlassScaledMMRSModel(_BaseScaledMMModel):
         return [torch.ops.vllm.reduce_scatter.default]
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter.default]
+        return [torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter.default]
 
 
 class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
