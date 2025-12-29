@@ -47,7 +47,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor !experts_ids,"
       "                     Tensor !num_tokens_post_pad,"
       "                     Tensor !adapter_enabled,"
-      "                     Tensor !lora_ids) -> () ");
+      "                     Tensor !lora_ids,"
+      "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM

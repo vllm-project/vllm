@@ -26,6 +26,7 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
@@ -140,7 +141,25 @@ class CompilerManager:
                 # we use ast.literal_eval to parse the data
                 # because it is a safe way to parse Python literals.
                 # do not use eval(), it is unsafe.
-                self.cache = ast.literal_eval(f.read())
+                cache = ast.literal_eval(f.read())
+
+            def check_type(value, ty):
+                if not isinstance(value, ty):
+                    raise TypeError(f"Expected {ty} but got {type(value)} for {value}")
+
+            def parse_key(key: Any) -> tuple[Range, int, str]:
+                range_tuple, graph_index, compiler_name = key
+                check_type(graph_index, int)
+                check_type(compiler_name, str)
+                if isinstance(range_tuple, tuple):
+                    start, end = range_tuple
+                    check_type(start, int)
+                    check_type(end, int)
+                    range_tuple = Range(start=start, end=end)
+                check_type(range_tuple, Range)
+                return range_tuple, graph_index, compiler_name
+
+            self.cache = {parse_key(key): value for key, value in cache.items()}
 
         self.compiler.initialize_cache(
             cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
@@ -444,21 +463,27 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 # the tag for the part of model being compiled,
 # e.g. backbone/eagle_head
 model_tag: str = "backbone"
+model_is_encoder: bool = False
 
 
 @contextmanager
-def set_model_tag(tag: str):
+def set_model_tag(tag: str, is_encoder: bool = False):
     """Context manager to set the model tag."""
     global model_tag
+    global model_is_encoder
     assert tag != model_tag, (
         f"Model tag {tag} is the same as the current tag {model_tag}."
     )
     old_tag = model_tag
+    old_is_encoder = model_is_encoder
+
     model_tag = tag
+    model_is_encoder = is_encoder
     try:
         yield
     finally:
         model_tag = old_tag
+        model_is_encoder = old_is_encoder
 
 
 class VllmBackend:
@@ -495,6 +520,7 @@ class VllmBackend:
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        is_encoder: bool = False,
     ):
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -503,6 +529,9 @@ class VllmBackend:
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
+
+        # Mark compilation for encoder.
+        self.is_encoder = is_encoder or model_is_encoder
 
         # Passes to run on the graph post-grad.
         self.pass_manager = resolve_obj_by_qualname(
@@ -722,6 +751,29 @@ class VllmBackend:
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
 
+        from torch._guards import detect_fake_mode
+
+        fake_mode = detect_fake_mode()
+
+        if (
+            self.compilation_config.dynamic_shapes_config.evaluate_guards
+            and self.compilation_config.dynamic_shapes_config.type
+            == DynamicShapesType.BACKED
+        ):
+            from torch.utils._sympy.value_ranges import ValueRanges
+
+            # Drop counter-0/1 specializations guards; for backed dynamic shapes,
+            # torch.compile will specialize for 0/1 inputs or otherwise guards that
+            # shape is >= 2. This is because it's really hard not to hit a check
+            # against 0/1. When we evaluate shape guards, we exclude checking those
+            # guards (We would fail always otherwise).
+
+            # We avoid that by updating the ranges of backed sizes when the min is
+            # 2 for any, we assume it's 0.
+            for s, r in fake_mode.shape_env.var_to_range.items():
+                if r.lower == 2:
+                    fake_mode.shape_env.var_to_range[s] = ValueRanges(0, r.upper)
+
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
             # code adapted from
@@ -746,11 +798,9 @@ class VllmBackend:
             or not self.compilation_config.cudagraph_copy_inputs
         ):
             return VllmSerializableFunction(
-                graph, example_inputs, self.prefix, self.split_gm
+                graph, example_inputs, self.prefix, self.split_gm, self.is_encoder
             )
 
-        # if we need to copy input buffers for cudagraph
-        #
         # index of tensors that have symbolic shapes (batch size)
         # for weights and static buffers, they will have concrete shapes.
         # symbolic shape only happens for input tensors.
@@ -786,5 +836,5 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return VllmSerializableFunction(
-            graph, example_inputs, self.prefix, copy_and_call
+            graph, example_inputs, self.prefix, copy_and_call, self.is_encoder
         )

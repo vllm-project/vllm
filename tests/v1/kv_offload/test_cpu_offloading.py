@@ -13,7 +13,6 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import set_env_var
 
 CPU_BLOCK_SIZES = [48]
 ATTN_BACKENDS = ["FLASH_ATTN"]
@@ -180,13 +179,13 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         topic="test",
     )
 
-    with set_env_var("VLLM_ATTENTION_BACKEND", attn_backend):
-        llm = LLM(
-            model="meta-llama/Llama-3.2-1B-Instruct",
-            gpu_memory_utilization=0.5,
-            kv_events_config=kv_events_config,
-            kv_transfer_config=kv_transfer_config,
-        )
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        gpu_memory_utilization=0.5,
+        kv_events_config=kv_events_config,
+        kv_transfer_config=kv_transfer_config,
+        attention_config={"backend": attn_backend},
+    )
 
     events_endpoint = events_endpoint.replace("*", "127.0.0.1")
     subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)

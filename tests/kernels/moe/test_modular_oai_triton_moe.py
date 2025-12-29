@@ -209,6 +209,7 @@ def test_oai_triton_moe(
     num_experts: int,
     topk: int,
     unfused: bool,
+    workspace_init,
 ):
     current_platform.seed_everything(0)
     (
