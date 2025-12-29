@@ -278,6 +278,7 @@ def build_model_context(
     mm_processor_kwargs: dict[str, Any] | None = None,
     limit_mm_per_prompt: dict[str, int] | None = None,
     mm_processor_cache_gb: int = 0,
+    enable_mm_embeds: bool | None = None,
 ):
     """Creates an InputProcessingContext for a given model.
 
@@ -286,6 +287,8 @@ def build_model_context(
         mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
+        enable_mm_embeds: Whether to enable multimodal embedding processing.
+            If None, defaults to model_info.require_embed_inputs.
 
     Returns:
         InputProcessingContext for the model being considered.
@@ -296,6 +299,11 @@ def build_model_context(
 
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
+    enable_mm_embeds = (
+        model_info.require_embed_inputs
+        if enable_mm_embeds is None
+        else enable_mm_embeds
+    )
     model_config = ModelConfig(
         model_id,
         runner=runner,
@@ -311,7 +319,7 @@ def build_model_context(
         hf_overrides=model_info.hf_overrides,
         skip_tokenizer_init=model_info.require_embed_inputs,
         enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=enable_mm_embeds,
         enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )

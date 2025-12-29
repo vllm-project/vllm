@@ -118,16 +118,19 @@ class MultiModalRegistry:
         """
         Checks if the model supports multimodal inputs.
         Returns True if the model is multimodal with any non-zero supported
-        modalities, otherwise returns False, effectively running in
-        text-only mode.
+        modalities OR if enable_mm_embeds is True (for pre-computed embeddings),
+        otherwise returns False, effectively running in text-only mode.
         """
         if not model_config.is_multimodal_model:
             return False
 
+        mm_config = model_config.get_multimodal_config()
+
+        if mm_config.enable_mm_embeds:
+            return True
+
         info = self._create_processing_info(model_config, tokenizer=None)
         supported_modalities = info.get_supported_mm_limits()
-
-        mm_config = model_config.get_multimodal_config()
 
         # Check if all supported modalities have limit == 0
         if all(

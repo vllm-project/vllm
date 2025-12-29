@@ -1052,7 +1052,24 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    mm_config = self.model_config.multimodal_config
+                    if (
+                        mm_config is not None
+                        and mm_config.enable_mm_embeds
+                        and "dummy_none" in self.encoder_cache
+                        and mm_hash not in self.encoder_cache
+                    ):
+                        # enable_mm_embeds is True and we have the dummy cache entry.
+                        # This edge case can occur when embeddings are provided
+                        # directly without going through the normal encoder caching
+                        # path. Skip this entry as the embeddings may have been
+                        # provided directly.
+                        continue
+                    else:
+                        assert encoder_output is not None, (
+                            f"Encoder cache miss for {mm_hash}."
+                        )
 
                 assert pos_info.is_embed is None, (
                     "Expected all positions to be contiguous and embeddings."
@@ -1726,7 +1743,22 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert mm_budget is not None
 
                 # TODO: handle encoder-decoder models once we support them.
-                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                encoder_budget = mm_budget.get_encoder_budget()
+                # Check if this is a minimal budget case (encoder_budget == 1)
+                # which occurs when all modalities are zero but enable_mm_embeds=True
+                if (
+                    encoder_budget == 1
+                    and mm_config is not None
+                    and mm_config.enable_mm_embeds
+                    and not mm_budget.max_tokens_by_modality
+                ):
+                    logger.info(
+                        "All modalities are disabled but enable_mm_embeds=True. "
+                        "Initializing encoder cache with None values for memory "
+                        "optimization."
+                    )
+                    self.encoder_cache["dummy_none"] = None
+                elif encoder_budget > 0:
                     # NOTE: Currently model is profiled with a single non-text
                     # modality with the max possible input tokens even when
                     # it supports multiple.

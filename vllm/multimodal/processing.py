@@ -1384,6 +1384,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
 
         for modality, items in mm_items.items():
+            # When enable_mm_embeds=True, allow embedding inputs even if
+            # modality limits are zero (for memory optimization)
+            if mm_config.enable_mm_embeds and isinstance(
+                items, (EmbeddingItems, DictEmbeddingItems)
+            ):
+                continue
             self.validate_num_items(modality, len(items))
 
         return mm_items

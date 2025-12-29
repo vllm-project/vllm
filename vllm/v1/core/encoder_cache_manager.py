@@ -277,6 +277,7 @@ def compute_encoder_budget(
         return compute_mm_encoder_budget(
             scheduler_config,
             max_tokens_by_modality,
+            model_config,
         )
 
     return compute_text_encoder_budget(scheduler_config)
@@ -302,6 +303,7 @@ def compute_text_encoder_budget(scheduler_config: "SchedulerConfig") -> tuple[in
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     max_tokens_by_modality: Mapping[str, int],
+    model_config: "ModelConfig | None" = None,
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
@@ -310,6 +312,7 @@ def compute_mm_encoder_budget(
         scheduler_config: Scheduler configuration.
         max_tokens_by_modality: The maximum number of tokens for each
             non-text modality.
+        model_config: Model configuration. Used to check enable_mm_embeds flag.
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
@@ -319,6 +322,20 @@ def compute_mm_encoder_budget(
     """
 
     if not max_tokens_by_modality:
+        # Check if enable_mm_embeds is True - if so, return minimal cache size
+        # to allow None value caching for memory optimization
+        if (
+            model_config is not None
+            and model_config.multimodal_config is not None
+            and model_config.multimodal_config.enable_mm_embeds
+        ):
+            logger.info(
+                "All non-text modalities are disabled but enable_mm_embeds=True. "
+                "Initializing encoder cache with minimal size to support "
+                "embedding inputs."
+            )
+            return 1, 1
+
         logger.warning(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
