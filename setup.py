@@ -863,6 +863,8 @@ package_data = {
         "py.typed",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        "entrypoints/serve/instrumentator/static/*.js",
+        "entrypoints/serve/instrumentator/static/*.css",
     ]
 }
 
