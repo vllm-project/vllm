@@ -107,7 +107,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
     && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
     && ln -s /opt/venv/bin/pip /usr/bin/pip \
-    && /opt/venv/bin/python3 -m pip install uv \
     && python3 --version && python3 -m pip --version
 
 # Activate virtual environment and add uv to PATH
