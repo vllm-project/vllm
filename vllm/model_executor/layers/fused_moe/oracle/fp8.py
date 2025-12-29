@@ -207,7 +207,7 @@ def convert_to_fp8_moe_kernel_format(
     return w13, w2, w13_scale, w2_scale
 
 
-def make_kernel(
+def make_fp8_moe_kernel(
     layer: torch.nn.Module,
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,

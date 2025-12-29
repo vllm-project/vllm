@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
-    make_kernel,
+    make_fp8_moe_kernel,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -820,7 +820,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
-        self.kernel, self.use_inplace = make_kernel(
+        self.kernel, self.use_inplace = make_fp8_moe_kernel(
             layer=layer,
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
