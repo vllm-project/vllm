@@ -318,10 +318,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             (workspace, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale) = (
                 prepare_moe_fp8_layer_for_marlin(
                     layer,
-                    w13_weight,
-                    w2_weight,
-                    w13_weight_scale,
-                    w2_weight_scale,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    layer.w13_weight_scale,
+                    layer.w2_weight_scale,
                 )
             )
             layer.workspace = workspace
