@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.workspace import init_workspace_manager
 
 DEFAULT_MODELS = [
     "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -48,6 +49,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
+    init_workspace_manager(torch.cuda.current_device())
     label = "Quant Matmul"
 
     sub_label = (
@@ -324,7 +326,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="run_cutlass_moe(a, a_scale, w1_q, w2_q, w1_scale, w2_scale, ab_strides1, ab_strides2, c_strides1, c_strides2, topk_weights, topk_ids, per_act_token, num_runs)",  # noqa: E501
+            stmt="run_cutlass_moe(a, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, per_act_token, num_runs)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,

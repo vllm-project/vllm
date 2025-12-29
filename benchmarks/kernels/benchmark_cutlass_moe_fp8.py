@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.workspace import init_workspace_manager
 
 # Weight shapes for different models: [num_experts, topk, hidden_size,
 # intermediate_size]
@@ -61,6 +62,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
+    init_workspace_manager(torch.cuda.current_device())
     (m, k, n) = mkn
 
     dtype = torch.half
