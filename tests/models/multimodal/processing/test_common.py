@@ -211,7 +211,11 @@ def _test_processing_correctness(
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
         model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config = ModelConfig(
         model_id,
