@@ -147,6 +147,37 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
 
 
 @pytest.mark.asyncio
+async def test_load_lora_adapter_with_load_inplace_false_errors(
+    client: openai.AsyncOpenAI, qwen3_meowing_lora_files
+):
+    """Test that load_inplace=False returns an error when adapter already exists."""
+    adapter_name = "test-load-inplace-false"
+
+    # Load LoRA adapter first time (should succeed)
+    response = await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={"lora_name": adapter_name, "lora_path": qwen3_meowing_lora_files},
+    )
+    assert "success" in response.lower()
+
+    # Try to load the same adapter again with load_inplace=False (should fail)
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await client.post(
+            "load_lora_adapter",
+            cast_to=str,
+            body={
+                "lora_name": adapter_name,
+                "lora_path": qwen3_meowing_lora_files,
+                "load_inplace": False,
+            },
+        )
+
+    # Verify the error message
+    assert "already been loaded" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_dynamic_lora_not_found(client: openai.AsyncOpenAI):
     with pytest.raises(openai.NotFoundError):
         await client.post(
