@@ -197,8 +197,8 @@ class MTPModule(nn.Module):
         # 4. 计算MTP损失（训练时）
         if labels is not None and self.training:
             # 标签截断：取第1~D个未来token作为MTP标签
-            mtp_labels = labels[:, 1:self.mtp_prediction_length+1]  # [batch, seq_len-D, D]
-            mtp_labels = mtp_labels.reshape(-1)  # [batch*(seq_len-D)*D]
+            mtp_labels = labels.unfold(1, self.mtp_prediction_length + 1, 1)[:, :, 1:]
+            mtp_labels = mtp_labels.reshape(-1)
             mtp_logits_flat = mtp_logits.reshape(-1, self.config.vocab_size)  # [batch*(seq_len-D)*D, vocab_size]
             
             # 计算交叉熵损失（忽略padding token）
