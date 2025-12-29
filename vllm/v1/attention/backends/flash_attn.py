@@ -167,7 +167,7 @@ class FlashAttentionBackend(AttentionBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -354,7 +354,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     aot_schedule = False
 
         max_num_splits = 0  # 0 means use FA3's heuristics, not CG compatible
-        if self.use_full_cuda_graph and num_actual_tokens <= self.max_cudagraph_size:
+        if (
+            self.use_full_cuda_graph
+            and self.max_cudagraph_size is not None
+            and num_actual_tokens <= self.max_cudagraph_size
+        ):
             # NOTE(woosuk): Setting num_splits > 1 may increase the memory
             # usage, because the intermediate buffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
@@ -709,11 +713,13 @@ class FlashAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     causal=attn_metadata.causal,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
+                    window_size=list(self.sliding_window)
+                    if self.sliding_window is not None
+                    else None,
                     block_table=block_table,
                     softcap=self.logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
+                    fa_version=self.vllm_flash_attn_version or 0,
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
@@ -741,7 +747,7 @@ class FlashAttentionImpl(AttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             max_num_splits=attn_metadata.max_num_splits,
-            fa_version=self.vllm_flash_attn_version,
+            fa_version=self.vllm_flash_attn_version or 0,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
             q_descale=layer._q_scale,
@@ -782,12 +788,14 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=False,
             alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
+            window_size=list(self.sliding_window)
+            if self.sliding_window is not None
+            else None,
             block_table=block_table,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
             scheduler_metadata=attn_metadata.scheduler_metadata,
-            fa_version=self.vllm_flash_attn_version,
+            fa_version=self.vllm_flash_attn_version or 0,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
@@ -813,10 +821,12 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
+            window_size=list(self.sliding_window)
+            if self.sliding_window is not None
+            else None,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
-            fa_version=self.vllm_flash_attn_version,
+            fa_version=self.vllm_flash_attn_version or 0,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
@@ -880,9 +890,11 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=False,  # Encoder attention is bidirectional
             alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
+            window_size=list(self.sliding_window)
+            if self.sliding_window is not None
+            else None,
             softcap=self.logits_soft_cap,
-            fa_version=self.vllm_flash_attn_version,
+            fa_version=self.vllm_flash_attn_version or 0,
             q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
@@ -1020,7 +1032,7 @@ def cascade_attention(
         max_seqlen_k=common_prefix_len,
         softmax_scale=softmax_scale,
         causal=False,
-        window_size=sliding_window,
+        window_size=list(sliding_window),
         block_table=block_table[:1],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
@@ -1048,7 +1060,7 @@ def cascade_attention(
         max_seqlen_k=max_kv_len - common_prefix_len,
         softmax_scale=softmax_scale,
         causal=True,
-        window_size=sliding_window,
+        window_size=list(sliding_window),
         block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,
         return_softmax_lse=True,

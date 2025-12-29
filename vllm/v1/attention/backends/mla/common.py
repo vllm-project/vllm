@@ -202,6 +202,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
+    AttentionMetadata,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
@@ -251,13 +252,16 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm.vllm_flash_attn import flash_attn_varlen_func as _vllm_fa
 
+    flash_attn_varlen_func = _vllm_fa
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func
+        from flash_attn import flash_attn_varlen_func as _upstream_fa
+
+        flash_attn_varlen_func = _upstream_fa
     is_vllm_fa = False
 
 try:
@@ -386,7 +390,7 @@ D = TypeVar("D", bound=MLACommonDecodeMetadata)
 
 
 @dataclass
-class MLACommonMetadata(Generic[D]):
+class MLACommonMetadata(AttentionMetadata, Generic[D]):
     """Metadata for MLACommon.
 
     NOTE: Please read the comment at the top of the file before trying to
@@ -434,7 +438,7 @@ class MLACommonMetadata(Generic[D]):
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
-A = TypeVar("A")
+A = TypeVar("A", bound=AttentionMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
@@ -617,7 +621,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._fi_prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)
+                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
             )
 
         if self._use_trtllm_ragged_prefill:
@@ -872,7 +876,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     )
                     # Note(qcs): The max local context lengths
                     # padded to `dcp_local_block_size`.
-                    padded_local_context_lens_cpu = (
+                    padded_local_context_lens_cpu: torch.Tensor = (
                         cdiv(
                             context_lens_cpu,
                             self.dcp_virtual_block_size,
@@ -1169,7 +1173,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if layer.quant_method is not None and not isinstance(
+                layer.quant_method, UnquantizedLinearMethod
+            ):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
@@ -1325,12 +1331,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # v with 0s to match the qk head dim for attention backends that do
             # not support different headdims
             # We don't need to pad V if we are on a hopper system with FA3
+            device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
                 self.vllm_flash_attn_version == 3
-                and current_platform.get_device_capability()[0] == 9
+                and device_capability is not None
+                and device_capability[0] == 9
             )
 
-        self.dcp_world_size: int | None = None
+        self.dcp_world_size: int = -1
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
@@ -1581,7 +1589,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if layer.quant_method is not None and not isinstance(
+                layer.quant_method, UnquantizedLinearMethod
+            ):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
@@ -1873,7 +1883,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
-        assert self.dcp_world_size is not None
+        assert self.dcp_world_size != -1
 
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -1973,7 +1983,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # same expert outputs.
             return output.fill_(0)
 
-        if self.dcp_world_size is None:
+        if self.dcp_world_size == -1:
             self.dcp_world_size = get_dcp_group().world_size
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")

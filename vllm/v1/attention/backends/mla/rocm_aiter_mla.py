@@ -233,7 +233,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             k=k,
             v=v,
             softmax_scale=softmax_scale,
-            return_lse=return_softmax_lse,
+            return_softmax_lse=return_softmax_lse,
             **kwargs,
         )
 
@@ -270,7 +270,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             o,
             self.scale,
             attn_metadata.decode.qo_indptr,
-            attn_metadata.decode.max_qo_len,
+            attn_metadata.decode.max_qo_len or 0,
             attn_metadata.decode.paged_kv_indptr,
             attn_metadata.decode.paged_kv_indices,
             attn_metadata.decode.paged_kv_last_page_len,
