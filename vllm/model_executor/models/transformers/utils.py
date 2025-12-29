@@ -25,6 +25,7 @@ from torch import nn
 
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -133,6 +134,28 @@ def replace_linear_class(
         prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
+    )
+
+
+def replace_conv2d_class(conv2d: nn.Conv2d) -> Conv2dLayer:
+    """
+    Replace nn.Conv2d with vLLM's Conv2dLayer.
+
+    Args:
+        conv2d: `nn.Conv2d` to be replaced.
+    Returns:
+        The new Conv2dLayer.
+    """
+    return Conv2dLayer(
+        in_channels=conv2d.in_channels,
+        out_channels=conv2d.out_channels,
+        kernel_size=conv2d.kernel_size,
+        stride=conv2d.stride,
+        padding=conv2d.padding,
+        dilation=conv2d.dilation,
+        groups=conv2d.groups,
+        bias=conv2d.bias is not None,
+        padding_mode=conv2d.padding_mode,
     )
 
 
