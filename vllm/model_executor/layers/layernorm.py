@@ -437,6 +437,21 @@ class LayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor):
+        class LayerNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+        self.epsilon = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # PASTE THIS START ->
+        if x.is_cuda and torch.version.hip:
+            from vllm.model_executor.layers.triton_layernorm import triton_layernorm
+            return triton_layernorm(x, self.weight, self.bias, self.epsilon)
+        # <- PASTE THIS END
+
+        # The rest of the original code starts here...
         return F.layer_norm(
             x.float(), (self.dim,), self.weight, self.bias, self.eps
         ).type_as(x)
