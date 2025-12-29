@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
+    fp8_w8a16_moe_quant_config,
     int4_w4a16_moe_quant_config,
     int4_w4afp8_moe_quant_config,
     int8_w8a8_moe_quant_config,
@@ -695,6 +696,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "FlashInfer TRTLLM backend not supported for compressed-tensors yet."
             )
 
+        if self.fp8_backend != Fp8MoeBackend.MARLIN:
+            per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+            per_channel_quant = (
+                self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+            )
+            if per_act_token != per_channel_quant:
+                raise NotImplementedError(
+                    "For FP8 Fused MoE layers, per-token and per-channel must be "
+                    "used together."
+                )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1040,8 +1052,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.use_marlin:
-            return None
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
+            return fp8_w8a16_moe_quant_config(
+                w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
+                w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
+                block_shape=self.weight_block_size,
+            )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
         per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -1067,118 +1083,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             router_logits=router_logits,
         )
 
-        per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
-        per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+        result = self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
-        if self.use_marlin:
-            assert layer.activation == "silu", (
-                f"{layer.activation} not supported for Marlin MoE."
-            )
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=self.marlin_input_dtype,
-                workspace=layer.workspace,
-            )
-
-        elif self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts,
-            )
-
-            assert per_act_token == per_channel_quant
-            assert self.moe_quant_config is not None
-            return rocm_aiter_fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-            )
-
-        # cutlass path
-        elif self.use_cutlass:
-            assert self.moe_quant_config is not None
-
-            # small-batch fallback on SM100
-            if self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8:
-                from vllm.model_executor.layers.fused_moe import fused_experts
-
-                assert per_act_token == per_channel_quant
-                return fused_experts(
-                    hidden_states=x,
-                    w1=layer.w13_weight,
-                    w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    inplace=True,
-                    activation=layer.activation,
-                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                    global_num_experts=layer.global_num_experts,
-                    expert_map=None
-                    if self.disable_expert_map
-                    else layer.expert_map,  # ???
-                    quant_config=self.moe_quant_config,
-                    allow_deep_gemm=self.allow_deep_gemm,
-                )
-            else:
-                from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-                    cutlass_moe_fp8,
-                )
-
-                assert per_act_token == per_channel_quant
-                assert self.moe_quant_config is not None
-                return cutlass_moe_fp8(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights,
-                    topk_ids,
-                    quant_config=self.moe_quant_config,
-                    activation=layer.activation,
-                    global_num_experts=layer.global_num_experts,
-                    expert_map=None if self.disable_expert_map else layer.expert_map,
-                    ab_strides1=self.ab_strides1_c_strides2,
-                    ab_strides2=self.ab_strides2,
-                    c_strides1=self.c_strides1,
-                    c_strides2=self.ab_strides1_c_strides2,
-                )
-
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            assert per_act_token == per_channel_quant
-            assert self.moe_quant_config is not None
-            return fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-                allow_deep_gemm=self.allow_deep_gemm,
-            )
+        return result
 
     @property
     def supports_eplb(self) -> bool:
