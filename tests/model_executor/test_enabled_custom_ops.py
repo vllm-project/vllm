@@ -4,8 +4,8 @@
 import pytest
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     CompilationConfig,
     VllmConfig,

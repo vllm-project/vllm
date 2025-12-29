@@ -1157,9 +1157,7 @@ def fused_topk(
         use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
         scoring_func="softmax",
     )
-    topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-    )
+    topk_func(topk_weights, topk_ids, token_expert_indices, gating_output, renormalize)
 
     return topk_weights, topk_ids, token_expert_indices
 

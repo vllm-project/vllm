@@ -196,7 +196,6 @@ def _rocm_aiter_topk_softmax_fake(
     pass
 
 
-
 def _rocm_aiter_topk_sigmoid_impl(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -208,7 +207,12 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize, e_score_correction_bias
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
     )
 
 
@@ -1281,7 +1285,13 @@ class rocm_aiter_ops:
         e_score_correction_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_sigmoid(
-            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize, e_score_correction_bias)
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
         return topk_weights, topk_indices
 
     @staticmethod
