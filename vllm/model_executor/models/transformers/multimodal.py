@@ -23,6 +23,7 @@ import torch
 from transformers import AutoModel
 
 from vllm.config.utils import getattr_iter
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
@@ -37,6 +38,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
+
+logger = init_logger(__name__)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -394,8 +398,29 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+
         if pixel_values is not None:
-            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
+            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
+            # with flash_sdp and mem_efficient_sdp
+            if current_platform.is_rocm():
+                # TODO: [ROCm] Fix accuracy issues with flash backend
+                logger.debug(
+                    "ROCm platform detected. Forcing math SDP backend "
+                    "for vision encoder. Currently ROCm platform has "
+                    "accuracy issues with `flash_sdp` and"
+                    "`mem_efficient_sdp` backends. See issue: "
+                    "https://github.com/vllm-project/vllm/issues/30167"
+                )
+                with torch.nn.attention.sdpa_kernel(
+                    backends=[torch.nn.attention.SDPBackend.MATH]
+                ):
+                    vision_embeddings = self.model.get_image_features(
+                        pixel_values, **kwargs
+                    )
+            else:
+                vision_embeddings = self.model.get_image_features(
+                    pixel_values, **kwargs
+                )
 
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
@@ -413,6 +438,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 ]
 
             return vision_embeddings
+        else:
+            logger.debug(
+                "No pixel values or image embeddings provided for multimodal embedding."
+            )
+            return None
 
     def get_mrope_input_positions(
         self,

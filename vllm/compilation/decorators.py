@@ -28,7 +28,7 @@ from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_dynamo
+from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
 
@@ -326,7 +326,13 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(mod, type, *args, **kwargs):
         def mark_dynamic(arg, dims):
             if type == DynamicShapesType.UNBACKED:
-                torch._dynamo.decorators.mark_unbacked(arg, dims)
+                if is_torch_equal_or_newer("2.10.0.dev"):
+                    for dim in dims:
+                        torch._dynamo.decorators.mark_unbacked(
+                            arg, dim, hint_override=arg.size()[dim]
+                        )
+                else:
+                    torch._dynamo.decorators.mark_unbacked(arg, dims)
             else:
                 torch._dynamo.mark_dynamic(arg, dims)
 
@@ -360,7 +366,13 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        torch._dynamo.decorators.mark_unbacked(arg, dims)
+                        if is_torch_equal_or_newer("2.10.0.dev"):
+                            for dim in dims:
+                                torch._dynamo.decorators.mark_unbacked(
+                                    arg, dim, hint_override=arg.size()[dim]
+                                )
+                        else:
+                            torch._dynamo.decorators.mark_unbacked(arg, dims)
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -388,14 +400,6 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            # Validate that AOT compile is not used with unbacked dynamic
-            # shapes. aot_compile re-allocates backed symbols post dynamo!
-            if ds_type == DynamicShapesType.UNBACKED:
-                raise ValueError(
-                    "AOT compilation is not compatible with UNBACKED dynamic shapes. "
-                    "Please use BACKED or BACKED_SIZE_OBLIVIOUS dynamic shapes type "
-                    "when VLLM_USE_AOT_COMPILE is enabled."
-                )
             from .caching import compilation_config_hash_factors
 
             factors: list[str] = compilation_config_hash_factors(self.vllm_config)
@@ -441,7 +445,10 @@ def _support_torch_compile(
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
         if self.compiled:
-            assert not envs.VLLM_USE_AOT_COMPILE
+            assert (
+                not envs.VLLM_USE_AOT_COMPILE
+                or self.vllm_config.compilation_config.backend == "eager"
+            )
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
 
         # This is the path for the first compilation.
@@ -498,6 +505,12 @@ def _support_torch_compile(
         if ds_type == DynamicShapesType.BACKED_SIZE_OBLIVIOUS:
             fx_config_patches["backed_size_oblivious"] = True
 
+        # Prepare inductor config patches
+        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        inductor_config_patches = {}
+        if is_torch_equal_or_newer("2.10.0.dev"):
+            inductor_config_patches["assume_32bit_indexing"] = True
+
         with (
             patch.object(
                 InliningInstructionTranslator, "inline_call_", patched_inline_call
@@ -506,8 +519,13 @@ def _support_torch_compile(
             maybe_use_cudagraph_partition_wrapper(self.vllm_config),
             torch.fx.experimental._config.patch(**fx_config_patches),
             _torch27_patch_tensor_subclasses(),
+            torch._inductor.config.patch(**inductor_config_patches),
         ):
-            if envs.VLLM_USE_AOT_COMPILE:
+            use_aot_compile = envs.VLLM_USE_AOT_COMPILE
+            if self.vllm_config.compilation_config.backend == "eager":
+                logger.warning("Detected eager backend, disabling AOT compile.")
+                use_aot_compile = False
+            if use_aot_compile:
                 self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                 output = self.aot_compiled_fn(self, *args, **kwargs)
                 assert aot_compilation_path is not None

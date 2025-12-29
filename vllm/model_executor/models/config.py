@@ -13,7 +13,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -21,20 +21,24 @@ logger = init_logger(__name__)
 class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        raise NotImplementedError
+        return
 
-
-class Gemma3TextModelConfig:
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        hf_config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        return
+
+
+class Gemma3TextModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
 class GteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         assert config.__class__.__name__ == "NewConfig"
         assert config.hidden_act == "gelu"
@@ -53,16 +57,15 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 
 class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
 
 
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        model_config = vllm_config.model_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
         if config.position_embedding_type == "rotary":
@@ -86,6 +89,26 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
                 "max_position": max_position,
                 "rope_parameters": config.rope_parameters,
             }
+
+
+class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        from vllm.config.pooler import PoolingTypeStr
+
+        hf_config = model_config.hf_config
+        hf_config.is_causal = False
+
+        pooling_type_map: dict[str, PoolingTypeStr] = {
+            "avg": "MEAN",
+            "cls": "CLS",
+            "last": "LAST",
+        }
+
+        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        if pooling_type is None:
+            raise ValueError(f"pool_type {hf_config.pooling} not supported")
+        model_config.pooler_config.pooling_type = pooling_type
 
 
 class NomicBertModelConfig(VerifyAndUpdateConfig):
@@ -184,8 +207,8 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
 
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
@@ -193,8 +216,8 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
 
 class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        pooler_config = vllm_config.model_config.pooler_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        pooler_config = model_config.pooler_config
 
         if pooler_config.softmax is None:
             pooler_config.softmax = False
@@ -202,8 +225,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         is_original_qwen3_reranker = getattr(
             config, "is_original_qwen3_reranker", False
@@ -217,23 +240,23 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
             "Try loading the original Qwen3 Reranker?, see: "
             "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
         )
-        vllm_config.model_config.hf_config.method = "from_2_way_softmax"
+        model_config.hf_config.method = "from_2_way_softmax"
 
 
 class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
         config.num_labels = 1
-        pooler_config = vllm_config.model_config.pooler_config
+        pooler_config = model_config.pooler_config
         if pooler_config.logit_bias is None:
             pooler_config.logit_bias = 2.65
 
 
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
 
         assert config.__class__.__name__ == "GteConfig"
         assert config.hidden_act == "gelu"
@@ -308,12 +331,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
 
-        # TODO(tdoublep): remove once cascade attention is supported
-        logger.info(
-            "Disabling cascade attention since it is not supported for hybrid models."
-        )
-        model_config.disable_cascade_attn = True
-
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
@@ -363,7 +380,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kernel_block_alignment_size = 16
             if (
-                current_platform.is_device_capability(100)
+                current_platform.is_device_capability_family(100)
                 and model_config.get_head_size() == 256
                 and (
                     attention_config.backend is None
@@ -407,7 +424,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
             #          attn_1_token = 2kB -> fits ~394 tokens
-            #      then round up to a mulitple of 256 -> 512 tokens
+            #      then round up to a multiple of 256 -> 512 tokens
             # End result:
             #  attn_block_size = 512
             #  mamba_block_size = 512 (aligned to a multiple of chunk_size)
@@ -515,6 +532,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
+    "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,

@@ -27,7 +27,7 @@ BLOCK_SIZE = [128, 128]
 @pytest.mark.parametrize("N", [512, 1024])  # intermediate dim per expert
 @pytest.mark.parametrize("topk", [2, 4])
 def test_batched_deepgemm_vs_triton(
-    E: int, T: int, K: int, N: int, topk: int, monkeypatch
+    E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
 
