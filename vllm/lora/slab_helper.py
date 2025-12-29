@@ -3,7 +3,6 @@
 
 import hashlib
 import threading
-import time
 
 # Create the LoRA model instance
 from typing import TYPE_CHECKING, Any
@@ -33,10 +32,6 @@ _CACHE_LOCK = threading.RLock()
 # Global LoRAModel cache for early checking
 _GLOBAL_LORA_MODEL_CACHE: dict[str, Any] = {}
 _LORA_MODEL_CACHE_LOCK = threading.RLock()
-
-# Global result storage
-_GLOBAL_RESULT_STORAGE: dict[str, tuple] = {}
-_RESULT_LOCK = threading.RLock()
 
 
 class UltraFastPinnedPool:
@@ -383,7 +378,6 @@ def build_target_matched_slab(
 
         # Store extraction_map in metadata for zero-overhead extraction
         global_metadata.extraction_map = extraction_map
-
         slab_dtype = torch.float16  # Default fallback
         if lora_config and hasattr(lora_config, "lora_dtype"):
             slab_dtype = lora_config.lora_dtype
@@ -418,25 +412,7 @@ def build_target_matched_slab(
         with _CACHE_LOCK:
             _GLOBAL_SLAB_CACHE[cache_key] = (slab_tensor, metadata)
 
-        # Touch the objects to ensure they're ready for return
-        _ = slab_tensor.shape if hasattr(slab_tensor, "shape") else None
-        _ = metadata.total_size if hasattr(metadata, "total_size") else None
-
-        # Generate unique result key for this build
-        result_key = f"slab_result_{cache_key}_{int(time.time() * 1000000)}"
-
-        # Store large objects in global storage instead of returning them
-        with _RESULT_LOCK:
-            _GLOBAL_RESULT_STORAGE[result_key] = (slab_tensor, metadata)
-
-        # Clear local references to large objects to prevent cleanup overhead
-        slab_tensor = None  # type: ignore[assignment]
-        metadata = None  # type: ignore[assignment]
-        full_slab = None  # type: ignore[assignment]
-        global_metadata = None  # type: ignore[assignment]
-        all_flattened_tensors = None  # type: ignore[assignment]
-
-        return result_key
+        return slab_tensor, metadata
 
 
 def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name):
@@ -740,18 +716,9 @@ def create_slab_optimized_lora_model(
                     shards = module_lora.lora_b.chunk(tp_size, dim=0)
                     module_lora.lora_b = shards[tp_rank]
 
-    result_key = build_target_matched_slab(
+    slab, metadata = build_target_matched_slab(
         lora_model_instance, target_modules_dict, 1, target_lora_config, slab_path
     )
-
-    # Handle different return types (cache key vs. direct objects for cache hits)
-    if isinstance(result_key, str) and result_key.startswith("slab_result_"):
-        slab, metadata = _GLOBAL_RESULT_STORAGE[result_key]
-        # Clean up the temporary storage
-        del _GLOBAL_RESULT_STORAGE[result_key]
-
-    else:
-        slab, metadata = result_key
 
     if not torch.cuda.is_available():
         # Return tuple for consistency even without GPU
