@@ -1997,7 +1997,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         if self.moe.is_lora_enabled:
             if not HAS_TRITON:
                 raise NotImplementedError(
-                    "TritonExperts requires Triton. Install triton or disable LoRA for MoE."
+                    "TritonExperts requires Triton. "
+                    "Install triton or disable LoRA for MoE."
                 )
 
             assert self.moe_quant_config is not None
