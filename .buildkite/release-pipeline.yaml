@@ -225,7 +225,6 @@ steps:
         allow_failure: true  # Allow failure so non-UI builds can proceed (input step is skipped)
     agents:
       queue: cpu_queue_postmerge
-    timeout_in_minutes: 240
     commands:
       # Set configuration and check cache
       - |
@@ -360,7 +359,7 @@ steps:
         allow_failure: false
     agents:
       queue: cpu_queue_postmerge
-    timeout_in_minutes: 120
+    timeout_in_minutes: 180
     commands:
       # Download artifacts and prepare Docker image
       - |
