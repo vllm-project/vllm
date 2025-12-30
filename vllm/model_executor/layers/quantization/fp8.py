@@ -1043,18 +1043,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
         if current_platform.is_fp8_fnuz():
-            # 1. For the w13 branch
-            w13_weight, w13_weight_scale, w13_in_s = normalize_e4m3fn_to_e4m3fnuz(
-                w13_weight, w13_weight_scale, layer.w13_input_scale
+            w13_weight, w13_weight_scale, layer.w13_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w13_weight, w13_weight_scale, layer.w13_input_scale
+                )
             )
-            if layer.w13_input_scale is not None:
-                replace_parameter(layer, "w13_input_scale", w13_in_s)
-            # 2. For the w2 branch
-            w2_weight, w2_weight_scale, w2_in_s = normalize_e4m3fn_to_e4m3fnuz(
-                w2_weight, w2_weight_scale, layer.w2_input_scale
+            w2_weight, w2_weight_scale, layer.w2_input_scale = (
+                normalize_e4m3fn_to_e4m3fnuz(
+                    w2_weight, w2_weight_scale, layer.w2_input_scale
+                )
             )
-            if layer.w2_input_scale is not None:
-                replace_parameter(layer, "w2_input_scale", w2_in_s)
 
         # Per tensor kernels require single activation scale. Use the max.
         if self.quant_config.activation_scheme == "static":
