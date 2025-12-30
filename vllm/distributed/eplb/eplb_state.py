@@ -34,7 +34,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
-from vllm.config import ModelConfig, ParallelConfig, get_current_vllm_config
+from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_node_count,
