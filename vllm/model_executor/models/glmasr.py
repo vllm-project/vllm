@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 from transformers.models.glmasr import GlmAsrConfig, GlmAsrEncoder, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs.data import PromptType
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -39,13 +41,17 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .audioflamingo3 import (
     AudioFlamingo3MultiModalDataParser,
     AudioFlamingo3MultiModalProcessor,
     AudioFlamingo3ProcessingInfo,
-    _audioflamingo3_field_config,
+)
+from .audioflamingo3 import (
+    _audioflamingo3_field_config as _glmasr_field_config,
 )
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
@@ -62,8 +68,10 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    SupportsTranscription,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .whisper import ISO639_1_SUPPORTED_LANGS
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -178,10 +186,6 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
                 length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
-
-
-# Reuse field config from AudioFlamingo3
-_glmasr_field_config = _audioflamingo3_field_config
 
 
 class GlmAsrMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
@@ -331,8 +335,10 @@ class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
     dummy_inputs=GlmAsrDummyInputsBuilder,
 )
 class GlmAsrForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -479,3 +485,61 @@ class GlmAsrForConditionalGeneration(
         skip_prefixes = ["audio_tower.embed_positions"]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
+
+    @classmethod
+    def _get_audio_token(cls, model_config: ModelConfig) -> str:
+        """Get the audio token from processor.
+
+        Similar to get_placeholder_str but returns single token.
+        """
+        processor = cached_processor_from_config(model_config)
+        return getattr(processor, "audio_token", "<|pad|>")
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        processor = cached_processor_from_config(model_config)
+        feature_extractor = processor.feature_extractor
+        max_audio_clip_s = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
+        return SpeechToTextConfig(
+            max_audio_clip_s=max_audio_clip_s,
+            sample_rate=feature_extractor.sampling_rate,
+        )
+
+    @classmethod
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
+        """Get the generation prompt to be used for transcription requests."""
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_token = cls._get_audio_token(model_config)
+
+        if task_type == "translate":
+            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            user_content = f"{audio_token}translate the speech to {full_lang_name_to}"
+        elif task_type == "transcribe":
+            user_content = (
+                f"{audio_token}can you transcribe the speech into a written format?"
+            )
+        else:
+            raise ValueError(f"Unsupported task type {task_type}")
+
+        messages = [{"role": "user", "content": user_content}]
+        prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_dict = {
+            "prompt_token_ids": prompt_token_ids,
+            "multi_modal_data": {"audio": audio},
+        }
+        return cast(PromptType, prompt_dict)
