@@ -213,20 +213,41 @@ def test_partition_wrapper_applied_on_aot_load(monkeypatch: pytest.MonkeyPatch):
                 ),
             ):
                 compiled_mod = CompiledMod(vllm_config=vllm_config)
+
+                # First call after restart: loads from AOT cache.
+                # This tests the fix for the first call after a restart.
                 compiled_mod(*args)
 
-            # Verify partition wrapper was called (set and then cleared)
-            # First call sets the wrapper (non-None), second clears it (None)
-            assert len(wrapper_calls) >= 2, (
-                f"Expected partition wrapper to be set and cleared, "
-                f"got {len(wrapper_calls)} calls"
-            )
-            assert wrapper_calls[0] is not None, (
-                "First call should set a wrapper function"
-            )
-            assert wrapper_calls[-1] is None, (
-                "Last call should clear the wrapper"
-            )
+                # Verify partition wrapper was called on AOT load.
+                assert len(wrapper_calls) >= 2, (
+                    "Expected partition wrapper to be set and cleared on AOT load, "
+                    f"got {len(wrapper_calls)} calls"
+                )
+                assert wrapper_calls[0] is not None, (
+                    "First call on AOT load should set a wrapper function"
+                )
+                assert wrapper_calls[-1] is None, (
+                    "Last call on AOT load should clear the wrapper"
+                )
+
+                # Reset for the next check.
+                wrapper_calls.clear()
+
+                # Subsequent call: uses the cached `aot_compiled_fn`.
+                # This tests the fix for subsequent calls.
+                compiled_mod(*args)
+
+                # Verify partition wrapper was called on the subsequent call.
+                assert len(wrapper_calls) >= 2, (
+                    "Expected partition wrapper to be set and cleared on subsequent call, "
+                    f"got {len(wrapper_calls)} calls"
+                )
+                assert wrapper_calls[0] is not None, (
+                    "First call on subsequent call should set a wrapper function"
+                )
+                assert wrapper_calls[-1] is None, (
+                    "Last call on subsequent call should clear the wrapper"
+                )
 
 
 @pytest.mark.skipif(
