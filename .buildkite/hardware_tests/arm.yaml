@@ -4,4 +4,5 @@ steps:
     soft_fail: true
     device: arm_cpu
     no_plugin: true
-    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
+    commands: 
+    - bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
