@@ -28,6 +28,13 @@ from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
     ZeroExpertFusedMoE,
 )
+from vllm.model_executor.layers.fused_moe.sonic_moe import (
+    SonicMoEExperts,
+    is_sonic_moe_supported,
+    is_valid_sonic_moe,
+    permute_weights_for_sonic,
+    sonic_moe_forward,
+)
 from vllm.triton_utils import HAS_TRITON
 
 _config: dict[str, Any] | None = None
@@ -61,6 +68,11 @@ __all__ = [
     "activation_without_mul",
     "override_config",
     "get_config",
+    "is_sonic_moe_supported",
+    "is_valid_sonic_moe",
+    "sonic_moe_forward",
+    "permute_weights_for_sonic",
+    "SonicMoEExperts",
 ]
 
 if HAS_TRITON:
