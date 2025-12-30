@@ -259,7 +259,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
             if self.flashinfer_cutlass_moe_enabled:
-                self.use_inplase = False
+                self.use_inplace = False
                 # Swap halves to arrange as [w3; w1] (kernel expectation)
                 w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
                 w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
@@ -279,7 +279,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     ),
                 )
             else:
-                self.use_inplase = True
+                self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     TritonExperts(self.moe_quant_config),
@@ -336,7 +336,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=self.use_inplase,
+                inplace=self.use_inplace,
                 activation=layer.activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
