@@ -728,7 +728,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.q_data_type,
-            o_data_type=self.output_dtype,
+            o_data_type=prefill.output_dtype,
         )
 
         # Prepare context prefills
@@ -748,7 +748,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     window_left=self._global_hyperparameters.window_left,
                     logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
                     q_data_type=self.q_data_type,
-                    o_data_type=self.output_dtype,
+                    o_data_type=prefill.output_dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
@@ -1537,7 +1537,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.query_seq_lens is not None
         assert prefill.workspace_buffer is not None
         # allocate BF16 / FP16 output tensor for TRT-LLM ragged attention
-        out = torch.zeros(
+        out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
