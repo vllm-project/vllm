@@ -324,6 +324,11 @@ def activation_without_mul(activation: str) -> str:
     return activation + "_no_mul"
 
 
+RELU2_NO_MUL: str = activation_without_mul("relu2")
+SILU_NO_MUL: str = activation_without_mul("silu")
+GELU_NO_MUL: str = activation_without_mul("gelu")
+
+
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
