@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <type_traits>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -122,15 +123,17 @@ __global__ void copy_blocks_mla_kernel(
 namespace vllm {
 
 // Used to copy/convert one element
+// Uses inv_scale (reciprocal) for FP8 quantization to avoid per-element
+// division
 template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
 struct CopyWithScaleOp {
-  float scale;
+  float inv_scale;
 
   __device__ __forceinline__ void operator()(OutT& dst, const InT src) const {
     if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
       dst = static_cast<OutT>(src);
     } else {
-      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
+      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, inv_scale);
     }
   }
 };
@@ -180,10 +183,13 @@ __global__ void reshape_and_cache_kernel(
       block_offset;
 
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
-  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  // Compute inverse scale once (multiply is ~20x faster than divide)
+  float k_inv_scale =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : (1.0f / *k_scale);
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_inv_scale};
+  float v_inv_scale =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : (1.0f / *v_scale);
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_inv_scale};
 
   vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
 
@@ -229,11 +235,14 @@ __global__ void reshape_and_cache_flash_kernel(
   // this is true for the NHD layout where `head_stride == head_size`
   const bool is_contiguous_heads = (head_stride == head_size);
 
-  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
-  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  // Compute inverse scale once (multiply is ~20x faster than divide)
+  float k_inv_scale =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : (1.0f / *k_scale);
+  float v_inv_scale =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : (1.0f / *v_scale);
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_inv_scale};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_inv_scale};
   if (is_contiguous_heads) {
     // NHD layout
     // kv cache: [num_blocks, block_size, num_heads, head_size]
@@ -295,6 +304,10 @@ __global__ void concat_and_cache_mla_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
+  // Compute inverse scale once (multiply is ~20x faster than divide)
+  const float inv_scale =
+      (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : (1.0f / *scale);
+
   auto copy = [&](const scalar_t* __restrict__ src, cache_t* __restrict__ dst,
                   int src_stride, int dst_stride, int size, int offset) {
     for (int i = threadIdx.x; i < size; i += blockDim.x) {
@@ -304,8 +317,8 @@ __global__ void concat_and_cache_mla_kernel(
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst[dst_idx] = src[src_idx];
       } else {
-        dst[dst_idx] =
-            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
+        dst[dst_idx] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(
+            src[src_idx], inv_scale);
       }
     }
   };
@@ -393,6 +406,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   // Compute the scale for the tile
   float tile_scale = max_abs / 448.f;
   tile_scale = fmaxf(tile_scale, FLT_MIN);
+  float tile_inv_scale = 1.0f / tile_scale;
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {
@@ -410,7 +424,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   for (int i = 0; i < 8; i++) {
     result[i] =
         fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
-            vals[i], tile_scale);
+            vals[i], tile_inv_scale);
   }
 
   // Store as aligned 64-bit writes
@@ -469,12 +483,13 @@ __global__ void indexer_k_quant_and_cache_kernel(
   if (use_ue8m0) {
     scale = exp2f(ceilf(log2f(scale)));
   }
+  float inv_scale = 1.0f / scale;
 
   const int64_t dst_offset = block_idx * cache_block_size * cache_stride +
                              block_offset * head_dim + head_dim_idx;
   for (int i = 0; i < VEC_SIZE; i++) {
     kv_cache[dst_offset + i] =
-        fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
+        fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], inv_scale);
   }
   if (threadIdx.x == 0) {
     const int64_t dst_scale_idx =
@@ -744,10 +759,16 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    const float scale,
                                    const int64_t block_stride) {
   const int64_t block_idx = blockIdx.x;
+  // scaled_convert expects:
+  // - Dequantization (FP8->HP): scale (multiply by scale)
+  // - Quantization (HP->FP8): 1/scale (multiply by inverse)
+  // Detect quantization by checking if Tout is FP8 storage type (uint8_t)
+  constexpr bool is_quantization = std::is_same_v<Tout, uint8_t>;
+  const float scale_factor = is_quantization ? (1.0f / scale) : scale;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
     dst_cache[idx] =
-        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale);
+        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale_factor);
   }
 }
 
