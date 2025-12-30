@@ -20,12 +20,12 @@ from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
 
 class FinishReason(enum.IntEnum):
     """
-    Reason a request finished - stop, length, abort, or error.
+    Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -34,6 +34,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
             Invariant: always converted to 500 Internal Server Error.
+    repetition - repetitive token pattern detected (hallucination)
 
     """
 
@@ -41,6 +42,7 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+    REPETITION = 4
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
