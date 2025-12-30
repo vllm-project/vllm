@@ -215,8 +215,8 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray,
         activate_lora: bool = True,
         remove_lora: bool = True,
-        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
         num_active_loras: int = 0,
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
         """
         Context manager for dummy runs with LoRA.
