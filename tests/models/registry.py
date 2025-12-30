@@ -647,7 +647,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
-    "GlmAsrForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-ASR-Nano-2512"),
+    "GlmAsrForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-ASR-Nano-2512", trust_remote_code=True
+    ),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b"
     ),
