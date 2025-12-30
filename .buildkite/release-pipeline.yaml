@@ -367,6 +367,25 @@ steps:
       - |
         set -euo pipefail
 
+        # Ensure git tags are up-to-date (Buildkite's default fetch doesn't update tags)
+        # This fixes version detection when tags are moved/force-pushed
+        echo "Fetching latest tags from origin..."
+        git fetch --tags --force origin
+        
+        # Log tag information for debugging version detection
+        echo "========================================"
+        echo "Git Tag Verification"
+        echo "========================================"
+        echo "Current HEAD: $(git rev-parse HEAD)"
+        echo "git describe --tags: $(git describe --tags 2>/dev/null || echo 'No tags found')"
+        echo ""
+        echo "Recent tags (pointing to commits near HEAD):"
+        git tag -l --sort=-creatordate | head -5
+        echo "setuptools_scm version detection:"
+        pip install -q setuptools_scm 2>/dev/null || true
+        python3 -c "import setuptools_scm; print('  Detected version:', setuptools_scm.get_version())" 2>/dev/null || echo "  (setuptools_scm not available in this environment)"
+        echo "========================================"
+
         # Download wheel artifacts from current build
         echo "Downloading wheel artifacts from current build"
         buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
