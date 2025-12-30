@@ -1158,6 +1158,7 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         documents: list[dict[str, str]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
@@ -1183,6 +1184,8 @@ class OpenAIServing:
             tools=tool_dicts,
             documents=documents,
         )
+        if default_chat_template_kwargs:
+            _chat_template_kwargs.update(default_chat_template_kwargs)
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: str | list[int]
