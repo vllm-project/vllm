@@ -228,6 +228,7 @@ class Fp8Config(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
             quant_method = Fp8LinearMethod(self)
+            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
@@ -240,6 +241,7 @@ class Fp8Config(QuantizationConfig):
                 moe_quant_method = Fp8MoEMethod(self, layer)
             else:
                 moe_quant_method = Fp8OnlineMoEMethod(self, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -311,7 +313,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.marlin_input_dtype = get_marlin_input_dtype()
+        self.marlin_input_dtype = None
         self.use_marlin = (
             not current_platform.has_device_capability(89)
             or envs.VLLM_TEST_FORCE_FP8_MARLIN
@@ -640,12 +642,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             with_lora_support=self.moe.is_lora_enabled,
         )
 
+        self.marlin_input_dtype = None
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-            # TODO(rob): move this logic into the oracle.
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports block "

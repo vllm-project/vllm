@@ -466,8 +466,7 @@ def get__quant_fp8_method() -> QuantFP8:
     return _quant_fp8_method
 
 
-# TODO(rob): redo the marlin input dtype logic
-def get_marlin_input_dtype(prefix: str | None = None):
+def get_marlin_input_dtype(prefix):
     if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
     elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
