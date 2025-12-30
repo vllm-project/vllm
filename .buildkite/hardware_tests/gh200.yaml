@@ -3,4 +3,5 @@ steps:
   - label: "GH200 Test"
     soft_fail: true
     device: gh200
+    optional: true
     command: nvidia-smi && bash .buildkite/scripts/hardware_ci/run-gh200-test.sh
