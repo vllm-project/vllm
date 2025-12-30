@@ -1449,34 +1449,28 @@ class HCXVisionV2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Process text first
-        processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=self.info.get_hf_processor(**mm_kwargs),
-            data=dict(
-                text=prompt,
-                images=None,
-                videos=None,
-                audios=None,
-            ),
+        images = mm_data.get("images") if mm_data else None
+        videos = mm_data.get("videos") if mm_data else None
+
+        # Check if audio is supported (Omni model)
+        hf_config = self.info.get_hf_config()
+        has_audio = (
+            hasattr(hf_config, "audio_config") and hf_config.audio_config is not None
         )
 
-        if len(mm_data) > 0:
-            images = mm_data.get("images")
-            videos = mm_data.get("videos")
-            audios = mm_data.get("audios")
+        # Build data dict - only include audios if model supports it
+        data: dict[str, object] = dict(
+            text=prompt,
+            images=images,
+            videos=videos,
+        )
+        if has_audio:
+            data["audios"] = mm_data.get("audios") if mm_data else None
 
-            # Process multimodal data
-            _processed_outputs = self.info.ctx.call_hf_processor(
-                hf_processor=self.info.get_hf_processor(**mm_kwargs),
-                data=dict(
-                    text=None,
-                    images=images,
-                    videos=videos,
-                    audios=audios,
-                ),
-            )
-
-            processed_outputs.update(_processed_outputs)
+        processed_outputs = self.info.ctx.call_hf_processor(
+            hf_processor=self.info.get_hf_processor(**mm_kwargs),
+            data=data,
+        )
 
         return processed_outputs
 
