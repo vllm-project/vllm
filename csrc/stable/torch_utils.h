@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
+
 #include <cuda_runtime.h>
 
 // Utility to get the current CUDA stream for a given device using stable APIs.

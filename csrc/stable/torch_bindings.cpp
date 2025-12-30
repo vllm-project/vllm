@@ -27,6 +27,41 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
 #ifndef USE_ROCM
   m.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 #endif
+
+  // Layernorm
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  m.def(
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  m.def(
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "float epsilon) -> ()");
+
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  m.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+
+  // In-place fused Add and RMS Normalization.
+  m.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, Tensor scale, float epsilon) -> ()");
+
+  // Fused Layernorm + Quant kernels
+  m.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+
+  // Fused Layernorm + Block quant kernels
+  m.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
@@ -42,6 +77,20 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("gelu_new", TORCH_BOX(&gelu_new));
   m.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   m.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+
+  // Layernorm ops
+  m.impl("rms_norm", TORCH_BOX(&rms_norm));
+  m.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
+
+  // Layernorm + quantization ops
+  m.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
+  m.impl("fused_add_rms_norm_static_fp8_quant",
+         TORCH_BOX(&fused_add_rms_norm_static_fp8_quant));
+
+  // Fused layernorm + dynamic quantization ops
+  m.impl("rms_norm_dynamic_per_token_quant",
+         TORCH_BOX(&rms_norm_dynamic_per_token_quant));
+  m.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
 
 #ifndef USE_ROCM
   // Utility ops
