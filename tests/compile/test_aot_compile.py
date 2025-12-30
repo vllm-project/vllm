@@ -160,7 +160,7 @@ def test_partition_wrapper_applied_on_aot_load(monkeypatch: pytest.MonkeyPatch):
     The root cause was that partition wrapper context was bypassed when
     loading from AOT cache.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from vllm.config import CUDAGraphMode
 
@@ -187,7 +187,9 @@ def test_partition_wrapper_applied_on_aot_load(monkeypatch: pytest.MonkeyPatch):
             disable_envs_cache()
 
             # Mock set_customized_partition_wrappers to track calls
-            original_set_wrappers = torch._inductor.utils.set_customized_partition_wrappers
+            original_set_wrappers = (
+                torch._inductor.utils.set_customized_partition_wrappers
+            )
             wrapper_calls = []
 
             def tracking_set_wrappers(wrapper):
@@ -239,8 +241,8 @@ def test_partition_wrapper_applied_on_aot_load(monkeypatch: pytest.MonkeyPatch):
 
                 # Verify partition wrapper was called on the subsequent call.
                 assert len(wrapper_calls) >= 2, (
-                    "Expected partition wrapper to be set and cleared on subsequent call, "
-                    f"got {len(wrapper_calls)} calls"
+                    "Expected partition wrapper set and cleared on subsequent "
+                    f"call, got {len(wrapper_calls)} calls"
                 )
                 assert wrapper_calls[0] is not None, (
                     "First call on subsequent call should set a wrapper function"
