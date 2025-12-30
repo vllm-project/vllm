@@ -70,6 +70,26 @@ class ProfilerConfig:
     Defaults to 0, meaning no limit.
     """
 
+    # Memory snapshot profiler settings
+    memory_profiler_dir: str = ""
+    """Directory to save memory snapshot files. When set, enables memory
+    snapshot profiling endpoints (/start_mem_profile, /stop_mem_profile).
+    The snapshots can be visualized at https://pytorch.org/memory_viz
+    Note that it must be an absolute path."""
+
+    memory_profiler_max_entries: int = 100000
+    """Maximum number of memory allocation entries to record.
+    Higher values capture more allocations but use more memory.
+    Default: 100000"""
+
+    memory_profiler_profile_init: bool = True
+    """If `True`, automatically profile memory during model loading and
+    initialization. Saves snapshots with stage-specific filenames."""
+
+    memory_profiler_dump_on_exception: bool = True
+    """If `True`, automatically dump memory snapshot when an exception
+    occurs during profiling. Enabled by default when memory profiler is active."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -196,4 +216,15 @@ class ProfilerConfig:
                     os.path.expanduser(profiler_dir)
                 )
 
+        # Normalize memory profiler directory path
+        if self.memory_profiler_dir:
+            self.memory_profiler_dir = os.path.abspath(
+                os.path.expanduser(self.memory_profiler_dir)
+            )
+
         return self
+
+    @property
+    def memory_profiler_enabled(self) -> bool:
+        """Returns True if memory profiler is configured."""
+        return bool(self.memory_profiler_dir)

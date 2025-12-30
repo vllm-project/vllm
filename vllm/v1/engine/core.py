@@ -502,6 +502,9 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def mem_profile(self, is_start: bool = True):
+        self.model_executor.mem_profile(is_start)
+
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 sender, P1 receiver)

@@ -738,6 +738,14 @@ class AsyncLLM(EngineClient):
             coros.append(asyncio.to_thread(self.profiler.stop))
         await asyncio.gather(*coros)
 
+    async def start_mem_profile(self) -> None:
+        """Start memory snapshot profiling on workers."""
+        await self.engine_core.mem_profile_async(True)
+
+    async def stop_mem_profile(self) -> None:
+        """Stop memory snapshot profiling and save snapshots."""
+        await self.engine_core.mem_profile_async(False)
+
     async def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
