@@ -17,6 +17,7 @@ from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.models.qwen2_audio import Qwen2AudioEncoder
+from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -1297,14 +1298,35 @@ class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
     """Processing info for HyperCLOVAX V2 (32B Think model and Omni model)."""
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        # Note: Omni model has audio_config but HF processor doesn't support
-        # 'audios' argument yet. Audio support is disabled until HF processor
-        # is updated to handle audio inputs.
-        # TODO: Enable audio when HF processor supports it
-        # hf_config = self.get_hf_config()
-        # if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
-        #     return {"image": None, "video": None, "audio": None}
+        # Check if audio is supported (Omni model has audio_config)
+        hf_config = self.get_hf_config()
+        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+            return {"image": None, "video": None, "audio": None}
         return {"image": None, "video": None}
+
+    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+        """Get WhisperFeatureExtractor for audio processing.
+
+        Since the HF processor (HCXVisionV2Processor) doesn't support audio,
+        we create a WhisperFeatureExtractor directly from the audio_config.
+        """
+        hf_config = self.get_hf_config()
+        audio_config = getattr(hf_config, "audio_config", None)
+        if audio_config is None:
+            raise ValueError(
+                "This model does not have audio_config. "
+                "Audio processing is not supported."
+            )
+
+        # Create WhisperFeatureExtractor with params from audio_config
+        return WhisperFeatureExtractor(
+            feature_size=audio_config.num_mel_bins,
+            sampling_rate=16000,  # Standard for Whisper
+            hop_length=160,
+            chunk_length=30,
+            n_fft=400,
+            padding_value=0.0,
+        )
 
     def get_num_image_tokens(
         self,
@@ -1387,7 +1409,16 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
 
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = 16  # Default for video
-        target_audio_len = 480000  # Default ~30 seconds at 16kHz
+
+        # Calculate audio length from feature extractor if available
+        hf_config = self.info.get_hf_config()
+        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+            feature_extractor = self.info.get_feature_extractor()
+            target_audio_len = (
+                feature_extractor.chunk_length * feature_extractor.sampling_rate
+            )
+        else:
+            target_audio_len = 480000  # Default ~30 seconds at 16kHz
 
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
@@ -1434,6 +1465,7 @@ class HCXVisionV2MultiModalProcessor(
     ) -> BatchFeature:
         images = mm_data.get("images") if mm_data else None
         videos = mm_data.get("videos") if mm_data else None
+        audios = mm_data.get("audios") if mm_data else None
 
         # Check if audio is supported (Omni model)
         hf_config = self.info.get_hf_config()
@@ -1441,19 +1473,38 @@ class HCXVisionV2MultiModalProcessor(
             hasattr(hf_config, "audio_config") and hf_config.audio_config is not None
         )
 
-        # Build data dict - only include audios if model supports it
+        # Build data dict for HF processor (images/videos only)
+        # The HF processor (HCXVisionV2Processor) doesn't support audio
         data: dict[str, object] = dict(
             text=prompt,
             images=images,
             videos=videos,
         )
-        if has_audio:
-            data["audios"] = mm_data.get("audios") if mm_data else None
 
         processed_outputs = self.info.ctx.call_hf_processor(
             hf_processor=self.info.get_hf_processor(**mm_kwargs),
             data=data,
         )
+
+        # Process audio separately using WhisperFeatureExtractor
+        # since HF processor doesn't support audio
+        if has_audio and audios:
+            audio_list = list(audios) if not isinstance(audios, list) else audios
+            if audio_list:
+                feature_extractor = self.info.get_feature_extractor()
+                audio_features = feature_extractor(
+                    audio_list,
+                    sampling_rate=feature_extractor.sampling_rate,
+                    return_tensors="pt",
+                    return_attention_mask=True,
+                    padding="max_length",
+                )
+                # Merge audio features into processed outputs
+                processed_outputs["input_features"] = audio_features["input_features"]
+                if "attention_mask" in audio_features:
+                    processed_outputs["feature_attention_mask"] = audio_features[
+                        "attention_mask"
+                    ]
 
         return processed_outputs
 
