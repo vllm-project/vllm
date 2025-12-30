@@ -542,11 +542,11 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 | Architecture | Models | Example HF Models | Corresponding score template | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 |--------------|--------|-------------------|------------------------------|-----------------------------|-----------------------------------------|
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
-| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`<sup>T</sup> (see note), etc. | bge-reranker-v2-gemma.jinja | ✅︎ | ✅︎ |
+| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`<sup>T</sup> (see note), etc. | [bge-reranker-v2-gemma.jinja](../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
 | `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
-| `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`<sup>T</sup>, etc. | nemotron-rerank.jinja | ✅︎ | ✅︎ |
-| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`<sup>T</sup> (see note), etc. | mxbai_rerank_v2.jinja | ✅︎ | ✅︎ |
-| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`<sup>T</sup>, `Qwen/Qwen3-Reranker-0.6B`<sup>T</sup> (see note), etc. | qwen3_reranker.jinja | ✅︎ | ✅︎ |
+| `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`<sup>T</sup>, etc. | [nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
+| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`<sup>T</sup> (see note), etc. | [mxbai_rerank_v2.jinja](../../examples/pooling/score/template/mxbai_rerank_v2.jinja) | ✅︎ | ✅︎ |
+| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`<sup>T</sup>, `Qwen/Qwen3-Reranker-0.6B`<sup>T</sup> (see note), etc. | [qwen3_reranker.jinja](../../examples/pooling/score/template/qwen3_reranker.jinja) | ✅︎ | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | N/A | | |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | N/A | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | N/A | \* | \* |
