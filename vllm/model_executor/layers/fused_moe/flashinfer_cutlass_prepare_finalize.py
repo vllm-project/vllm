@@ -352,7 +352,7 @@ def create_flashinfer_prepare_finalize(
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
-) -> FlashInferCutlassMoEPrepareAndFinalize:
+) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
     """Factory function to create the appropriate FlashInfer implementation."""
     # TODO(rob): migrate non-DP cases to MoEPrepareAndFinalizeNoEP
     # once we complete the FP8 refactor.
