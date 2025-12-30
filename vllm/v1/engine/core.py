@@ -487,10 +487,8 @@ class EngineCore:
             request_ids = []
             while not self.aborts_queue.empty():
                 ids = self.aborts_queue.get_nowait()
-                if isinstance(ids, str):
-                    # Should be a list here, but also handle string just in case.
-                    ids = (ids,)
-                request_ids.extend(ids)
+                # Should be a list here, but also handle string just in case.
+                request_ids.extend((ids,) if isinstance(ids, str) else ids)
             # More efficient to abort all as a single batch.
             self.abort_requests(request_ids)
 

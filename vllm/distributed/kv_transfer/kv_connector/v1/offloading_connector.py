@@ -521,6 +521,7 @@ class OffloadingConnectorScheduler:
                     lora_id=None,
                     block_size=event.block_size,
                     medium=event.medium,
+                    lora_name=None,
                 )
 
 
