@@ -270,7 +270,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         use_dp=(self.moe.dp_size > 1),
                     ),
                     FlashInferExperts(
-                        out_dtype=torch.get_default_dtype(),
+                        out_dtype=torch.bfloat16,
                         quant_config=self.moe_quant_config,
                         tp_rank=self.moe.moe_parallel_config.tp_rank,
                         tp_size=self.moe.moe_parallel_config.tp_size,
