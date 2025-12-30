@@ -306,7 +306,7 @@ class MiMoV2Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
 
-        # Apply v_scale before attention (as in SGLang)
+        # Apply v_scale before attention
         if self.v_scale is not None:
             v = v * self.v_scale
 
