@@ -510,8 +510,8 @@ def backend_supports_prefill_query_quantization() -> bool:
     - TRT-LLM ragged DeepSeek prefill
 
     Not supported:
-    - cuDNN prefill
-    - FlashAttention fallback
+    - cuDNN Prefill
+    - FlashAttention
     """
     return use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
 
@@ -1615,7 +1615,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=q.device,
             dtype=prefill.output_dtype,
         )
-
         prefill.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
@@ -1782,7 +1781,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         workspace = prefill_metadata.chunked_context.workspace
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            if attn_metadata.prefill.q_data_type != torch.float8_e4m3fn:
+            if attn_metadata.prefill.q_data_type != current_platform.fp8_dtype():
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
@@ -1809,12 +1808,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
-            # To Do: Use epilogue to generate fp8 kv_nope.
-            if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
+            # kv_b_proj may not be quantized, for example NVFP4 models.
+            if (
+                self.kv_b_proj.weight.dtype != current_platform.fp8_dtype()
+                and attn_metadata.prefill.q_data_type == current_platform.fp8_dtype()
+            ):
                 kv_c_normed = kv_c_normed.to(attn_metadata.prefill.output_dtype)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+
+            # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
                 kv_nope = kv_nope.to(attn_metadata.prefill.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
