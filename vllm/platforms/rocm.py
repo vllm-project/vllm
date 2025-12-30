@@ -409,6 +409,10 @@ class RocmPlatform(Platform):
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+        use_aiter_shared_expert = (
+            rocm_aiter_ops.is_fused_moe_enabled()
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled
+        )
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -457,6 +461,9 @@ class RocmPlatform(Platform):
 
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
+
+        if use_aiter_shared_expert:
+            compilation_config.custom_ops.append("+grouped_topk")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
