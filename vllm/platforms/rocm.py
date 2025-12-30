@@ -463,7 +463,15 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.append("+quant_fp8")
 
         if use_aiter_shared_expert:
-            compilation_config.custom_ops.append("+grouped_topk")
+            if "-grouped_topk" in compilation_config.custom_ops:
+                logger.warning_once(
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
+                    "requires the 'grouped_topk' custom op. Overriding the "
+                    "user-provided '-grouped_topk'."
+                )
+                compilation_config.custom_ops.remove("-grouped_topk")
+            if "+grouped_topk" not in compilation_config.custom_ops:
+                compilation_config.custom_ops.append("+grouped_topk")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
