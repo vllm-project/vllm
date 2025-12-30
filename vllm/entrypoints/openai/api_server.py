@@ -1303,6 +1303,7 @@ def setup_server(args):
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     if args.uds:
         listen_address = f"unix:{args.uds}"
