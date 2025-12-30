@@ -65,10 +65,11 @@ class EncoderCacheManager:
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_mm_embeds: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
+        self.enable_mm_embeds = enable_mm_embeds
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
@@ -142,8 +143,10 @@ class EncoderCacheManager:
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
+        is_embedding_only_mode = self.enable_mm_embeds and encoder_compute_budget == 1
+
         # Not enough compute budget
-        if num_embeds > encoder_compute_budget:
+        if not is_embedding_only_mode and num_embeds > encoder_compute_budget:
             return False
 
         num_embeds += num_embeds_to_schedule
@@ -371,9 +374,10 @@ def compute_mm_encoder_budget(
 # utilize the cache and this class will fold into EncoderCacheManager, as
 # differences with MM models shrink.
 class EncoderDecoderCacheManager(EncoderCacheManager):
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_mm_embeds: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
+        self.enable_mm_embeds = enable_mm_embeds
         self.freed: list[str] = []
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
@@ -387,9 +391,12 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         num_embeds_to_schedule: int,
     ) -> bool:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+
+        is_embedding_only_mode = self.enable_mm_embeds and encoder_compute_budget == 1
+
         # Not enough compute budget
-        if num_encoder_embeds > encoder_compute_budget:
-            return False
+        if not is_embedding_only_mode and num_encoder_embeds > encoder_compute_budget:
+                return False
 
         num_encoder_embeds += num_embeds_to_schedule
         # Enough free slots
