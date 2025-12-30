@@ -45,7 +45,6 @@ def test_load_inplace_offline_reload(
         lora_name="test-adapter",
         lora_int_id=adapter_id,
         lora_path=qwen3_meowing_lora_files,
-        load_inplace=True,
     )
 
     outputs = llm.chat([messages], sampling_params, lora_request=meowing_request)
@@ -89,7 +88,6 @@ def test_load_inplace_false_no_reload(
         lora_name="test-adapter-2",
         lora_int_id=adapter_id,
         lora_path=qwen3_meowing_lora_files,
-        load_inplace=True,
     )
 
     outputs = llm.chat(
@@ -106,7 +104,6 @@ def test_load_inplace_false_no_reload(
         lora_name="test-adapter-2-woof",
         lora_int_id=adapter_id,  # Same ID
         lora_path=qwen3_woofing_lora_files,
-        load_inplace=False,  # Don't force reload
     )
 
     outputs = llm.chat(
