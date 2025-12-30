@@ -54,8 +54,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
+    CausalConv1d,
+    CausalConv1dUpdate,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -272,6 +272,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             if self.speculative_config
             else 0
         )
+        # This is not an layer of GDN, this is just an operator
+        self.causal_conv1d = CausalConv1d()
+        self.causal_conv1d_update = CausalConv1dUpdate()
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -543,7 +546,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = causal_conv1d_update(
+            mixed_qkv_spec = self.causal_conv1d_update.forward(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
@@ -563,7 +566,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
+            mixed_qkv_non_spec = self.causal_conv1d.forward(
                 mixed_qkv_non_spec_T,
                 conv_weights,
                 self.conv1d.bias,
@@ -575,7 +578,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
-            mixed_qkv_non_spec = causal_conv1d_update(
+            mixed_qkv_non_spec = self.causal_conv1d_update.forward(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
