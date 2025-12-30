@@ -1,0 +1,6 @@
+group: Hardware ARM
+steps:
+  - label: "Arm CPU Test"
+    soft_fail: true
+    device: arm_cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh

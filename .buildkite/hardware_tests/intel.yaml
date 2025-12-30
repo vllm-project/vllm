@@ -5,3 +5,13 @@ steps:
     soft_fail: true
     device: intel_cpu
     command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
+  
+  - label: "Intel HPU Test"
+    soft_fail: true
+    device: intel_hpu
+    command: bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
+
+  - label: "Intel GPU Test"
+    soft_fail: true
+    device: intel_gpu
+    command: bash .buildkite/scripts/hardware_ci/run-xpu-test.sh
