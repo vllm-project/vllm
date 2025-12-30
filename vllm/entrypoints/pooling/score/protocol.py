@@ -99,6 +99,15 @@ class RerankRequest(OpenAIBaseModel):
         description="Whether to use activation for classification outputs. "
         "Default is True.",
     )
+
+    instruct: str | None = Field(
+        default=None,
+        description=(
+            "Optional instruction string to include in the query template. "
+            "For Qwen3-Reranker models, this provides context about the reranking task. "
+            "If not provided, the model's default template will be used."
+        ),
+    )
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):

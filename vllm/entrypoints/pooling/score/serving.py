@@ -45,6 +45,60 @@ from vllm.utils.async_utils import make_async, merge_async_iterators
 logger = init_logger(__name__)
 
 
+def _maybe_format_reranker_inputs(
+    *,
+    model_config: Any,
+    query: str | ScoreMultiModalParam,
+    documents: list[str] | ScoreMultiModalParam,
+    instruct: str | None,
+) -> tuple[str | ScoreMultiModalParam, list[str] | ScoreMultiModalParam]:
+    """Format query/documents for original Qwen3-Reranker models if applicable."""
+    is_qwen3_reranker = (
+        model_config.architecture == "Qwen3ForSequenceClassification"
+        and getattr(model_config.hf_config, "is_original_qwen3_reranker", False)
+    )
+    if not is_qwen3_reranker:
+        return query, documents
+
+    # Default values for Qwen3-Reranker (from
+    # examples/pooling/score/offline_reranker.py).
+    default_prefix = (
+        '<|im_start|>system\nJudge whether the Document meets the requirements '
+        "based on the Query and the Instruct provided. Note that the answer can "
+        'only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+    )
+    default_suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+    if isinstance(query, str):
+        instruct_str = instruct if instruct is not None else ""
+        query_template = "{prefix}<Instruct>: {instruct_str}\n<Query>: {query}\n"
+        query = query_template.format(
+            prefix=default_prefix, instruct_str=instruct_str, query=query
+        )
+
+    if isinstance(documents, list):
+        documents = [
+            f"<Document>: {doc}{default_suffix}" if isinstance(doc, str) else doc
+            for doc in documents
+        ]
+    elif isinstance(documents, dict) and "content" in documents:
+        # Handle ScoreMultiModalParam
+        formatted_content: list[ScoreContentPartParam] = []
+        for doc in documents["content"]:
+            if isinstance(doc, dict) and doc.get("type") == "text":
+                formatted_content.append(
+                    {
+                        **doc,
+                        "text": f"<Document>: {doc.get('text', '')}{default_suffix}",
+                    }
+                )
+            else:
+                formatted_content.append(doc)
+        documents = {**documents, "content": formatted_content}
+
+    return query, documents
+
+
 class ServingScores(OpenAIServing):
     def __init__(
         self,
@@ -410,10 +464,17 @@ class ServingScores(OpenAIServing):
             )
         )
 
+        query_for_scoring, documents_for_scoring = _maybe_format_reranker_inputs(
+            model_config=self.model_config,
+            query=request.query,
+            documents=documents,
+            instruct=request.instruct,
+        )
+
         try:
             final_res_batch = await self._run_scoring(
-                request.query,
-                documents,
+                query_for_scoring,
+                documents_for_scoring,
                 request,
                 request_id,
                 raw_request,
