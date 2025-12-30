@@ -88,6 +88,7 @@ class OutlinesBackend(StructuredOutputBackend):
         )
         return OutlinesGrammar(
             vocab_size=self.vocab_size,
+            eos_token_id=self.tokenizer.eos_token_id,
             guide=oc.Guide(index, max_rollback=max_rollback_tokens),
         )
 
@@ -106,14 +107,16 @@ class OutlinesBackend(StructuredOutputBackend):
 @dataclass
 class OutlinesGrammar(StructuredOutputGrammar):
     vocab_size: int
+    eos_token_id: int | None
     guide: oc.Guide = field(hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
 
     # outlines_core signals done on DFA accept; vLLM expects done after EOS.
-    # We delay the finished flag by one step so EOS can still be emitted.
-    _prev_finished: bool = field(default=False, init=False, repr=False, hash=False)
+    # We raise the finished flag only if the DFA is in an accepting state
+    # and the EOS token has been emitted.
+    _eos_emitted: bool = field(default=False, init=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -121,13 +124,35 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
         """
-        if self.guide.accepts_tokens(tokens):
-            # Advance cannot fail because we checked Guide.accepts_tokens()
-            for t in tokens:
-                self.guide.advance(t)
-                self.num_processed_tokens += 1
+
+        # The EOS token is not part of the guide's state machine,
+        # so we must extract it before advancing.
+        last_token_eos = False
+        if tokens and tokens[-1] == self.eos_token_id:
+            last_token_eos = True
+            tokens = tokens[:-1]
+
+        # Try to advance the guide with the tokens
+        if not self.guide.accepts_tokens(tokens):
+            return False
+
+        # Advance cannot fail because we checked Guide.accepts_tokens()
+        for t in tokens:
+            self.guide.advance(t)
+            self.num_processed_tokens += 1
+
+        # If the EOS token was not generated,
+        # we return True to allow generation to continue.
+        if not last_token_eos:
             return True
-        return False
+
+        # If the EOS token was generated,
+        # we must verify that the FSM is in an accepting state.
+        if self.guide.is_finished():
+            self._eos_emitted = True
+            return True
+        else:
+            return False
 
     def rollback(self, num_tokens: int) -> None:
         self.guide.rollback_state(num_tokens)
@@ -147,14 +172,11 @@ class OutlinesGrammar(StructuredOutputGrammar):
         self.guide.write_mask_into(mask.data_ptr(), mask.numel(), mask.element_size())
 
     def is_terminated(self) -> bool:
-        curr = self.guide.is_finished()
-        prev = self._prev_finished
-        self._prev_finished = curr
-        return prev
+        return self.guide.is_finished() and self._eos_emitted
 
     def reset(self):
         self.num_processed_tokens = 0
-        self._prev_finished = False
+        self._eos_emitted = False
         self.guide.reset()
 
 
