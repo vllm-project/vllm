@@ -55,8 +55,6 @@ class MxbaiRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
             **kwargs,
         )
 
-        MtebCrossEncoderMixin.__init__(self, model_name=model_name, revision=None)
-
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.yes_loc = self.tokenizer.convert_tokens_to_ids("1")
         self.no_loc = self.tokenizer.convert_tokens_to_ids("0")

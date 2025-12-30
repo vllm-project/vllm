@@ -25,6 +25,7 @@ RERANK_MODELS = [
             "classifier_from_token": ["Yes"],
             "method": "no_post_processing",
         },
+        mteb_score=0.33757,
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
@@ -49,8 +50,6 @@ class GemmaRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
             dtype=dtype,
             **kwargs,
         )
-
-        MtebCrossEncoderMixin.__init__(self, model_name=model_name, revision=None)
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.yes_loc = self.tokenizer.convert_tokens_to_ids("Yes")

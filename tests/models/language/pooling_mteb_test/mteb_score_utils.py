@@ -3,7 +3,7 @@
 
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mteb
 import numpy as np
@@ -146,7 +146,6 @@ class HFMtebCrossEncoder(MtebCrossEncoderMixin, HfRunner):
         HfRunner.__init__(
             self, model_name=model_name, is_cross_encoder=True, dtype=dtype, **kwargs
         )
-        MtebCrossEncoderMixin.__init__(self, model_name=model_name, revision=None)
 
     @torch.no_grad
     def predict(
@@ -181,6 +180,7 @@ class HFMtebCrossEncoder(MtebCrossEncoderMixin, HfRunner):
         else:
             prompts = list(zip(queries, corpus))
             outputs = HfRunner.predict(self, prompts, show_progress_bar=False)
+            outputs = cast(torch.Tensor, outputs)
             return outputs.cpu().numpy()
 
 

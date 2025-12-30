@@ -57,8 +57,6 @@ class Qwen3RerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
             **kwargs,
         )
 
-        MtebCrossEncoderMixin.__init__(self, model_name=model_name, revision=None)
-
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
         self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
