@@ -82,7 +82,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs)
   timeout_in_minutes: 20
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing

@@ -14,7 +14,7 @@ steps:
 - label: LM Eval Large Models (4 GPUs)(A100)
   device: a100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -26,7 +26,7 @@ steps:
 - label: LM Eval Large Models (4 GPUs)(H100)
   device: h100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/

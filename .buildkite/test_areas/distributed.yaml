@@ -5,7 +5,7 @@ steps:
 - label: Distributed Comm Ops
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
@@ -18,7 +18,7 @@ steps:
 - label: Distributed (2 GPUs)
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
@@ -54,7 +54,7 @@ steps:
 - label: Distributed Tests (4 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
   - tests/distributed/test_utils
@@ -104,7 +104,7 @@ steps:
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
   device: h100
-  num_gpus: 8
+  num_devices: 8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
@@ -122,7 +122,7 @@ steps:
 - label: Distributed Tests (4 GPUs)(A100)
   device: a100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/
   commands:
@@ -137,7 +137,7 @@ steps:
   device: h200
   optional: true
   working_dir: "/vllm-workspace/"
-  num_gpus: 2
+  num_devices: 2
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
@@ -152,7 +152,7 @@ steps:
   device: b200
   optional: true
   working_dir: "/vllm-workspace/"
-  num_gpus: 2
+  num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
@@ -161,7 +161,7 @@ steps:
 - label: 2 Node Test (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   num_nodes: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -176,7 +176,7 @@ steps:
 - label: Distributed NixlConnector PD accuracy (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
@@ -187,7 +187,7 @@ steps:
 - label: Pipeline + Context Parallelism (4 GPUs))
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/

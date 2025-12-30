@@ -58,7 +58,7 @@ steps:
 - label: Kernels DeepGEMM Test (H100)
   timeout_in_minutes: 45
   device: h100
-  num_gpus: 1
+  num_devices: 1
   source_file_dependencies:
   - tools/install_deepgemm.sh
   - vllm/utils/deep_gemm.py
