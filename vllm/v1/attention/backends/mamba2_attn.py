@@ -3,7 +3,6 @@
 import copy
 import itertools
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -13,7 +12,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
-    AttentionCGSupport,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
@@ -160,7 +158,7 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    # _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     supports_update_block_table: bool = False  # TODO smor- fix this
 
     def __init__(
