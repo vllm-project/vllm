@@ -5,8 +5,6 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
@@ -16,7 +14,6 @@ KVRole = Literal[KVProducer, KVConsumer]
 
 
 @config
-@dataclass
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
 

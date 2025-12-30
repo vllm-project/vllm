@@ -4,7 +4,6 @@
 from typing import Any, Literal
 
 from pydantic import field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
@@ -14,7 +13,6 @@ logger = init_logger(__name__)
 
 
 @config
-@dataclass
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 

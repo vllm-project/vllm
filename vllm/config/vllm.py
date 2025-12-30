@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.speculative import EagleModelTypes
@@ -171,8 +170,7 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.

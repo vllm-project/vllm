@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, model_validator
-from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
@@ -47,7 +46,6 @@ All2AllBackend = Literal[
 
 
 @config
-@dataclass
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
@@ -79,7 +77,6 @@ class EPLBConfig:
 
 
 @config
-@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 

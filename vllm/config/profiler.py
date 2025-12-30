@@ -5,7 +5,6 @@ import os
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 import vllm.envs as envs
@@ -19,7 +18,6 @@ ProfilerKind = Literal["torch", "cuda"]
 
 
 @config
-@dataclass
 class ProfilerConfig:
     """Dataclass which contains profiler config for the engine."""
 

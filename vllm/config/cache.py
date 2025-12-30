@@ -5,7 +5,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -35,7 +34,6 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
-@dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
 

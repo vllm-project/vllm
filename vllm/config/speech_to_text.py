@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class SpeechToTextConfig:
     """Configuration for speech-to-text models."""
 

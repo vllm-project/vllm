@@ -10,12 +10,14 @@ import json
 import pathlib
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, dataclass, field, fields, is_dataclass, replace
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
 import torch
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
@@ -32,7 +34,12 @@ ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 
-def config(cls: ConfigT) -> ConfigT:
+def config(
+    cls: type | None = None,
+    *,
+    config: ConfigDict | None = None,
+    **kwargs,
+) -> type[DataclassInstance]:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
@@ -45,7 +52,22 @@ def config(cls: ConfigT) -> ConfigT:
     Config validation is performed by the tools/pre_commit/validate_config.py
     script, which is invoked during the pre-commit checks.
     """
-    return cls
+    if config is None:
+        config = ConfigDict()
+
+    # Start with defaults
+    config = ConfigDict(extra="forbid").update(config)
+
+    # Handle both @config and @config(...) syntax
+    def decorator(cls):
+        return dataclass(cls, config=config, **kwargs)
+
+    if cls is None:
+        # Called with arguments: @config(config=...)
+        return decorator
+    else:
+        # Called without arguments: @config
+        return decorator(cls)
 
 
 def get_field(cls: ConfigType, name: str) -> Field:
