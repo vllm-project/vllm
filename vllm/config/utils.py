@@ -56,7 +56,8 @@ def config(
         config = ConfigDict()
 
     # Start with defaults
-    config = ConfigDict(extra="forbid").update(config)
+    _config = ConfigDict(extra="forbid")
+    _config.update(config)
 
     # Handle both @config and @config(...) syntax
     def decorator(cls):
