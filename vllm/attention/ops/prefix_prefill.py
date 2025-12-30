@@ -785,6 +785,12 @@ def context_attention_fwd(
         extra_kargs = {}
 
     real_block_size = v_cache.shape[3]
+    # Ensure the processing granularity does not exceed
+    # the physical block size and remains a power of 2
+    # to be compatible with Triton constraints.
+    # For Gemma (16), this will become 16;
+    # For Qwen3 (544), it will remain 32.
+    SAFE_BLOCK_SIZE = min(32, real_block_size)
 
     grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid](
@@ -826,7 +832,7 @@ def context_attention_fwd(
         stride_v_cache_h=v_cache.stride(1),
         stride_v_cache_d=v_cache.stride(2),
         stride_v_cache_bl=v_cache.stride(3),
-        BLOCK_SIZE=32,
+        BLOCK_SIZE=SAFE_BLOCK_SIZE,
         PHYSICAL_BLOCK_SIZE=real_block_size,
         num_queries_per_kv=num_queries_per_kv,
         IN_PRECISION=IN_PRECISION,
@@ -835,8 +841,8 @@ def context_attention_fwd(
         SLIDING_WINDOW=sliding_window,
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
-        BLOCK_M=32,
-        BLOCK_N=32,
+        BLOCK_M=SAFE_BLOCK_SIZE,
+        BLOCK_N=SAFE_BLOCK_SIZE,
         num_unroll_cache=4,
         num_unroll_request=1,
         num_warps=4,
