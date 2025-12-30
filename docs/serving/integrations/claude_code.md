@@ -27,7 +27,7 @@ First, install Claude Code by following the [official installation guide](https:
 Start vLLM with a tool-calling capable model - here's an example using `openai/gpt-oss-120b`:
 
 ```bash
-vllm serve openai/gpt-oss-120b --served-model-name my-model
+vllm serve openai/gpt-oss-120b --served-model-name my-model --enable-auto-tool-choice --tool-call-parser openai
 ```
 
 For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
