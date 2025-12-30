@@ -1572,11 +1572,48 @@ class HCXVisionV2MultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        # Get spatial merge size from config for calculating grid sizes
+        hf_config = self.info.get_hf_config()
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        # Calculate grid sizes for flat_from_sizes (Qwen2.5-VL style)
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        if isinstance(image_grid_thw, torch.Tensor):
+            image_pixel_grid_sizes = image_grid_thw.prod(-1)
+            image_embed_grid_sizes = (
+                image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+            )
+        else:
+            image_pixel_grid_sizes = torch.empty(0)
+            image_embed_grid_sizes = torch.empty(0)
+
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+        if isinstance(video_grid_thw, torch.Tensor):
+            video_pixel_grid_sizes = video_grid_thw.prod(-1)
+            video_embed_grid_sizes = (
+                video_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+            )
+        else:
+            video_pixel_grid_sizes = torch.empty(0)
+            video_embed_grid_sizes = torch.empty(0)
+
         fields = dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            # pixel_values is concatenated patches, use flat_from_sizes
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_pixel_grid_sizes
+            ),
+            image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_embed_grid_sizes
+            ),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            # video pixel_values is also concatenated patches
+            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_pixel_grid_sizes
+            ),
+            video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_embed_grid_sizes
+            ),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
         # Add audio fields if present
