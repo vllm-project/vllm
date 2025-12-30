@@ -69,7 +69,7 @@ def test_grouped_topk(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
         )
-        assert grouped_topk._forward_method.__name__ in ["forward_cuda", "forward_hip"]
+        assert grouped_topk._forward_method.__name__ == "forward_cuda"
         baseline_topk_weights, baseline_topk_ids = grouped_topk(
             hidden_states=hidden_states,
             gating_output=gating_output,
