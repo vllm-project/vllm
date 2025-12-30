@@ -237,7 +237,7 @@ class Scheduler(SchedulerInterface):
         )
 
         if ":" in self.vllm_config.instance_id:  # for async mode in verl
-            self.instance_id = self.vllm_config.instance_id.rsplit(":", 1)[-1]
+            self.instance_id = self.vllm_config.instance_id
         else:  # sync mode in verl
             rank = self.vllm_config.parallel_config.rank
             world_size = self.vllm_config.parallel_config.world_size
