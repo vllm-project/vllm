@@ -686,11 +686,7 @@ class InputPreprocessor:
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        res = self._preprocess(
-            prompt,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
             delta = self.mm_processor_cache.make_stats(delta=True)
