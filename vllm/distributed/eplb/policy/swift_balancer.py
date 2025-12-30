@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from typing import DefaultDict
 
 import numpy as np
 import torch
@@ -11,7 +10,6 @@ from .abstract import AbstractEplbPolicy
 
 
 class SwiftBalancerPolicy(AbstractEplbPolicy):
-
     def __init__(self):
         self.num_layers: int = 0
         self.num_original_experts: int = 0
@@ -28,19 +26,15 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def constraint_expert_local_exchange(
-            old_deployment: np.ndarray,
-            new_deployment: np.ndarray):
+        old_deployment: np.ndarray, new_deployment: np.ndarray
+    ):
         """
         Align the new deployment with the old deployment
         """
         for layer_id in range(len(new_deployment)):
             for card_id in range(len(new_deployment[layer_id])):
-                current_list = [
-                    int(x) for x in old_deployment[layer_id][card_id]
-                ]
-                new_list = [
-                    int(x) for x in new_deployment[layer_id][card_id]
-                ]
+                current_list = [int(x) for x in old_deployment[layer_id][card_id]]
+                new_list = [int(x) for x in new_deployment[layer_id][card_id]]
                 num = len(new_list)
 
                 new_index = [-1] * num
@@ -50,8 +44,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                 for i in range(num):
                     flag = True
                     for j in range(num):
-                        if (new_list[i] == current_list[j]
-                                and new_index[j] == -1):
+                        if new_list[i] == current_list[j] and new_index[j] == -1:
                             new_index[j] = 0
                             new_result[j] = current_list[j]
                             flag = False
@@ -69,9 +62,9 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         return new_deployment
 
-    def calculate_imbalance(self,
-                            cur_deployment: np.ndarray,
-                            cur_experts_load: np.ndarray) -> list[float]:
+    def calculate_imbalance(
+        self, cur_deployment: np.ndarray, cur_experts_load: np.ndarray
+    ) -> list[float]:
         """
         Calculate the imbalance degree of each layer.
         """
@@ -88,8 +81,10 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
             for rank in layer:
                 rank_load = 0
                 for expert_id in rank:
-                    update_workload = (cur_experts_load[layer_id][expert_id]
-                                       / num_per_expert[layer_id][expert_id])
+                    update_workload = (
+                        cur_experts_load[layer_id][expert_id]
+                        / num_per_expert[layer_id][expert_id]
+                    )
 
                     rank_load += update_workload
                     total_load += update_workload
@@ -105,10 +100,9 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         return per_layer_imbalance
 
-    def statistics_expert_distribution(self,
-                                       single_layer_deployment: np.ndarray
-                                       ) -> tuple[list[list[int]],
-                                                  np.ndarray, int]:
+    def statistics_expert_distribution(
+        self, single_layer_deployment: np.ndarray
+    ) -> tuple[list[list[int]], np.ndarray, int]:
         """
         Statistics on the distribution of redundant experts and logical
         experts under the current deployment
@@ -127,10 +121,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         num_ranks = len(single_layer_deployment)
         redundant_expert_pos: list[list[int]] = [[] for _ in range(num_ranks)]
         num_redundant_experts = 0
-        expert_from_rank = np.zeros(
-            self.num_original_experts,
-            dtype=np.int64
-        )
+        expert_from_rank = np.zeros(self.num_original_experts, dtype=np.int64)
         existing_experts = set()
 
         for index in range(self.num_experts_per_rank):
@@ -146,10 +137,10 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         return redundant_expert_pos, expert_from_rank, num_redundant_experts
 
     def compute_redundant_assignments(
-            self,
-            initial_weights: np.ndarray,
-            num_redundant_experts: int,
-            ) -> tuple[list[tuple[int, float]], np.ndarray]:
+        self,
+        initial_weights: np.ndarray,
+        num_redundant_experts: int,
+    ) -> tuple[list[tuple[int, float]], np.ndarray]:
         """
         Reconfigure redundant experts based on current expert workload and
         count the new expert workload after redundancy reconfiguration
@@ -165,20 +156,19 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         """
 
         current_weights = initial_weights.copy()
-        redundant_assignments = np.zeros(self.num_original_experts,
-                                         dtype=np.int64)
+        redundant_assignments = np.zeros(self.num_original_experts, dtype=np.int64)
 
         for i in range(num_redundant_experts):
-            sorted_indices = np.argsort(
-                [w for _, w in current_weights],
-                kind='stable'
-                )[::-1]
+            sorted_indices = np.argsort([w for _, w in current_weights], kind="stable")[
+                ::-1
+            ]
             target_expert = current_weights[sorted_indices[0]]
             expert_id, original_weight = target_expert
 
             current_redundancy = redundant_assignments[expert_id]
-            new_avg_weight = (original_weight * (current_redundancy + 1)
-                              / (current_redundancy + 2))
+            new_avg_weight = (
+                original_weight * (current_redundancy + 1) / (current_redundancy + 2)
+            )
 
             redundant_assignments[expert_id] += 1
             current_weights[sorted_indices[0]] = (expert_id, new_avg_weight)
@@ -200,22 +190,23 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         return redundant_expert_list, update_weight
 
     def fill_in_undeployed_ranks(
-            self,
-            initial_weights: np.ndarray,
-            rank_assignments: np.ndarray,
-            undeployed_ranks: list[int],
-            redundant_expert_pos: list[list[int]],
-            num_com_between_rank: np.ndarray,
-            rev_expert_per_rank: DefaultDict[int, set[int]],
-            expert_from_rank: np.ndarray
-            ) -> tuple[np.ndarray, np.ndarray]:
+        self,
+        initial_weights: np.ndarray,
+        rank_assignments: np.ndarray,
+        undeployed_ranks: list[int],
+        redundant_expert_pos: list[list[int]],
+        num_com_between_rank: np.ndarray,
+        rev_expert_per_rank: defaultdict[int, set[int]],
+        expert_from_rank: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         reselect and assign redundant experts to the ranks
         with remaining redundant slots
         """
 
-        update_workload, num_per_existing_expert = (
-            self.recomputing_initial_weight(initial_weights, rank_assignments))
+        update_workload, num_per_existing_expert = self.recomputing_initial_weight(
+            initial_weights, rank_assignments
+        )
 
         for rank_idx in undeployed_ranks:
             for pos in redundant_expert_pos[rank_idx]:
@@ -225,21 +216,17 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                     send_rank = expert_from_rank[expert_id]
                     if expert_id in rank_assignments[rank_idx]:
                         continue
-                    if (num_com_between_rank[send_rank][rank_idx]
-                            >= self.num_max_com):
+                    if num_com_between_rank[send_rank][rank_idx] >= self.num_max_com:
                         continue
                     if np.isclose(update_workload[expert_id], -1):
-                        raise ValueError(
-                            f"Expert ID {expert_id} is not in the node"
-                        )
+                        raise ValueError(f"Expert ID {expert_id} is not in the node")
 
                     rank_assignments[rank_idx][pos] = expert_id
                     num_com_between_rank[send_rank][rank_idx] += 1
                     rev_expert_per_rank[rank_idx].add(expert_id)
 
                     num_cur_expert = num_per_existing_expert[expert_id]
-                    update_workload[expert_id] *= (num_cur_expert
-                                                   / (num_cur_expert + 1))
+                    update_workload[expert_id] *= num_cur_expert / (num_cur_expert + 1)
                     num_per_existing_expert[expert_id] += 1
                     break
 
@@ -251,11 +238,11 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         return update_workload, rank_loads
 
     def non_redundant_expert_information(
-            self,
-            origin_deployment: np.ndarray,
-            updated_weights: np.ndarray,
-            redundant_expert_pos: list[list[int]],
-            ) -> tuple[np.ndarray, np.ndarray]:
+        self,
+        origin_deployment: np.ndarray,
+        updated_weights: np.ndarray,
+        redundant_expert_pos: list[list[int]],
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Statistics on the status of logical experts on each rank
 
@@ -277,7 +264,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         rank_assignments = np.full(
             (num_cur_deployment_ranks, self.num_experts_per_rank),
             fill_value=-1,
-            dtype=np.int64
+            dtype=np.int64,
         )
         rank_loads = np.zeros(num_cur_deployment_ranks, dtype=np.float32)
 
@@ -290,16 +277,14 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         return rank_assignments, rank_loads
 
-    def recomputing_initial_weight(self,
-                                   initial_weights: np.ndarray,
-                                   rank_assignments: np.ndarray
-                                   ) -> tuple[np.ndarray, np.ndarray]:
+    def recomputing_initial_weight(
+        self, initial_weights: np.ndarray, rank_assignments: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Calculate the load of the logic expert again based
         on the current deployment
         """
-        num_per_existing_expert = (
-            np.zeros(self.num_original_experts, dtype=np.int64))
+        num_per_existing_expert = np.zeros(self.num_original_experts, dtype=np.int64)
         for rank in rank_assignments:
             for expert_id in rank:
                 if expert_id != -1:
@@ -308,19 +293,18 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         update_workload = np.zeros(self.num_original_experts, dtype=np.float32)
         for expert_id, weight in initial_weights:
             assert num_per_existing_expert[expert_id] != 0
-            update_workload[expert_id] = (weight
-                                          / num_per_existing_expert[expert_id])
+            update_workload[expert_id] = weight / num_per_existing_expert[expert_id]
 
         return update_workload, num_per_existing_expert
 
     def distribute_redundant_experts(
-            self,
-            rank_assignments: np.ndarray,
-            rank_loads: np.ndarray,
-            redundant_expert_list: list[tuple[int, float]],
-            expert_from_rank: np.ndarray,
-            redundant_expert_pos: list[list[int]]
-            ) -> tuple[np.ndarray, DefaultDict[int, set[int]], list[int]]:
+        self,
+        rank_assignments: np.ndarray,
+        rank_loads: np.ndarray,
+        redundant_expert_list: list[tuple[int, float]],
+        expert_from_rank: np.ndarray,
+        redundant_expert_pos: list[list[int]],
+    ) -> tuple[np.ndarray, defaultdict[int, set[int]], list[int]]:
         """
         Assign redundant experts to ranks
 
@@ -346,10 +330,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         num_ranks = len(rank_assignments)
         rev_expert_per_rank = defaultdict(set)
-        num_com_between_rank = np.zeros(
-            (num_ranks, num_ranks),
-            dtype=np.int64
-            )
+        num_com_between_rank = np.zeros((num_ranks, num_ranks), dtype=np.int64)
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1
@@ -359,11 +340,9 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                     continue
                 if expert_id in rank_assignments[rank_id]:
                     continue
-                if (num_com_between_rank[send_rank][rank_id]
-                        >= self.num_max_com):
+                if num_com_between_rank[send_rank][rank_id] >= self.num_max_com:
                     continue
-                if (candidate == -1 or
-                        rank_loads[rank_id] < rank_loads[candidate]):
+                if candidate == -1 or rank_loads[rank_id] < rank_loads[candidate]:
                     candidate = rank_id
 
             if candidate != -1:
@@ -381,11 +360,11 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         return num_com_between_rank, rev_expert_per_rank, undeployed_ranks
 
-    def redundancy_again(self,
-                         initial_weights: np.ndarray,
-                         cur_layer_deployment: np.ndarray
-                         ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
-                                    np.ndarray, DefaultDict[int, set[int]]]:
+    def redundancy_again(
+        self, initial_weights: np.ndarray, cur_layer_deployment: np.ndarray
+    ) -> tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, defaultdict[int, set[int]]
+    ]:
         """
         Calculate the status of a single node after redundant expert
         configuration.
@@ -409,55 +388,56 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         """
 
         redundant_expert_pos, expert_from_rank, num_redundant_experts = (
-            self.statistics_expert_distribution(cur_layer_deployment))
-
-        redundant_expert_list, updated_weights = (
-            self.compute_redundant_assignments(
-                initial_weights,
-                num_redundant_experts
-                )
+            self.statistics_expert_distribution(cur_layer_deployment)
         )
 
-        rank_assignments, rank_loads = (
-            self.non_redundant_expert_information(
-                cur_layer_deployment,
-                updated_weights,
-                redundant_expert_pos
-                )
+        redundant_expert_list, updated_weights = self.compute_redundant_assignments(
+            initial_weights, num_redundant_experts
+        )
+
+        rank_assignments, rank_loads = self.non_redundant_expert_information(
+            cur_layer_deployment, updated_weights, redundant_expert_pos
         )
 
         num_com_between_rank, rev_expert_per_rank, undeployed_ranks = (
             self.distribute_redundant_experts(
-                rank_assignments, rank_loads, redundant_expert_list,
-                expert_from_rank, redundant_expert_pos
-            ))
+                rank_assignments,
+                rank_loads,
+                redundant_expert_list,
+                expert_from_rank,
+                redundant_expert_pos,
+            )
+        )
 
         if len(undeployed_ranks) > 0:
-            updated_weights, rank_loads = (
-                self.fill_in_undeployed_ranks(
-                    initial_weights,
-                    rank_assignments,
-                    undeployed_ranks,
-                    redundant_expert_pos,
-                    num_com_between_rank,
-                    rev_expert_per_rank,
-                    expert_from_rank
-                    ))
+            updated_weights, rank_loads = self.fill_in_undeployed_ranks(
+                initial_weights,
+                rank_assignments,
+                undeployed_ranks,
+                redundant_expert_pos,
+                num_com_between_rank,
+                rev_expert_per_rank,
+                expert_from_rank,
+            )
 
-        return (rank_assignments, rank_loads, updated_weights,
-                num_com_between_rank, rev_expert_per_rank)
+        return (
+            rank_assignments,
+            rank_loads,
+            updated_weights,
+            num_com_between_rank,
+            rev_expert_per_rank,
+        )
 
-    def redundant_expert_deployment(self,
-                                    cur_layer_workload: np.ndarray,
-                                    cur_layer_deployment: np.ndarray
-                                    ):
+    def redundant_expert_deployment(
+        self, cur_layer_workload: np.ndarray, cur_layer_deployment: np.ndarray
+    ):
         """
         Calculate the status of each node after reconfiguring redundant experts;
         treat non-intra-node redundancy as a single node, store the result of
         each node in a list, and return it.
         """
 
-        weights = np.zeros(self.num_original_experts, dtype='object')
+        weights = np.zeros(self.num_original_experts, dtype="object")
         for expert_id, workload_weight in enumerate(cur_layer_workload):
             weights[expert_id] = (expert_id, workload_weight)
 
@@ -468,31 +448,25 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         rev_expert_per_rank = []
 
         if self.is_node_redundant:
-
             num_ranks_per_node = self.num_ranks_per_node
-            num_route_experts_per_node = (self.num_original_experts
-                                          // self.num_nodes)
+            num_route_experts_per_node = self.num_original_experts // self.num_nodes
 
             for node_id in range(self.num_nodes):
                 cur_node_weights = weights[
-                                   node_id * num_route_experts_per_node:
-                                   (node_id + 1) * num_route_experts_per_node
-                                   ]
+                    node_id * num_route_experts_per_node : (node_id + 1)
+                    * num_route_experts_per_node
+                ]
                 cur_node_deployment = cur_layer_deployment[
-                                      node_id * num_ranks_per_node:
-                                      (node_id + 1) * num_ranks_per_node
-                                      ]
+                    node_id * num_ranks_per_node : (node_id + 1) * num_ranks_per_node
+                ]
 
-                (cur_node_rank_assignments,
-                 cur_node_rank_loads,
-                 cur_node_updated_weights,
-                 cur_node_num_com_between_rank,
-                 cur_node_rev_expert_per_rank) = (
-                    self.redundancy_again(
-                        cur_node_weights,
-                        cur_node_deployment
-                        )
-                )
+                (
+                    cur_node_rank_assignments,
+                    cur_node_rank_loads,
+                    cur_node_updated_weights,
+                    cur_node_num_com_between_rank,
+                    cur_node_rev_expert_per_rank,
+                ) = self.redundancy_again(cur_node_weights, cur_node_deployment)
 
                 all_node_assignments.append(cur_node_rank_assignments)
                 all_node_loads.append(cur_node_rank_loads)
@@ -501,13 +475,13 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                 rev_expert_per_rank.append(cur_node_rev_expert_per_rank)
 
         else:
-
-            (cur_rank_assignments,
-             cur_rank_loads,
-             cur_updated_weights,
-             cur_num_com_between_rank,
-             cur_rev_expert_per_rank) = (
-                self.redundancy_again(weights, cur_layer_deployment))
+            (
+                cur_rank_assignments,
+                cur_rank_loads,
+                cur_updated_weights,
+                cur_num_com_between_rank,
+                cur_rev_expert_per_rank,
+            ) = self.redundancy_again(weights, cur_layer_deployment)
 
             all_node_assignments.append(cur_rank_assignments)
             all_node_loads.append(cur_rank_loads)
@@ -515,18 +489,24 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
             num_com_between_rank.append(cur_num_com_between_rank)
             rev_expert_per_rank.append(cur_rev_expert_per_rank)
 
-        return (all_node_assignments, all_node_loads, num_com_between_rank,
-                rev_expert_per_rank, updated_weights)
+        return (
+            all_node_assignments,
+            all_node_loads,
+            num_com_between_rank,
+            rev_expert_per_rank,
+            updated_weights,
+        )
 
-    def swap_experts_between_ranks(self,
-                                   max_rank_deployment_set,
-                                   swap_rank_deployment_set,
-                                   max_rank_rev_expert,
-                                   swap_rank_rev_expert,
-                                   workload,
-                                   max_rank_load,
-                                   swap_rank_load,
-                                   ):
+    def swap_experts_between_ranks(
+        self,
+        max_rank_deployment_set,
+        swap_rank_deployment_set,
+        max_rank_rev_expert,
+        swap_rank_rev_expert,
+        workload,
+        max_rank_load,
+        swap_rank_load,
+    ):
         """
         Find the optimal experts for workload reduction
         after exchange between two ranks
@@ -537,23 +517,24 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         max_weight = max_rank_load
 
         for cur_expert_id in max_rank_deployment_set:
-            if (cur_expert_id in swap_rank_deployment_set
-                    or cur_expert_id in max_rank_rev_expert):
+            if (
+                cur_expert_id in swap_rank_deployment_set
+                or cur_expert_id in max_rank_rev_expert
+            ):
                 continue
             cur_weight = workload[cur_expert_id]
 
             for next_expert_id in swap_rank_deployment_set:
-                if (next_expert_id in max_rank_deployment_set
-                        or next_expert_id in swap_rank_rev_expert):
+                if (
+                    next_expert_id in max_rank_deployment_set
+                    or next_expert_id in swap_rank_rev_expert
+                ):
                     continue
                 next_weight = workload[next_expert_id]
 
                 cur_load_after_swap = max_rank_load - cur_weight + next_weight
                 next_load_after_swap = swap_rank_load - next_weight + cur_weight
-                max_load_after_swap = max(
-                    cur_load_after_swap,
-                    next_load_after_swap
-                    )
+                max_load_after_swap = max(cur_load_after_swap, next_load_after_swap)
                 if max_load_after_swap < max_weight:
                     max_weight = max_load_after_swap
                     max_rank_expert = cur_expert_id
@@ -562,13 +543,13 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         return max_rank_expert, swap_rank_expert, max_weight
 
     def expert_exchange_between_ranks(
-            self,
-            rank_assignments: np.ndarray,
-            rank_loads: np.ndarray,
-            num_com_between_rank: np.ndarray,
-            rev_expert_per_rank: DefaultDict[int, set[int]],
-            updated_weights: np.ndarray
-            ) -> tuple[list[list[int]], float]:
+        self,
+        rank_assignments: np.ndarray,
+        rank_loads: np.ndarray,
+        num_com_between_rank: np.ndarray,
+        rev_expert_per_rank: defaultdict[int, set[int]],
+        updated_weights: np.ndarray,
+    ) -> tuple[list[list[int]], float]:
         """
         Perform inter-rank expert exchange within a single node
 
@@ -599,7 +580,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         exchange = True
         while max_swap_times > 0:
             max_swap_times -= 1
-            sorted_rank_idx = np.argsort(rank_loads, kind='stable')
+            sorted_rank_idx = np.argsort(rank_loads, kind="stable")
             max_load_rank_id = int(sorted_rank_idx[-1])
             max_rank_load = rank_loads[max_load_rank_id]
 
@@ -607,12 +588,12 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                 break
             exchange = False
             for swap_rank_id in sorted_rank_idx[:-1]:
-
-                if (num_com_between_rank[swap_rank_id][max_load_rank_id]
-                        < self.num_max_com and
-                        num_com_between_rank[max_load_rank_id][swap_rank_id]
-                        < self.num_max_com):
-
+                if (
+                    num_com_between_rank[swap_rank_id][max_load_rank_id]
+                    < self.num_max_com
+                    and num_com_between_rank[max_load_rank_id][swap_rank_id]
+                    < self.num_max_com
+                ):
                     swap_rank_load = rank_loads[swap_rank_id]
 
                     max_rank_expert, swap_rank_expert, max_weight = (
@@ -623,12 +604,14 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                             rev_expert_per_rank[swap_rank_id],
                             updated_weights,
                             max_rank_load,
-                            swap_rank_load
+                            swap_rank_load,
                         )
                     )
 
-                    if (max_rank_load - max_weight < self.swap_threshold
-                            or max_rank_expert == -1):
+                    if (
+                        max_rank_load - max_weight < self.swap_threshold
+                        or max_rank_expert == -1
+                    ):
                         continue
 
                     rank_deploy_sets[max_load_rank_id].remove(max_rank_expert)
@@ -637,11 +620,13 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
                     rank_deploy_sets[swap_rank_id].add(max_rank_expert)
 
                     rank_loads[max_load_rank_id] += (
-                            updated_weights[swap_rank_expert]
-                            - updated_weights[max_rank_expert])
+                        updated_weights[swap_rank_expert]
+                        - updated_weights[max_rank_expert]
+                    )
                     rank_loads[swap_rank_id] += (
-                            updated_weights[max_rank_expert]
-                            - updated_weights[swap_rank_expert])
+                        updated_weights[max_rank_expert]
+                        - updated_weights[swap_rank_expert]
+                    )
 
                     rev_expert_per_rank[max_load_rank_id].add(swap_rank_expert)
                     rev_expert_per_rank[swap_rank_id].add(max_rank_expert)
@@ -657,13 +642,13 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         return ranks_deployment_after_swap, max_rank_load
 
     def exchange_experts(
-            self,
-            all_node_assignments: list[np.ndarray],
-            all_node_loads: list[np.ndarray],
-            num_com_between_rank: list[np.ndarray],
-            rev_expert_per_rank: list[DefaultDict[int, set[int]]],
-            updated_weights: list[np.ndarray]
-            ) -> tuple[np.ndarray, float]:
+        self,
+        all_node_assignments: list[np.ndarray],
+        all_node_loads: list[np.ndarray],
+        num_com_between_rank: list[np.ndarray],
+        rev_expert_per_rank: list[defaultdict[int, set[int]]],
+        updated_weights: list[np.ndarray],
+    ) -> tuple[np.ndarray, float]:
         """
         For each node after redundancy, perform inter-rank expert
         exchange within the node to reduce the workload of the hottest rank
@@ -672,15 +657,15 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         max_workload = 0.0
         after_swap_ranks_deployment = []
         for idx in range(len(all_node_assignments)):
-
             cur_node_deployment, cur_node_max_workload = (
                 self.expert_exchange_between_ranks(
                     all_node_assignments[idx],
                     all_node_loads[idx],
                     num_com_between_rank[idx],
                     rev_expert_per_rank[idx],
-                    updated_weights[idx]
-                    ))
+                    updated_weights[idx],
+                )
+            )
             after_swap_ranks_deployment += cur_node_deployment
             if cur_node_max_workload > max_workload:
                 max_workload = cur_node_max_workload
@@ -695,9 +680,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         """
 
         num_log_expert = self.num_original_experts
-        log_replica_count = np.zeros(
-            (self.num_layers, num_log_expert), dtype=np.int32
-        )
+        log_replica_count = np.zeros((self.num_layers, num_log_expert), dtype=np.int32)
 
         for layer_id, layer in enumerate(new_deployment):
             for rank in layer:
@@ -707,9 +690,8 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         num_phy_experts = self.num_ranks * self.num_experts_per_rank
         num_redundant = num_phy_experts - num_log_expert
         log_to_phy_map = np.full(
-            (self.num_layers, num_log_expert, num_redundant + 1),
-            -1,
-            dtype=np.int32)
+            (self.num_layers, num_log_expert, num_redundant + 1), -1, dtype=np.int32
+        )
 
         phy_to_log_map = new_deployment.reshape(self.num_layers, -1)
         for layer_id, layer in enumerate(phy_to_log_map):
@@ -721,14 +703,15 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
 
         return phy_to_log_map, log_to_phy_map, log_replica_count
 
-    def rebalance_experts(self,
-                          weight: torch.Tensor,
-                          num_replicas: int,
-                          num_groups: int,
-                          num_nodes: int,
-                          num_ranks: int,
-                          old_global_expert_indices: torch.Tensor | None = None
-                          ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def rebalance_experts(
+        self,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
 
@@ -761,11 +744,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         assert experts_workload is not None and current_deployment is not None
 
         self.num_layers, self.num_original_experts = experts_workload.shape
-        current_deployment = current_deployment.reshape(
-            self.num_layers,
-            num_ranks,
-            -1
-            )
+        current_deployment = current_deployment.reshape(self.num_layers, num_ranks, -1)
 
         self.num_ranks = num_ranks
         self.num_experts_per_rank = current_deployment.shape[2]
@@ -776,9 +755,8 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         self.swap_threshold = ave_workload * self.increment
 
         layer_initial_imbalance = self.calculate_imbalance(
-            current_deployment,
-            experts_workload
-            )
+            current_deployment, experts_workload
+        )
 
         new_deployment = current_deployment.copy()
 
@@ -792,21 +770,26 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
             if layer_initial_imbalance[layer] < self.imbalance_threshold:
                 continue
 
-            (all_node_assignments,
-             all_node_loads,
-             num_com_between_rank,
-             rev_experts_per_rank,
-             updated_weights) = (
-                self.redundant_expert_deployment(cur_layer_workload,
-                                                 cur_layer_deployment))
+            (
+                all_node_assignments,
+                all_node_loads,
+                num_com_between_rank,
+                rev_experts_per_rank,
+                updated_weights,
+            ) = self.redundant_expert_deployment(
+                cur_layer_workload, cur_layer_deployment
+            )
 
             # redundant_max_workload = max(map(max, all_node_loads))
             # print(layer, f"Imbalance Ratio after Redundancy Adjustment:",
             #       redundant_max_workload / ave_workload)
 
             new_layer_deployment, new_max_workload = self.exchange_experts(
-                all_node_assignments, all_node_loads, num_com_between_rank,
-                rev_experts_per_rank, updated_weights
+                all_node_assignments,
+                all_node_loads,
+                num_com_between_rank,
+                rev_experts_per_rank,
+                updated_weights,
             )
 
             after_swap_imbalance = new_max_workload / ave_workload
@@ -820,15 +803,12 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
             current_deployment, new_deployment
         )
 
-        phy_to_log_map, log_to_phy_map, log_replica_count = (
-            self.gen_result(new_deployment))
+        phy_to_log_map, log_to_phy_map, log_replica_count = self.gen_result(
+            new_deployment
+        )
 
-        phy2log = torch.tensor(
-            phy_to_log_map, dtype=torch.int32, device=weight.device
-        )
-        log2phy = torch.tensor(
-            log_to_phy_map, dtype=torch.int32, device=weight.device
-        )
+        phy2log = torch.tensor(phy_to_log_map, dtype=torch.int32, device=weight.device)
+        log2phy = torch.tensor(log_to_phy_map, dtype=torch.int32, device=weight.device)
         logcnt = torch.tensor(
             log_replica_count, dtype=torch.int32, device=weight.device
         )
