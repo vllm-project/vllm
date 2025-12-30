@@ -402,6 +402,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Embedded-7B-V1.1", trust_remote_code=True
     ),
+    "PanguProMoEV2ForCausalLM": _HfExamplesInfo(
+        "",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "PanguUltraMoEForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,

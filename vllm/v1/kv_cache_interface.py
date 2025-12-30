@@ -89,11 +89,17 @@ class FullAttentionSpec(AttentionSpec):
     In this case, we use FullAttentionSpec and record the sliding window size.
     """
 
+    head_size_v: int | None = None
+
     sliding_window: int | None = None
     """
     Default to None for not using sliding window attention.
     """
     attention_chunk_size: int | None = None
+
+    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -142,6 +148,7 @@ class FullAttentionSpec(AttentionSpec):
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -159,6 +166,15 @@ class FullAttentionSpec(AttentionSpec):
             "layers is not supported."
         )
         return merged_spec
+
+    @property
+    def page_size_bytes(self) -> int:
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size + self.head_size_v)
+            * get_dtype_size(self.dtype)
+        )
 
 
 @dataclass(frozen=True)
@@ -285,6 +301,56 @@ class CrossAttentionSpec(AttentionSpec):
         # Get encoder length (e.g., 1500 for Whisper).
         max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
+
+
+@dataclass(frozen=True)
+class SinkFullAttentionSpec(FullAttentionSpec):
+    sink_len: int | None = None
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullAttentionSpec objects into a single
+        FullAttentionSpec object.
+        """
+        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be FullAttentionSpec."
+        )
+
+        sliding_window = set(
+            spec.sliding_window for spec in specs if spec.sliding_window is not None
+        )
+        attention_chunk_size = set(
+            spec.attention_chunk_size
+            for spec in specs
+            if spec.attention_chunk_size is not None
+        )
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
+            sink_len=specs[0].sink_len,
+            dtype=specs[0].dtype,
+            sliding_window=cls.merge_window_sizes(sliding_window),
+            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+        )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        assert (merged_spec.sliding_window is not None) + (
+            merged_spec.attention_chunk_size is not None
+        ) <= 1, (
+            "Model with both sliding window layers and chunked local attention "
+            "layers is not supported."
+        )
+        return merged_spec
 
 
 @dataclass(frozen=True)
