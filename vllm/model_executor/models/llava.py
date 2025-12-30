@@ -756,8 +756,8 @@ class LlavaForConditionalGeneration(
         self,
         num_image_tokens: int,
     ) -> int:
-        # LLaVA uses a simple MLP projector that does not change
-        # the number of tokens (no spatial merging/pixel shuffle)
+        # LLaVA's vision encoder outputs one token per patch without
+        # spatial merging or pixel shuffle
         return num_image_tokens
 
     def get_num_mm_connector_tokens(
