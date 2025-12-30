@@ -112,6 +112,30 @@ RUN --mount=type=bind,source=.git,target=vllm/.git \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
 
+# Fail if git-based package dependencies are found in requirements files
+# (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
+# Extra notes: pip install is able to handle git+ URLs, but uv doesn't.
+RUN echo "Checking for git-based packages in requirements files..." \
+    && echo "Checking common.txt for git-based packages:" \
+    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
+         echo "ERROR: Git-based packages found in common.txt:"; \
+         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
+         echo "Please publish these packages to PyPI instead of using git dependencies."; \
+         exit 1; \
+       else \
+         echo "  ✓ No git-based packages found in common.txt"; \
+       fi \
+    && echo "Checking rocm.txt for git-based packages:" \
+    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
+         echo "ERROR: Git-based packages found in rocm.txt:"; \
+         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
+         echo "Please publish these packages to PyPI instead of using git dependencies."; \
+         exit 1; \
+       else \
+         echo "  ✓ No git-based packages found in rocm.txt"; \
+       fi \
+    && echo "All requirements files are clean - no git-based packages found"
+
 # Pin vLLM dependencies to exact versions of custom ROCm wheels
 # This ensures 'pip install vllm' automatically installs correct torch/triton/torchvision/amdsmi
 COPY tools/vllm-rocm/pin_rocm_dependencies.py /tmp/pin_rocm_dependencies.py
