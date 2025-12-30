@@ -110,7 +110,6 @@ class LoRAModelRunnerMixin:
                     lora_name=f"warmup_{lora_id}",
                     lora_int_id=lora_id,
                     lora_path="/not/a/real/path",
-                    load_inplace=False,
                 )
                 for lora_id in range(1, num_loras + 1)
             }
@@ -169,7 +168,6 @@ class LoRAModelRunnerMixin:
                     lora_name=f"warmup_{lora_id}",
                     lora_int_id=lora_id,
                     lora_path="/not/a/real/path",
-                    load_inplace=False,
                 )
                 for lora_id in range(1, num_loras + 1)
             }
