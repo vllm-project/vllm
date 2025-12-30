@@ -16,6 +16,7 @@ from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
+from transformers.models.qwen2_audio import Qwen2AudioEncoder
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -61,6 +62,7 @@ VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
 # These are placeholder tokens for the V2 model
 V2_IMAGE_TOKEN: str = "<|IMAGE_PAD|>"
 V2_VIDEO_TOKEN: str = "<|VIDEO_PAD|>"
+V2_AUDIO_TOKEN: str = "<|AUDIO|>"
 
 
 # Based on combine_frames_into_images in
@@ -1244,10 +1246,61 @@ class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
 HCXVisionV2VideoInputs = HCXVisionV2VideoPixelInputs | HCXVisionV2VideoEmbeddingInputs
 
 
+class HCXVisionV2AudioFeatureInputs(TensorSchema):
+    """
+    V2 Audio inputs using Qwen2AudioEncoder.
+
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins (128)
+    """
+
+    type: Literal["audio_features"] = "audio_features"
+    input_features: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "nmb", 3000),
+    ]
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", 3000),
+    ]
+
+
+class HCXVisionV2AudioEmbeddingInputs(TensorSchema):
+    """
+    V2 Audio embedding inputs.
+
+    Dimensions:
+        - naf: Number of audio features
+        - hs: Hidden size
+    """
+
+    type: Literal["audio_embeds"] = "audio_embeds"
+    audio_embeds: Annotated[
+        list[torch.Tensor],
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
+    ]
+
+
+HCXVisionV2AudioInputs = HCXVisionV2AudioFeatureInputs | HCXVisionV2AudioEmbeddingInputs
+
+
+# From Qwen2AudioEncoder._get_feat_extract_output_lengths
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
+    """Calculate output lengths for audio features."""
+    feat_lengths = (input_lengths - 1) // 2 + 1
+    output_lengths = (feat_lengths - 2) // 2 + 1
+    return feat_lengths, output_lengths
+
+
 class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
-    """Processing info for HyperCLOVAX V2 (32B Think model)."""
+    """Processing info for HyperCLOVAX V2 (32B Think model and Omni model)."""
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        # Check if audio is supported (Omni model has audio_config)
+        hf_config = self.get_hf_config()
+        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+            return {"image": None, "video": None, "audio": None}
         return {"image": None, "video": None}
 
     def get_num_image_tokens(
@@ -1314,10 +1367,14 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         # Get placeholder tokens from config
         image_token = vocab.get(V2_IMAGE_TOKEN, hf_config.image_token_id)
         video_token = vocab.get(V2_VIDEO_TOKEN, hf_config.video_token_id)
+        audio_token = vocab.get(
+            V2_AUDIO_TOKEN, getattr(hf_config, "audio_token_id", None)
+        )
 
         # Return placeholder string
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
 
         image_placeholder = (
             chr(image_token) if isinstance(image_token, int) else image_token
@@ -1325,8 +1382,15 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         video_placeholder = (
             chr(video_token) if isinstance(video_token, int) else video_token
         )
+        audio_placeholder = (
+            chr(audio_token) if isinstance(audio_token, int) else (audio_token or "")
+        )
 
-        return image_placeholder * num_images + video_placeholder * num_videos
+        return (
+            image_placeholder * num_images
+            + video_placeholder * num_videos
+            + audio_placeholder * num_audios
+        )
 
     def get_dummy_mm_data(
         self,
@@ -1336,14 +1400,17 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = 16  # Default for video
+        target_audio_len = 480000  # Default ~30 seconds at 16kHz
 
         image_overrides = mm_options.get("image") if mm_options else None
         video_overrides = mm_options.get("video") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
 
-        return {
+        result: MultiModalDataDict = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
@@ -1359,11 +1426,21 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
             ),
         }
 
+        # Add audio if supported
+        if num_audios > 0:
+            result["audio"] = self._get_dummy_audios(
+                length=target_audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,  # type: ignore
+            )
+
+        return result
+
 
 class HCXVisionV2MultiModalProcessor(
     BaseMultiModalProcessor[HCXVisionV2ProcessingInfo]
 ):
-    """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
+    """Multimodal processor for HyperCLOVAX V2 (32B Think and Omni models)."""
 
     def _call_hf_processor(
         self,
@@ -1379,12 +1456,14 @@ class HCXVisionV2MultiModalProcessor(
                 text=prompt,
                 images=None,
                 videos=None,
+                audios=None,
             ),
         )
 
         if len(mm_data) > 0:
             images = mm_data.get("images")
             videos = mm_data.get("videos")
+            audios = mm_data.get("audios")
 
             # Process multimodal data
             _processed_outputs = self.info.ctx.call_hf_processor(
@@ -1393,6 +1472,7 @@ class HCXVisionV2MultiModalProcessor(
                     text=None,
                     images=images,
                     videos=videos,
+                    audios=audios,
                 ),
             )
 
@@ -1421,7 +1501,12 @@ class HCXVisionV2MultiModalProcessor(
             "video": hf_config.video_token_id,
         }
 
-        def get_replacement_v2(
+        # Add audio placeholder if audio is supported
+        audio_token_id = getattr(hf_config, "audio_token_id", None)
+        if audio_token_id is not None:
+            placeholder["audio"] = audio_token_id
+
+        def get_replacement_v2_vision(
             item_idx: int,
             modality: str,
             out_mm_kwargs: MultiModalKwargsItems,
@@ -1437,12 +1522,35 @@ class HCXVisionV2MultiModalProcessor(
             num_tokens = int(grid_thw.prod()) // (merge_size**2)
             return [placeholder[modality]] * num_tokens
 
-        return [
+        def get_replacement_v2_audio(
+            item_idx: int,
+            out_mm_kwargs: MultiModalKwargsItems,
+        ):
+            out_item = out_mm_kwargs["audio"][item_idx]
+            feature_attention_mask = out_item.get("feature_attention_mask")
+
+            if feature_attention_mask is not None:
+                assert isinstance(feature_attention_mask.data, torch.Tensor)
+                _, audio_output_lens = _get_feat_extract_output_lengths(
+                    feature_attention_mask.data.sum(-1)
+                )
+                num_tokens = int(audio_output_lens.item())
+            else:
+                # Fallback: use audio_embeds shape
+                audio_embeds = out_item.get("audio_embeds")
+                if audio_embeds is not None:
+                    num_tokens = audio_embeds.data.shape[0]
+                else:
+                    num_tokens = 0
+
+            return [placeholder["audio"]] * num_tokens
+
+        updates: list[PromptUpdate] = [
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
                 replacement=partial(
-                    get_replacement_v2,
+                    get_replacement_v2_vision,
                     modality=modality,
                     out_mm_kwargs=out_mm_kwargs,
                 ),
@@ -1450,17 +1558,40 @@ class HCXVisionV2MultiModalProcessor(
             for modality in ("image", "video")
         ]
 
+        # Add audio prompt replacement if supported
+        if "audio" in placeholder:
+            updates.append(
+                PromptReplacement(
+                    modality="audio",
+                    target=[placeholder["audio"]],
+                    replacement=partial(
+                        get_replacement_v2_audio,
+                        out_mm_kwargs=out_mm_kwargs,
+                    ),
+                )
+            )
+
+        return updates
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
+        fields = dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_grid_thw=MultiModalFieldConfig.batched("image"),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
             video_grid_thw=MultiModalFieldConfig.batched("video"),
         )
+
+        # Add audio fields if present
+        if "input_features" in hf_inputs or "audio_embeds" in hf_inputs:
+            fields["input_features"] = MultiModalFieldConfig.batched("audio")
+            fields["feature_attention_mask"] = MultiModalFieldConfig.batched("audio")
+            fields["audio_embeds"] = MultiModalFieldConfig.batched("audio")
+
+        return fields
 
 
 def _build_hcxvision_v2_hf_info(
@@ -1489,10 +1620,14 @@ def _build_hcxvision_v2_hf_processor(
 )
 class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     """
-    HyperCLOVAX-SEED-Think-32B Vision-Language Model.
+    HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
 
-    Uses Qwen2.5 Vision Transformer as the vision encoder with a linear projector
-    connecting to the HyperCLOVAX text backbone.
+    Supports:
+    - HyperCLOVAX-SEED-Think-32B: Vision + Text
+    - HyperCLOVAX-SEED-Omni-8B: Vision + Audio + Text
+
+    Uses Qwen2.5 Vision Transformer as the vision encoder. For Omni models,
+    also uses Qwen2AudioEncoder for audio processing.
     """
 
     packed_modules_mapping = {
@@ -1565,6 +1700,26 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # Standard linear projector
             self.mm_projector = nn.Linear(vision_hidden_size, text_hidden_size)
 
+        # Audio tower (for Omni models)
+        audio_config = getattr(config, "audio_config", None)
+        self.audio_config = audio_config
+        if audio_config is not None:
+            self.audio_tower = Qwen2AudioEncoder(audio_config)
+            # Audio projector based on config
+            audio_hidden_size = audio_config.d_model
+            audio_projector_type = getattr(config, "audio_projector_type", "linear")
+            if audio_projector_type == "mlp":
+                self.audio_projector = nn.Sequential(
+                    nn.Linear(audio_hidden_size, text_hidden_size),
+                    nn.GELU(),
+                    nn.Linear(text_hidden_size, text_hidden_size),
+                )
+            else:
+                self.audio_projector = nn.Linear(audio_hidden_size, text_hidden_size)
+        else:
+            self.audio_tower = None
+            self.audio_projector = None
+
         # Language model
         self.lm_head_vocab_size = getattr(
             text_config, "padded_vocab_size", text_config.vocab_size
@@ -1585,8 +1740,10 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return V2_IMAGE_TOKEN
         if modality.startswith("video"):
             return V2_VIDEO_TOKEN
+        if modality.startswith("audio"):
+            return V2_AUDIO_TOKEN
 
-        raise ValueError("Only image or video modality is supported")
+        raise ValueError("Only image, video, or audio modality is supported")
 
     def _parse_and_validate_image_input(
         self,
@@ -1634,6 +1791,30 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return HCXVisionV2VideoEmbeddingInputs(
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
+            )
+
+        return None
+
+    def _parse_and_validate_audio_input(
+        self,
+        **kwargs: object,
+    ) -> HCXVisionV2AudioInputs | None:
+        input_features = kwargs.pop("input_features", None)
+        audio_embeds = kwargs.pop("audio_embeds", None)
+        feature_attention_mask = kwargs.pop("feature_attention_mask", None)
+
+        if input_features is None and audio_embeds is None:
+            return None
+
+        if audio_embeds is not None:
+            return HCXVisionV2AudioEmbeddingInputs(
+                audio_embeds=audio_embeds,
+            )
+
+        if input_features is not None:
+            return HCXVisionV2AudioFeatureInputs(
+                input_features=input_features,
+                feature_attention_mask=feature_attention_mask,
             )
 
         return None
@@ -1688,6 +1869,84 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
+    def _process_audio_input(
+        self,
+        audio_input: HCXVisionV2AudioInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Process audio through Qwen2AudioEncoder and projector."""
+        if self.audio_tower is None or self.audio_projector is None:
+            raise RuntimeError(
+                "Audio processing requested but audio tower not initialized. "
+                "This model may not support audio input."
+            )
+
+        if audio_input["type"] == "audio_embeds":
+            audio_embeds = audio_input["audio_embeds"]
+            return tuple(audio_embeds)
+
+        input_features = audio_input["input_features"]
+        feature_attention_mask = audio_input["feature_attention_mask"]
+
+        # Calculate audio feature lengths
+        audio_feat_lengths, audio_output_lengths = (
+            self.audio_tower._get_feat_extract_output_lengths(
+                feature_attention_mask.sum(-1)
+            )
+        )
+
+        batch_size, _, max_mel_seq_len = input_features.shape
+        max_seq_len = (max_mel_seq_len - 2) // 2 + 1
+
+        # Create attention mask for audio encoder
+        seq_range = (
+            torch.arange(
+                0,
+                max_seq_len,
+                dtype=audio_feat_lengths.dtype,
+                device=audio_feat_lengths.device,
+            )
+            .unsqueeze(0)
+            .expand(batch_size, max_seq_len)
+        )
+        lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
+            batch_size, max_seq_len
+        )
+        padding_mask = seq_range >= lengths_expand
+
+        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
+            batch_size, 1, max_seq_len, max_seq_len
+        )
+        audio_attention_mask = audio_attention_mask_.to(
+            dtype=self.audio_tower.conv1.weight.dtype,
+            device=self.audio_tower.conv1.weight.device,
+        )
+        audio_attention_mask[audio_attention_mask_] = float("-inf")
+
+        # Forward through audio encoder
+        audio_outputs = self.audio_tower(
+            input_features, attention_mask=audio_attention_mask
+        )
+        selected_audio_feature = audio_outputs.last_hidden_state
+
+        # Apply audio projector
+        audio_features = self.audio_projector(selected_audio_feature)
+
+        # Mask and split audio features
+        num_audios, max_audio_tokens, embed_dim = audio_features.shape
+        audio_output_lengths = audio_output_lengths.unsqueeze(1)
+        audio_features_mask = (
+            torch.arange(max_audio_tokens)
+            .expand(num_audios, max_audio_tokens)
+            .to(audio_output_lengths.device)
+            < audio_output_lengths
+        )
+        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
+
+        # Split to tuple of embeddings for individual audio input
+        return torch.split(
+            masked_audio_features, audio_output_lengths.flatten().tolist()
+        )
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
@@ -1702,6 +1961,11 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 and "video" not in modalities
             ):
                 modalities["video"] = self._parse_and_validate_video_input(**kwargs)
+            if (
+                input_key in ("input_features", "audio_embeds")
+                and "audio" not in modalities
+            ):
+                modalities["audio"] = self._parse_and_validate_audio_input(**kwargs)
 
         return modalities
 
@@ -1729,6 +1993,11 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 if video_input is not None:
                     video_embeddings = self._process_video_input(video_input)
                     multimodal_embeddings += tuple(video_embeddings)
+            if modality == "audio":
+                audio_input = modalities["audio"]
+                if audio_input is not None:
+                    audio_embeddings = self._process_audio_input(audio_input)
+                    multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
 
