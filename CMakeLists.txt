@@ -287,14 +287,11 @@ set(VLLM_EXT_SRC
   "csrc/attention/merge_attn_states.cu"
   "csrc/attention/vertical_slash_index.cu"
   "csrc/pos_encoding_kernels.cu"
-  "csrc/layernorm_kernels.cu"
   "csrc/fused_qknorm_rope_kernel.cu"
-  "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
-  "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -945,6 +942,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_STABLE_EXT_SRC
     "csrc/activation_kernels.cu"
     "csrc/cuda_view.cu"
+    "csrc/layernorm_kernels.cu"
+    "csrc/layernorm_quant_kernels.cu"
+    "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
     "csrc/torch_bindings_stable.cpp")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
