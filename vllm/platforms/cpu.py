@@ -193,6 +193,8 @@ class CpuPlatform(Platform):
             )
 
         scheduler_config = vllm_config.scheduler_config
+        # async scheduling is not required on CPU
+        scheduler_config.async_scheduling = False
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching

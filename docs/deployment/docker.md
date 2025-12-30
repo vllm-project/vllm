@@ -84,10 +84,10 @@ DOCKER_BUILDKIT=1 docker build . \
     If you have not changed any C++ or CUDA kernel code, you can use precompiled wheels to significantly reduce Docker build time.
 
     *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
-    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/) by using the merge-base commit with the upstream `main` branch.
+    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](../contributing/ci/nightly_builds.md) by using the merge-base commit with the upstream `main` branch.
     *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
 
-    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds.html#precompiled-wheels-usage), these args are similar.
+    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](../contributing/ci/nightly_builds.md#precompiled-wheels-usage), these args are similar.
 
 ## Building for Arm64/aarch64
 

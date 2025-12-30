@@ -128,7 +128,7 @@ class LoRAModelManager:
                 max_num_batched_tokens,
                 max_batches=self.max_num_seqs,
                 device=self.device,
-                max_loras=self.lora_config.max_loras,
+                lora_config=self.lora_config,
             )
 
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
@@ -148,7 +148,7 @@ class LoRAModelManager:
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
+            lora_config=self.lora_config,
         )
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
@@ -186,7 +186,7 @@ class LoRAModelManager:
             num_encoder_tokens,
             max_batches=self.max_num_seqs * limit_per_prompt,
             device=self.device,
-            max_loras=self.lora_config.max_loras,
+            lora_config=self.lora_config,
         )
         for prefix in self.mm_mapping.tower_model:
             self.punica_wrapper_mapping[prefix] = tower_punica_wrapper
@@ -201,7 +201,7 @@ class LoRAModelManager:
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
                     device=self.device,
-                    max_loras=self.lora_config.max_loras,
+                    lora_config=self.lora_config,
                 )
                 for prefix in self.mm_mapping.connector:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
