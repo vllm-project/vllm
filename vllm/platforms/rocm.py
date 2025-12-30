@@ -411,7 +411,7 @@ class RocmPlatform(Platform):
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_shared_expert = (
             rocm_aiter_ops.is_fused_moe_enabled()
-            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
