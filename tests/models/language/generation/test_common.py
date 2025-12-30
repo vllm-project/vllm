@@ -4,25 +4,14 @@
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-# This list contains the model that are using AITER kernel.
-# Skip model that are not using AITER tests.
-# When more AITER kernels are added, this list will not be
-# needed as all the models will be calling AITER kernels
-# in parts of the operators
-AITER_MODEL_LIST = [
-    "meta-llama/Llama-3.2-1B-Instruct",
-    "openbmb/MiniCPM3-4B",
-    "Qwen/Qwen-7B-Chat",
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "TitanML/tiny-mixtral",
-    "Qwen/Qwen3-8B",
-]
+# Models that require embedding scaling for prompt_embeds test
+EMBED_SCALING_MODELS = {
+    "openbmb/MiniCPM4.1-8B",
+}
 
 
 # @maybe_test_rocm_aiter
@@ -64,8 +53,8 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "openbmb/MiniCPM3-4B",
-            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=32)],
+            "openbmb/MiniCPM4.1-8B",  # minicpm
+            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
         ),
         pytest.param(
             "facebook/opt-125m",  # opt
@@ -100,9 +89,6 @@ AITER_MODEL_LIST = [
 )
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_models(
     hf_runner,
@@ -111,22 +97,11 @@ def test_models(
     model: str,
     max_tokens: int,
     num_logprobs: int,
-    use_rocm_aiter: bool,
     use_prompt_embeds: bool,
-    monkeypatch,
 ) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if use_rocm_aiter and (model in AITER_MODEL_LIST):
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    elif use_rocm_aiter and model not in AITER_MODEL_LIST:
-        # Skip model that are not using AITER tests.
-        # When more AITER kernels are added, this list will not be
-        # needed as all the models will be calling AITER kernels
-        # in parts of the operators
-        pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -135,16 +110,20 @@ def test_models(
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
-        prompt_token_ids = []
         for prompt in example_prompts:
             token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
                 hf_model.model.device
             )
-            prompt_token_ids.append(token_ids)
             if prompt_embeds is not None:
-                prompt_embeds.append(
-                    hf_model.model.get_input_embeddings()(token_ids).squeeze(0)
-                )
+                embed = hf_model.model.get_input_embeddings()(token_ids)
+
+                # MiniCPM models apply scale_emb to embeddings internally.
+                # vLLM expects pre-scaled embeddings when using inputs_embeds.
+                if model in EMBED_SCALING_MODELS:
+                    config = hf_model.model.config
+                    embed = embed * config.scale_emb
+
+                prompt_embeds.append(embed.squeeze(0))
 
     with vllm_runner(
         model,
@@ -175,11 +154,3 @@ def test_models(
             name_0="vllm",
             name_1="vllm_from_embeds",
         )
-
-    if use_rocm_aiter:
-        # this is to ensure that vllm engine
-        # has deallocated the memory before running the next
-        # unit tests. On ROCm, when using AITER
-        # the memory might not be deallocated completely
-        # before running the next test case
-        torch.cuda.synchronize()
