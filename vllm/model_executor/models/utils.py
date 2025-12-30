@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
+import regex as re
 import torch
 import torch.nn as nn
 from torch.func import functional_call
@@ -39,7 +40,9 @@ from vllm.utils.torch_utils import (
 
 logger = init_logger(__name__)
 
-WeightsMapping = Mapping[str, str | None]
+StrWeightsMapping = Mapping[str, str | None]
+"""If a key maps to a value of `None`, the corresponding weight is ignored."""
+RegexWeightsMapping = Mapping[re.Pattern, str | None]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
 
 
@@ -47,9 +50,10 @@ WeightsMapping = Mapping[str, str | None]
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns."""
 
-    orig_to_new_substr: WeightsMapping = field(default_factory=dict)
-    orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
-    orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
+    orig_to_new_regex: RegexWeightsMapping = field(default_factory=dict)
+    orig_to_new_substr: StrWeightsMapping = field(default_factory=dict)
+    orig_to_new_prefix: StrWeightsMapping = field(default_factory=dict)
+    orig_to_new_suffix: StrWeightsMapping = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -60,6 +64,13 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        for pattern, new_key in self.orig_to_new_regex.items():
+            if pattern.search(key):
+                if new_key is None:
+                    return None
+
+                key = pattern.sub(new_key, key)
+
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
                 if new_key is None:
