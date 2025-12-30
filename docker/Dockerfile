@@ -5,7 +5,21 @@
 # docs/contributing/dockerfile/dockerfile.md and
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
+# =============================================================================
+# VERSION MANAGEMENT
+# =============================================================================
+# The canonical source of truth for all pinned versions is: docker/versions.json
+#
+# To query versions: jq '.cuda.version' docker/versions.json
+#
+# When updating versions:
+# 1. Update docker/versions.json (source of truth)
+# 2. Update the corresponding ARG defaults below to match
+# =============================================================================
+
+# From versions.json: .cuda.version
 ARG CUDA_VERSION=12.9.1
+# From versions.json: .python.version
 ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -141,6 +155,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
+# From versions.json: .torch.cuda_arch_list
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
@@ -474,6 +489,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer pre-compiled kernel cache and binaries
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
+# From versions.json: .flashinfer.version
 ARG FLASHINFER_VERSION=0.5.3
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
@@ -503,14 +519,20 @@ RUN set -eux; \
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
 # These are stable packages that don't depend on vLLM itself
+# From versions.json: .bitsandbytes.x86_64, .bitsandbytes.arm64
+# From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
+ARG BITSANDBYTES_VERSION_X86=0.46.1
+ARG BITSANDBYTES_VERSION_ARM64=0.42.0
+ARG TIMM_VERSION=">=1.0.17"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.3"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        BITSANDBYTES_VERSION="0.42.0"; \
+        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
     else \
-        BITSANDBYTES_VERSION="0.46.1"; \
+        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.3'
+        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)

@@ -1,0 +1,68 @@
+{
+  "$schema": "./versions.schema.json",
+  "_comment": "Centralized version manifest for vLLM Docker builds. This file is the single source of truth for all pinned versions.",
+
+  "docker": {
+    "_comment": "Build args that map directly to Dockerfile ARGs - use with docker buildx bake",
+    "build_args": {
+      "CUDA_VERSION": "12.9.1",
+      "PYTHON_VERSION": "3.12",
+      "_comment_arch_list": "lowercase to match Dockerfile ARG; Dockerfile converts to uppercase ENV TORCH_CUDA_ARCH_LIST",
+      "torch_cuda_arch_list": "7.0 7.5 8.0 8.9 9.0 10.0 12.0",
+      "FLASHINFER_VERSION": "0.5.3",
+      "BITSANDBYTES_VERSION_X86": "0.46.1",
+      "BITSANDBYTES_VERSION_ARM64": "0.42.0",
+      "TIMM_VERSION": ">=1.0.17",
+      "RUNAI_MODEL_STREAMER_VERSION": ">=0.15.3",
+      "GDRCOPY_CUDA_VERSION": "12.8",
+      "DEEPGEMM_GIT_REF": "594953acce41793ae00a1233eb516044d604bcb6",
+      "PPLX_COMMIT_HASH": "12cecfd",
+      "DEEPEP_COMMIT_HASH": "73b6ea4"
+    },
+    "build_config": {
+      "max_jobs": 16,
+      "nvcc_threads": 8
+    }
+  },
+
+  "cuda": {
+    "version": "12.9.1",
+    "version_major_minor": "12.9",
+    "min_supported": "12.4"
+  },
+
+  "python": {
+    "version": "3.12",
+    "supported": ["3.10", "3.11", "3.12", "3.13"]
+  },
+
+  "torch": {
+    "version": "2.9.1"
+  },
+
+  "flashinfer": {
+    "version": "0.5.3",
+    "cubin": "0.5.3",
+    "jit_cache": "0.5.3"
+  },
+
+  "extensions": {
+    "deepgemm": {
+      "repo": "https://github.com/deepseek-ai/DeepGEMM.git",
+      "ref": "594953acce41793ae00a1233eb516044d604bcb6"
+    },
+    "pplx_kernels": {
+      "repo": "https://github.com/ppl-ai/pplx-kernels",
+      "ref": "12cecfd"
+    },
+    "deepep": {
+      "repo": "https://github.com/deepseek-ai/DeepEP",
+      "ref": "73b6ea4"
+    }
+  },
+
+  "system": {
+    "nvshmem_version": "3.3.24",
+    "sccache_version": "0.8.1"
+  }
+}
