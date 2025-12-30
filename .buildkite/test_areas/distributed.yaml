@@ -163,6 +163,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   num_nodes: 2
+  no_plugin: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
