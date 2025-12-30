@@ -1110,6 +1110,16 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
 
+    def get_input_seq_prefix_length(self) -> int:
+        """Get the number of prefix tokens prepended to input sequences."""
+        num_meta = getattr(self.hf_text_config, "num_meta_tokens", None)
+        if num_meta is not None:
+            return num_meta
+        num_memory = getattr(self.hf_text_config, "num_memory_tokens", None)
+        if num_memory is not None:
+            return num_memory
+        return 0
+
     def get_inputs_embeds_size(self) -> int:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
