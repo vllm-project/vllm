@@ -38,20 +38,20 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 
-def empty_bf16(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
+def empty_bf16(*args, device=current_platform.device_type, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device=device)
 
 
-def empty_fp32(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
+def empty_fp32(*args, device=current_platform.device_type, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.float32, device=device)
 
 
-def empty_i32(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
+def empty_i32(*args, device=current_platform.device_type, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device=device)
 
 
-def empty_i64(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.int64, device="cuda")
+def empty_i64(*args, device=current_platform.device_type, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int64, device=device)
 
 
 RMS_OP = torch.ops._C.rms_norm.default
