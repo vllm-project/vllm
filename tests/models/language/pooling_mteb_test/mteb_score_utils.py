@@ -174,14 +174,13 @@ class HFMtebCrossEncoder(MtebCrossEncoderMixin, HfRunner):
                     tokenize=False,
                 )
                 prompts.append(prompt)
-            outputs = HfRunner.classify(self, prompts)
-            scores = np.array(outputs).squeeze(-1)
+            outputs_list = HfRunner.classify(self, prompts)
+            scores = np.array(outputs_list).squeeze(-1)
             return scores
         else:
             prompts = list(zip(queries, corpus))
-            outputs = HfRunner.predict(self, prompts, show_progress_bar=False)
-            outputs = cast(torch.Tensor, outputs)
-            return outputs.cpu().numpy()
+            outputs_tensor = HfRunner.predict(self, prompts, show_progress_bar=False)
+            return outputs_tensor.cpu().numpy()
 
 
 def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):

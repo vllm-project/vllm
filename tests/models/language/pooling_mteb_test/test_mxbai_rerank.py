@@ -29,6 +29,7 @@ RERANK_MODELS = [
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
         chat_template_name="mxbai_rerank_v2.jinja",
+        mteb_score=0.33651,
         enable_test=True,
     ),
     RerankModelInfo(

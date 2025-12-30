@@ -31,6 +31,7 @@ RERANK_MODELS = [
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
+        mteb_score=0.33459,
         enable_test=True,
     ),
     RerankModelInfo(
