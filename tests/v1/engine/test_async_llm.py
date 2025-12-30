@@ -598,11 +598,18 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
                 "logger_manager.record should be called when aborting requests"
             )
 
+            # Get the expected engine_idx for this request
+            expected_engine_idx = engine.engine_core.get_engine_index_for_request(
+                request_id
+            )
+
             # Find a call that has a finished request with finish_reason=ABORT
             found_abort_record = False
             for call in engine.logger_manager.record.call_args_list:
                 call_kwargs = call.kwargs
                 iteration_stats = call_kwargs.get("iteration_stats")
+                engine_idx = call_kwargs.get("engine_idx")
+
                 if iteration_stats is not None and isinstance(
                     iteration_stats, IterationStats
                 ):
@@ -613,6 +620,11 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
                             # Verify scheduler_stats is None for abort records
                             assert call_kwargs["scheduler_stats"] is None, (
                                 "scheduler_stats should be None for aborted requests"
+                            )
+                            # Verify engine_idx matches the expected value
+                            assert engine_idx == expected_engine_idx, (
+                                f"Expected engine_idx={expected_engine_idx} for "
+                                f"request {request_id}, but got engine_idx={engine_idx}"
                             )
                             break
                     if found_abort_record:

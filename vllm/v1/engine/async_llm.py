@@ -554,23 +554,28 @@ class AsyncLLM(EngineClient):
         request_ids: list[str] = (
             [request_id] if isinstance(request_id, str) else as_list(request_id)
         )
+        all_request_ids_to_abort = []
+        request_stats_map: dict[str, IterationStats] = {}
 
-        iteration_stats = IterationStats()
+        # Create iteration_stats per request because different requests can have
+        # different engine indexes which need to be logged separately.
+        for req_id in request_ids:
+            iteration_stats = IterationStats()
+            request_ids_to_abort = self.output_processor.abort_requests(
+                [req_id],
+                iteration_stats,
+            )
+            all_request_ids_to_abort.extend(request_ids_to_abort)
+            request_stats_map[req_id] = iteration_stats
 
-        all_request_ids = self.output_processor.abort_requests(
-            request_ids,
-            iteration_stats,
-        )
-        await self.engine_core.abort_requests_async(all_request_ids)
+        await self.engine_core.abort_requests_async(all_request_ids_to_abort)
 
         if self.logger_manager:
-            for request_id in request_ids:
+            for req_id, iter_stats in request_stats_map.items():
                 self.logger_manager.record(
                     scheduler_stats=None,
-                    iteration_stats=iteration_stats,
-                    engine_idx=self.engine_core.get_engine_index_for_request(
-                        request_id
-                    ),
+                    iteration_stats=iter_stats,
+                    engine_idx=self.engine_core.get_engine_index_for_request(req_id),
                 )
 
         if self.log_requests:
