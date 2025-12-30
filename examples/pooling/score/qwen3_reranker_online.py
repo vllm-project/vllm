@@ -22,7 +22,7 @@ For the converted model, initialization would simply be:
     vllm serve tomaarsen/Qwen3-Reranker-0.6B-seq-cls --runner pooling --chat-template examples/pooling/score/template/qwen3_reranker.jinja
 
 This example demonstrates loading the ORIGINAL model with special overrides
-to make it compatible with vLLM's scoring system.
+to make it compatible with vLLM's score API.
     vllm serve Qwen/Qwen3-Reranker-0.6B --runner pooling --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' --chat-template examples/pooling/score/template/qwen3_reranker.jinja
 """
 

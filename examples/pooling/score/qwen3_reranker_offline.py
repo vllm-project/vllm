@@ -23,7 +23,7 @@ For the converted model, initialization would simply be:
 llm = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", runner="pooling")
 
 This example demonstrates loading the ORIGINAL model with special overrides
-to make it compatible with vLLM's scoring system.
+to make it compatible with vLLM's score API.
 """
 
 from pathlib import Path
@@ -42,12 +42,12 @@ def get_llm() -> LLM:
 
     Note:
         This function loads the ORIGINAL Qwen3-Reranker model with specific
-        overrides to enable sequence classification functionality within vLLM.
+        overrides to make it compatible with vLLM's score API.
     """
     return LLM(
         # Specify the original model from HuggingFace
         model=model_name,
-        # Use pooling runner for sequence classification tasks
+        # Use pooling runner for score task
         runner="pooling",
         # HuggingFace model configuration overrides required for compatibility
         hf_overrides={

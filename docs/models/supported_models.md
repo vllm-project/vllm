@@ -554,7 +554,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
-<sup>T</sup> this models require a specific prompt format to work correctly.
+<sup>T</sup> These models require a specific prompt format to work correctly.
 
     Examples : [examples/pooling/score/using_template_offline.py](../../examples/pooling/score/using_template_offline.py) [examples/pooling/score/using_template_online.py](../../examples/pooling/score/using_template_online.py)
 
