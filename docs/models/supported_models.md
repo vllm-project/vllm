@@ -539,23 +539,24 @@ If your model is not in the above list, we will try to automatically convert the
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
-|--------------|--------|-------------------|----------------------|---------------------------|
-| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | | |
-| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`<sup>T</sup> (see note), etc. | ✅︎ | ✅︎ |
-| `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. |  |  |
-| `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`<sup>T</sup>, etc. | ✅︎ | ✅︎ |
-| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`<sup>T</sup> (see note), etc. | ✅︎ | ✅︎ |
-| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`<sup>T</sup>, `Qwen/Qwen3-Reranker-0.6B`<sup>T</sup> (see note), etc. | ✅︎ | ✅︎ |
-| `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | | |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | | |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+| Architecture | Models | Example HF Models | Corresponding score template | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+|--------------|--------|-------------------|------------------------------|-----------------------------|-----------------------------------------|
+| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
+| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`<sup>T</sup> (see note), etc. | bge-reranker-v2-gemma.jinja | ✅︎ | ✅︎ |
+| `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
+| `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`<sup>T</sup>, etc. | nemotron-rerank.jinja | ✅︎ | ✅︎ |
+| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`<sup>T</sup> (see note), etc. | mxbai_rerank_v2.jinja | ✅︎ | ✅︎ |
+| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`<sup>T</sup>, `Qwen/Qwen3-Reranker-0.6B`<sup>T</sup> (see note), etc. | qwen3_reranker.jinja | ✅︎ | ✅︎ |
+| `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | N/A | | |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | N/A | | |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | N/A | \* | \* |
 
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
-<sup>T</sup> These models require a specific prompt format to work correctly.
+<sup>T</sup> These models require a specific prompt format to work correctly. 
 
+    You can find Example HF Models's corresponding score template in [examples/pooling/score/template/](../../examples/pooling/score/template/)
     Examples : [examples/pooling/score/using_template_offline.py](../../examples/pooling/score/using_template_offline.py) [examples/pooling/score/using_template_online.py](../../examples/pooling/score/using_template_online.py)
 
 !!! note
