@@ -310,7 +310,10 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            assert prompt_text is None
+            if prompt_text is not None:
+                raise ValueError(
+                    "should only provide prompt_text with EngineCoreRequest"
+                )
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
