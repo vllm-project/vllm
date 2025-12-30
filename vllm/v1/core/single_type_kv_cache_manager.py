@@ -888,12 +888,18 @@ class SinkFullAttentionManager(FullAttentionManager):
         self,
         kv_cache_spec: SinkFullAttentionSpec,
         block_pool: BlockPool,
+        enable_caching: bool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ):
         super().__init__(
-            kv_cache_spec, block_pool, kv_cache_group_id, dcp_world_size, pcp_world_size
+            kv_cache_spec,
+            block_pool,
+            enable_caching,
+            kv_cache_group_id,
+            dcp_world_size,
+            pcp_world_size,
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
