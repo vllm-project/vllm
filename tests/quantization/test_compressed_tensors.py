@@ -744,6 +744,8 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
     with vllm_runner(model_path, enforce_eager=True) as llm:
         fp8_dtype = current_platform.fp8_dtype()
+        is_sm100 = current_platform.is_device_capability(100)
+        is_cuda = current_platform.is_cuda()
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -762,7 +764,10 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
             input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
             assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+            quant_enabled = (
+                input_quant_op._forward_method == input_quant_op.forward_cuda
+            )
+            assert quant_enabled == (not is_cuda or not is_sm100)
 
         llm.apply_model(check_model)
 
