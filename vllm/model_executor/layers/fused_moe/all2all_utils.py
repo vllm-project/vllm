@@ -72,7 +72,6 @@ def maybe_make_prepare_finalize(
     quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
-    print(f"{moe.moe_parallel_config.use_all2all_kernels=}")
     if not moe.moe_parallel_config.use_all2all_kernels:
         return None
 
