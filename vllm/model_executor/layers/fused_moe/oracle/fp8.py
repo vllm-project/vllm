@@ -163,6 +163,7 @@ def convert_to_fp8_moe_kernel_format(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    marlin_input_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
@@ -182,8 +183,14 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
+        # TODO(rob): remove need to pass around marlin_input_dtype.
         workspace, w13, w2, w13_scale, w2_scale = prepare_moe_fp8_layer_for_marlin(
-            layer, w13, w2, w13_scale, w2_scale
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            marlin_input_dtype,
         )
         layer.workspace = workspace
     elif fp8_backend in [

@@ -899,6 +899,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2,
             w13_scale,
             w2_scale,
+            get_marlin_input_dtype(prefix=""),
         )
 
         # Replace parameters with updated versions. Note that this helper

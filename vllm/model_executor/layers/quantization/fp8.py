@@ -803,12 +803,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_scale: torch.Tensor,
     ) -> None:
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            self.fp8_backend,
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            marlin_input_dtype=self.marlin_input_dtype,
         )
         # Replace parameters with updated versions. Note that this helper
         # function ensures the replacement is compatible with RL weight reloads.
