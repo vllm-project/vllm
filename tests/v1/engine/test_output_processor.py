@@ -1269,35 +1269,45 @@ def test_abort_requests(runner: str, dummy_test_vectors):
         output_processor.add_request(request, None, queue=queue)
 
     # Test aborting a single request
-    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
-        [requests[0].request_id]
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        [requests[0].request_id], iteration_stats=iteration_stats
     )
     assert isinstance(request_ids_to_abort, list)
-    assert isinstance(request_states_to_abort, list)
     assert len(request_ids_to_abort) == 1
-    assert len(request_states_to_abort) == 1
     assert request_ids_to_abort[0] == requests[0].request_id
-    assert request_states_to_abort[0].request_id == requests[0].request_id
-    from vllm.v1.engine.output_processor import RequestState
-
-    assert isinstance(request_states_to_abort[0], RequestState)
+    # Verify stats were updated
+    assert len(iteration_stats.finished_requests) == 1
+    assert iteration_stats.finished_requests[0].finish_reason == FinishReason.ABORT
+    assert iteration_stats.finished_requests[0].num_prompt_tokens == len(
+        requests[0].prompt_token_ids
+    )
 
     # Test aborting multiple requests
     remaining_request_ids = [req.request_id for req in requests[1:3]]
-    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
-        remaining_request_ids
+    expected_prompt_token_counts = {len(req.prompt_token_ids) for req in requests[1:3]}
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        remaining_request_ids, iteration_stats=iteration_stats
     )
     assert len(request_ids_to_abort) == 2
-    assert len(request_states_to_abort) == 2
     assert set(request_ids_to_abort) == set(remaining_request_ids)
-    assert all(
-        req_state.request_id in remaining_request_ids
-        for req_state in request_states_to_abort
-    )
+    # Verify stats were updated for both requests
+    assert len(iteration_stats.finished_requests) == 2
+    finished_prompt_token_counts = {
+        finished_req.num_prompt_tokens
+        for finished_req in iteration_stats.finished_requests
+    }
+    for finished_req in iteration_stats.finished_requests:
+        assert finished_req.finish_reason == FinishReason.ABORT
+    # Verify that the prompt token counts match the aborted requests
+    assert finished_prompt_token_counts == expected_prompt_token_counts
 
-    # Test aborting non-existent request (should return empty lists)
-    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
-        ["non-existent-request"]
+    # Test aborting non-existent request (should return empty list)
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        ["non-existent-request"], iteration_stats=iteration_stats
     )
     assert len(request_ids_to_abort) == 0
-    assert len(request_states_to_abort) == 0
+    # Verify no stats were added for non-existent request
+    assert len(iteration_stats.finished_requests) == 0

@@ -192,6 +192,10 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        """Returns the engine index for a given request ID."""
+        raise NotImplementedError
+
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
@@ -338,6 +342,9 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
+
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        return 0
 
 
 @dataclass
@@ -804,6 +811,9 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        return 0
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -1014,6 +1024,9 @@ class AsyncMPClient(MPClient):
             "collective_rpc", method, timeout, args, kwargs
         )
 
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        return 0
+
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1170,6 +1183,15 @@ class DPAsyncMPClient(AsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
 
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        # DPAsyncMPClient always uses self.core_engine regardless of request_id
+        # Find the index of self.core_engine in self.core_engines
+        try:
+            return self.core_engines.index(self.core_engine)
+        except ValueError as e:
+            engine_rank = int.from_bytes(self.core_engine, "little")
+            raise ValueError(f"Engine {engine_rank} not found in core_engines") from e
+
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1229,6 +1251,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         return chosen_engine
+
+    def get_engine_index_for_request(self, request_id: str) -> int:
+        # Find the chosen_engine using self.reqs_in_flight
+        chosen_engine = self.reqs_in_flight.get(request_id)
+        if chosen_engine is None:
+            raise ValueError(f"Request ID {request_id} not found in reqs_in_flight")
+        # Look for chosen_engine in self.core_engines and return the found index.
+        try:
+            return self.core_engines.index(chosen_engine)
+        except ValueError as e:
+            engine_rank = int.from_bytes(chosen_engine, "little")
+            raise ValueError(
+                f"Engine {engine_rank} not found in core_engines "
+                f"for request {request_id}"
+            ) from e
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.

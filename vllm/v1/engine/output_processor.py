@@ -377,15 +377,14 @@ class OutputProcessor:
     def abort_requests(
         self,
         request_ids: Iterable[str],
-    ) -> tuple[list[str], list[RequestState]]:
+        iteration_stats: IterationStats | None = None,
+    ) -> list[str]:
         request_ids_to_abort = []
-        request_states_to_abort = []
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self.lora_states.request_finished(request_id, req_state.lora_name)
+                # self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
-                request_states_to_abort.append(req_state)
                 # Produce final abort output.
                 if req_state.queue is not None and (
                     request_output := req_state.make_request_output(
@@ -401,17 +400,19 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
+                self._update_stats_from_finished(
+                    req_state, FinishReason.ABORT, iteration_stats
+                )
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs, child_req_states = self.abort_requests(child_reqs)
+                    child_reqs = self.abort_requests(child_reqs, iteration_stats)
                     request_ids_to_abort.extend(child_reqs)
-                    request_states_to_abort.extend(child_req_states)
                 self.parent_requests.pop(request_id, None)
         if not self.request_states:
             self._requests_drained.set()
-        return request_ids_to_abort, request_states_to_abort
+        return request_ids_to_abort
 
     def add_request(
         self,

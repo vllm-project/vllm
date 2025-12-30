@@ -18,9 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import FinishReason
-from vllm.v1.engine.output_processor import RequestState
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
@@ -1285,36 +1283,3 @@ class StatLoggerManager:
     def log_engine_initialized(self):
         for agg_logger in self.stat_loggers:
             agg_logger.log_engine_initialized()
-
-
-def record_aborted_requests(
-    logger_manager: StatLoggerManager | None,
-    request_states_to_abort: list["RequestState"],
-) -> None:
-    """Record aborted requests in the logger manager.
-
-    Args:
-        logger_manager: The stat logger manager to record to. If None, this
-            function does nothing.
-        request_states_to_abort: List of RequestState objects for requests
-            that were aborted.
-    """
-    if not logger_manager:
-        return
-
-    for req_state in request_states_to_abort:
-        # Create a new iteration stats object for each aborted request.
-        iteration_stats = IterationStats()
-        assert req_state.stats is not None
-        iteration_stats.update_from_finished_request(
-            finish_reason=FinishReason.ABORT,
-            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
-                req_state.prompt_token_ids, req_state.prompt_embeds
-            ),
-            max_tokens_param=req_state.max_tokens_param,
-            req_stats=req_state.stats,
-        )
-        logger_manager.record(
-            scheduler_stats=None,
-            iteration_stats=iteration_stats,
-        )
