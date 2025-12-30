@@ -24,14 +24,16 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from .protocol import TokenizerLike
 
 # Mistral architecture indicators - used to validate Mistral tokenizer selection
-_MISTRAL_ARCHITECTURE_INDICATORS = frozenset({
-    "mistral",
-    "mixtral",
-    "pixtral",
-    "mathstral",
-    "codestral",
-    "ministral",
-})
+_MISTRAL_ARCHITECTURE_INDICATORS = frozenset(
+    {
+        "mistral",
+        "mixtral",
+        "pixtral",
+        "mathstral",
+        "codestral",
+        "ministral",
+    }
+)
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig, RunnerType
@@ -121,16 +123,16 @@ def _is_mistral_architecture(
         architectures = getattr(config, "architectures", None) or []
         for arch in architectures:
             arch_lower = arch.lower()
-            if any(arch_lower.startswith(ind) for ind in _MISTRAL_ARCHITECTURE_INDICATORS):
+            is_mistral = any(
+                arch_lower.startswith(ind) for ind in _MISTRAL_ARCHITECTURE_INDICATORS
+            )
+            if is_mistral:
                 return True
 
         # Check model_type (e.g., "mistral") for an exact match
         # to avoid false positives like "not-mistral"
         model_type = getattr(config, "model_type", None) or ""
-        if model_type.lower() in _MISTRAL_ARCHITECTURE_INDICATORS:
-            return True
-
-        return False
+        return model_type.lower() in _MISTRAL_ARCHITECTURE_INDICATORS
     except Exception as e:
         # On any error (missing config, network issues, etc.),
         # don't assume Mistral - let the caller fall back to HF tokenizer
