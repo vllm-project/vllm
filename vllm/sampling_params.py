@@ -246,6 +246,22 @@ class SamplingParams(
 
     skip_reading_prefix_cache: bool | None = None
 
+    # Sequence/N-gram repetition detection parameters
+    max_repetition_pattern_size: int = 0
+    """Size of N-gram pattern to detect for sequence repetition.
+    Set to 0 to disable. Example: 3 for detecting 'this is fun' repeated.
+    Must be used together with repetition_min_count."""
+
+    repetition_min_count: int = 0
+    """Minimum number of times an N-gram pattern must repeat to trigger detection.
+    Must be >= 2. Example: 3 for detecting a phrase repeated 3 times.
+    Must be used together with max_repetition_pattern_size."""
+
+    min_repetition_pattern_size: int = 0
+    """Minimum N-gram pattern size to check for sequence repetition.
+    Set to 0 to disable minimum (start checking from size 1).
+    Must be <= max_repetition_pattern_size."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -277,6 +293,9 @@ class SamplingParams(
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
+        max_repetition_pattern_size: int = 0,
+        repetition_min_count: int = 0,
+        min_repetition_pattern_size: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -318,6 +337,9 @@ class SamplingParams(
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             skip_clone=skip_clone,
+            max_repetition_pattern_size=max_repetition_pattern_size,
+            repetition_min_count=repetition_min_count,
+            min_repetition_pattern_size=min_repetition_pattern_size,
         )
 
     def __post_init__(self) -> None:

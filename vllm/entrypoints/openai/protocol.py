@@ -753,6 +753,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    max_repetition_pattern_size: int = (
+        Field(
+            default=0,
+            description="Max repetition pattern size to check for repetition penalty",
+        ),
+    )
+    min_repetition_pattern_size: int = (
+        Field(
+            default=0,
+            description="Min repetition pattern size to check for repetition penalty",
+        ),
+    )
+    repetition_min_count: int = (
+        Field(
+            default=0,
+            description="Minimum number of repetitions to check for repetition penalty",
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -878,6 +897,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            max_repetition_pattern_size=self.max_repetition_pattern_size,
+            min_repetition_pattern_size=self.min_repetition_pattern_size,
+            repetition_min_count=self.repetition_min_count,
         )
 
     @model_validator(mode="before")
@@ -1187,6 +1209,25 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    max_repetition_pattern_size: int = (
+        Field(
+            default=0,
+            description="Max repetition pattern size to check for repetition penalty",
+        ),
+    )
+    min_repetition_pattern_size: int = (
+        Field(
+            default=0,
+            description="Min repetition pattern size to check for repetition penalty",
+        ),
+    )
+    repetition_min_count: int = (
+        Field(
+            default=0,
+            description="Minimum number of repetitions to check for repetition penalty",
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     # Default sampling parameters for completion requests
@@ -1319,6 +1360,9 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            max_repetition_pattern_size=self.max_repetition_pattern_size,
+            min_repetition_pattern_size=self.min_repetition_pattern_size,
+            repetition_min_count=self.repetition_min_count,
         )
 
     @model_validator(mode="before")
