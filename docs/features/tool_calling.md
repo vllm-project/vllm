@@ -429,6 +429,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+
+### Facebook Code World Model (`facebook-cwm`)
+
+Custom tool parser for facebook cwm tool calling format 
+
+* `facebook/cwm`
+* `facebook/cwm-sft`
+
+Flags: `--tool-call-parser cwm`
+
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
