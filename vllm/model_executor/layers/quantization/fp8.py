@@ -48,7 +48,6 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
@@ -1091,21 +1090,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            if self.block_quant:
-                assert self.weight_block_size == [128, 128], (
-                    f"Only support weight_block_size == [128, 128], "
-                    f"got {self.weight_block_size}"
-                )
-            # Wire block-scale flag through prepare/finalize when using CUTLASS
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
