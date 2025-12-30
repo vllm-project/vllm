@@ -393,6 +393,7 @@ FROM base AS dev
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG USE_TORCH_NIGHTLY
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -406,8 +407,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
+COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /tmp/pytorch_vars.env && \
+    if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+        python3 use_existing_torch.py; \
+    fi && \
     uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
 #################### DEV IMAGE ####################
@@ -632,6 +638,7 @@ FROM vllm-base AS test
 ADD . /vllm-workspace/
 
 ARG PYTHON_VERSION
+ARG USE_TORCH_NIGHTLY
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -653,6 +660,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         . /tmp/pytorch_vars.env && \
+        if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+            echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
+            python3 use_existing_torch.py; \
+        fi && \
         uv pip install --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
     fi
