@@ -10,6 +10,7 @@
 import copy
 import math
 import random
+import typing
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -1830,6 +1831,9 @@ class NemotronH_Nano_VL_V2(
         """Process video input and create final embeddings with video content
         and indicator tokens."""
         # Get video embeddings using the same processing as images
+        assert typing.assert_never(video_input), (
+            "TODO(nhaber): Video input is not supported for this hacky RL enablement branch for vision"
+        )
         video_embeddings = self._process_image_input(video_input)
 
         final_video_embeddings: tuple[torch.Tensor, ...] = ()
