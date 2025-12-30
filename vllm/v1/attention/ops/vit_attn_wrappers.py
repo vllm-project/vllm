@@ -26,6 +26,7 @@ def flash_attn_maxseqlen_wrapper(
     v: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    output: torch.Tensor,
     fa_version: int | None,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
@@ -48,7 +49,7 @@ def flash_attn_maxseqlen_wrapper(
     max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = flash_attn_varlen_func(
+    fa_output = flash_attn_varlen_func(
         q,
         k,
         v,
@@ -61,8 +62,9 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
-    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
-    return context_layer
+    context_layer = einops.rearrange(fa_output, "(b s) h d -> b s h d", b=batch_size)
+    output.copy_(context_layer)
+    return output
 
 
 def flash_attn_maxseqlen_wrapper_fake(
@@ -71,6 +73,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     v: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    output: torch.Tensor,
     fa_version: int | None,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
@@ -97,12 +100,15 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    b, s, h, d = q.shape
+    output = torch.empty((b, s, h, d), dtype=q.dtype, device=q.device)
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
         q,
         k,
         v,
         batch_size,
         is_rocm_aiter,
+        output,
         fa_version,
         scale,
         cu_seqlens,
@@ -132,6 +138,7 @@ def torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    output: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -155,13 +162,15 @@ def torch_sdpa_wrapper(
         output_i = apply_sdpa(q_i, k_i, v_i, scale=scale)
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
-    return context_layer
+    output.copy_(context_layer)
+    return output
 
 
 def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    output: torch.Tensor,
     scale: float | None,
     cu_seqlens: torch.Tensor | None,
 ) -> torch.Tensor:
@@ -182,4 +191,6 @@ def vit_torch_sdpa_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, scale, cu_seqlens)
+    b, s, h, d = q.shape
+    output = torch.empty((b, s, h, d), dtype=q.dtype, device=q.device)
+    return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, output, scale, cu_seqlens)
