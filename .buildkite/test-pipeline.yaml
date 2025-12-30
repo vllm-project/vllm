@@ -1276,7 +1276,18 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: NixlConnector PD accuracy tests (Distributed) # TODO
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
 ##### multi gpus test #####
