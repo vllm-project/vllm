@@ -52,16 +52,15 @@ def config(
     Config validation is performed by the tools/pre_commit/validate_config.py
     script, which is invoked during the pre-commit checks.
     """
-    if config is None:
-        config = ConfigDict()
 
     # Start with defaults
-    _config = ConfigDict(extra="forbid")
-    _config.update(config)
+    merged_config = ConfigDict(extra="forbid")
+    if config is not None:
+        merged_config.update(config)
 
     # Handle both @config and @config(...) syntax
     def decorator(cls):
-        return dataclass(cls, config=config, **kwargs)
+        return dataclass(cls, config=merged_config, **kwargs)
 
     if cls is None:
         # Called with arguments: @config(config=...)
