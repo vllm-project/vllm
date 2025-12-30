@@ -77,6 +77,9 @@ class EngineCoreRequest(
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
 
+    # Number of prefix/meta tokens prepended to this request
+    num_prefix_tokens: int = 0
+
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
     # to the request_id field, see InputProcessor.assign_request_id().

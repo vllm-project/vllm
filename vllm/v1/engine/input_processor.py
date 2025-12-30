@@ -570,6 +570,14 @@ class InputProcessor:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
 
+        # Prepend meta/prefix tokens if the model uses them
+        num_meta_tokens = self.vllm_config.scheduler_config.num_input_prefix_tokens
+        if num_meta_tokens > 0 and prompt_token_ids is not None:
+            # Use token ID 0 as placeholder for meta tokens
+            META_TOKEN_PLACEHOLDER = 0
+            meta_token_ids = [META_TOKEN_PLACEHOLDER] * num_meta_tokens
+            prompt_token_ids = meta_token_ids + prompt_token_ids
+
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
@@ -633,6 +641,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            num_prefix_tokens=num_meta_tokens,
         )
 
     def _validate_model_inputs(

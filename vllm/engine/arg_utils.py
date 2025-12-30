@@ -1652,6 +1652,9 @@ class EngineArgs:
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
         )
+        
+        # Set num_input_prefix_tokens from model config
+        scheduler_config.num_input_prefix_tokens = model_config.get_input_seq_prefix_length()
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
