@@ -125,6 +125,10 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns False if the FSM failed to advance.
         """
 
+        # If the EOS token has already been emitted, reject any further tokens.
+        if self._eos_emitted:
+            return False
+
         # The EOS token is not part of the guide's state machine,
         # so we must extract it before advancing.
         last_token_eos = False
@@ -155,8 +159,16 @@ class OutlinesGrammar(StructuredOutputGrammar):
             return False
 
     def rollback(self, num_tokens: int) -> None:
-        self.guide.rollback_state(num_tokens)
-        self.num_processed_tokens -= num_tokens
+        # If the EOS token was emitted, it wasn't added to the guide state. So we
+        # only need to unset the flag and decrease the count of tokens to rollback.
+        if self._eos_emitted and num_tokens >= 1:
+            self._eos_emitted = False
+            num_tokens -= 1
+
+        # Rollback the remaining tokens from the guide state.
+        if num_tokens > 0:
+            self.guide.rollback_state(num_tokens)
+            self.num_processed_tokens -= num_tokens
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         accepted: list[int] = []
