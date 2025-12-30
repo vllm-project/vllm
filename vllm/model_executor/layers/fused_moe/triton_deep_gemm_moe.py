@@ -40,6 +40,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
+        print(f"{M=} | {_valid_deep_gemm_shape(M, N, K)=}")
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K):
             return self.experts.workspace_shapes(
                 M,

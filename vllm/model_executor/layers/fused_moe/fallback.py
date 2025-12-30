@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 
-class FallbackExperts(ABC, mk.FusedMoEPermuteExpertsUnpermute):
+class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
     """Base class for runtime dispatching of expert implementations."""
 
     def __init__(
