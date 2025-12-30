@@ -51,8 +51,10 @@ class BagelProcessor(ProcessorMixin):
             return BatchFeature(combined)
         elif pixel_values is not None:
             return pixel_values
+        elif text_inputs is not None:
+            return BatchFeature(dict(text_inputs))
         else:
-            return text_inputs
+            return BatchFeature({})
 
     def batch_decode(self, *args, **kwargs):
         """
