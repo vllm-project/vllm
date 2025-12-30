@@ -259,6 +259,12 @@ class MultiConnector(KVConnectorBase_V1):
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
 
+    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events' method
+    # for the MultiConnector. It should be able to get events from multiple
+    # connectors, handling the case where only a subset of the requested connectors
+    # implements the 'get_kv_connector_kv_cache_events'
+    # Follow on PR from https://github.com/vllm-project/vllm/pull/28309#pullrequestreview-3566351082
+
     # ==============================
     # Scheduler-side methods
     # ==============================

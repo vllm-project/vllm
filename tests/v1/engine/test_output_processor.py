@@ -26,7 +26,10 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -47,7 +50,8 @@ def _ref_convert_id_to_token(
 
 
 @pytest.mark.parametrize(
-    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+    "request_output_kind",
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
 )
 @pytest.mark.parametrize("stream_interval", [1, 5, 10])
 def test_incremental_detokenization(
@@ -56,14 +60,16 @@ def test_incremental_detokenization(
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=stream_interval,
     )
-    engine_core = MockEngineCore(tokens_list=dummy_test_vectors.generation_tokens)
 
     # Make N requests.
     requests = [
         EngineCoreRequest(
-            request_id=f"request-{idx}",
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -82,6 +88,11 @@ def test_incremental_detokenization(
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
+
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
 
     # Add requests to the detokenizer.
     for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
@@ -124,7 +135,10 @@ def test_incremental_detokenization(
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_toks) in enumerate(
-        zip(dummy_test_vectors.generation_strings, dummy_test_vectors.generation_tokens)
+        zip(
+            dummy_test_vectors.generation_strings,
+            dummy_test_vectors.generation_tokens,
+        )
     ):
         gen_str = gen_strings[f"request-{idx}"]
         gen_toks = gen_tokens[f"request-{idx}"]
@@ -181,9 +195,11 @@ def _validate_logprobs(
                 # logprob token id tensors associated with this
                 # position in the completion. Also break out the
                 # sampled token ranks
-                (ref_pos_logprob_toks, ref_pos_logprob_vals, ref_sampled_token_rank) = (
-                    ref_logprobs[idx]
-                )
+                (
+                    ref_pos_logprob_toks,
+                    ref_pos_logprob_vals,
+                    ref_sampled_token_rank,
+                ) = ref_logprobs[idx]
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
@@ -427,7 +443,8 @@ def _validate_logprobs(
 
 
 @pytest.mark.parametrize(
-    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+    "request_output_kind",
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
 )
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize("num_prompt_logprobs", [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
@@ -438,15 +455,6 @@ def test_logprobs_processor(
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
-    engine_core = MockEngineCore(
-        tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=None
-        if num_sample_logprobs is None
-        else dummy_test_vectors.generation_logprobs,
-        prompt_logprobs_raw=None
-        if num_prompt_logprobs is None
-        else dummy_test_vectors.prompt_logprobs,
-    )
 
     # Make N requests.
     request_id_list = [
@@ -454,7 +462,8 @@ def test_logprobs_processor(
     ]
     requests = [
         EngineCoreRequest(
-            request_id=request_id_list[idx],
+            request_id=request_id_list[idx] + "-int",
+            external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -475,6 +484,19 @@ def test_logprobs_processor(
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
+
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=(
+            None
+            if num_sample_logprobs is None
+            else dummy_test_vectors.generation_logprobs
+        ),
+        prompt_logprobs_raw=(
+            None if num_prompt_logprobs is None else dummy_test_vectors.prompt_logprobs
+        ),
+        request_ids=[req.request_id for req in requests],
+    )
 
     # Add requests to the detokenizer.
     for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
@@ -621,19 +643,12 @@ def test_stop_token(
         ]
     prompt_string = dummy_test_vectors.prompt_strings[0]
     prompt_tokens = dummy_test_vectors.prompt_tokens[0]
-    engine_core = MockEngineCore(
-        tokens_list=[generation_tokens],
-        generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
-        prompt_logprobs_raw=None,
-        eos_token_id=eos_token_id,
-        stop_token_ids=stop_token_ids,
-        ignore_eos=ignore_eos,
-    )
 
     # Make request.
     request_id = "request-0"
     request = EngineCoreRequest(
         request_id=request_id,
+        external_req_id=request_id + "-ext",
         prompt_token_ids=prompt_tokens,
         mm_features=None,
         eos_token_id=eos_token_id,
@@ -653,6 +668,16 @@ def test_stop_token(
             ignore_eos=ignore_eos,
         ),
         pooling_params=None,
+    )
+
+    engine_core = MockEngineCore(
+        tokens_list=[generation_tokens],
+        generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
+        prompt_logprobs_raw=None,
+        eos_token_id=eos_token_id,
+        stop_token_ids=stop_token_ids,
+        ignore_eos=ignore_eos,
+        request_ids=[request.request_id],
     )
 
     # Add request to the detokenizer.
@@ -720,13 +745,6 @@ def test_stop_string(
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
-    engine_core = MockEngineCore(
-        tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
-        if num_sample_logprobs
-        else None,
-        prompt_logprobs_raw=None,
-    )
 
     # Make N requests.
     request_id_list = [
@@ -734,7 +752,8 @@ def test_stop_string(
     ]
     requests = [
         EngineCoreRequest(
-            request_id=request_id_list[idx],
+            request_id=request_id_list[idx] + "-int",
+            external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -755,6 +774,15 @@ def test_stop_string(
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
+
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=(
+            dummy_test_vectors.generation_logprobs if num_sample_logprobs else None
+        ),
+        prompt_logprobs_raw=None,
+        request_ids=[req.request_id for req in requests],
+    )
 
     # Add requests to the detokenizer.
     for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
@@ -813,9 +841,12 @@ def test_stop_string(
     for idx, (ref_gen_str, stop_str) in enumerate(
         zip(dummy_test_vectors.generation_strings, STOP_STRINGS)
     ):
-        # Request should be aborted.
+        # Request should be aborted (check internal ID in abort list).
+        internal_request_id = f"request-{idx}-int"
+        assert internal_request_id in aborted
+
+        # Use external ID for collecting outputs
         request_id = f"request-{idx}"
-        assert request_id in aborted
 
         # Collected values that were generated.
         gen_str = gen_strings[request_id]
@@ -848,13 +879,13 @@ def test_stop_string(
 
 def test_iteration_stats(dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
     engine_core_timestamp = time.monotonic()
 
     # Make N requests.
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
+            external_req_id=f"request-{idx}-ext",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -867,6 +898,11 @@ def test_iteration_stats(dummy_test_vectors):
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
+
+    engine_core = MockEngineCore(
+        dummy_test_vectors.generation_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
 
     # Add all requests except one to the OutputProcessor.
     num_active = len(dummy_test_vectors.generation_tokens) - 1
@@ -922,7 +958,6 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     output_processor = OutputProcessor(
         dummy_test_vectors.tokenizer, log_stats=log_stats
     )
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
     engine_core_timestamp = time.monotonic()
 
     # Create LoRA requests
@@ -936,7 +971,8 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     lora_assignments = [lora1, lora2, None]
     requests = [
         EngineCoreRequest(
-            request_id=f"request-{idx}",
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -949,6 +985,11 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
+
+    engine_core = MockEngineCore(
+        dummy_test_vectors.generation_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
 
     # Add all requests to the OutputProcessor
     for request in requests:
@@ -1015,9 +1056,9 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
-    # Find and mark request-0 as finished (it uses lora-1)
+    # Find and mark request-0-int as finished (it uses lora-1)
     for output in outputs.outputs:
-        if output.request_id == "request-0":
+        if output.request_id == "request-0-int":
             output.finish_reason = FinishReason.LENGTH
             break
 
@@ -1040,9 +1081,9 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
-    # Find and mark request-1 as finished (it uses lora-2)
+    # Find and mark request-1-int as finished (it uses lora-2)
     for output in outputs.outputs:
-        if output.request_id == "request-1":
+        if output.request_id == "request-1-int":
             output.finish_reason = FinishReason.LENGTH
             break
 
@@ -1064,9 +1105,9 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
-    # Find and mark request-2 as finished (it has no LoRA)
+    # Find and mark request-2-int as finished (it has no LoRA)
     for output in outputs.outputs:
-        if output.request_id == "request-2":
+        if output.request_id == "request-2-int":
             output.finish_reason = FinishReason.LENGTH
             break
 
@@ -1099,7 +1140,7 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
-                        finish_reason="length" if (idx == NUM_REQS - 1) else None,
+                        finish_reason=("length" if (idx == NUM_REQS - 1) else None),
                     )
                 ],
                 finished=(idx == NUM_REQS - 1),
@@ -1107,7 +1148,9 @@ async def test_request_output_collector():
             for idx in range(NUM_REQS)
         ]
 
-    collector = RequestOutputCollector(RequestOutputKind.DELTA)
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id="my-request-id-int"
+    )
 
     # CASE 1: Put then get.
     outputs = make_outputs()
@@ -1163,7 +1206,9 @@ async def test_request_output_collector():
 @pytest.mark.asyncio
 async def test_cumulative_output_collector_n():
     """Test collector correctly handles multiple outputs by index."""
-    collector = RequestOutputCollector(RequestOutputKind.CUMULATIVE)
+    collector = RequestOutputCollector(
+        RequestOutputKind.CUMULATIVE, request_id="my-request-id-int"
+    )
     outputs = [
         RequestOutput(
             request_id="my-request-id",
@@ -1242,11 +1287,13 @@ async def test_cumulative_output_collector_n():
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
-def test_abort_requests(runner: str, dummy_test_vectors):
+@pytest.mark.parametrize("abort_by", ["internal", "external"])
+def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
+            external_req_id=f"external-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
             eos_token_id=None,
@@ -1255,7 +1302,9 @@ def test_abort_requests(runner: str, dummy_test_vectors):
             cache_salt=None,
             data_parallel_rank=None,
             sampling_params=SamplingParams() if runner == "generate" else None,
-            pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+            pooling_params=(
+                PoolingParams(task="embed") if runner == "pooling" else None
+            ),
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
@@ -1265,14 +1314,25 @@ def test_abort_requests(runner: str, dummy_test_vectors):
             output_kind = request.sampling_params.output_kind
         else:
             output_kind = request.pooling_params.output_kind
-        queue = RequestOutputCollector(output_kind=output_kind)
+        queue = RequestOutputCollector(
+            output_kind=output_kind, request_id=request.request_id
+        )
         output_processor.add_request(request, None, queue=queue)
 
     # Test aborting a single request
     iteration_stats = IterationStats()
-    request_ids_to_abort = output_processor.abort_requests(
-        [requests[0].request_id], iteration_stats=iteration_stats
-    )
+    if abort_by == "internal":
+        request_ids_to_abort = output_processor.abort_requests(
+            [requests[0].request_id],
+            internal=True,
+            iteration_stats=iteration_stats,
+        )
+    else:
+        request_ids_to_abort = output_processor.abort_requests(
+            [requests[0].external_req_id],
+            internal=False,
+            iteration_stats=iteration_stats,
+        )
     assert isinstance(request_ids_to_abort, list)
     assert len(request_ids_to_abort) == 1
     assert request_ids_to_abort[0] == requests[0].request_id
@@ -1287,9 +1347,18 @@ def test_abort_requests(runner: str, dummy_test_vectors):
     remaining_request_ids = [req.request_id for req in requests[1:3]]
     expected_prompt_token_counts = {len(req.prompt_token_ids) for req in requests[1:3]}
     iteration_stats = IterationStats()
-    request_ids_to_abort = output_processor.abort_requests(
-        remaining_request_ids, iteration_stats=iteration_stats
-    )
+    if abort_by == "internal":
+        request_ids_to_abort = output_processor.abort_requests(
+            remaining_request_ids,
+            internal=True,
+            iteration_stats=iteration_stats,
+        )
+    else:
+        request_ids_to_abort = output_processor.abort_requests(
+            remaining_request_ids,
+            internal=False,
+            iteration_stats=iteration_stats,
+        )
     assert len(request_ids_to_abort) == 2
     assert set(request_ids_to_abort) == set(remaining_request_ids)
     # Verify stats were updated for both requests
@@ -1305,9 +1374,18 @@ def test_abort_requests(runner: str, dummy_test_vectors):
 
     # Test aborting non-existent request (should return empty list)
     iteration_stats = IterationStats()
-    request_ids_to_abort = output_processor.abort_requests(
-        ["non-existent-request"], iteration_stats=iteration_stats
-    )
+    if abort_by == "internal":
+        request_ids_to_abort = output_processor.abort_requests(
+            ["non-existent-request"],
+            internal=True,
+            iteration_stats=iteration_stats,
+        )
+    else:
+        request_ids_to_abort = output_processor.abort_requests(
+            ["non-existent-request"],
+            internal=False,
+            iteration_stats=iteration_stats,
+        )
     assert len(request_ids_to_abort) == 0
     # Verify no stats were added for non-existent request
     assert len(iteration_stats.finished_requests) == 0

@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -272,7 +273,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step_fn()
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -534,7 +536,9 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+                ):
                     raise TimeoutError(
                         "Timed out waiting for engines to send"
                         "initial message on input socket."
@@ -1376,7 +1380,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
-            if not sync_input_socket.poll(timeout=600_000):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
                     "message on input socket."
