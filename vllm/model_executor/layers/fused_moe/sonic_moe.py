@@ -207,7 +207,8 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         if activation not in ("silu", "silu_and_mul"):
             raise ValueError(
-                f"Sonic MoE only supports silu/silu_and_mul activation, got {activation}"
+                f"Sonic MoE only supports silu/silu_and_mul activation, "
+                f"got {activation}"
             )
 
         w1_sonic, w2_sonic = self._ensure_weights_converted(w1, w2)
@@ -287,6 +288,9 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
 
+_kernel_cache: dict[torch.dtype, mk.FusedMoEModularKernel] = {}
+
+
 def sonic_moe_forward(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -306,10 +310,13 @@ def sonic_moe_forward(
             "Requires: sonicmoe package + Hopper GPU (H100/H200)"
         )
 
-    fused_experts = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        SonicMoEExperts(out_dtype=hidden_states.dtype),
-    )
+    dtype = hidden_states.dtype
+    if dtype not in _kernel_cache:
+        _kernel_cache[dtype] = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            SonicMoEExperts(out_dtype=dtype),
+        )
+    fused_experts = _kernel_cache[dtype]
 
     return fused_experts(
         hidden_states=hidden_states,
