@@ -16,6 +16,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -387,6 +389,7 @@ def run_dp_sharded_mrope_vision_model(
     grid_thw_list: list[list[int]],
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
+    cudagraph_dispatcher: CudagraphDispatcher | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -462,43 +465,85 @@ def run_dp_sharded_mrope_vision_model(
         embed_dim_reduction_factor = (
             vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
         )
+        merge_size = vision_model.merge_kernel_size[0]
     else:
         embed_dim_reduction_factor = (
             vision_model.spatial_merge_size * vision_model.spatial_merge_size
         )
+        merge_size = vision_model.spatial_merge_size
 
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
     # padded to this length for tensor_model_parallel_all_gather
     # to work
-    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    vllm_config = get_current_vllm_config()
+    use_cudagraph = False
+
+    if (vllm_config and
+        vllm_config.compilation_config.vit_cudagraph_capture_sizes):
+        max_input_len = max(grouped_pixel_values_len) if grouped_pixel_values_len else 0
+        target_input_len = vllm_config.pad_for_vit_cudagraph(max_input_len)
+        max_len_per_rank = target_input_len // embed_dim_reduction_factor
+        use_cudagraph = True
+    else:
+        max_len_per_rank = (max(grouped_pixel_values_len) if grouped_pixel_values_len else 0) // embed_dim_reduction_factor
+
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
-    # Run the vision model on the local pixel_values_local
-    if rope_type == "rope_2d":
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list)
+    # Pad pixel_values_local for CUDA graph if needed
+    if use_cudagraph:
+        current_input_len = pixel_values_local.shape[0]
+        # target_input_len derived from max_len_per_rank for consistency
+        target_input_len = max_len_per_rank * embed_dim_reduction_factor
+        
+        if current_input_len < target_input_len:
+            padding_size = target_input_len - current_input_len
+            padding = torch.empty(
+                (padding_size, pixel_values_local.shape[1]),
+                device=pixel_values_local.device,
+                dtype=pixel_values_local.dtype,
             )
-            if isinstance(image_embeds_local, list):
-                image_embeds_local = torch.cat(image_embeds_local, dim=0)
-        else:
-            out_dim = getattr(vision_model.config, "hidden_size", None)
-            image_embeds_local = torch.empty(
-                (0, embed_dim_reduction_factor, out_dim),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
+            pixel_values_local = torch.cat([pixel_values_local, padding], dim=0)
+            local_grid_thw_list.append([1, merge_size, padding_size // merge_size])
+
+    # Context setup
+    if cudagraph_dispatcher is not None:
+        dispatcher = cudagraph_dispatcher
     else:
-        if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
+        dispatcher = CudagraphDispatcher(vllm_config)
+    batch_descriptor = BatchDescriptor(num_tokens=pixel_values_local.shape[0], is_vit=True)
+    cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(batch_descriptor, False)
+    with set_forward_context(
+        None, 
+        vllm_config=vllm_config, 
+        cudagraph_runtime_mode=cudagraph_runtime_mode, 
+        batch_descriptor=batch_descriptor
+    ):
+        # Run the vision model on the local pixel_values_local
+        if rope_type == "rope_2d":
+            if pixel_values_local.shape[0] > 0:
+                image_embeds_local = vision_model(
+                    pixel_values_local, torch.tensor(local_grid_thw_list)
+                )
+                if isinstance(image_embeds_local, list):
+                    image_embeds_local = torch.cat(image_embeds_local, dim=0)
+            else:
+                out_dim = getattr(vision_model.config, "hidden_size", None)
+                image_embeds_local = torch.empty(
+                    (0, embed_dim_reduction_factor, out_dim),
+                    device=pixel_values.device,
+                    dtype=pixel_values.dtype,
+                )
         else:
-            # Handle empty case
-            image_embeds_local = torch.empty(
-                (0, vision_model.out_hidden_size),
-                device=pixel_values.device,
-                dtype=pixel_values.dtype,
-            )
+            if pixel_values_local.shape[0] > 0:
+                image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
+            else:
+                # Handle empty case
+                image_embeds_local = torch.empty(
+                    (0, vision_model.out_hidden_size),
+                    device=pixel_values.device,
+                    dtype=pixel_values.dtype,
+                )
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work

@@ -1389,8 +1389,6 @@ class VllmConfig:
             and not self.model_config.enforce_eager
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.compile_mm_encoder
-            and self.model_config.multimodal_config is not None
-            and self.model_config.multimodal_config.mm_encoder_tp_mode != "data"
         ):
             # determine the vit_cudagraph_capture_sizes
             if self.compilation_config.vit_cudagraph_capture_sizes is not None:
@@ -1410,17 +1408,10 @@ class VllmConfig:
                     scheduler_config=self.scheduler_config,
                     mm_registry=MULTIMODAL_REGISTRY,
                 )
-                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 32768)
+                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 8192)
                 vit_cudagraph_capture_sizes = [
-                    i
-                    for i in [16, 32, 64, 128, 256]
-                    if i <= max_vit_cudagraph_capture_size
+                    i for i in [512, 1024, 1536] if i <= max_vit_cudagraph_capture_size
                 ]
-                if max_vit_cudagraph_capture_size >= 1024:
-                    # Step size 64 for small batch sizes, up to 2048(not included)
-                    vit_cudagraph_capture_sizes += list(
-                        range(512, min(max_vit_cudagraph_capture_size + 1, 2048), 64)
-                    )
                 if max_vit_cudagraph_capture_size >= 2048:
                     # Step size 128 for larger batch sizes
                     vit_cudagraph_capture_sizes += list(

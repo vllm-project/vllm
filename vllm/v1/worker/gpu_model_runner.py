@@ -2438,88 +2438,99 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-                original_num_imgs = -1
-                padded_num_tokens = -1
-                if self.vit_cudagraph_batch_sizes and "pixel_values" in mm_kwargs_group:
-                    pixel_values = mm_kwargs_group["pixel_values"]
-                    num_tokens = pixel_values.shape[0]
+                is_vit_dp_mode = (
+                    getattr(self.model_config.multimodal_config, "mm_encoder_tp_mode", None) == "data"
+                    and self.parallel_config.tensor_parallel_size > 1
+                )
+                if not is_vit_dp_mode:
+                    original_num_imgs = -1
+                    padded_num_tokens = -1
+                    if self.vit_cudagraph_batch_sizes and "pixel_values" in mm_kwargs_group:
+                        pixel_values = mm_kwargs_group["pixel_values"]
+                        num_tokens = pixel_values.shape[0]
 
-                    # Pad to the size expected by CUDA graph
-                    padded_num_tokens = self.vllm_config.pad_for_vit_cudagraph(
-                        num_tokens
-                    )
-
-                    if padded_num_tokens > num_tokens:
-                        assert (
-                            self.pixel_values_buffer is not None
-                            and self.image_grid_thw_buffer is not None
+                        # Pad to the size expected by CUDA graph
+                        padded_num_tokens = self.vllm_config.pad_for_vit_cudagraph(
+                            num_tokens
                         )
 
-                        self.pixel_values_buffer[:num_tokens].copy_(pixel_values)  # type: ignore
-                        mm_kwargs_group["pixel_values"] = self.pixel_values_buffer[
-                            :padded_num_tokens
-                        ]
-
-                        # Update image_grid_thw to account for padding
-                        if "image_grid_thw" in mm_kwargs_group:
-                            image_grid_thw = mm_kwargs_group["image_grid_thw"]
-                            num_images = image_grid_thw.shape[0]
-                            original_num_imgs = num_images
-                            padding_amount = padded_num_tokens - num_tokens
-
-                            # Treat padding as a new virtual image.
-                            # Assuming a fixed patch size where height is merge_size.
-                            merge_size = getattr(
-                                self.model_config.hf_config.vision_config,
-                                "spatial_merge_size",
-                                1,
+                        if padded_num_tokens > num_tokens:
+                            assert (
+                                self.pixel_values_buffer is not None
+                                and self.image_grid_thw_buffer is not None
                             )
-                            assert padding_amount % (merge_size * merge_size) == 0
-                            h_patches = merge_size
-                            w_patches = padding_amount // h_patches
-                            if num_images + 1 > self.image_grid_thw_buffer.shape[0]:
-                                new_size = max(
-                                    self.image_grid_thw_buffer.shape[0] * 2,
-                                    num_images + 1,
+
+                            self.pixel_values_buffer[:num_tokens].copy_(pixel_values)  # type: ignore
+                            mm_kwargs_group["pixel_values"] = self.pixel_values_buffer[
+                                :padded_num_tokens
+                            ]
+
+                            # Update image_grid_thw to account for padding
+                            if "image_grid_thw" in mm_kwargs_group:
+                                image_grid_thw = mm_kwargs_group["image_grid_thw"]
+                                num_images = image_grid_thw.shape[0]
+                                original_num_imgs = num_images
+                                padding_amount = padded_num_tokens - num_tokens
+
+                                # Treat padding as a new virtual image.
+                                # Assuming a fixed patch size where height is merge_size.
+                                merge_size = getattr(
+                                    self.model_config.hf_config.vision_config,
+                                    "spatial_merge_size",
+                                    1,
                                 )
-                                new_buffer = torch.zeros(
-                                    (new_size, 3),
+                                assert padding_amount % (merge_size * merge_size) == 0
+                                h_patches = merge_size
+                                w_patches = padding_amount // h_patches
+                                if num_images + 1 > self.image_grid_thw_buffer.shape[0]:
+                                    new_size = max(
+                                        self.image_grid_thw_buffer.shape[0] * 2,
+                                        num_images + 1,
+                                    )
+                                    new_buffer = torch.zeros(
+                                        (new_size, 3),
+                                        dtype=torch.long,
+                                        device=self.device,
+                                    )
+                                    self.image_grid_thw_buffer = new_buffer
+                                self.image_grid_thw_buffer[:num_images].copy_(
+                                    image_grid_thw
+                                )
+                                self.image_grid_thw_buffer[num_images] = torch.tensor(
+                                    [1, h_patches, w_patches],
                                     dtype=torch.long,
                                     device=self.device,
                                 )
-                                self.image_grid_thw_buffer = new_buffer
-                            self.image_grid_thw_buffer[:num_images].copy_(
-                                image_grid_thw
-                            )
-                            self.image_grid_thw_buffer[num_images] = torch.tensor(
-                                [1, h_patches, w_patches],
-                                dtype=torch.long,
-                                device=self.device,
-                            )
-                            mm_kwargs_group["image_grid_thw"] = (
-                                self.image_grid_thw_buffer[: num_images + 1]
-                            )
+                                mm_kwargs_group["image_grid_thw"] = (
+                                    self.image_grid_thw_buffer[: num_images + 1]
+                                )
 
-                # get batch_descriptor from dispatcher
-                batch_descriptor = BatchDescriptor(
-                    num_tokens=padded_num_tokens,
-                    is_vit=True,
-                )
-                cudagraph_runtime_mode, batch_descriptor = (
-                    self.cudagraph_dispatcher.dispatch(batch_descriptor, False)
-                )
-                with set_forward_context(
+                    # get batch_descriptor from dispatcher
+                    batch_descriptor = BatchDescriptor(
+                        num_tokens=padded_num_tokens,
+                        is_vit=True,
+                    )
+                    cudagraph_runtime_mode, batch_descriptor = (
+                        self.cudagraph_dispatcher.dispatch(batch_descriptor, False)
+                    )
+                    with set_forward_context(
                         None,
                         vllm_config=self.vllm_config,
                         cudagraph_runtime_mode=cudagraph_runtime_mode,
                         batch_descriptor=batch_descriptor,
-                    ), self.timed_encoder_operation(
+                        ), self.timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx, num_items
                     ):
-                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
-                # Remove the padded items before sanity check
-                if original_num_imgs != -1:
-                    curr_group_outputs = curr_group_outputs[:original_num_imgs]
+                        curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                        # Remove the padded items before sanity check
+                        if original_num_imgs != -1:
+                            curr_group_outputs = curr_group_outputs[:original_num_imgs]
+                else:
+                    with self.timed_encoder_operation(
+                        should_time, mm_lora_refs, current_item_idx, num_items
+                    ):
+                        mm_kwargs_group["cudagraph_dispatcher"] = self.cudagraph_dispatcher
+                        curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,

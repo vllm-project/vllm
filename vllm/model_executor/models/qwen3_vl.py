@@ -49,10 +49,10 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -1481,7 +1481,8 @@ class Qwen3VLForConditionalGeneration(
             )
 
     def _process_image_input(
-        self, image_input: Qwen2_5_VLImageInputs
+        self, image_input: Qwen2_5_VLImageInputs,
+        cudagraph_dispatcher: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1491,22 +1492,26 @@ class Qwen3VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            maybe_in_vit_cuda_graph_capture = is_forward_context_available()
             if self.vllm_config.is_in_compile:
                 with set_forward_context(None, self.vllm_config):
-                    if self.use_data_parallel:
+                    if self.use_data_parallel and not maybe_in_vit_cuda_graph_capture:
                         return run_dp_sharded_mrope_vision_model(
                             self.visual,
                             pixel_values,
                             grid_thw_list,
                             rope_type="rope_3d",
+                            cudagraph_dispatcher=cudagraph_dispatcher,
                         )
                     else:
                         image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
             else:
-                if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-                    )
+                if self.use_data_parallel and not maybe_in_vit_cuda_graph_capture:
+                    with set_current_vllm_config(self.vllm_config):
+                        return run_dp_sharded_mrope_vision_model(
+                            self.visual, pixel_values, grid_thw_list, rope_type="rope_3d",
+                            cudagraph_dispatcher=cudagraph_dispatcher,
+                        )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
@@ -1516,7 +1521,8 @@ class Qwen3VLForConditionalGeneration(
         return image_embeds.split(sizes)
 
     def _process_video_input(
-        self, video_input: Qwen2_5_VLVideoInputs
+        self, video_input: Qwen2_5_VLVideoInputs,
+        cudagraph_dispatcher: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1535,6 +1541,7 @@ class Qwen3VLForConditionalGeneration(
                         pixel_values_videos,
                         grid_thw_list,
                         rope_type="rope_3d",
+                        cudagraph_dispatcher=cudagraph_dispatcher,
                     )
                 else:
                     video_embeds = self.visual(
@@ -1983,6 +1990,7 @@ class Qwen3VLForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
+        cudagraph_dispatcher = kwargs.pop("cudagraph_dispatcher", None)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -1996,14 +2004,14 @@ class Qwen3VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input)
+                image_embeddings = self._process_image_input(multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher)
                 if self.is_multimodal_pruning_enabled:
                     image_embeddings = self._postprocess_image_embeds_evs(
                         image_embeddings, multimodal_input
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
+                video_embeddings = self._process_video_input(multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher)
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
