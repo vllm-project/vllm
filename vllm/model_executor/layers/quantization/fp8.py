@@ -878,6 +878,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
+        return None
         if (
             self.fp8_backend == Fp8MoeBackend.AITER
             or self.fp8_backend == Fp8MoeBackend.MARLIN
