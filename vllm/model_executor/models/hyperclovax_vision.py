@@ -1297,10 +1297,13 @@ class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
     """Processing info for HyperCLOVAX V2 (32B Think model and Omni model)."""
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        # Check if audio is supported (Omni model has audio_config)
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
-            return {"image": None, "video": None, "audio": None}
+        # Note: Omni model has audio_config but HF processor doesn't support
+        # 'audios' argument yet. Audio support is disabled until HF processor
+        # is updated to handle audio inputs.
+        # TODO: Enable audio when HF processor supports it
+        # hf_config = self.get_hf_config()
+        # if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+        #     return {"image": None, "video": None, "audio": None}
         return {"image": None, "video": None}
 
     def get_num_image_tokens(
@@ -1532,8 +1535,9 @@ class HCXVisionV2MultiModalProcessor(
             for modality in ("image", "video")
         ]
 
-        # Add audio prompt replacement if supported
-        if "audio" in placeholder:
+        # Add audio prompt replacement if supported AND audio data was processed
+        # (HF processor may not support audios even if model has audio_config)
+        if "audio" in placeholder and "audio" in out_mm_kwargs:
             updates.append(
                 PromptReplacement(
                     modality="audio",
