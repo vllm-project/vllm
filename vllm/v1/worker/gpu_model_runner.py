@@ -326,7 +326,7 @@ class GPUModelRunner(
         # https://github.com/vllm-project/vllm/issues/18019
         self.broadcast_pp_output = (
             self.parallel_config.distributed_executor_backend == "external_launcher"
-            and len(get_pp_group().ranks) > 0
+            and len(get_pp_group().ranks) > 1
         )
 
         # Model-related.
