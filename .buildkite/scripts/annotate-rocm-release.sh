@@ -14,8 +14,8 @@ PYTHON_VERSION=$(buildkite-agent meta-data get rocm-python-version 2>/dev/null |
 PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
 # S3 URLs
-S3_BUCKET="${S3_BUCKET:-vllm-rocm-wheels-embeddedllm-2}"
-S3_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+S3_BUCKET="${S3_BUCKET:-vllm-wheels-dev}"
+S3_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 S3_URL="https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com"
 ROCM_PATH="rocm/${BUILDKITE_COMMIT}"
 

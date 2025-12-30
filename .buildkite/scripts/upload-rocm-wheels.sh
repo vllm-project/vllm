@@ -16,7 +16,7 @@
 set -ex
 
 # ======== Configuration ========
-BUCKET="${S3_BUCKET:-vllm-wheels}"
+BUCKET="${S3_BUCKET:-vllm-wheels-dev}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
 S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
