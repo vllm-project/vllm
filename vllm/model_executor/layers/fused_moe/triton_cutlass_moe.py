@@ -9,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.platform import current_platform
+from vllm.platforms import current_platform
 
 
 class TritonOrCutlassExperts(FallbackExperts):
@@ -52,7 +52,7 @@ class TritonOrCutlassExperts(FallbackExperts):
                 expert_tokens_meta,
             )
         else:
-            return self.fallback_experts.workspace_shapes(
+            return self.experts.workspace_shapes(
                 M,
                 N,
                 K,
@@ -67,7 +67,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ):
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
         # Small batch fallback for sm100.
         if self.is_sm100 and hidden_states.shape[0] <= 8:
             return self.fallback_experts
