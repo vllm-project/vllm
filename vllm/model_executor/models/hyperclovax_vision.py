@@ -1360,36 +1360,16 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         self,
         mm_counts: Mapping[str, int],
     ) -> str:
-        hf_config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        # Get placeholder tokens from config
-        image_token = vocab.get(V2_IMAGE_TOKEN, hf_config.image_token_id)
-        video_token = vocab.get(V2_VIDEO_TOKEN, hf_config.video_token_id)
-        audio_token = vocab.get(
-            V2_AUDIO_TOKEN, getattr(hf_config, "audio_token_id", None)
-        )
-
-        # Return placeholder string
+        # Use actual token strings directly - these will be tokenized by HF processor
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
         num_audios = mm_counts.get("audio", 0)
 
-        image_placeholder = (
-            chr(image_token) if isinstance(image_token, int) else image_token
-        )
-        video_placeholder = (
-            chr(video_token) if isinstance(video_token, int) else video_token
-        )
-        audio_placeholder = (
-            chr(audio_token) if isinstance(audio_token, int) else (audio_token or "")
-        )
-
+        # Use the token strings that HF processor expects
         return (
-            image_placeholder * num_images
-            + video_placeholder * num_videos
-            + audio_placeholder * num_audios
+            V2_IMAGE_TOKEN * num_images
+            + V2_VIDEO_TOKEN * num_videos
+            + V2_AUDIO_TOKEN * num_audios
         )
 
     def get_dummy_mm_data(
