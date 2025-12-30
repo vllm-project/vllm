@@ -45,6 +45,8 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request(
     params: SamplingParams, prompt_tokens_ids: list[int] | None = None
@@ -52,8 +54,12 @@ def make_request(
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
 
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=prompt_tokens_ids,
         mm_features=None,
         sampling_params=params,
@@ -727,6 +733,7 @@ def test_kv_cache_events(
         )
         assert event.parent_block_hash is None, "Parent block hash should be None"
         assert event.lora_id is None, "Lora id should be None"
+        assert event.lora_name is None, "Lora name should be None"
         assert len(event.token_ids) == num_blocks * block_size, (
             "Token ids should be the same as the custom tokens"
         )
