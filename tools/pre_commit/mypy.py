@@ -24,8 +24,10 @@ import sys
 import regex as re
 
 FILES = [
+    "tests/engine",
     "vllm/*.py",
     "vllm/assets",
+    "vllm/config",
     "vllm/distributed",
     "vllm/engine",
     "vllm/entrypoints",
@@ -53,7 +55,43 @@ FILES = [
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move the following directories to FILES
 SEPARATE_GROUPS = [
-    "tests",
+    # tests
+    "tests/basic_correctness",
+    "tests/models",
+    "tests/reasoning",
+    "tests/tokenizers_",
+    "tests/v1",
+    "tests/benchmarks",
+    "tests/entrypoints",
+    "tests/multimodal",
+    "tests/rocm",
+    "tests/tool_parsers",
+    "tests/vllm_test_utils",
+    "tests/compile",
+    "tests/evals",
+    "tests/plugins",
+    "tests/samplers",
+    "tests/tools",
+    "tests/weight_loading",
+    "tests/config",
+    "tests/kernels",
+    "tests/plugins_tests",
+    "tests/speculative_decoding",
+    "tests/tool_use",
+    "tests/cuda",
+    "tests/kv_transfer",
+    "tests/prompts",
+    "tests/standalone_tests",
+    "tests/tpu",
+    "tests/detokenizer",
+    "tests/lora",
+    "tests/system_messages",
+    "tests/transformers_utils",
+    "tests/distributed",
+    "tests/model_executor",
+    "tests/quantization",
+    "tests/tokenization",
+    "tests/utils_",
     # v0 related
     "vllm/attention",
     "vllm/compilation",
@@ -68,7 +106,6 @@ SEPARATE_GROUPS = [
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
-    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",

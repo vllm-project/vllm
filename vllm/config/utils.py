@@ -9,17 +9,18 @@ import inspect
 import json
 import pathlib
 import textwrap
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
 import regex as re
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
+from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
-from typing_extensions import runtime_checkable
+from typing_extensions import dataclass_transform, runtime_checkable
 
 from vllm.logger import init_logger
 
@@ -31,43 +32,47 @@ else:
     DataclassInstance = Any
 
 ConfigType = type[DataclassInstance]
-ConfigT = TypeVar("ConfigT", bound=ConfigType)
+ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
+@overload
 def config(
-    cls: type | None = None,
+    cls: type[ConfigT],
     *,
     config: ConfigDict | None = None,
-    **kwargs,
-) -> type[DataclassInstance]:
-    """
-    A decorator that ensures all fields in a dataclass have default values
-    and that each field has a docstring.
+    **kwargs: Any,
+) -> type[ConfigT]: ...
 
-    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
-    provided by `get_kwargs` will be
-    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
-    `cli_arg` as a JSON string which gets validated by `pydantic`.
 
-    Config validation is performed by the tools/pre_commit/validate_config.py
-    script, which is invoked during the pre-commit checks.
-    """
+@overload
+def config(
+    cls: None = None,
+    *,
+    config: ConfigDict | None = None,
+    **kwargs: Any,
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
-    # Start with defaults
+
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(
+    cls: type[ConfigT] | None = None,
+    *,
+    config: ConfigDict | None = None,
+    **kwargs: Any,
+) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
+    # Extra fields are forbidden by default
     merged_config = ConfigDict(extra="forbid")
     if config is not None:
         merged_config.update(config)
 
-    # Handle both @config and @config(...) syntax
     def decorator(cls):
         return dataclass(cls, config=merged_config, **kwargs)
 
+    # Called with arguments: @config(config=...)
     if cls is None:
-        # Called with arguments: @config(config=...)
         return decorator
-    else:
-        # Called without arguments: @config
-        return decorator(cls)
+    # Called without arguments: @config
+    return decorator(cls)
 
 
 def get_field(cls: ConfigType, name: str) -> Field:
@@ -85,7 +90,8 @@ def get_field(cls: ConfigType, name: str) -> Field:
         if isinstance(default, FieldInfo):
             # Handle pydantic.Field defaults
             if default.default_factory is not None:
-                return field(default_factory=default.default_factory)
+                default_factory = cast(Callable[[], Any], default.default_factory)
+                return field(default_factory=default_factory)
             else:
                 default = default.default
         return field(default=default)
@@ -97,7 +103,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
 
 def getattr_iter(
     object: object,
-    names: Iterable[str],
+    names: Sequence[str],
     default: Any | None = None,
     default_factory: Callable[[], Any] | None = None,
     warn: bool = False,
