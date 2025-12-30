@@ -151,6 +151,87 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.skipif(
     not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
 )
+def test_partition_wrapper_applied_on_aot_load(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that partition wrappers are applied when loading AOT cached functions.
+
+    This test verifies the fix for GitHub issue #31439 where AOT compile
+    caused 2x latency regression when use_inductor_graph_partition=True.
+    The root cause was that partition wrapper context was bypassed when
+    loading from AOT cache.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from vllm.config import CUDAGraphMode
+
+    with monkeypatch.context() as m:
+        args = (torch.randn(10, 10),)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+            m.setenv("VLLM_USE_AOT_COMPILE", "1")
+
+            # Create config with partition enabled
+            vllm_config = VllmConfig(
+                compilation_config=CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                    use_inductor_graph_partition=True,
+                    cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                )
+            )
+
+            # First compilation - save to cache
+            with use_vllm_config(vllm_config):
+                compiled_mod = CompiledMod(vllm_config=vllm_config)
+                compiled_mod(*args)
+            disable_envs_cache()
+
+            # Mock set_customized_partition_wrappers to track calls
+            original_set_wrappers = torch._inductor.utils.set_customized_partition_wrappers
+            wrapper_calls = []
+
+            def tracking_set_wrappers(wrapper):
+                wrapper_calls.append(wrapper)
+                return original_set_wrappers(wrapper)
+
+            # Second run - load from cache, verify partition wrapper applied
+            m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+            vllm_config = VllmConfig(
+                compilation_config=CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                    use_inductor_graph_partition=True,
+                    cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                )
+            )
+
+            with (
+                use_vllm_config(vllm_config),
+                patch.object(
+                    torch._inductor.utils,
+                    "set_customized_partition_wrappers",
+                    tracking_set_wrappers,
+                ),
+            ):
+                compiled_mod = CompiledMod(vllm_config=vllm_config)
+                compiled_mod(*args)
+
+            # Verify partition wrapper was called (set and then cleared)
+            # First call sets the wrapper (non-None), second clears it (None)
+            assert len(wrapper_calls) >= 2, (
+                f"Expected partition wrapper to be set and cleared, "
+                f"got {len(wrapper_calls)} calls"
+            )
+            assert wrapper_calls[0] is not None, (
+                "First call should set a wrapper function"
+            )
+            assert wrapper_calls[-1] is None, (
+                "Last call should clear the wrapper"
+            )
+
+
+@pytest.mark.skipif(
+    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+)
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
     """
