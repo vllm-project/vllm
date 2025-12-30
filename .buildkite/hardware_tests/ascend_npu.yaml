@@ -1,4 +1,4 @@
-group: Ascend NPU
+group: Hardware
 depends_on: ~
 steps:
   - label: "Ascend NPU Test"

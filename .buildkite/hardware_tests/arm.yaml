@@ -1,4 +1,4 @@
-group: Hardware ARM
+group: Hardware
 steps:
   - label: "Arm CPU Test"
     soft_fail: true

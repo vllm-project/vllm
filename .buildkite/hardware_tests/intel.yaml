@@ -1,4 +1,4 @@
-group: Intel
+group: Hardware
 depends_on: ~
 steps:
   - label: "Intel CPU Test"
