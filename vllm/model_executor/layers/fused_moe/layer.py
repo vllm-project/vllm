@@ -2039,7 +2039,6 @@ class FusedMoE(CustomOp):
         num_shared_experts: int = 0,
         mix_placement: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-
         # In the returned mapping:
         # - `expert_id` is the physical expert id
         # - `weight_name` contains the weight name of the logical expert
