@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 import multiprocessing
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -172,7 +174,7 @@ class StructuredOutputManager:
 
     def _fill_bitmasks(
         self,
-        batch: list[tuple[StructuredOutputGrammar, int, bool]],
+        batch: Iterable[tuple[StructuredOutputGrammar, int, bool]],
     ) -> None:
         assert self._grammar_bitmask is not None
         for grammar, index, apply_bitmask in batch:
@@ -265,16 +267,16 @@ class StructuredOutputManager:
                 apply_bitmask = self.should_fill_bitmask(request)
 
                 state_advancements = 0
-                req_tokens = scheduled_spec_decode_tokens.get(req_id, [])
-                for i, token in enumerate(req_tokens + [None]):
+                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                for token in itertools.chain(req_tokens, (None,)):
                     self._fill_bitmasks(
-                        [
+                        (
                             (
                                 structured_output_request.grammar,
                                 cumulative_index,
                                 apply_bitmask,
-                            )
-                        ]
+                            ),
+                        )
                     )
 
                     if (
