@@ -956,13 +956,6 @@ class NemotronFlashDecoderLayer(nn.Module):
 
             hidden_states = residual + hidden_states
 
-            # Attention layers also have MoE after the attention
-            if self.has_moe:
-                residual = hidden_states
-                hidden_states = self.pre_moe_layernorm(hidden_states)
-                hidden_states = self.moe(hidden_states)
-                hidden_states = residual + hidden_states
-
         return hidden_states
 
 
