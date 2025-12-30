@@ -782,7 +782,7 @@ def context_attention_fwd(
     max_seq_len = 0 if max_seq_len is None else max_seq_len
     extra_kargs = {}
     if current_platform.is_rocm():
-        extra_kargs = {"kpack": 1, "waves_per_eu": 2}
+        extra_kargs = {}
 
     real_block_size = v_cache.shape[3]
 
