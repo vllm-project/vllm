@@ -134,7 +134,11 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
     response = await client.post(
         "load_lora_adapter",
         cast_to=str,
-        body={"lora_name": adapter_name, "lora_path": qwen3_woofing_lora_files},
+        body={
+            "lora_name": adapter_name,
+            "lora_path": qwen3_woofing_lora_files,
+            "load_inplace": True,
+        },
     )
     assert "success" in response.lower()
 
@@ -169,7 +173,6 @@ async def test_load_lora_adapter_with_load_inplace_false_errors(
             body={
                 "lora_name": adapter_name,
                 "lora_path": qwen3_meowing_lora_files,
-                "load_inplace": False,
             },
         )
 
