@@ -403,8 +403,16 @@ steps:
 
         # Load base Docker image and capture the tag
         echo "Loading base Docker image..."
-        gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load
-        BASE_IMAGE_TAG=$$(docker images rocm/vllm-dev --format "{{.Repository}}:{{.Tag}}" | head -1)
+        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
+        echo "$${LOAD_OUTPUT}"
+        # Extract the actual loaded image tag from "Loaded image: <tag>" output
+        # This avoids picking up stale images (like rocm/vllm-dev:nightly) already on the agent
+        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
+        if [ -z "$${BASE_IMAGE_TAG}" ]; then
+          echo "ERROR: Failed to extract image tag from docker load output"
+          echo "Load output was: $${LOAD_OUTPUT}"
+          exit 1
+        fi
         echo "Loaded base image: $${BASE_IMAGE_TAG}"
 
         # Prepare base wheels for Docker build context
