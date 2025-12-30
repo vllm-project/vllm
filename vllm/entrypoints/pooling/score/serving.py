@@ -63,7 +63,7 @@ def _maybe_format_reranker_inputs(
     # Default values for Qwen3-Reranker (from
     # examples/pooling/score/offline_reranker.py).
     default_prefix = (
-        '<|im_start|>system\nJudge whether the Document meets the requirements '
+        "<|im_start|>system\nJudge whether the Document meets the requirements "
         "based on the Query and the Instruct provided. Note that the answer can "
         'only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
     )
