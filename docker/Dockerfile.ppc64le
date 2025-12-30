@@ -27,7 +27,7 @@ RUN  microdnf install -y dnf && \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
         dnf config-manager --set-enabled crb
 
-RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel && \
+RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel yajl-devel && \
     dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-26.el9.noarch 
 
 
@@ -226,7 +226,7 @@ ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    dnf install llvm15 llvm15-devel yajl-devel -y && \
+    dnf install llvm15 llvm15-devel -y && \
     rpm -ivh --nodeps https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-16.el9.ppc64le.rpm && \
     source /opt/rh/gcc-toolset-14/enable && \
     git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
