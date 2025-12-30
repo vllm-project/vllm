@@ -75,8 +75,9 @@ def select_fp8_moe_backend(
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    # TODO(rob): update so that each mk expresses supported features.
-    # TODO(rob): update so that we have priority order for each.
+    # TODO(rob): in a future PR, we will query each mk for
+    # supported features and return the mk directly, just like
+    # we do for the Attention Backend.
 
     if with_lora_support:
         return Fp8MoeBackend.TRITON
