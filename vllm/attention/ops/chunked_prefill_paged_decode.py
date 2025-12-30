@@ -127,40 +127,36 @@ def kernel_paged_attention_2d(
 
     num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
 
+    offs_n = tl.arange(0, BLOCK_SIZE)
+    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     # iterate through tiles
     for j in range(0, num_blocks):
-        start_n = j * BLOCK_SIZE  # BLOCK_SIZE = 32
+        start_n = j * BLOCK_SIZE
         # Calculate the logical location within a non-standard physical block,
         # such as 544 in Qwen/Qwen3-Next-80B-A3B-Thinking.
-        logical_block_index = start_n // PHYSICAL_BLOCK_SIZE
-        internal_offset = start_n % PHYSICAL_BLOCK_SIZE
-
-        # Load the actual physical block ID from block_table
-        physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + logical_block_index
-        )
-
-        offs_n = tl.arange(0, BLOCK_SIZE)
-        offs_d = tl.arange(0, HEAD_SIZE_PADDED)
-
-        # Physical index vector
-        actual_indices = internal_offset + offs_n
+        # Supports non-contiguous mapping
+        # from logical blocks to physical blocks
+        abs_token_idx = start_n + offs_n
+        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
+        # Vectorized loading of physical block IDs
+        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
         # 5D addressing logic of K
         k_offset = (
-            physical_block_idx * stride_k_cache_0
+            p_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_1
             + (offs_d[:, None] // x) * stride_k_cache_2
-            + actual_indices[None, :] * stride_k_cache_3
+            + internal_offsets[None, :] * stride_k_cache_3
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
         # 4D addressing logic of V (Slot is innermost)
         v_offset = (
-            physical_block_idx * stride_v_cache_0
+            p_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_1
             + offs_d[None, :] * stride_v_cache_2
-            + actual_indices[:, None] * stride_v_cache_3
+            + internal_offsets[:, None] * stride_v_cache_3
         )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
@@ -398,7 +394,7 @@ def chunked_prefill_paged_decode(
         # to be compatible with Triton constraints.
         # For Gemma (16), this will become 16;
         # For Qwen3 (544), it will remain 32.
-        TRITON_BLOCK_SIZE = min(32, real_block_size)
+        TRITON_BLOCK_SIZE = 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()

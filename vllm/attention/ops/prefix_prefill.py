@@ -155,37 +155,37 @@ def _fwd_kernel(
     for start_n in tl.range(
         0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
     ):
-        # Explicitly calculate the current absolute offset
-        # relative to the physical block
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
-        # bn_logical_idx = start_n // 544 Combined with internal_offset = start_n % 544,
-        # Process 17 32-Tile blocks. When the number of tiles accumulates to 544,
-        # bn_logical_idx will automatically increment by 1,
-        # and the next physical block ID will be read from B_Loc.
-        bn_logical_idx = start_n // PHYSICAL_BLOCK_SIZE
-        bn_internal_offset = start_n % PHYSICAL_BLOCK_SIZE
+        # Calculate the logical block index of each of the 32 tokens
+        # in the current Tile (handling cross-block cases).
+        token_indices = start_n + offs_bs_n
+        bn_logical_indices = token_indices // PHYSICAL_BLOCK_SIZE
+
+        # 2. Vectorized loading of physical block IDs from B_Loc
         bn = tl.load(
-            B_Loc + cur_batch * stride_b_loc_b + bn_logical_idx * stride_b_loc_s
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical_indices * stride_b_loc_s
         ).to(tl.int64)
-        # Calculate the physical location of this set of 32 tokens.
-        current_loc_in_physical = bn_internal_offset + offs_bs_n
+
+        # 3. Calculate the exact offset of
+        # each token within its physical block.
+        internal_offsets = token_indices % PHYSICAL_BLOCK_SIZE
 
         # Addressing of K (5D)
         off_k = (
-            bn * stride_k_cache_bs
+            bn[None, :] * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
             + (offs_d[:, None] // x) * stride_k_cache_d
-            + current_loc_in_physical[None, :] * stride_k_cache_bl
+            + internal_offsets[None, :] * stride_k_cache_bl
             + (offs_d[:, None] % x) * stride_k_cache_x
         )
 
         # Addressing of V (4D)
         off_v = (
-            bn * stride_v_cache_bs
+            bn[:, None] * stride_v_cache_bs
             + cur_kv_head * stride_v_cache_h
             + offs_d[None, :] * stride_v_cache_d
-            + current_loc_in_physical[:, None] * stride_v_cache_bl
+            + internal_offsets[:, None] * stride_v_cache_bl
         )
 
         if (
@@ -785,12 +785,7 @@ def context_attention_fwd(
         extra_kargs = {}
 
     real_block_size = v_cache.shape[3]
-    # Ensure the processing granularity does not exceed
-    # the physical block size and remains a power of 2
-    # to be compatible with Triton constraints.
-    # For Gemma (16), this will become 16;
-    # For Qwen3 (544), it will remain 32.
-    SAFE_BLOCK_SIZE = min(32, real_block_size)
+    TRITON_BLOCK_SIZE = 32
 
     grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid](
@@ -832,7 +827,7 @@ def context_attention_fwd(
         stride_v_cache_h=v_cache.stride(1),
         stride_v_cache_d=v_cache.stride(2),
         stride_v_cache_bl=v_cache.stride(3),
-        BLOCK_SIZE=SAFE_BLOCK_SIZE,
+        BLOCK_SIZE=TRITON_BLOCK_SIZE,
         PHYSICAL_BLOCK_SIZE=real_block_size,
         num_queries_per_kv=num_queries_per_kv,
         IN_PRECISION=IN_PRECISION,
@@ -841,8 +836,8 @@ def context_attention_fwd(
         SLIDING_WINDOW=sliding_window,
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
-        BLOCK_M=SAFE_BLOCK_SIZE,
-        BLOCK_N=SAFE_BLOCK_SIZE,
+        BLOCK_M=TRITON_BLOCK_SIZE,
+        BLOCK_N=TRITON_BLOCK_SIZE,
         num_unroll_cache=4,
         num_unroll_request=1,
         num_warps=4,
