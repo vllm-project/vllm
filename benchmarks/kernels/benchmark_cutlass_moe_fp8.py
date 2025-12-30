@@ -162,7 +162,6 @@ def bench_run(
                 activation="silu",
                 global_num_experts=num_experts,
             )
-
     torch.cuda.synchronize()
 
     # Create CUDA graphs for Triton (match benchmark_moe.py pattern exactly)
