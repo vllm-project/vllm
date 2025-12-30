@@ -9,6 +9,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    TritonExperts,
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -258,13 +259,15 @@ def make_fp8_moe_kernel(
                 quant_config=moe_quant_config,
             ),
         )
-    else:
-        assert fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.TRITON]
+    elif fp8_backend == Fp8MoeBackend.DEEPGEMM:
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            TritonOrDeepGemmExperts(
-                quant_config=moe_quant_config,
-                allow_deep_gemm=(fp8_backend == Fp8MoeBackend.DEEPGEMM),
-            ),
+            TritonOrDeepGemmExperts(quant_config=moe_quant_config),
+        )
+    else:
+        assert fp8_backend == Fp8MoeBackend.TRITON
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            TritonExperts(quant_config=moe_quant_config),
         )
     return kernel, use_inplace

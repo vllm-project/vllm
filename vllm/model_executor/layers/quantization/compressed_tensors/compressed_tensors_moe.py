@@ -982,6 +982,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
             BatchedTritonExperts,
         )
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            TritonExperts,
+        )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
@@ -1011,11 +1014,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 )
 
         else:
-            logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
-            return TritonOrDeepGemmExperts(
-                self.moe_quant_config,
-                allow_deep_gemm=self.fp8_backend == Fp8MoeBackend.DEEPGEMM,
-            )
+            if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
+                logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
+                return TritonOrDeepGemmExperts(self.moe_quant_config)
+            else:
+                logger.debug("TritonExperts(%s)", self.__class__.__name__)
+                return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
