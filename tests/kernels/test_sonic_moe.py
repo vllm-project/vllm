@@ -113,7 +113,11 @@ def test_is_valid_sonic_moe_large_topk():
 
 
 @requires_cuda
-def test_sonic_moe_forward_not_implemented():
+def test_sonic_moe_forward_unsupported():
+    """Test that sonic_moe_forward raises RuntimeError on unsupported systems."""
+    if is_sonic_moe_supported():
+        pytest.skip("Sonic MoE is supported on this system")
+
     M, K, N = 128, 512, 1024
     num_experts, top_k = 8, 2
 
@@ -123,12 +127,8 @@ def test_sonic_moe_forward_not_implemented():
     topk_weights = torch.randn(M, top_k, dtype=torch.float16, device="cuda")
     topk_ids = torch.randint(0, num_experts, (M, top_k), device="cuda")
 
-    if is_sonic_moe_supported():
-        with pytest.raises(NotImplementedError):
-            sonic_moe_forward(hidden_states, w1, w2, topk_weights, topk_ids)
-    else:
-        with pytest.raises(RuntimeError):
-            sonic_moe_forward(hidden_states, w1, w2, topk_weights, topk_ids)
+    with pytest.raises(RuntimeError):
+        sonic_moe_forward(hidden_states, w1, w2, topk_weights, topk_ids)
 
 
 def test_import_from_fused_moe():
