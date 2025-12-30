@@ -13,7 +13,7 @@ from vllm.platform import current_platform
 
 
 class TritonOrCutlassExperts(FallbackExperts):
-    """Cutlass with fallback to Triton for low latency shapes."""
+    """Cutlass with fallback to Triton for low latency shapes on SM100."""
 
     def __init__(
         self,
