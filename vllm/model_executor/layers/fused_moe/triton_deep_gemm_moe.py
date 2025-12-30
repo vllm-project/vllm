@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import ABC, abstractmethod
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -12,76 +14,60 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import (
-    get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
 
 
-class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FallbackExperts(ABC, mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        quant_config: FusedMoEQuantConfig,
-        allow_deep_gemm: bool = False,
+        experts: mk.FusedMoEPermuteExpertsUnpermute,
+        fallback_experts: mk.FusedMoEPermuteExpertsUnpermute,
     ):
-        super().__init__(quant_config)
+        super().__init__(experts.quant_config)
 
-        self.triton_expert = TritonExperts(quant_config)
-
-        self.allow_deep_gemm = (
-            allow_deep_gemm
-            and self.quant_config.use_fp8_w8a8
-            and self.block_shape == get_mk_alignment_for_contiguous_layout()
-        )
-
-        self.deep_gemm_expert = (
-            DeepGemmExperts(self.quant_config) if self.allow_deep_gemm else None
-        )
+        self.fallback_experts = fallback_experts
+        self.experts = experts
 
     @property
     def activation_formats(
         self,
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         assert (
-            self.deep_gemm_expert is None
-            or self.triton_expert.activation_formats
-            == self.deep_gemm_expert.activation_formats
+            self.fallback_experts.activation_formats == self.expert.activation_formats
         )
-        return self.triton_expert.activation_formats
+        return self.fallback_experts.activation_formats
 
     def supports_chunking(self) -> bool:
-        dge = self.deep_gemm_expert
-        te = self.triton_expert
-        return (dge is None or dge.supports_chunking()) and (
-            te is None or te.supports_chunking()
+        return (
+            self.expert.supports_chunking()
+            and self.fallback_experts.supports_chunking()
         )
 
     def supports_expert_map(self) -> bool:
-        dge = self.deep_gemm_expert
-        te = self.triton_expert
-        return (dge is None or dge.supports_expert_map()) and (
-            te is None or te.supports_expert_map()
+        return (
+            self.expert.supports_expert_map()
+            and self.fallback_experts.supports_expert_map()
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        dge = self.deep_gemm_expert
-        te = self.triton_expert
-        dge_war = dge.finalize_weight_and_reduce_impl() if dge else None
-        te_war = te.finalize_weight_and_reduce_impl() if te else None
-        is_dge_war = dge_war is not None
-        is_te_war = te_war is not None
+        e_war = self.expert.finalize_weight_and_reduce_impl()
+        fbe_war = self.fallback_experts.finalize_weight_and_reduce_impl()
+        is_dge_war = e_war is not None
+        is_fbe_war = fbe_war is not None
 
-        if is_dge_war and is_te_war:
-            assert dge_war == te_war, (
+        if is_dge_war and is_fbe_war:
+            assert e_war == fbe_war, (
                 "Both implementations should agree on WeightAndReduce impls. "
-                f"Got dge_war: {dge_war}, and te_war: {te_war}"
+                f"Got e_war: {e_war}, and fbe_war: {fbe_war}"
             )
 
-        if dge_war is not None:
-            return dge_war
+        if e_war is not None:
+            return e_war
+        assert fbe_war is not None
+        return fbe_war
 
-        assert te_war is not None
-        return te_war
-
+    @abstractmethod
     def workspace_shapes(
         self,
         M: int,
@@ -92,32 +78,18 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # Note: the deep gemm workspaces are strictly larger than the triton
-        # workspaces so we can be pessimistic here and allocate for DeepGemm
-        # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and (
-            is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K)
-        ):
-            assert self.deep_gemm_expert is not None
-            return self.deep_gemm_expert.workspace_shapes(
-                M,
-                N,
-                K,
-                topk,
-                global_num_experts,
-                local_num_experts,
-                expert_tokens_meta,
-            )
-        else:
-            return self.triton_expert.workspace_shapes(
-                M,
-                N,
-                K,
-                topk,
-                global_num_experts,
-                local_num_experts,
-                expert_tokens_meta,
-            )
+        """Logic for allocating workspace depending on experts implementation."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _select_experts_impl(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        """Logic for dispatching between experts implementation."""
+        raise NotImplementedError
 
     def apply(
         self,
@@ -137,13 +109,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        use_deep_gemm = self.allow_deep_gemm and (
-            is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2)
-        )
-
-        experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
-        assert experts is not None
-
+        experts = self._select_experts_impl(hidden_states, w1, w2)
         experts.apply(
             output,
             hidden_states,
@@ -161,3 +127,56 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_tokens_meta,
             apply_router_weight_on_input,
         )
+
+
+class TritonOrDeepGemmExperts(FallbackExperts):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        super().__init__(
+            experts=DeepGemmExperts(quant_config),
+            fallback_experts=TritonExperts(quant_config),
+        )
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # Note: the deep gemm workspaces are strictly larger than the triton
+        # workspaces so we can be pessimistic here and allocate for DeepGemm
+        # even if we fall back to triton later, e.g. if expert maps are set.
+        if is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K):
+            return self.experts.workspace_shapes(
+                M,
+                N,
+                K,
+                topk,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+            )
+        else:
+            return self.fallback_experts.workspace_shapes(
+                M,
+                N,
+                K,
+                topk,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+            )
+
+    def select_gemm_impl(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+    ):
+        if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
+            return self.experts
+        else:
+            return self.fallback_experts
