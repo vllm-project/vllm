@@ -124,6 +124,8 @@ _TEXT_GENERATION_MODELS = {
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision", "HCXVisionV2ForCausalLM"),
+    # HyperCLOVAX text-only model (LLaMA-based)
+    "HyperCLOVAXForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
