@@ -1524,15 +1524,24 @@ class HCXVisionV2MultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
-        placeholder = {
+
+        # Use token IDs for replacement (what gets inserted into prompt)
+        placeholder_ids = {
             "image": hf_config.image_token_id,
             "video": hf_config.video_token_id,
+        }
+
+        # Use string tokens for target matching (what we search for in prompt)
+        placeholder_strs = {
+            "image": V2_IMAGE_TOKEN,
+            "video": V2_VIDEO_TOKEN,
         }
 
         # Add audio placeholder if audio is supported
         audio_token_id = getattr(hf_config, "audio_token_id", None)
         if audio_token_id is not None:
-            placeholder["audio"] = audio_token_id
+            placeholder_ids["audio"] = audio_token_id
+            placeholder_strs["audio"] = V2_AUDIO_TOKEN
 
         def get_replacement_v2_vision(
             item_idx: int,
@@ -1548,7 +1557,7 @@ class HCXVisionV2MultiModalProcessor(
             merge_size = hf_config.vision_config.spatial_merge_size
 
             num_tokens = int(grid_thw.prod()) // (merge_size**2)
-            return [placeholder[modality]] * num_tokens
+            return [placeholder_ids[modality]] * num_tokens
 
         def get_replacement_v2_audio(
             item_idx: int,
@@ -1571,12 +1580,12 @@ class HCXVisionV2MultiModalProcessor(
                 else:
                     num_tokens = 0
 
-            return [placeholder["audio"]] * num_tokens
+            return [placeholder_ids["audio"]] * num_tokens
 
         updates: list[PromptUpdate] = [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=placeholder_strs[modality],  # Use string token for matching
                 replacement=partial(
                     get_replacement_v2_vision,
                     modality=modality,
@@ -1588,11 +1597,11 @@ class HCXVisionV2MultiModalProcessor(
 
         # Add audio prompt replacement if supported AND audio data was processed
         # (HF processor may not support audios even if model has audio_config)
-        if "audio" in placeholder and "audio" in out_mm_kwargs:
+        if "audio" in placeholder_ids and "audio" in out_mm_kwargs:
             updates.append(
                 PromptReplacement(
                     modality="audio",
-                    target=[placeholder["audio"]],
+                    target=placeholder_strs["audio"],  # Use string token for matching
                     replacement=partial(
                         get_replacement_v2_audio,
                         out_mm_kwargs=out_mm_kwargs,
