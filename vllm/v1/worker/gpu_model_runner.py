@@ -610,13 +610,6 @@ class GPUModelRunner(
             ]
             self.is_mm_embed_idx = 0
 
-            # START: Add persistent buffers for ViT inputs
-            # Use a large enough size for the CUDA graph
-            # The feature dimension is model-specific. We'll initialize
-            # the buffer lazily on the first run to get this dimension.
-            self.pixel_values_buffer: torch.Tensor | None = None
-            self.image_grid_thw_buffer: torch.Tensor | None = None
-
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
@@ -2455,22 +2448,20 @@ class GPUModelRunner(
                         )
 
                         if padded_num_tokens > num_tokens:
-                            assert (
-                                self.pixel_values_buffer is not None
-                                and self.image_grid_thw_buffer is not None
+                            padding_amount = padded_num_tokens - num_tokens
+                            padding_tensor = torch.zeros(
+                                (padding_amount, pixel_values.shape[1]),
+                                dtype=pixel_values.dtype,
+                                device=pixel_values.device,
                             )
-
-                            self.pixel_values_buffer[:num_tokens].copy_(pixel_values)  # type: ignore
-                            mm_kwargs_group["pixel_values"] = self.pixel_values_buffer[
-                                :padded_num_tokens
-                            ]
+                            mm_kwargs_group["pixel_values"] = torch.cat(
+                                [pixel_values, padding_tensor], dim=0
+                            )
 
                             # Update image_grid_thw to account for padding
                             if "image_grid_thw" in mm_kwargs_group:
                                 image_grid_thw = mm_kwargs_group["image_grid_thw"]
-                                num_images = image_grid_thw.shape[0]
-                                original_num_imgs = num_images
-                                padding_amount = padded_num_tokens - num_tokens
+                                original_num_imgs = image_grid_thw.shape[0]
 
                                 # Treat padding as a new virtual image.
                                 # Assuming a fixed patch size where height is merge_size.
@@ -2482,27 +2473,13 @@ class GPUModelRunner(
                                 assert padding_amount % (merge_size * merge_size) == 0
                                 h_patches = merge_size
                                 w_patches = padding_amount // h_patches
-                                if num_images + 1 > self.image_grid_thw_buffer.shape[0]:
-                                    new_size = max(
-                                        self.image_grid_thw_buffer.shape[0] * 2,
-                                        num_images + 1,
-                                    )
-                                    new_buffer = torch.zeros(
-                                        (new_size, 3),
-                                        dtype=torch.long,
-                                        device=self.device,
-                                    )
-                                    self.image_grid_thw_buffer = new_buffer
-                                self.image_grid_thw_buffer[:num_images].copy_(
-                                    image_grid_thw
+                                padding_grid_info = torch.tensor(
+                                    [[1, h_patches, w_patches]],
+                                    dtype=image_grid_thw.dtype,
+                                    device=image_grid_thw.device,
                                 )
-                                self.image_grid_thw_buffer[num_images] = torch.tensor(
-                                    [1, h_patches, w_patches],
-                                    dtype=torch.long,
-                                    device=self.device,
-                                )
-                                mm_kwargs_group["image_grid_thw"] = (
-                                    self.image_grid_thw_buffer[: num_images + 1]
+                                mm_kwargs_group["image_grid_thw"] = torch.cat(
+                                    [image_grid_thw, padding_grid_info], dim=0
                                 )
 
                     # get batch_descriptor from dispatcher
@@ -5254,20 +5231,12 @@ class GPUModelRunner(
         self,
         compilation_cases: list[int],
     ) -> None:
-        if self.pixel_values_buffer is None:
-            tmp_dummy_mm_inputs = self._get_mm_dummy_batch(
-                "image",
-                1,
-            )
-            img_feature_dim = tmp_dummy_mm_inputs["pixel_values"].shape[1]
-            self.pixel_values_buffer = torch.zeros(
-                (compilation_cases[0], img_feature_dim),
-                dtype=self.dtype,
-                device=self.device,
-            )
-            self.image_grid_thw_buffer = torch.zeros(
-                (512, 3), dtype=torch.long, device=self.device
-            )
+        tmp_dummy_mm_inputs = self._get_mm_dummy_batch(
+            "image",
+            1,
+        )
+        img_feature_dim = tmp_dummy_mm_inputs["pixel_values"].shape[1]
+
         if is_global_first_rank():
             compilation_cases = tqdm(
                 compilation_cases,
