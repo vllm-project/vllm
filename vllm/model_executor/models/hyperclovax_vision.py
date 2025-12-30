@@ -1651,6 +1651,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "",  # Remove model. prefix if present
+            "vision_model.": "visual.",  # HF uses vision_model, we use visual
         }
     )
 
