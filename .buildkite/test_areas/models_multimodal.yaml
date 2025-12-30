@@ -18,7 +18,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
-  no_gpu: true
+  device: cpu
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py

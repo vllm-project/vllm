@@ -5,7 +5,7 @@ steps:
 - label: Fusion and Compile Tests (B200)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -37,7 +37,7 @@ steps:
 - label: Fusion E2E (2 GPUs)(B200)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   optional: true
   num_gpus: 2
   source_file_dependencies:

@@ -1,0 +1,7 @@
+group: Intel
+depends_on: ~
+steps:
+  - label: "Intel CPU Test"
+    soft_fail: true
+    device: intel_cpu
+    command: bash .buildkite/scripts/hardware_ci/run-cpu-test.sh

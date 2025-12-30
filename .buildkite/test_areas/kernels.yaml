@@ -57,7 +57,7 @@ steps:
 
 - label: Kernels DeepGEMM Test (H100)
   timeout_in_minutes: 45
-  gpu: h100
+  device: h100
   num_gpus: 1
   source_file_dependencies:
   - tools/install_deepgemm.sh
@@ -77,7 +77,7 @@ steps:
 - label: Kernels (B200)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/

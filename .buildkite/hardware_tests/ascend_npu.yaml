@@ -1,0 +1,8 @@
+group: Ascend NPU
+depends_on: ~
+steps:
+  - label: "Ascend NPU Test"
+    soft_fail: true
+    timeout_in_minutes: 20
+    device: ascend_npu
+    command: bash .buildkite/scripts/hardware_ci/run-npu-test.sh

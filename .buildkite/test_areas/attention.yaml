@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: V1 attention (H100)
   timeout_in_minutes: 30
-  gpu: h100
+  device: h100
   source_file_dependencies:
     - vllm/v1/attention
     - tests/v1/attention
@@ -13,7 +13,7 @@ steps:
 
 - label: V1 attention (B200)
   timeout_in_minutes: 30
-  gpu: b200
+  device: b200
   source_file_dependencies:
     - vllm/v1/attention
     - tests/v1/attention

@@ -12,7 +12,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 - label: LM Eval Large Models (4 GPUs)(A100)
-  gpu: a100
+  device: a100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -24,7 +24,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: LM Eval Large Models (4 GPUs)(H100)
-  gpu: h100
+  device: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -37,7 +37,7 @@ steps:
 
 - label: LM Eval Small Models (B200)
   timeout_in_minutes: 120
-  gpu: b200
+  device: b200
   optional: true
   source_file_dependencies:
   - csrc/

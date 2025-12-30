@@ -103,7 +103,7 @@ steps:
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
-  gpu: h100
+  device: h100
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -120,7 +120,7 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4 GPUs)(A100)
-  gpu: a100
+  device: a100
   optional: true
   num_gpus: 4
   source_file_dependencies:
@@ -134,7 +134,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: Distributed Tests (2 GPUs)(H200)
-  gpu: h200
+  device: h200
   optional: true
   working_dir: "/vllm-workspace/"
   num_gpus: 2
@@ -149,7 +149,7 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 - label: Distributed Tests (2 GPUs)(B200)
-  gpu: b200
+  device: b200
   optional: true
   working_dir: "/vllm-workspace/"
   num_gpus: 2

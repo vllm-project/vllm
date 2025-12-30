@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: DeepSeek V2-Lite Accuracy
   timeout_in_minutes: 60
-  gpu: h100
+  device: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -13,7 +13,7 @@ steps:
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy
   timeout_in_minutes: 60
-  gpu: h100
+  device: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
@@ -22,7 +22,7 @@ steps:
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
   timeout_in_minutes: 60
-  gpu: b200
+  device: b200
   optional: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
@@ -39,4 +39,5 @@ steps:
   - vllm/
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
+    - nvidia-smi
     - bash .buildkite/scripts/run-prime-rl-test.sh
