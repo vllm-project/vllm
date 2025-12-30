@@ -36,7 +36,7 @@ the input pointers `q`, `k_cache`, and `v_cache`, which point
 to query, key, and value data on global memory that need to be read
 and processed. The output pointer `out` points to global memory
 where the result should be written. These four pointers actually
-refer to multi-dimensional arrays, but each thread only accesses the
+refer to multidimensional arrays, but each thread only accesses the
 portion of data assigned to it. I have omitted all other runtime
 parameters here for simplicity.
 
@@ -139,18 +139,18 @@ token data.
 const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 ```
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/query.png){ align="center" alt="query" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/query.png" alt="query" width="70%" />
+</p>
 
 Each thread defines its own `q_ptr` which points to the assigned
 query token data on global memory. For example, if `VEC_SIZE` is 4
 and `HEAD_SIZE` is 128, the `q_ptr` points to data that contains
 total of 128 elements divided into 128 / 4 = 32 vecs.
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/q_vecs.png){ align="center" alt="q_vecs" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/q_vecs.png" alt="q_vecs" width="70%" />
+</p>
 
 ```cpp
 __shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
@@ -187,9 +187,9 @@ key token at different iterations. As shown above, that `k_ptr`
 points to key token data based on `k_cache` at assigned block,
 assigned head and assigned token.
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/key.png){ align="center" alt="key" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/key.png" alt="key" width="70%" />
+</p>
 
 The diagram above illustrates the memory layout for key data. It
 assumes that the `BLOCK_SIZE` is 16, `HEAD_SIZE` is 128, `x` is
@@ -202,9 +202,9 @@ iterations. Inside each rectangle, there are a total 32 vecs (128
 elements for one token) that will be processed by 2 threads (one
 thread group) separately.
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/k_vecs.png){ align="center" alt="k_vecs" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/k_vecs.png" alt="k_vecs" width="70%" />
+</p>
 
 ```cpp
 K_vec k_vecs[NUM_VECS_PER_THREAD]
@@ -229,7 +229,7 @@ manner.
 
 ## QK
 
-As shown the pseudo code below, before the entire for loop block, we
+As shown the pseudocode below, before the entire for loop block, we
 fetch the query data for one token and store it in `q_vecs`. Then,
 in the outer for loop, we iterate through different `k_ptrs` that
 point to different tokens and prepare the `k_vecs` in the inner for
@@ -361,17 +361,17 @@ later steps. Now, it should store the normalized softmax result of
 
 ## Value
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/value.png){ align="center" alt="value" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/value.png" alt="value" width="70%" />
+</p>
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/logits_vec.png){ align="center" alt="logits_vec" width="50%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/logits_vec.png" alt="logits_vec" width="50%" />
+</p>
 
-<figure markdown="span">
-  ![](../assets/design/paged_attention/v_vec.png){ align="center" alt="v_vec" width="70%" }
-</figure>
+<p align="center">
+  <img src="../assets/design/paged_attention/v_vec.png" alt="v_vec" width="70%" />
+</p>
 
 Now we need to retrieve the value data and perform dot multiplication
 with `logits`. Unlike query and key, there is no thread group
@@ -403,7 +403,7 @@ for ... { // Iteration over different blocks.
 }
 ```
 
-As shown in the above pseudo code, in the outer loop, similar to
+As shown in the above pseudocode, in the outer loop, similar to
 `k_ptr`, `logits_vec` iterates over different blocks and reads
 `V_VEC_SIZE` elements from `logits`. In the inner loop, each
 thread reads `V_VEC_SIZE` elements from the same tokens as a

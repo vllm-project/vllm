@@ -18,6 +18,7 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
     ProfilerConfig,
@@ -72,7 +73,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -174,6 +176,10 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        attention_config: Configuration for attention mechanisms. Can be a
+            dictionary or an AttentionConfig instance. If a dictionary, it will
+            be converted to an AttentionConfig. Allows specifying the attention
+            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -198,7 +204,7 @@ class LLM:
         quantization: QuantizationMethods | None = None,
         revision: str | None = None,
         tokenizer_revision: str | None = None,
-        seed: int | None = None,
+        seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -212,6 +218,7 @@ class LLM:
         | StructuredOutputsConfig
         | None = None,
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
+        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -251,51 +258,28 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        if compilation_config is not None:
-            if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    mode=CompilationMode(compilation_config)
-                )
-            elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
-            else:
-                compilation_config_instance = compilation_config
-        else:
-            compilation_config_instance = CompilationConfig()
+        def _make_config(value: Any, cls: type[_R]) -> _R:
+            """Convert dict/None/instance to a config instance."""
+            if value is None:
+                return cls()
+            if isinstance(value, dict):
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+            return value
 
-        if structured_outputs_config is not None:
-            if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
-            else:
-                structured_outputs_instance = structured_outputs_config
+        if isinstance(compilation_config, int):
+            compilation_config_instance = CompilationConfig(
+                mode=CompilationMode(compilation_config)
+            )
         else:
-            structured_outputs_instance = StructuredOutputsConfig()
+            compilation_config_instance = _make_config(
+                compilation_config, CompilationConfig
+            )
 
-        if profiler_config is not None:
-            if isinstance(profiler_config, dict):
-                profiler_config_instance = ProfilerConfig(
-                    **{
-                        k: v
-                        for k, v in profiler_config.items()
-                        if is_init_field(ProfilerConfig, k)
-                    }
-                )
-            else:
-                profiler_config_instance = profiler_config
-        else:
-            profiler_config_instance = ProfilerConfig()
+        structured_outputs_instance = _make_config(
+            structured_outputs_config, StructuredOutputsConfig
+        )
+        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
+        attention_config_instance = _make_config(attention_config, AttentionConfig)
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
@@ -340,6 +324,7 @@ class LLM:
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
             profiler_config=profiler_config_instance,
+            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -657,7 +642,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 
@@ -1295,6 +1283,7 @@ class LLM:
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        score_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1328,6 +1317,7 @@ class LLM:
                 data_2=d,
                 tokenizer=tokenizer,
                 tokenization_kwargs=tokenization_kwargs,
+                score_template=score_template,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -1362,6 +1352,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        chat_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1394,6 +1385,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            chat_template: The chat template to use for the scoring. If None, we
+                use the model's default chat template.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1420,6 +1413,11 @@ class LLM:
             and getattr(model_config.hf_config, "num_labels", 0) != 1
         ):
             raise ValueError("Score API is only enabled for num_labels == 1.")
+
+        if not model_config.is_cross_encoder and chat_template is not None:
+            raise ValueError(
+                "chat_template is only supported for cross-encoder models."
+            )
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
@@ -1490,6 +1488,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                score_template=chat_template,
             )
         else:
             return self._embedding_score(
@@ -1625,7 +1624,7 @@ class LLM:
                 added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
-                self.llm_engine.abort_request(added_request_ids)
+                self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
     def _validate_mm_data_and_uuids(
@@ -1735,7 +1734,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
-        return request_id
+        return engine_request.request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True

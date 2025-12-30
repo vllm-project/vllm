@@ -1,22 +1,13 @@
 #pragma once
 
 #include <torch/all.h>
+#include <c10/util/Optional.h>
 
 #include <map>
 #include <vector>
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping);
-
-// Note: the key_caches and value_caches vectors are constant but
-// not the Tensors they contain. The vectors need to be const refs
-// in order to satisfy pytorch's C++ operator registration code.
-void copy_blocks(std::vector<torch::Tensor> const& key_caches,
-                 std::vector<torch::Tensor> const& value_caches,
-                 const torch::Tensor& block_mapping);
-
-void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
-                     const torch::Tensor& block_mapping);
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
@@ -57,6 +48,15 @@ void cp_gather_cache(
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+// Gather and upconvert FP8 KV cache to BF16 workspace
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& seq_lens,          // [BATCH]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(

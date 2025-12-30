@@ -244,3 +244,35 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
     )
     assert transcription.segments is not None
     assert len(transcription.segments) > 0
+
+
+@pytest.mark.asyncio
+async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": 1},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1
+    # max_completion_tokens > max_model_len
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": int(1e6)},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) < 450  # ~Whisper max output len

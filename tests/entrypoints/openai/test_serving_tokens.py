@@ -93,6 +93,7 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
     )
+
     for ignore_eos in [True, False]:
         payload = {
             "model": MODEL_NAME,
@@ -108,9 +109,8 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         }
         generate_resp = await client.post(GEN_ENDPOINT, json=payload)
         generate_data = generate_resp.json()
-        generate_res = tokenizer.decode(
-            generate_data["choices"][0]["token_ids"], skip_special_tokens=True
-        )
+        gen_token_ids = generate_data["choices"][0]["token_ids"]
+        generate_res = tokenizer.decode(gen_token_ids, skip_special_tokens=True)
 
         payload = {
             "model": MODEL_NAME,
@@ -119,11 +119,32 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             "temperature": 0.0,
             "stream": False,
             "ignore_eos": ignore_eos,
-            "chat_template_kwargs": dict(enable_thinking=False),
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         completions_resp = await client.post("/v1/chat/completions", json=payload)
         completions_data = completions_resp.json()
         completions_res = completions_data["choices"][0]["message"]["content"]
+
+        if ignore_eos:
+            # When ignoring EOS, only compare up to the first EOS token
+            # Post-EOS generation is undefined and may differ
+            eos_tokens = {
+                tokenizer.eos_token_id,
+                *tokenizer.additional_special_tokens_ids,
+            }
+            # Find first EOS in generated tokens
+            eos_pos = None
+            for i, tid in enumerate(gen_token_ids):
+                if tid in eos_tokens:
+                    eos_pos = i
+                    break
+            if eos_pos is not None:
+                gen_token_ids_truncated = gen_token_ids[:eos_pos]
+                generate_res = tokenizer.decode(
+                    gen_token_ids_truncated, skip_special_tokens=True
+                )
+                # Truncate completions_res to same length for comparison
+                completions_res = completions_res[: len(generate_res)]
 
         assert generate_res == completions_res
 

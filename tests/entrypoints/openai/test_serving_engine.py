@@ -10,7 +10,7 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 @pytest.fixture()

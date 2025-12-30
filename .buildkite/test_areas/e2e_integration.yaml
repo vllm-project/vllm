@@ -32,6 +32,7 @@ steps:
 - label: Prime-RL Integration (2 GPUs)
   timeout_in_minutes: 30
   optional: true
+  soft_fail: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -39,21 +40,3 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
-
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
-
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040

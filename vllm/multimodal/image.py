@@ -8,7 +8,11 @@ import pybase64
 import torch
 from PIL import Image
 
+from vllm.logger import init_logger
+
 from .base import MediaIO, MediaWithBytes
+
+logger = init_logger(__file__)
 
 
 def rescale_image_size(
@@ -104,8 +108,17 @@ class ImageMediaIO(MediaIO[Image.Image]):
         self,
         media: Image.Image,
         *,
-        image_format: str = "JPEG",
+        image_format: str | None = None,
     ) -> str:
+        if image_format is None:
+            logger.warning_once(
+                "The default format of `ImageMediaIO.encode_base64` will be changed "
+                'from "JPEG" to "PNG" in v0.15 to avoid lossy compression. '
+                "To continue using the old default, "
+                'pass `format="JPEG"` explicitly to silence this warning.'
+            )
+            image_format = "JPEG"
+
         image = media
 
         with BytesIO() as buffer:
@@ -122,13 +135,21 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def load_bytes(self, data: bytes) -> torch.Tensor:
         buffer = BytesIO(data)
-        return torch.load(buffer, weights_only=True)
+        # Enable sparse tensor integrity checks to prevent out-of-bounds
+        # writes from maliciously crafted tensors
+        with torch.sparse.check_sparse_tensor_invariants():
+            tensor = torch.load(buffer, weights_only=True)
+            return tensor.to_dense()
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> torch.Tensor:
-        return torch.load(filepath, weights_only=True)
+        # Enable sparse tensor integrity checks to prevent out-of-bounds
+        # writes from maliciously crafted tensors
+        with torch.sparse.check_sparse_tensor_invariants():
+            tensor = torch.load(filepath, weights_only=True)
+            return tensor.to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return pybase64.b64encode(media.numpy()).decode("utf-8")

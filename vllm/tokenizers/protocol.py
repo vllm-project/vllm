@@ -97,7 +97,7 @@ class TokenizerLike(Protocol):
         messages: list["ChatCompletionMessageParam"],
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
-    ) -> list[int]:
+    ) -> str | list[int]:
         raise NotImplementedError
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:

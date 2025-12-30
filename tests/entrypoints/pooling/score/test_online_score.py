@@ -12,11 +12,6 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.score.protocol import ScoreResponse
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODELS = [
     {"name": "BAAI/bge-reranker-v2-m3", "is_cross_encoder": True},
     {"name": "BAAI/bge-base-en-v1.5", "is_cross_encoder": False},
@@ -43,6 +38,10 @@ def model(request):
 @pytest.fixture(scope="class")
 def server(model: dict[str, Any]):
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
+
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(model["name"], args) as remote_server:
         yield remote_server

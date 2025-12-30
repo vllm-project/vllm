@@ -142,7 +142,7 @@ typedef struct {
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
                           int prob_n, int prob_k, int num_bits, int group_size,
-                          bool has_act_order, bool is_k_full) {
+                          bool has_act_order, bool is_k_full, int stages) {
   bool cache_scales_chunk = has_act_order && !is_k_full;
 
   int tb_n = th_config.thread_n;
@@ -160,13 +160,13 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
 
   if (cache_scales_chunk) {
     int load_groups =
-        tb_groups * pipe_stages * 2;     // Chunk size is 2x pipeline over dim K
+        tb_groups * stages * 2;          // Chunk size is 2x pipeline over dim K
     load_groups = max(load_groups, 32);  // We load at least 32 scale groups
     return load_groups * tb_n * 2;
   } else {
     int tb_scales = tb_groups * tb_n * 2;
 
-    return tb_scales * pipe_stages;
+    return tb_scales * stages;
   }
 }
 
@@ -174,7 +174,7 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
                           int thread_m_blocks, int prob_m, int prob_n,
                           int prob_k, int num_bits, int group_size,
                           bool has_act_order, bool is_k_full, int has_zp,
-                          int is_zp_float, bool is_a_8bit) {
+                          int is_zp_float, bool is_a_8bit, int stages) {
   int pack_factor = 32 / num_bits;
 
   // Get B size
@@ -185,8 +185,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
   // shm size for block_sorted_ids/rd_block_sorted_ids/block_topk_weights
   // both of them requires tb_m * 4 bytes (tb_m * int32 or tb_m * float32)
   int sh_block_meta_size = tb_m * 16;
-  int sh_a_size = pipe_stages * (tb_m * tb_k) * (is_a_8bit ? 1 : 2);
-  int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
+  int sh_a_size = stages * (tb_m * tb_k) * (is_a_8bit ? 1 : 2);
+  int sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
   int tmp_size =
@@ -195,8 +195,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
 
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
-                            group_size, has_act_order, is_k_full);
-  int sh_g_idx_size = has_act_order && !is_k_full ? pipe_stages * tb_k / 4 : 0;
+                            group_size, has_act_order, is_k_full, stages);
+  int sh_g_idx_size = has_act_order && !is_k_full ? stages * tb_k / 4 : 0;
   int sh_zp_size = 0;
   if (has_zp) {
     if (is_zp_float)
@@ -217,7 +217,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
                      int thread_m_blocks, int prob_m, int prob_n, int prob_k,
                      int num_bits, int group_size, bool has_act_order,
                      bool is_k_full, int has_zp, int is_zp_float,
-                     int max_shared_mem, bool is_a_8bit) {
+                     bool is_a_8bit, int stages, int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -243,7 +243,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
   int cache_size =
       get_kernel_cache_size(th_config, m_block_size_8, thread_m_blocks, prob_m,
                             prob_n, prob_k, num_bits, group_size, has_act_order,
-                            is_k_full, has_zp, is_zp_float, is_a_8bit);
+                            is_k_full, has_zp, is_zp_float, is_a_8bit, stages);
   return cache_size <= max_shared_mem;
 }
 
@@ -252,7 +252,7 @@ MarlinFuncPtr get_marlin_kernel(
     const vllm::ScalarType c_type, const vllm::ScalarType s_type,
     int thread_m_blocks, int thread_n_blocks, int thread_k_blocks,
     bool m_block_size_8, bool has_act_order, bool has_zp, int group_blocks,
-    int threads, bool is_zp_float) {
+    int threads, bool is_zp_float, int stages) {
   int num_bits = b_type.size_bits();
   auto kernel = MarlinDefault;
 
@@ -266,8 +266,8 @@ exec_config_t determine_exec_config(
     const vllm::ScalarType& c_type, const vllm::ScalarType& s_type, int prob_m,
     int prob_n, int prob_k, int num_experts, int top_k, int thread_m_blocks,
     bool m_block_size_8, int num_bits, int group_size, bool has_act_order,
-    bool is_k_full, bool has_zp, bool is_zp_float, int max_shared_mem, int sms,
-    bool is_a_8bit) {
+    bool is_k_full, bool has_zp, bool is_zp_float, bool is_a_8bit, int stages,
+    int max_shared_mem, int sms) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
   thread_config_t* thread_configs = thread_m_blocks > 1
                                         ? large_batch_thread_configs
@@ -284,15 +284,15 @@ exec_config_t determine_exec_config(
 
     if (!is_valid_config(th_config, m_block_size_8, thread_m_blocks, prob_m,
                          prob_n, prob_k, num_bits, group_size, has_act_order,
-                         is_k_full, has_zp, is_zp_float, max_shared_mem - 512,
-                         is_a_8bit)) {
+                         is_k_full, has_zp, is_zp_float, is_a_8bit, stages,
+                         max_shared_mem - 512)) {
       continue;
     }
 
     int cache_size = get_kernel_cache_size(
         th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
         num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
-        is_a_8bit);
+        is_a_8bit, stages);
 
     int group_blocks = 0;
     if (!has_act_order) {
@@ -303,7 +303,7 @@ exec_config_t determine_exec_config(
         get_marlin_kernel(a_type, b_type, c_type, s_type, thread_m_blocks,
                           th_config.thread_n / 16, th_config.thread_k / 16,
                           m_block_size_8, has_act_order, has_zp, group_blocks,
-                          th_config.num_threads, is_zp_float);
+                          th_config.num_threads, is_zp_float, stages);
 
     if (kernel == MarlinDefault) continue;
 
@@ -433,8 +433,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                          dev);
   cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
                          dev);
-  TORCH_CHECK(major_capability * 10 + minor_capability >= 80,
-              "marlin kernel only support Ampere or newer GPUs.");
+  TORCH_CHECK(major_capability * 10 + minor_capability >= 75,
+              "marlin kernel only support Turing or newer GPUs.");
+  int stages = 4;
+  if (major_capability == 7 && minor_capability == 5) {
+    stages = 2;
+    TORCH_CHECK(a_type == vllm::kFloat16 || a_type == vllm::kS8,
+                "Turing only support FP16 or INT8 activation.");
+  }
   if (a_type == vllm::kFE4M3fn) {
     TORCH_CHECK(major_capability * 10 + minor_capability >= 89,
                 "FP8 only support Ada Lovelace or newer GPUs.");
@@ -461,8 +467,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     exec_cfg = determine_exec_config(
         a_type, b_type, c_type, s_type, prob_m, prob_n, prob_k, num_experts,
         top_k, thread_m_blocks, m_block_size_8, num_bits, group_size,
-        has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem, sms,
-        is_a_8bit);
+        has_act_order, is_k_full, has_zp, is_zp_float, is_a_8bit, stages,
+        max_shared_mem, sms);
     thread_tfg = exec_cfg.tb_cfg;
   }
 
@@ -479,7 +485,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   TORCH_CHECK(is_valid_config(thread_tfg, m_block_size_8, thread_m_blocks,
                               prob_m, prob_n, prob_k, num_bits, group_size,
                               has_act_order, is_k_full, has_zp, is_zp_float,
-                              max_shared_mem, is_a_8bit),
+                              is_a_8bit, stages, max_shared_mem),
               "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
               ", thread_k = ", thread_tfg.thread_k,
               ", thread_n = ", thread_tfg.thread_n,
@@ -493,12 +499,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int sh_cache_size =
       get_kernel_cache_size(thread_tfg, m_block_size_8, thread_m_blocks, prob_m,
                             prob_n, prob_k, num_bits, group_size, has_act_order,
-                            is_k_full, has_zp, is_zp_float, is_a_8bit);
+                            is_k_full, has_zp, is_zp_float, is_a_8bit, stages);
 
   auto kernel = get_marlin_kernel(
       a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
       thread_k_blocks, m_block_size_8, has_act_order, has_zp, group_blocks,
-      num_threads, is_zp_float);
+      num_threads, is_zp_float, stages);
 
   if (kernel == MarlinDefault) {
     TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,

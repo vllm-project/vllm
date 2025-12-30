@@ -20,13 +20,14 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import flat_product, multi_gpu_test
 
-is_blackwell = lambda: current_platform.is_device_capability(100)
+is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
 class Matches(NamedTuple):
     attention_fusion: int = 0
     allreduce_fusion: int = 0
+    rms_quant_norm_fusion: int = 0
     sequence_parallel: int = 0
     async_tp: int = 0
 
@@ -40,6 +41,7 @@ class ModelBackendTestCase(NamedTuple):
 
 MODELS_FP8: list[ModelBackendTestCase] = []
 MODELS_FP4: list[ModelBackendTestCase] = []
+MODELS_GROUP_FP8: list[ModelBackendTestCase] = []
 MODELS: list[ModelBackendTestCase] = []  # tp-only
 
 if current_platform.is_cuda():
@@ -138,6 +140,17 @@ elif current_platform.is_rocm():
 CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 
 
+def has_cuda_graph_wrapper_metadata() -> bool:
+    from importlib import import_module
+
+    try:
+        module = import_module("torch._inductor.utils")
+        module.CUDAGraphWrapperMetadata  # noqa B018
+    except AttributeError:
+        return False
+    return True
+
+
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
@@ -145,7 +158,20 @@ CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
     # quant_fp4 only has the custom impl
     + list(flat_product(MODELS_FP4, [""])),
 )
-@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+@pytest.mark.parametrize(
+    "inductor_graph_partition",
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_cuda_graph_wrapper_metadata(),
+                reason="This test requires"
+                "torch._inductor.utils.CUDAGraphWrapperMetadata to run",
+            ),
+        ),
+        False,
+    ],
+)
 def test_attn_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
@@ -182,7 +208,8 @@ def test_attn_quant(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -271,7 +298,8 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -383,7 +411,8 @@ def test_tp2_attn_quant_async_tp(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -474,3 +503,84 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config.compile_ranges_split_points = (
         llm.llm_engine.vllm_config.compilation_config.compile_ranges_split_points
     )
+
+
+if current_platform.is_cuda():
+    MODELS_GROUP_FP8 = [
+        ModelBackendTestCase(
+            model_name="Qwen/Qwen3-30B-A3B-FP8",
+            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            backend=AttentionBackendEnum.TRITON_ATTN,
+            matches=Matches(
+                rms_quant_norm_fusion=48,
+            ),
+        ),
+    ]
+
+CUSTOM_OPS_QUANT_RMS_NORM = ["+quant_fp8,+rms_norm"]
+
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Test rms norm+group quant_fp8 fusion
+    list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
+)
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+# TODO: remove skip after we fix the fusion thoroughly
+@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
+def test_rms_group_quant(
+    model_name: str,
+    model_kwargs: dict[str, Any],
+    backend: AttentionBackendEnum,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(
+            fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+        ),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(compilation_config, model_name, **model_kwargs)
+
+    log_matches = re.findall(
+        r"\[fusion.py:\d+] Replaced (\d+) patterns",
+        log_holder.text,
+    )
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.rms_quant_norm_fusion

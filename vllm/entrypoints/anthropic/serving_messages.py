@@ -324,12 +324,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     id=origin_chunk.id,
                                     content=[],
                                     model=origin_chunk.model,
-                                ),
-                                usage=AnthropicUsage(
-                                    input_tokens=origin_chunk.usage.prompt_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    output_tokens=0,
+                                    usage=AnthropicUsage(
+                                        input_tokens=origin_chunk.usage.prompt_tokens
+                                        if origin_chunk.usage
+                                        else 0,
+                                        output_tokens=0,
+                                    ),
                                 ),
                             )
                             first_item = False

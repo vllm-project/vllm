@@ -932,40 +932,6 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_phi4_multimodal(question: str, image_urls: list[str]) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process multi images inputs.
-    """
-
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    vision_lora_path = os.path.join(model_path, "vision-lora")
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        enable_lora=True,
-        max_lora_rank=320,
-        # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={"dynamic_hd": 4},
-    )
-
-    placeholders = "<|image|>" * len(image_urls)
-    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
-    )
-
-
 def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     engine_args = EngineArgs(
@@ -1363,7 +1329,6 @@ model_example_map = {
     "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
-    "phi4_multimodal": load_phi4_multimodal,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
@@ -1382,7 +1347,7 @@ def run_generate(
     model,
     question: str,
     image_urls: list[str],
-    seed: int | None,
+    seed: int,
     tensor_parallel_size: int | None,
 ):
     req_data = model_example_map[model](question, image_urls)
@@ -1416,7 +1381,7 @@ def run_chat(
     model: str,
     question: str,
     image_urls: list[str],
-    seed: int | None,
+    seed: int,
     tensor_parallel_size: int | None,
 ):
     req_data = model_example_map[model](question, image_urls)
@@ -1494,7 +1459,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     parser.add_argument(
