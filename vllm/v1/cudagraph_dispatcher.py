@@ -57,6 +57,8 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
+        # Set it as False by default now.
+        # Will provide the option to use max-loras or active loras in grid construction
         self.specialize_lora_count = False
 
     def _get_lora_cases(self) -> list[tuple[bool, int]]:
