@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
@@ -102,6 +102,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         log_error_stack: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -115,6 +116,7 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
 
         # set up logits processors
@@ -203,6 +205,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts=None,
                 documents=None,
                 chat_template_kwargs=None,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 tool_parser=None,
                 add_special_tokens=False,
             )
@@ -310,6 +313,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts=tool_dicts,
                     documents=request.documents,
                     chat_template_kwargs=request.chat_template_kwargs,
+                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
                 )

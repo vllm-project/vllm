@@ -11,7 +11,7 @@ import json
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic.dataclasses import dataclass
 
@@ -114,6 +114,12 @@ class FrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    default_chat_template_kwargs: dict[str, Any] | None = None
+    """Default keyword arguments to pass to the chat template renderer.
+    These will be merged with request-level chat_template_kwargs,
+    with request values taking precedence. Useful for setting default
+    behavior for reasoning models. Example: '{"enable_thinking": false}'
+    to disable thinking mode by default for Qwen3/DeepSeek models."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     ssl_keyfile: str | None = None
@@ -215,6 +221,9 @@ class FrontendArgs:
         del frontend_kwargs["allowed_origins"]["nargs"]
         del frontend_kwargs["allowed_methods"]["nargs"]
         del frontend_kwargs["allowed_headers"]["nargs"]
+
+        # Special case: default_chat_template_kwargs needs json.loads type
+        frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
 
         # Special case: LoRA modules need custom parser action and
         # optional_type(str)
