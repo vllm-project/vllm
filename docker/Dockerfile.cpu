@@ -84,7 +84,6 @@ FROM base AS vllm-build
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
-ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512=0
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
@@ -105,13 +104,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/build.txt
 
 COPY . .
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
+ARG VLLM_VERSION_OVERRIDE="0.0.0+src.build"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
@@ -157,7 +154,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
 COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirements/test.txt

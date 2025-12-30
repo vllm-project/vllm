@@ -334,9 +334,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
