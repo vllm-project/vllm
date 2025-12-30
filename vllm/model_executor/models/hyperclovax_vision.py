@@ -1699,18 +1699,14 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         text_hidden_size = text_config.hidden_size
 
         # Check if out_hidden_size is defined (Qwen2.5-VL style)
+        # The merger in Qwen2.5 VisionTransformer handles projection to out_hidden_size
         if hasattr(vision_config, "out_hidden_size"):
-            # The merger in Qwen2.5 VisionTransformer handles projection
-            # to out_hidden_size, so we may need additional projection
-            # if out_hidden_size != text_hidden_size
             out_hidden = vision_config.out_hidden_size
-            if out_hidden != text_hidden_size:
-                self.mm_projector = nn.Linear(out_hidden, text_hidden_size)
-            else:
-                self.mm_projector = nn.Identity()
         else:
-            # Standard linear projector
-            self.mm_projector = nn.Linear(vision_hidden_size, text_hidden_size)
+            out_hidden = vision_hidden_size
+
+        # Always create Linear projector since HF checkpoint has mm_projector weights
+        self.mm_projector = nn.Linear(out_hidden, text_hidden_size)
 
         # Audio tower (for Omni models)
         audio_config = getattr(config, "audio_config", None)
@@ -1847,9 +1843,8 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             with set_forward_context(None, self.vllm_config):
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
-        # Apply projector if needed
-        if not isinstance(self.mm_projector, nn.Identity):
-            image_embeds = self.mm_projector(image_embeds)
+        # Apply projector
+        image_embeds = self.mm_projector(image_embeds)
 
         # Split concatenated embeddings for each image
         merge_size = self.visual.spatial_merge_size
@@ -1872,9 +1867,8 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             with set_forward_context(None, self.vllm_config):
                 video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
 
-        # Apply projector if needed
-        if not isinstance(self.mm_projector, nn.Identity):
-            video_embeds = self.mm_projector(video_embeds)
+        # Apply projector
+        video_embeds = self.mm_projector(video_embeds)
 
         # Split concatenated embeddings for each video
         merge_size = self.visual.spatial_merge_size
