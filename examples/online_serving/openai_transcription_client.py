@@ -43,14 +43,14 @@ def sync_openai(audio_path: str, client: OpenAI, model: str):
                 repetition_penalty=1.3,
             ),
         )
-        print("transcription result:", transcription.text)
+        print("transcription result [sync]:", transcription.text)
 
 
 async def stream_openai_response(audio_path: str, client: AsyncOpenAI, model: str):
     """
     Perform asynchronous transcription using OpenAI-compatible API.
     """
-    print("\ntranscription result:", end=" ")
+    print("\ntranscription result [stream]:", end=" ")
     with open(audio_path, "rb") as f:
         transcription = await client.audio.transcriptions.create(
             file=f,
@@ -93,7 +93,7 @@ def stream_api_response(audio_path: str, model: str, openai_api_base: str):
             "response_format": "json",
         }
 
-        print("\ntranscription result:", end=" ")
+        print("\ntranscription result [stream]:", end=" ")
         response = requests.post(
             api_url, headers=headers, files=files, data=data, stream=True
         )
@@ -125,26 +125,27 @@ def main(args):
         base_url=openai_api_base,
     )
 
+    model = client.models.list().data[0].id
+    print(f"Using model: {model}")
+
     # Run the synchronous function
-    sync_openai(
-        args.audio_path if args.audio_path else mary_had_lamb, client, args.model
-    )
+    sync_openai(args.audio_path if args.audio_path else mary_had_lamb, client, model)
 
     # Run the asynchronous function
-    if "openai" in args.model:
+    if "openai" in model:
         client = AsyncOpenAI(
             api_key=openai_api_key,
             base_url=openai_api_base,
         )
         asyncio.run(
             stream_openai_response(
-                args.audio_path if args.audio_path else winning_call, client, args.model
+                args.audio_path if args.audio_path else winning_call, client, model
             )
         )
     else:
         stream_api_response(
             args.audio_path if args.audio_path else winning_call,
-            args.model,
+            model,
             openai_api_base,
         )
 
@@ -153,12 +154,6 @@ if __name__ == "__main__":
     # setup argparser
     parser = argparse.ArgumentParser(
         description="OpenAI Transcription Client using vLLM API Server"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="openai/whisper-large-v3-turbo",
-        help="The model name to use for transcription.",
     )
     parser.add_argument(
         "--audio_path",
