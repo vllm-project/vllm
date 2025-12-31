@@ -67,13 +67,18 @@ V2_AUDIO_TOKEN: str = "<|AUDIO|>"
 
 
 class AudioProjectorMLP(nn.Module):
-    """Audio projector MLP with fc1/fc2 naming to match HF checkpoint."""
+    """Audio projector MLP with fc1/fc2 naming to match HF checkpoint.
+
+    Structure matches VLM_Mlp from HF:
+    - fc1: (input_size, input_size) - keeps hidden dim same as input
+    - fc2: (input_size, output_size) - projects to LLM hidden size
+    """
 
     def __init__(self, input_size: int, output_size: int):
         super().__init__()
-        self.fc1 = nn.Linear(input_size, output_size)
+        self.fc1 = nn.Linear(input_size, input_size)  # 1280 -> 1280
         self.act = nn.GELU()
-        self.fc2 = nn.Linear(output_size, output_size)
+        self.fc2 = nn.Linear(input_size, output_size)  # 1280 -> 4096
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(self.act(self.fc1(x)))
