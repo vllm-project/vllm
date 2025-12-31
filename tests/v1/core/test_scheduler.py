@@ -97,6 +97,12 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
         assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
+    if enable_prefix_caching:
+        for new_req_data in output.scheduled_new_reqs:
+            assert new_req_data.prompt_block_hashes is not None
+            assert (
+                len(new_req_data.block_ids) - len(new_req_data.prompt_block_hashes) <= 1
+            )  # tail block may not have a hash
 
     # Verify requests moved from waiting to running
     assert len(scheduler.waiting) == 0
@@ -293,6 +299,15 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output1.num_scheduled_tokens[requests[0].request_id] == 400
     assert output1.num_scheduled_tokens[requests[1].request_id] == 400
     assert output1.num_scheduled_tokens[requests[2].request_id] == 224
+    if enable_prefix_caching:
+        assert len(output1.scheduled_cached_reqs.running_block_hashes) == 3
+        for idx in range(3):
+            assert (
+                len(output1.scheduled_cached_reqs.new_block_ids[idx])
+                - len(output1.scheduled_cached_reqs.running_block_hashes[idx])
+                <= 1
+            )  # tail block may not have a hash
+        assert len(output1.scheduled_cached_reqs.all_token_ids) == 0
 
     # Schedule the third step. All three requests are running.
     # First and second requests are in the decode stage.
@@ -314,6 +329,16 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
+    # Verify running_block_hashes again for all continuing requests.
+    if enable_prefix_caching:
+        assert len(output2.scheduled_cached_reqs.running_block_hashes) == 3
+        for idx in range(3):
+            assert (
+                len(output2.scheduled_cached_reqs.new_block_ids[idx])
+                - len(output2.scheduled_cached_reqs.running_block_hashes[idx])
+                <= 1
+            )  # tail block may not have a hash
+        assert len(output2.scheduled_cached_reqs.all_token_ids) == 0
 
 
 def test_stop_via_update_from_output():
@@ -2300,6 +2325,13 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     # Resumed tokens include 30 prompt tokens and 2 decoded tokens
     assert len(scheduled_cached_reqs.resumed_req_token_ids[0]) == 32
     assert scheduled_cached_reqs.resumed_req_token_ids[0][31] == 100
+    assert request_low.request_id in scheduled_cached_reqs.all_block_hashes
+    assert (
+        len(scheduled_cached_reqs.new_block_ids[0])
+        - len(scheduled_cached_reqs.all_block_hashes[request_low.request_id])
+        <= 1
+    )  # tail block may not have hash
+    assert scheduled_cached_reqs.running_block_hashes[0] is None
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestD
     return NewRequestData(
         req_id="test_req",
         prompt_token_ids=None,
+        prompt_block_hashes=None,
         mm_features=[],
         sampling_params=None,
         pooling_params=None,

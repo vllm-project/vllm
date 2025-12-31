@@ -32,6 +32,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -829,6 +830,9 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
         all_token_ids: dict[str, list[int]] = {}
+        all_block_hashes: dict[str, list[BlockHash]] = {}
+        running_token_ids: list[list[int] | None] = []
+        running_block_hashes: list[list[BlockHash] | None] = []
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
@@ -854,8 +858,19 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
+            if scheduled_in_prev_step:
+                num_tokens = num_scheduled_tokens[req_id]
+                start_token = req.num_computed_tokens
+                end_token = start_token + num_tokens
+                start_block = start_token // self.block_size
+                end_block = end_token // self.block_size
+                running_token_ids.append(req.all_token_ids[start_token:end_token])
+                running_block_hashes.append(req.block_hashes[start_block:end_block])
+            else:
                 all_token_ids[req_id] = req.all_token_ids.copy()
+                all_block_hashes[req_id] = req.block_hashes.copy()
+                running_token_ids.append(None)
+                running_block_hashes.append(None)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -869,6 +884,9 @@ class Scheduler(SchedulerInterface):
             resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
             all_token_ids=all_token_ids,
+            all_block_hashes=all_block_hashes,
+            running_token_ids=running_token_ids,
+            running_block_hashes=running_block_hashes,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,

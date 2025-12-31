@@ -26,7 +26,11 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
-from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
+from vllm.v1.core.kv_cache_types import BlockHash
+from vllm.v1.core.kv_cache_utils import (
+    estimate_max_model_len,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -39,6 +43,8 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup
 
+# Dummy NONE_HASH for testing
+NONE_HASH = BlockHash(b"\x00" * 32)
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE = current_platform.device_type
@@ -134,6 +140,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
+                prompt_block_hashes=[NONE_HASH],
                 mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=None,
@@ -312,6 +319,9 @@ def test_update_states_request_resumed(model_runner, dist_init):
         resumed_req_ids=set(),
         new_token_ids=[[]],
         all_token_ids={},
+        all_block_hashes={},
+        running_token_ids=[[]],
+        running_block_hashes=[[]],
         new_block_ids=[([0],)],
         num_computed_tokens=[0],
         num_output_tokens=[0],
