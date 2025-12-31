@@ -1735,8 +1735,8 @@ def is_global_first_rank() -> bool:
         # Fallback to torch's global rank
         return torch.distributed.get_rank() == 0
 
-    except Exception:
-        # If anything goes wrong, assume this is the first rank
+    except RuntimeError:
+        # torch.distributed not initialized or other runtime errors
         return True
 
 
@@ -1757,9 +1757,10 @@ def is_local_first_rank() -> bool:
         # note: envs.LOCAL_RANK is set when using env:// launchers (e.g., torchrun)
         try:
             return int(envs.LOCAL_RANK) == 0  # type: ignore[arg-type]
-        except Exception:
+        except (ValueError, TypeError):
             return torch.distributed.get_rank() == 0
-    except Exception:
+    except RuntimeError:
+        # torch.distributed not initialized or other runtime errors
         return True
 
 
