@@ -568,28 +568,138 @@ def is_xnnpack_available():
 
 
 def get_env_vars():
-    env_vars = ""
-    secret_terms = ("secret", "token", "api", "access", "password")
-    report_prefix = (
-        "TORCH",
-        "NCCL",
-        "PYTORCH",
-        "CUDA",
-        "CUBLAS",
-        "CUDNN",
-        "OMP_",
-        "MKL_",
-        "NVIDIA",
-    )
-    for k, v in os.environ.items():
-        if any(term in k.lower() for term in secret_terms):
+    """
+    Collect and filter environment variables for system reporting.
+    
+    Returns:
+        str: Formatted string containing relevant environment variables,
+             one per line in KEY=VALUE format.
+    """
+    from collections import OrderedDict
+    
+    # Enhanced security filtering - exclude sensitive information
+    SECRET_TERMS = {
+        "secret", "token", "api", "access", "password", "key", "credential",
+        "auth", "cert", "signature", "private", "pwd", "passwd", "certificate"
+    }
+    
+    # Always include these vLLM-specific environment variables
+    VLLM_PREFIXES = {"VLLM_"}
+    
+    # Common framework and library prefixes to include
+    FRAMEWORK_PREFIXES = {
+        "TORCH", "NCCL", "PYTORCH", "CUDA", "CUBLAS", "CUDNN", "OMP_", "MKL_",
+        "NVIDIA", "HIP", "ROCM", "OPENMP", "OPENBLAS", "INTEL", "AMD", "TF_",
+        "TENSORFLOW", "JAX", "XLA", "TRT", "TRITON", "FLASH", "DEEPSPEED"
+    }
+    
+    # System and runtime environment variables
+    SYSTEM_PREFIXES = {
+        "PATH", "LD_", "PYTHON", "CONDA", "PIP", "UV", "HOME", "USER", "SHELL",
+        "TERM", "LANG", "LC_", "TZ", "EDITOR", "VISUAL"
+    }
+    
+    collected_vars = OrderedDict()
+    
+    for key, value in os.environ.items():
+        key_upper = key.upper()
+        key_lower = key.lower()
+        
+        # Skip empty values and sensitive information
+        if not value or any(term in key_lower for term in SECRET_TERMS):
             continue
-        if k in environment_variables:
-            env_vars = env_vars + "{}={}".format(k, v) + "\n"
-        if k.startswith(report_prefix):
-            env_vars = env_vars + "{}={}".format(k, v) + "\n"
+            
+        # Always include vLLM environment variables
+        if any(key_upper.startswith(prefix) for prefix in VLLM_PREFIXES):
+            collected_vars[key] = value
+            continue
+            
+        # Include framework and library related variables
+        if any(key_upper.startswith(prefix) for prefix in FRAMEWORK_PREFIXES):
+            collected_vars[key] = value
+            continue
+            
+        # Include system and runtime variables
+        if any(key_upper.startswith(prefix) for prefix in SYSTEM_PREFIXES):
+            collected_vars[key] = value
+            continue
+            
+        # Include variables defined in environment_variables registry
+        if key in environment_variables:
+            collected_vars[key] = value
+    
+    # Format as sorted key=value pairs
+    formatted_vars = []
+    for key in sorted(collected_vars.keys()):
+        formatted_vars.append(f"{key}={collected_vars[key]}")
+    
+    return "\n".join(formatted_vars)
 
-    return env_vars
+
+def get_env_vars_structured():
+    """
+    Collect environment variables in a structured format.
+    
+    Returns:
+        dict: Structured dictionary containing categorized environment variables.
+    """
+    from collections import defaultdict
+    
+    categories = defaultdict(dict)
+    
+    for key, value in os.environ.items():
+        key_upper = key.upper()
+        
+        if key_upper.startswith("VLLM_"):
+            categories["vllm"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["TORCH", "PYTORCH", "CUDA", "CUBLAS", "CUDNN", "NCCL"]):
+            categories["pytorch"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["HIP", "ROCM", "AMD"]):
+            categories["rocm"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["TF_", "TENSORFLOW"]):
+            categories["tensorflow"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["JAX", "XLA"]):
+            categories["jax"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["OMP_", "MKL_", "OPENMP", "OPENBLAS"]):
+            categories["system_math"][key] = value
+        elif any(key_upper.startswith(prefix) for prefix in
+                ["PATH", "LD_", "PYTHON", "CONDA", "PIP", "UV"]):
+            categories["runtime"][key] = value
+        elif key in environment_variables:
+            categories["vllm_registry"][key] = value
+        else:
+            categories["other"][key] = value
+    
+    return dict(categories)
+
+
+def get_env_var_summary():
+    """
+    Get a summary of environment variables for debugging purposes.
+    
+    Returns:
+        dict: Summary statistics about environment variables.
+    """
+    total_vars = len(os.environ)
+    
+    vllm_vars = [k for k in os.environ if k.upper().startswith("VLLM_")]
+    framework_vars = [
+        k for k in os.environ
+        if any(k.upper().startswith(prefix) for prefix in
+              ["TORCH", "PYTORCH", "CUDA", "HIP", "ROCM", "TF_", "TENSORFLOW", "JAX"])
+    ]
+    
+    return {
+        "total_environment_variables": total_vars,
+        "vllm_specific_variables": len(vllm_vars),
+        "framework_variables": len(framework_vars),
+        "system_variables": total_vars - len(vllm_vars) - len(framework_vars)
+    }
 
 
 def get_env_info():
@@ -855,3 +965,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
