@@ -191,6 +191,7 @@ class WorkerWrapperBase:
         users can launch 2 engines/executors, each with only 1 worker.
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
+        rpc_rank and global_rank may be updated later in `adjust_rank`.
         """
         self.rpc_rank = rpc_rank
         self.global_rank = self.rpc_rank if global_rank is None else global_rank
@@ -222,6 +223,7 @@ class WorkerWrapperBase:
         """
         if self.rpc_rank in rank_mapping:
             self.rpc_rank = rank_mapping[self.rpc_rank]
+            self.global_rank = self.rpc_rank
 
     def update_environment_variables(
         self,
