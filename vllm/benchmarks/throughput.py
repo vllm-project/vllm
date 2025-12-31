@@ -355,11 +355,17 @@ def get_requests(args, tokenizer):
         sample_kwargs["range_ratio"] = args.random_range_ratio
         # prefer random_* arguments, fall back to regular arguments
         random_prefix_len = getattr(args, "random_prefix_len", None)
-        sample_kwargs["prefix_len"] = random_prefix_len if random_prefix_len is not None else args.prefix_len
+        sample_kwargs["prefix_len"] = (
+            random_prefix_len if random_prefix_len is not None else args.prefix_len
+        )
         random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = random_input_len if random_input_len is not None else args.input_len
+        sample_kwargs["input_len"] = (
+            random_input_len if random_input_len is not None else args.input_len
+        )
         random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = random_output_len if random_output_len is not None else args.output_len
+        sample_kwargs["output_len"] = (
+            random_output_len if random_output_len is not None else args.output_len
+        )
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
@@ -415,9 +421,17 @@ def get_requests(args, tokenizer):
         dataset_cls = RandomMultiModalDataset
         # prefer random_* arguments, fall back to regular arguments
         random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = random_input_len if random_input_len is not None else getattr(args, "input_len", None)
+        sample_kwargs["input_len"] = (
+            random_input_len
+            if random_input_len is not None
+            else getattr(args, "input_len", None)
+        )
         random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = random_output_len if random_output_len is not None else getattr(args, "output_len", None)
+        sample_kwargs["output_len"] = (
+            random_output_len
+            if random_output_len is not None
+            else getattr(args, "output_len", None)
+        )
         sample_kwargs["base_items_per_request"] = getattr(
             args, "random_mm_base_items_per_request", None
         )
@@ -427,21 +441,29 @@ def get_requests(args, tokenizer):
         sample_kwargs["limit_mm_per_prompt"] = getattr(
             args, "random_mm_limit_mm_per_prompt", None
         )
-        sample_kwargs["bucket_config"] = getattr(
-            args, "random_mm_bucket_config", None
-        )
+        sample_kwargs["bucket_config"] = getattr(args, "random_mm_bucket_config", None)
         sample_kwargs["enable_multimodal_chat"] = True
         random_prefix_len = getattr(args, "random_prefix_len", None)
         prefix_len = getattr(args, "prefix_len", None)
-        sample_kwargs["prefix_len"] = random_prefix_len if random_prefix_len is not None else prefix_len
+        sample_kwargs["prefix_len"] = (
+            random_prefix_len if random_prefix_len is not None else prefix_len
+        )
         sample_kwargs["range_ratio"] = args.random_range_ratio
     elif args.dataset_name == "random-rerank":
         dataset_cls = RandomDatasetForReranking
         # prefer random_* arguments, fall back to regular arguments
         random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = random_input_len if random_input_len is not None else getattr(args, "input_len", None)
+        sample_kwargs["input_len"] = (
+            random_input_len
+            if random_input_len is not None
+            else getattr(args, "input_len", None)
+        )
         random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = random_output_len if random_output_len is not None else getattr(args, "output_len", None)
+        sample_kwargs["output_len"] = (
+            random_output_len
+            if random_output_len is not None
+            else getattr(args, "output_len", None)
+        )
         sample_kwargs["batchsize"] = getattr(args, "random_batch_size", 1)
         sample_kwargs["is_reranker"] = not getattr(args, "no_reranker", False)
         sample_kwargs["range_ratio"] = args.random_range_ratio
@@ -504,7 +526,8 @@ def validate_args(args):
         random_input_len = getattr(args, "random_input_len", None)
         if args.input_len is None and random_input_len is None:
             raise ValueError(
-                "Either --input-len or --random-input-len must be provided for a random dataset"
+                "Either --input-len or --random-input-len must be provided "
+                "for a random dataset"
             )
 
     # === Dataset Name Specific Checks ===
@@ -538,8 +561,12 @@ def validate_args(args):
         else:
             raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 
-    # --random-range-ratio: only used when dataset_name is 'random', 'random-mm', or 'random-rerank'
-    if args.dataset_name not in {"random", "random-mm", "random-rerank"} and args.random_range_ratio is not None:
+    # --random-range-ratio: only used when dataset_name is 'random',
+    # 'random-mm', or 'random-rerank'
+    if (
+        args.dataset_name not in {"random", "random-mm", "random-rerank"}
+        and args.random_range_ratio is not None
+    ):
         warnings.warn(
             "--random-range-ratio will be ignored since \
                 --dataset-name is not 'random', 'random-mm', or 'random-rerank'.",
@@ -547,13 +574,15 @@ def validate_args(args):
         )
 
     # --random-batch-size: only used when dataset_name is 'random-rerank'
-    if args.dataset_name != "random-rerank" and getattr(args, "random_batch_size", None) is not None:
-        if args.random_batch_size != 1:
-            warnings.warn(
-                "--random-batch-size will be ignored since \
+    if (
+        args.dataset_name != "random-rerank"
+        and getattr(args, "random_batch_size", None) is not None
+    ) and args.random_batch_size != 1:
+        warnings.warn(
+            "--random-batch-size will be ignored since \
                     --dataset-name is not 'random-rerank'.",
-                stacklevel=2,
-            )
+            stacklevel=2,
+        )
 
     # --no-reranker: only used when dataset_name is 'random-rerank'
     if args.dataset_name != "random-rerank" and getattr(args, "no_reranker", False):
@@ -563,8 +592,8 @@ def validate_args(args):
             stacklevel=2,
         )
 
-    # --prefix-len: only used when dataset_name is 'random', 'random-mm', 'sonnet', or not
-    # set.
+    # --prefix-len: only used when dataset_name is 'random', 'random-mm',
+    # 'sonnet', or not set.
     if (
         args.dataset_name not in {"random", "random-mm", "sonnet", None}
         and args.prefix_len is not None
@@ -576,7 +605,8 @@ def validate_args(args):
         )
 
     # === Random Dataset Argument Conflict Detection ===
-    # Check for conflicts between regular and random arguments when using random datasets
+    # Check for conflicts between regular and random arguments when using
+    # random datasets
     if args.dataset_name in {"random", "random-mm", "random-rerank"}:
         random_input_len = getattr(args, "random_input_len", None)
         random_output_len = getattr(args, "random_output_len", None)
@@ -585,19 +615,22 @@ def validate_args(args):
         if args.input_len is not None and random_input_len is not None:
             warnings.warn(
                 "Both --input-len and --random-input-len are specified. "
-                "The random version (--random-input-len) will be preferred in this run.",
+                "The random version (--random-input-len) will be preferred "
+                "in this run.",
                 stacklevel=2,
             )
         if args.output_len is not None and random_output_len is not None:
             warnings.warn(
                 "Both --output-len and --random-output-len are specified. "
-                "The random version (--random-output-len) will be preferred in this run.",
+                "The random version (--random-output-len) will be preferred "
+                "in this run.",
                 stacklevel=2,
             )
         if args.prefix_len is not None and random_prefix_len is not None:
             warnings.warn(
                 "Both --prefix-len and --random-prefix-len are specified. "
-                "The random version (--random-prefix-len) will be preferred in this run.",
+                "The random version (--random-prefix-len) will be preferred "
+                "in this run.",
                 stacklevel=2,
             )
 
@@ -650,7 +683,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf", "prefix_repetition", "random-mm", "random-rerank"],
+        choices=[
+            "sharegpt",
+            "random",
+            "sonnet",
+            "burstgpt",
+            "hf",
+            "prefix_repetition",
+            "random-mm",
+            "random-rerank",
+        ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
     )
@@ -735,10 +777,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
     # hf dtaset
     parser.add_argument(
-        "--hf-subset", type=str, default=None, help="Subset of the HF dataset.",
+        "--hf-subset",
+        type=str,
+        default=None,
+        help="Subset of the HF dataset.",
     )
     parser.add_argument(
-        "--hf-split", type=str, default=None, help="Split of the HF dataset.",
+        "--hf-split",
+        type=str,
+        default=None,
+        help="Split of the HF dataset.",
     )
     parser.add_argument(
         "--profile",
