@@ -405,6 +405,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    expert_parallel_size: int = ParallelConfig.expert_parallel_size
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -838,7 +839,13 @@ class EngineArgs:
             **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
-            "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
+            "--expert-parallel-size",
+            "-ep",
+            **parallel_kwargs["expert_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--enable-expert-parallel",
+            **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -1574,6 +1581,7 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            expert_parallel_size=self.expert_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,

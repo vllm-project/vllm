@@ -370,7 +370,7 @@ def report_usage_stats(
             "tensor_parallel_size": parallel_config.tensor_parallel_size,
             "data_parallel_size": parallel_config.data_parallel_size,
             "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
-            "enable_expert_parallel": parallel_config.enable_expert_parallel,
+            "expert_parallel_size": parallel_config.expert_parallel_size,
             # All2All backend for MoE expert parallel
             "all2all_backend": parallel_config.all2all_backend,
             # KV connector used
