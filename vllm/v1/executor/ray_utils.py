@@ -104,8 +104,11 @@ try:
                 scheduler_output, intermediate_tensors
             )
             if isinstance(output, IntermediateTensors):
-                output = scheduler_output, grammar_output, output
-            elif not get_pp_group().is_last_rank:
+                return scheduler_output, grammar_output, output
+
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
+            if not get_pp_group().is_last_rank:
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids

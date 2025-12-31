@@ -124,7 +124,7 @@ class WorkerBase:
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """If this method returns None, sample_tokens should be called immediately after
         to obtain the ModelRunnerOutput.
 
@@ -362,7 +362,7 @@ class WorkerWrapperBase:
         scheduler_output: SchedulerOutput,
         *args,
         **kwargs,
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self._apply_mm_cache(scheduler_output)
 
         assert self.worker is not None
