@@ -326,7 +326,7 @@ class GPUModelRunner(
         # https://github.com/vllm-project/vllm/issues/18019
         self.broadcast_pp_output = (
             self.parallel_config.distributed_executor_backend == "external_launcher"
-            and len(get_pp_group().ranks) > 0
+            and len(get_pp_group().ranks) > 1
         )
 
         # Model-related.
@@ -1026,7 +1026,7 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        if not self.model_config.is_hybrid or not self.speculative_config:
+        if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
         # Find the number of accepted tokens for each sequence.
