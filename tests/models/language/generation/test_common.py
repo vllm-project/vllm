@@ -4,6 +4,8 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
@@ -89,6 +91,9 @@ EMBED_SCALING_MODELS = {
 )
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_models(
     hf_runner,
@@ -97,11 +102,16 @@ def test_models(
     model: str,
     max_tokens: int,
     num_logprobs: int,
+    use_rocm_aiter: bool,
     use_prompt_embeds: bool,
+    monkeypatch,
 ) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
+
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -154,3 +164,11 @@ def test_models(
             name_0="vllm",
             name_1="vllm_from_embeds",
         )
+
+    if use_rocm_aiter:
+        # this is to ensure that vllm engine
+        # has deallocated the memory before running the next
+        # unit tests. On ROCm, when using AITER
+        # the memory might not be deallocated completely
+        # before running the next test case
+        torch.cuda.synchronize()
