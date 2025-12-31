@@ -556,7 +556,9 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 
 !!! note 
     Some models require a specific prompt format to work correctly.
+
     You can find Example HF Models's corresponding score template in [examples/pooling/score/template/](../../examples/pooling/score/template)
+
     Examples : [examples/pooling/score/using_template_offline.py](../../examples/pooling/score/using_template_offline.py) [examples/pooling/score/using_template_online.py](../../examples/pooling/score/using_template_online.py)
 
 !!! note
