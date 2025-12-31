@@ -455,6 +455,8 @@ class RayDistributedExecutor(Executor):
         if self.scheduler_config.async_scheduling:
             assert non_block
 
+            # Delay getting the model runner output until next step execute_model
+            # returns.
             refs = [
                 partial(RayDistributedExecutor._get_async_refs, ref, worker)
                 for ref, worker in zip(refs, self.workers)
