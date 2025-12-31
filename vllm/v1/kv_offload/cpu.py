@@ -13,7 +13,7 @@ from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
+from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
@@ -32,7 +32,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handler: OffloadingHandler | None = None
+        self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
@@ -67,13 +67,13 @@ class CPUOffloadingSpec(OffloadingSpec):
         kv_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handler:
+        if not self._handlers:
             if not current_platform.is_cuda_alike():
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
-            self._handler = CpuGpuOffloadingHandler(
+            self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
                 cpu_block_size=self.offloaded_block_size,
@@ -81,6 +81,6 @@ class CPUOffloadingSpec(OffloadingSpec):
                 gpu_caches=kv_caches,
             )
 
-        assert self._handler is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handler
+        assert self._handlers is not None
+        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
+        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
