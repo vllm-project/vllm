@@ -1321,18 +1321,17 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
     # Test aborting a single request
     iteration_stats = IterationStats()
-    if abort_by == "internal":
-        request_ids_to_abort = output_processor.abort_requests(
-            [requests[0].request_id],
-            internal=True,
-            iteration_stats=iteration_stats,
-        )
-    else:
-        request_ids_to_abort = output_processor.abort_requests(
-            [requests[0].external_req_id],
-            internal=False,
-            iteration_stats=iteration_stats,
-        )
+    request_ids_to_abort = output_processor.abort_requests(
+        [
+            (
+                requests[0].request_id
+                if abort_by == "internal"
+                else requests[0].external_req_id
+            )
+        ],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
     assert isinstance(request_ids_to_abort, list)
     assert len(request_ids_to_abort) == 1
     assert request_ids_to_abort[0] == requests[0].request_id
@@ -1344,23 +1343,23 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
     )
 
     # Test aborting multiple requests
-    remaining_request_ids = [req.request_id for req in requests[1:3]]
-    expected_prompt_token_counts = {len(req.prompt_token_ids) for req in requests[1:3]}
+    remaining_requests = [req for req in requests[1:3]]
+    expected_prompt_token_counts = {
+        len(req.prompt_token_ids) for req in remaining_requests
+    }
     iteration_stats = IterationStats()
-    if abort_by == "internal":
-        request_ids_to_abort = output_processor.abort_requests(
-            remaining_request_ids,
-            internal=True,
-            iteration_stats=iteration_stats,
-        )
-    else:
-        request_ids_to_abort = output_processor.abort_requests(
-            remaining_request_ids,
-            internal=False,
-            iteration_stats=iteration_stats,
-        )
+    request_ids_to_abort = output_processor.abort_requests(
+        [
+            req.request_id if abort_by == "internal" else req.external_req_id
+            for req in remaining_requests
+        ],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
     assert len(request_ids_to_abort) == 2
-    assert set(request_ids_to_abort) == set(remaining_request_ids)
+    assert set(request_ids_to_abort) == set(
+        [req.request_id for req in remaining_requests]
+    )
     # Verify stats were updated for both requests
     assert len(iteration_stats.finished_requests) == 2
     finished_prompt_token_counts = {
@@ -1374,18 +1373,11 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
     # Test aborting non-existent request (should return empty list)
     iteration_stats = IterationStats()
-    if abort_by == "internal":
-        request_ids_to_abort = output_processor.abort_requests(
-            ["non-existent-request"],
-            internal=True,
-            iteration_stats=iteration_stats,
-        )
-    else:
-        request_ids_to_abort = output_processor.abort_requests(
-            ["non-existent-request"],
-            internal=False,
-            iteration_stats=iteration_stats,
-        )
+    request_ids_to_abort = output_processor.abort_requests(
+        ["non-existent-request"],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
     assert len(request_ids_to_abort) == 0
     # Verify no stats were added for non-existent request
     assert len(iteration_stats.finished_requests) == 0
