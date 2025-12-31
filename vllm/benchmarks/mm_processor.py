@@ -35,6 +35,7 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
+
 def collect_mm_processor_stats(
     llm_engine: Any,
 ) -> dict[str, list[float]]:
@@ -113,6 +114,7 @@ def validate_args(args):
     if not hasattr(args, "max_loras"):
         args.max_loras = None
 
+
 def benchmark_multimodal_processor(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -122,13 +124,13 @@ def benchmark_multimodal_processor(
     from vllm import LLM, SamplingParams
 
     validate_args(args)
-    
+
     if args.seed is None:
         args.seed = 0
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
-    
+
     tokenizer = llm.get_tokenizer()
     requests = get_requests(args, tokenizer)
 
@@ -355,9 +357,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Benchmark mm processor latency"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark mm processor latency")
     add_cli_args(parser)
     args = parser.parse_args()
     main(args)

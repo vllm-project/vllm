@@ -1501,16 +1501,17 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "repetition dataset.",
     )
 
+
 def add_random_dataset_base_args(
     parser_or_group: FlexibleArgumentParser | argparse._ArgumentGroup,
 ) -> None:
     """Add CLI arguments for base random dataset options.
-    
+
     This function adds arguments needed for:
     - random (random dataset)
     - random-mm (random multimodal dataset)
     - random-rerank (random dataset for reranking)
-    
+
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
     """
@@ -1568,10 +1569,10 @@ def add_random_multimodal_dataset_args(
     parser_or_group: FlexibleArgumentParser | argparse._ArgumentGroup,
 ) -> None:
     """Add CLI arguments for random multimodal dataset options.
-    
+
     This function adds arguments needed for:
     - random-mm (random multimodal dataset)
-    
+
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
     """
