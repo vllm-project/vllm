@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -235,6 +236,7 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
+    @instrument(span_name="Worker init")
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
