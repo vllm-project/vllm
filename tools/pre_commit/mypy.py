@@ -20,6 +20,7 @@ Args:
 
 import subprocess
 import sys
+from typing import Dict, List, Optional
 
 import regex as re
 
@@ -77,7 +78,7 @@ EXCLUDE = [
 ]
 
 
-def group_files(changed_files: list[str]) -> dict[str, list[str]]:
+def group_files(changed_files: List[str]) -> Dict[str, List[str]]:
     """
     Group changed files into different mypy calls.
 
@@ -108,9 +109,9 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
 
 
 def mypy(
-    targets: list[str],
-    python_version: str | None,
-    follow_imports: str | None,
+    targets: List[str],
+    python_version: Optional[str],
+    follow_imports: Optional[str],
     file_group: str,
 ) -> int:
     """

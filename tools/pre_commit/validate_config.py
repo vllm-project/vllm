@@ -8,12 +8,24 @@ and that each field has a docstring.
 import ast
 import inspect
 import sys
-from itertools import pairwise
+from typing import Dict, Iterator, Tuple, TypeVar
 
 import regex as re
 
+# pairwise is only available in Python 3.10+
+T = TypeVar("T")
 
-def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
+
+def pairwise(iterable: Iterator[T]) -> Iterator[Tuple[T, T]]:
+    """Return successive overlapping pairs from an iterable."""
+    from itertools import tee
+
+    a, b = tee(iterable)
+    next(b, None)
+    return zip(a, b)
+
+
+def get_attr_docs(cls_node: ast.ClassDef) -> Dict[str, str]:
     """
     Get any docstrings placed after attribute assignments in a class body.
 
