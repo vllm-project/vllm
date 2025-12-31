@@ -953,6 +953,8 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         assert attn_metadata.fp8_extra_metadata is not None
         extra_metadata = attn_metadata.fp8_extra_metadata
+        assert isinstance(extra_metadata,
+                          FlashMLASparseMetadata.FP8KernelMetadata)
 
         _attn_out, _ = flash_mla_with_kvcache(
             q=q.unsqueeze(0),  # unsqueeze to add batch_dim
