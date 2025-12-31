@@ -71,6 +71,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+    Mxfp8LinearOp,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     cutlass_fp4_supported,
@@ -116,6 +121,8 @@ QUANT_ALGOS = [
     "FP8_PB_WO",
     # FP4
     "NVFP4",
+    # MXFP8
+    "MXFP8",
 ]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
@@ -333,7 +340,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):
-    """Config class for ModelOpt FP8."""
+    """Config class for ModelOpt FP8 (including MXFP8)."""
 
     def __init__(
         self,
@@ -353,6 +360,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 quant_method,
             )
 
+        # Used by MXFP8
+        self.group_size: int | None = None
+
         # Select LinearMethod implementation based on quant_algo.
         if self.quant_method == "FP8":
             self.LinearMethodCls = ModelOptFp8LinearMethod
@@ -364,7 +374,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
             raise ValueError(
                 "Unsupported ModelOpt FP8 quant_algo for vLLM: "
                 f"{self.quant_method}. Supported: FP8 / "
-                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
+                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO / MXFP8."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -398,12 +408,18 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
             if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", ""))
+                quant_algo = str(quant_config.get("quant_algo", "")).upper()
+                # Skip MXFP8 - let ModelOptMxFp8Config handle it
+                if "MXFP8" in quant_algo.upper():
+                    return None
                 if "FP8" in quant_algo.upper():
                     return "modelopt"
         else:
             # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
+            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
+            # Skip MXFP8 - let ModelOptMxFp8Config handle it
+            if "MXFP8" in quant_algo.upper():
+                return None
             if "FP8" in quant_algo.upper():
                 return "modelopt"
 
@@ -1677,3 +1693,222 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
 ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+
+
+class ModelOptMxFp8Config(ModelOptQuantConfigBase):
+    """Config class for ModelOpt MXFP8."""
+
+    def __init__(
+        self,
+        is_checkpoint_fp8_serialized: bool,
+        kv_cache_quant_algo: str | None,
+        exclude_modules: list[str],
+    ) -> None:
+        super().__init__(exclude_modules)
+        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+
+        assert is_checkpoint_fp8_serialized, "Only serialized MXFP8 is supported"
+
+        logger.warning(
+            "Detected ModelOpt MXFP8 checkpoint. Please note that"
+            " the format is experimental and could change in future."
+        )
+
+        # MXFP8 group size must be 32
+        self.group_size = 32
+        self.kv_cache_quant_algo = kv_cache_quant_algo
+
+    def get_name(self) -> QuantizationMethods:
+        return "modelopt_mxfp8"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 100
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional["QuantizeMethodBase"]:
+        if isinstance(layer, FusedMoE):
+            raise NotImplementedError(
+                "MXFP8 quantization does not yet support MoE models"
+            )
+        return super().get_quant_method(layer, prefix)
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
+        """Detect if this ModelOpt MXFP8 config should be used based on
+        quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        # Use the community standard 'quant_method'
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+
+        # Only proceed if the method is explicitly "modelopt"
+        if quant_method != "modelopt":
+            return None
+
+        # Look for ModelOpt-specific config structure
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                quant_algo = str(quant_config.get("quant_algo", ""))
+                if "MXFP8" in quant_algo.upper():
+                    return "modelopt_mxfp8"
+        else:
+            # Check for compressed-tensors style config with specific quant_algo
+            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
+            if "MXFP8" in quant_algo.upper():
+                return "modelopt_mxfp8"
+
+        return None
+
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        **kwargs: Any,
+    ) -> "ModelOptMxFp8Config":
+        is_checkpoint_fp8_serialized = "MXFP8" in quant_method
+
+        # For MXFP8, these fields are required
+        if is_checkpoint_fp8_serialized and "quantization" in original_config:
+            # Check if required fields are present in the quantization config
+            quant_config = original_config["quantization"]
+            required_fields = ["kv_cache_quant_algo", "exclude_modules"]
+            missing_fields = [
+                field for field in required_fields if field not in quant_config
+            ]
+            if missing_fields:
+                raise ValueError(
+                    f"MXFP8 quantization requires the following fields in "
+                    f"hf_quant_config.json: {missing_fields}"
+                )
+
+        return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, exclude_modules)
+
+
+class ModelOptMxFp8LinearMethod(LinearMethodBase):
+    """Linear method for Model Optimizer MXFP8.
+    Supports loading MXFP8 checkpoints with the following structure:
+    weight: MXFP8 Value, Shape: [X, Y]
+    weight_scale: MXFP8 Scale, Shape: [X, ceil(Y/32)]
+    Args: quant_config: The ModelOpt quantization config.
+    """
+
+    def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
+        self.quant_config = quant_config
+
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError("MXFP8 currently only supports serialized checkpoints.")
+
+        self.backend: str = "torch"
+        self.mxfp8_linear = Mxfp8LinearOp(use_fallback=True)
+
+        logger.info_once(f"Using {self.backend} for MXFP8 GEMM")
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "MXFP8 quantization was selected, "
+                " dynamic quantization is not supported."
+            )
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        if input_size_per_partition % self.quant_config.group_size != 0:
+            raise ValueError(
+                "Unsupported model when in features size is not multiple of group size"
+            )
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                layer.output_size_per_partition,
+                layer.input_size_per_partition,
+                dtype=MXFP8_VALUE_DTYPE,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # Per Block Weight Scale
+        divide_and_round_up = lambda x, y: (x + y - 1) // y
+        num_scale_elements = divide_and_round_up(
+            input_size_per_partition, self.quant_config.group_size
+        )
+
+        weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                num_scale_elements,
+                dtype=MXFP8_SCALE_DTYPE,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
+            raise ValueError("MXFP8 weights must be in float8_e4m3fn format")
+
+        if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
+            raise ValueError("MXFP8 weight_scale must be in uint8 format (E8M0)")
+
+        if self.backend == "torch":
+            # Pad output dim to multiples of 128, convert to float8_e8m0fnu
+            weight_scale = layer.weight_scale
+            out_features = layer.weight.size(0)
+            out_features_padded = (out_features + 127) // 128 * 128
+            pad_rows = out_features_padded - out_features
+            if pad_rows > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, 0, 0, pad_rows)
+                )
+            weight_scale = weight_scale.view(torch.float8_e8m0fnu).flatten()
+            layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        out_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        return self.mxfp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            out_dtype=out_dtype,
+            bias=bias,
+        )
+
+
+ModelOptMxFp8Config.LinearMethodCls = ModelOptMxFp8LinearMethod
+ModelOptMxFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
