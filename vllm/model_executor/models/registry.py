@@ -190,7 +190,7 @@ _TEXT_GENERATION_MODELS = {
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
-    "IQuestCoderForCausalLM": ("iquest_coder", "IQuestCoderForCausalLM"),
+    "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
