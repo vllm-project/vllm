@@ -1841,7 +1841,6 @@ def fused_experts(
     quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
 ) -> torch.Tensor:
-    # import pdb; pdb.set_trace()
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
