@@ -41,7 +41,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
 )
 from vllm.model_executor.models.radio import RadioModel
-from vllm.model_executor.models.utils import _flatten_embeddings
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -59,7 +58,6 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.sample.metadata import SamplingMetadata
 
 DEFAULT_FINAL_IMAGE_SIZE = (2048, 1648)
 
@@ -188,7 +186,7 @@ class BartDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.encoder_attn(
-            decoder_hidden_states=hidden_states,
+            hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
 
@@ -228,7 +226,7 @@ class MBartDecoderLayer(BartDecoderLayer):
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
         hidden_states = self.encoder_attn(
-            decoder_hidden_states=hidden_states,
+            hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
 
@@ -941,21 +939,11 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        multimodal_embeddings: MultiModalEmbeddings,
-    ) -> torch.Tensor:
-        # For vLLM encoder-decoder models, flatten embeddings to
-        # [total_tokens, hidden_dim]
-        return _flatten_embeddings(multimodal_embeddings)
-
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        *,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
+        encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -964,17 +952,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 torch.Tensor of *decoder* input token ids.
             positions
                 torch.Tensor of *decoder* position indices.
-            encoder_input_ids
-                torch.Tensor of *encoder* input token ids.
-            encoder_positions
-                torch.Tensor of *encoder* position indices
+            encoder_outputs
+                List of encoder output tensors (vision embeddings).
+                During profiling, this may be None or empty.
         Returns:
             Output torch.Tensor
         """
         inputs_embeds = None
-        if encoder_input_ids.numel() > 0:
-            vision_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.get_input_embeddings(vision_embeddings)
+        if encoder_outputs:
+            inputs_embeds = torch.cat(encoder_outputs, dim=0)
         hidden_states = self.decoder(
             decoder_input_ids=input_ids, encoder_hidden_states=inputs_embeds
         )
@@ -983,10 +969,8 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
-        return logits
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         lm_head_dict = dict(self.lm_head.named_parameters())
