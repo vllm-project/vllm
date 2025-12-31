@@ -676,7 +676,7 @@ def test_sliding_window_backend_correctness(
         "medium_encoder_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["unsloth/embeddinggemma-300m"])
+@pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_sliding_window_encoder_backend_correctness(
     batch_spec_name: str, model: str, tensor_parallel_size: int
