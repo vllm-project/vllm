@@ -8,7 +8,6 @@ from math import prod
 from typing import final
 
 import torch
-import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -18,8 +17,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    RELU2_NO_MUL,
     _resize_cache,
+    apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
 )
@@ -578,31 +577,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def activation(
         self, activation: str, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        # For *_and_mul activations: output is N/2 (gate × activation(up))
-        # For *_no_mul activations: output equals input size (just activation)
-        is_no_mul = activation.endswith("_no_mul")
-        if is_no_mul:
-            assert output.size(-1) == input.size(-1), (
-                f"NO_MUL activation expects equal sizes: "
-                f"{output.size(-1)} vs {input.size(-1)}"
-            )
-        else:
-            assert output.size(-1) * 2 == input.size(-1), (
-                f"*_and_mul activation expects 2x ratio: "
-                f"{output.size(-1) * 2} vs {input.size(-1)}"
-            )
-
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(output, input)
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(output, input)
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(output, input)
-        elif activation == RELU2_NO_MUL:
-            torch.square(input=F.relu(input), out=output)
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        apply_moe_activation(activation, output, input)
 
     def enable_chunking(self):
         return (

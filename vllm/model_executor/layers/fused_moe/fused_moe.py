@@ -9,7 +9,6 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -42,10 +41,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    GELU_NO_MUL,
-    RELU2_NO_MUL,
-    SILU_NO_MUL,
     _resize_cache,
+    apply_moe_activation,
     disable_inplace,
     moe_kernel_quantize_input,
 )
@@ -2018,29 +2015,9 @@ def fused_experts_impl(
             B_bias=w1_bias,
         )
 
-        # Activation function with multiplication
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-        # Activation function without multiplication
-        elif activation == SILU_NO_MUL:
-            intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
-        elif activation == GELU_NO_MUL:
-            intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-        elif activation == RELU2_NO_MUL:
-            intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+        apply_moe_activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
