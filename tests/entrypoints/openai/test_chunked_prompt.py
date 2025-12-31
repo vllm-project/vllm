@@ -116,7 +116,10 @@ async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
                 assert chunk.choices[0].logprobs is None
                 empty_chunks_received += 1
             else:
-                tokens_received += 1
+                # Count actual tokens from logprobs since multiple tokens
+                # can be batched into a single chunk
+                assert chunk.choices[0].logprobs and chunk.choices[0].logprobs.content
+                tokens_received += len(chunk.choices[0].logprobs.content)
 
             if chunk.choices[0].finish_reason is not None:
                 finished = True
