@@ -477,6 +477,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "mxfp8",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -484,6 +485,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "int4",
+            "mxfp8",
         }
 
         if weight_dtype is None:

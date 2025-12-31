@@ -17,6 +17,7 @@ following `quantization.quant_algo` values:
 - `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
 - `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `MXFP8`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_mxfp8"`).
 
 ## Quantizing HuggingFace Models with PTQ
 
