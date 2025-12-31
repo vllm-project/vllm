@@ -972,6 +972,24 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
+            # #region agent log
+            import json
+            with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "E",
+                    "location": "qwen2_5_vl.py:974",
+                    "message": "get_replacement_qwen2vl entry",
+                    "data": {
+                        "modality": modality,
+                        "item_idx": item_idx,
+                        "out_mm_kwargs_keys": list(out_mm_kwargs.keys()),
+                        "mm_items_keys": list(mm_items.keys())
+                    },
+                    "timestamp": __import__('time').time() * 1000
+                }) + '\n')
+            # #endregion
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -998,13 +1016,21 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
             return [placeholder[modality]] * num_tokens
 
+        # Only create prompt updates for modalities that are present in BOTH mm_items AND out_mm_kwargs
+        # out_mm_kwargs may be empty for embeddings (passthrough data), so we need to check both
+        available_modalities = [
+            modality for modality in ("image", "video")
+            if modality in mm_items and modality in out_mm_kwargs
+        ]
+        
+        
         return [
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
                 replacement=partial(get_replacement_qwen2vl, modality=modality),
             )
-            for modality in ("image", "video")
+            for modality in available_modalities
         ]
 
 

@@ -729,10 +729,16 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         An optional uuid can be added which serves as a unique identifier of the
         media.
         """
+        is_embedding = modality.endswith("_embeds")
         input_modality = modality.replace("_embeds", "")
         num_items = len(self._items_by_modality[modality]) + 1
 
-        self.mm_processor.validate_num_items(input_modality, num_items)
+        # validate_num_items now handles embedding detection internally
+        self.mm_processor.validate_num_items(
+            input_modality, 
+            num_items, 
+            is_embedding=is_embedding
+        )
 
         self._items_by_modality[modality].append(item)
         self._uuids_by_modality[modality].append(uuid)
