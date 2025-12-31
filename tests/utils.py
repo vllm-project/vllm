@@ -49,7 +49,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless
-from typing import Optional
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -719,7 +718,7 @@ def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
     rank: int,
-    distributed_init_port: Optional[str] = None,
+    distributed_init_port: str | None = None,
     local_rank: int = -1,
 ) -> None:
     if distributed_init_port:

@@ -105,27 +105,34 @@ class NgramProposer:
                 total_tokens = np.sum(num_tokens_no_spec)
                 if total_tokens >= self.num_tokens_threshold:
                     final_num_threads = max(
-                        1,
-                        min(self.num_numba_thread_available,
-                            num_ngram_requests))
+                        1, min(self.num_numba_thread_available, num_ngram_requests)
+                    )
                     set_num_threads(final_num_threads)
                 else:
                     set_num_threads(1)
 
-                batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
-                                    token_ids_cpu, self.min_n, self.max_n,
-                                    self.max_model_len, self.k,
-                                    self.valid_ngram_draft,
-                                    self.valid_ngram_num_drafts)
+                batch_propose_numba(
+                    valid_ngram_requests,
+                    num_tokens_no_spec,
+                    token_ids_cpu,
+                    self.min_n,
+                    self.max_n,
+                    self.max_model_len,
+                    self.k,
+                    self.valid_ngram_draft,
+                    self.valid_ngram_num_drafts,
+                )
 
                 # Restore original number of threads.
                 set_num_threads(original_num_numba_threads)
 
             for i in range(num_requests):
-                if i in valid_ngram_requests and \
-                    self.valid_ngram_num_drafts[i] > 0:
-                    draft_token_ids.append(self.valid_ngram_draft[
-                        i, :self.valid_ngram_num_drafts[i]].tolist())
+                if i in valid_ngram_requests and self.valid_ngram_num_drafts[i] > 0:
+                    draft_token_ids.append(
+                        self.valid_ngram_draft[
+                            i, : self.valid_ngram_num_drafts[i]
+                        ].tolist()
+                    )
                 else:
                     draft_token_ids.append([])
         else:
@@ -134,7 +141,8 @@ class NgramProposer:
         # Broadcast from rank 0 to other ranks using GroupCoordinator
         if self.tp_group is not None and self.tp_group.world_size > 1:
             draft_token_ids = self.tp_group.broadcast_object_list(
-                draft_token_ids, src=self.leader_rank)
+                draft_token_ids, src=self.leader_rank
+            )
 
         return draft_token_ids
 
