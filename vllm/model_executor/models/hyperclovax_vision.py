@@ -1734,7 +1734,12 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         orig_to_new_prefix={
             "model.": "",  # Remove model. prefix if present
             "vision_model.": "visual.",  # HF uses vision_model, we use visual
-        }
+        },
+        orig_to_new_substr={
+            # Ignore MambaMia video-audio compressor weights (not implemented in vLLM)
+            # This module is used in HF for temporal compression of video+audio
+            "video_audio_compressor": None,
+        },
     )
 
     def __init__(
