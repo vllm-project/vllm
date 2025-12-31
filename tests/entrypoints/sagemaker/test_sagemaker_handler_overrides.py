@@ -22,7 +22,8 @@ import tempfile
 import pytest
 import requests
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     MODEL_NAME_SMOLLM,
 )

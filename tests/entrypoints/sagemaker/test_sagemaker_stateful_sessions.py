@@ -6,7 +6,8 @@ import openai  # use the official client for correctness check
 import pytest
 import requests
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     HEADER_SAGEMAKER_CLOSED_SESSION_ID,
     HEADER_SAGEMAKER_NEW_SESSION_ID,

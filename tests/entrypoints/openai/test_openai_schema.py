@@ -8,7 +8,7 @@ import schemathesis
 from hypothesis import settings
 from schemathesis import GenerationConfig
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 schemathesis.experimental.OPEN_API_3_1.enable()
 

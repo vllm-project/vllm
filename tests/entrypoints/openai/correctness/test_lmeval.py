@@ -11,9 +11,8 @@ AsyncLLMEngine are working correctly.
 
 import lm_eval
 
+from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
-
-from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 NUM_CONCURRENT = 500

@@ -6,7 +6,7 @@ import pytest
 from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
 
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")

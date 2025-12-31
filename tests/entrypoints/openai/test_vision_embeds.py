@@ -8,9 +8,8 @@ import pytest
 import requests
 import torch
 
+from tests.utils import RemoteOpenAIServer
 from vllm.utils.serial_utils import tensor2base64
-
-from ...utils import RemoteOpenAIServer
 
 
 def _terratorch_dummy_messages():

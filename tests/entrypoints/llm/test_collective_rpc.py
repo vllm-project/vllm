@@ -2,19 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
+from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM
 
-from ...utils import create_new_process_for_each_test
 
-
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()
 def test_collective_rpc(tp_size, backend, monkeypatch):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
     if tp_size == 1 and backend == "ray":
         pytest.skip("Skip duplicate test case")
     if tp_size == 1:

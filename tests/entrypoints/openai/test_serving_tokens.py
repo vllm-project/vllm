@@ -6,10 +6,9 @@ import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
 
+from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.v1.engine.detokenizer import check_stop_strings
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 GEN_ENDPOINT = "/inference/v1/generate"
