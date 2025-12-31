@@ -495,27 +495,40 @@ def main(args):
         temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
     )
 
-    mm_data = req_data.multi_modal_data
-    if not mm_data:
-        mm_data = {}
-        if audio_count > 0:
-            mm_data = {
-                "audio": [
-                    asset.audio_and_sample_rate for asset in audio_assets[:audio_count]
-                ]
-            }
+    def get_input(start, end):
+        mm_data = req_data.multi_modal_data
+        if not mm_data:
+            mm_data = {}
+            if end - start > 0:
+                mm_data = {
+                    "audio": [
+                        asset.audio_and_sample_rate for asset in audio_assets[start:end]
+                    ]
+                }
 
+        inputs = {"multi_modal_data": mm_data}
+
+        if req_data.prompt:
+            inputs["prompt"] = req_data.prompt
+        else:
+            inputs["prompt_token_ids"] = req_data.prompt_token_ids
+
+        return inputs
+
+    # Batch inference
     assert args.num_prompts > 0
-    inputs = {"multi_modal_data": mm_data}
-
-    if req_data.prompt:
-        inputs["prompt"] = req_data.prompt
-    else:
-        inputs["prompt_token_ids"] = req_data.prompt_token_ids
-
-    if args.num_prompts > 1:
-        # Batch inference
+    if audio_count != 1:
+        inputs = get_input(0, audio_count)
         inputs = [inputs] * args.num_prompts
+    else:
+        # For single audio input, we need to vary the audio input
+        # to avoid deduplication in vLLM engine.
+        inputs = []
+        for i in range(args.num_prompts):
+            start = i % len(audio_assets)
+            inp = get_input(start, start + 1)
+            inputs.append(inp)
+
     # Add LoRA request if applicable
     lora_request = (
         req_data.lora_requests * args.num_prompts if req_data.lora_requests else None
