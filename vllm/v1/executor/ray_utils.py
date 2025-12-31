@@ -184,12 +184,9 @@ class FutureWrapper(Future):
     def get_refs(self, timeout=None):
         if self.is_callable(self.ref_or_refs):
             if isinstance(self.ref_or_refs, list):
-                refs = [ref(timeout) for ref in self.ref_or_refs]
-            else:
-                refs = self.ref_or_refs(timeout)
-        else:
-            refs = self.ref_or_refs
-        return refs
+                return = [ref(timeout) for ref in self.ref_or_refs]
+            return self.ref_or_refs(timeout)
+        return self.ref_or_refs
 
     def result(self, timeout=None):
         outputs = ray.get(self.get_refs(), timeout=timeout)
