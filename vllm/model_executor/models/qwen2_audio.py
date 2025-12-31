@@ -39,6 +39,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio import get_target_channels
 from vllm.multimodal.inputs import (
     AudioItem,
     ModalityData,
@@ -201,7 +202,10 @@ class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return Qwen2AudioMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return Qwen2AudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=get_target_channels(feature_extractor),
+        )
 
     def _call_hf_processor(
         self,

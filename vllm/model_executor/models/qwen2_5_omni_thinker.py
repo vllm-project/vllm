@@ -63,6 +63,7 @@ from vllm.model_executor.models.qwen2_audio import (
 )
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio import get_target_channels
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
@@ -310,6 +311,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.info.get_hf_config().vision_config.spatial_merge_size,
             target_sr=feature_extractor.sampling_rate,
+            target_channels=get_target_channels(feature_extractor),
         )
 
     def _call_hf_processor(

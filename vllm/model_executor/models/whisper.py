@@ -45,6 +45,7 @@ from vllm.model_executor.models.whisper_utils import (
     WhisperCausalConv1d,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio import get_target_channels
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -719,7 +720,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=get_target_channels(feature_extractor),
+        )
 
     @property
     def pad_dummy_encoder_prompt(self) -> bool:
