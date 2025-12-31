@@ -355,6 +355,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniCPM3ForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
+    "MiniCPM4ForCausalLM": _HfExamplesInfo(
+        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+    ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-Text-01",
