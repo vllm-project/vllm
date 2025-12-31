@@ -15,6 +15,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     ModelConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -32,6 +33,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule,
+    fused_gdn_gating_patch,
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -359,6 +361,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        self.is_cuda_graph = (
+            get_current_vllm_config().compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE
+        )
 
     def fix_query_key_value_ordering(
         self,
@@ -594,7 +600,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
-        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        if (self.is_cuda_graph):
+            g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
+        else:
+            g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
