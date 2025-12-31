@@ -378,3 +378,241 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
     ref_input_batch.refresh_metadata()
 
     _compare_objs(input_batch, ref_input_batch)
+
+
+# ==============================================================================
+# Tests for merged_track_token_ids
+# ==============================================================================
+
+
+def _create_input_batch(device: str, batch_size: int = 32) -> InputBatch:
+    """Helper to create an InputBatch for testing."""
+    return InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+
+
+def _create_cached_request_with_track_ids(
+    req_id_suffix: int,
+    track_token_ids: list[int] | None = None,
+) -> CachedRequestState:
+    """Create a CachedRequestState with optional track_token_ids."""
+    prompt_token_ids = [
+        np.random.randint(0, VOCAB_SIZE)
+        for _ in range(np.random.randint(1, MAX_PROMPT_SIZE))
+    ]
+    output_token_ids = [
+        np.random.randint(0, VOCAB_SIZE)
+        for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))
+    ]
+    sampling_params = SamplingParams(
+        top_k=np.random.randint(1, 10),
+        top_p=np.random.uniform(0.0, 1.0),
+        track_token_ids=track_token_ids,
+    )
+    return CachedRequestState(
+        req_id=f"req_id_{req_id_suffix}",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=[],
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=len(output_token_ids),
+        output_token_ids=output_token_ids,
+    )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_empty(device: str):
+    """
+    Test that merged_track_token_ids returns None
+    when no requests have track_token_ids.
+    """
+    input_batch = _create_input_batch(device)
+
+    # Add requests without track_token_ids
+    for i in range(3):
+        req = _create_cached_request_with_track_ids(i, track_token_ids=None)
+        input_batch.add_request(req)
+
+    # Should return None
+    assert input_batch.merged_track_token_ids is None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_single_request(device: str):
+    """Test merged_track_token_ids with a single request having track_token_ids."""
+    input_batch = _create_input_batch(device)
+
+    track_ids = [100, 200, 300]
+    req = _create_cached_request_with_track_ids(0, track_token_ids=track_ids)
+    input_batch.add_request(req)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    assert merged.device == torch.device(device)
+    assert merged.tolist() == sorted(track_ids)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_multiple_requests_disjoint(device: str):
+    """
+    Test merged_track_token_ids with multiple requests
+    having disjoint track_token_ids.
+    """
+    input_batch = _create_input_batch(device)
+
+    # Request 0: track [100, 200]
+    req0 = _create_cached_request_with_track_ids(0, track_token_ids=[100, 200])
+    input_batch.add_request(req0)
+
+    # Request 1: track [300, 400]
+    req1 = _create_cached_request_with_track_ids(1, track_token_ids=[300, 400])
+    input_batch.add_request(req1)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    # Should contain union of all track_token_ids, sorted
+    assert merged.tolist() == [100, 200, 300, 400]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_multiple_requests_overlapping(device: str):
+    """Test merged_track_token_ids with overlapping track_token_ids (deduplication)."""
+    input_batch = _create_input_batch(device)
+
+    # Request 0: track [100, 200, 300]
+    req0 = _create_cached_request_with_track_ids(0, track_token_ids=[100, 200, 300])
+    input_batch.add_request(req0)
+
+    # Request 1: track [200, 300, 400] (overlaps with req0)
+    req1 = _create_cached_request_with_track_ids(1, track_token_ids=[200, 300, 400])
+    input_batch.add_request(req1)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    # Should deduplicate and sort
+    assert merged.tolist() == [100, 200, 300, 400]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_mixed_requests(device: str):
+    """
+    Test merged_track_token_ids with some requests
+    having track_token_ids and others not.
+    """
+    input_batch = _create_input_batch(device)
+
+    # Request 0: no track_token_ids
+    req0 = _create_cached_request_with_track_ids(0, track_token_ids=None)
+    input_batch.add_request(req0)
+
+    # Request 1: track [100, 200]
+    req1 = _create_cached_request_with_track_ids(1, track_token_ids=[100, 200])
+    input_batch.add_request(req1)
+
+    # Request 2: no track_token_ids
+    req2 = _create_cached_request_with_track_ids(2, track_token_ids=None)
+    input_batch.add_request(req2)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    assert merged.tolist() == [100, 200]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_empty_list(device: str):
+    """Test merged_track_token_ids when a request has track_token_ids=[]."""
+    input_batch = _create_input_batch(device)
+
+    # Request 0: empty list
+    req0 = _create_cached_request_with_track_ids(0, track_token_ids=[])
+    input_batch.add_request(req0)
+
+    # Should return None since no tokens to track
+    assert input_batch.merged_track_token_ids is None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_many_tokens(device: str):
+    """Test merged_track_token_ids with many tokens (classification use case)."""
+    input_batch = _create_input_batch(device)
+
+    # Track 100 tokens for classification
+    track_ids = list(range(100, 200))
+    req = _create_cached_request_with_track_ids(0, track_token_ids=track_ids)
+    input_batch.add_request(req)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    assert merged.tolist() == track_ids
+    assert len(merged) == 100
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_after_remove_request(device: str):
+    """Test that merged_track_token_ids updates after removing a request."""
+    input_batch = _create_input_batch(device)
+
+    # Request 0: track [100, 200]
+    req0 = _create_cached_request_with_track_ids(0, track_token_ids=[100, 200])
+    input_batch.add_request(req0)
+
+    # Request 1: track [300, 400]
+    req1 = _create_cached_request_with_track_ids(1, track_token_ids=[300, 400])
+    input_batch.add_request(req1)
+
+    # Initial merged should have all 4 tokens
+    assert input_batch.merged_track_token_ids.tolist() == [100, 200, 300, 400]
+
+    # Remove request 0
+    input_batch.remove_request(req0.req_id)
+
+    # After removal, should only have tokens from request 1
+    assert input_batch.merged_track_token_ids.tolist() == [300, 400]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_merged_track_token_ids_tensor_properties(device: str):
+    """Test that the returned tensor has correct properties."""
+    input_batch = _create_input_batch(device)
+
+    track_ids = [500, 100, 300, 200]  # Unsorted input
+    req = _create_cached_request_with_track_ids(0, track_token_ids=track_ids)
+    input_batch.add_request(req)
+
+    merged = input_batch.merged_track_token_ids
+
+    assert merged is not None
+    assert merged.dtype == torch.int64
+    assert merged.device == torch.device(device)
+    # Should be sorted
+    assert merged.tolist() == sorted(track_ids)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_track_token_ids_validation_exceeds_vocab(device: str):
+    """Test that track_token_ids exceeding vocab_size raises ValueError."""
+    input_batch = _create_input_batch(device)
+
+    # Try to add request with token ID >= vocab_size
+    invalid_track_ids = [100, VOCAB_SIZE + 100]  # VOCAB_SIZE is 1024
+    req = _create_cached_request_with_track_ids(0, track_token_ids=invalid_track_ids)
+
+    with pytest.raises(ValueError) as exc_info:
+        input_batch.add_request(req)
+
+    assert "exceed vocab_size" in str(exc_info.value)

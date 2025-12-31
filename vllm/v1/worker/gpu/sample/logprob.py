@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.outputs import LogprobsTensors, TrackedLogprobsTensors
 
 
 @triton.jit
@@ -165,3 +165,31 @@ def compute_prompt_logprobs(
     logprobs = torch.cat(logprobs, dim=0) if len(logprobs) > 1 else logprobs[0]
     ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
     return logprobs, ranks
+
+
+def compute_tracked_logprobs(
+    logits: torch.Tensor,
+    track_token_ids: torch.Tensor,
+) -> TrackedLogprobsTensors:
+    """Compute logprobs for specific tracked token IDs.
+
+    This is an efficient way to get logprobs for a small set of tokens
+    (e.g., class labels) without retrieving the full vocabulary logprobs.
+
+    Args:
+        logits: [batch_size, vocab_size] tensor of logits
+        track_token_ids: [num_tracked_tokens] tensor of token IDs to track
+
+    Returns:
+        TrackedLogprobsTensors containing:
+            - logprobs: [batch_size, num_tracked_tokens] tensor
+            - token_ids: [num_tracked_tokens] tensor (same as input)
+    """
+    # Compute log softmax to get logprobs
+    logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
+    # Index into the specific token columns we care about
+    tracked_logprobs = logprobs[:, track_token_ids]
+    return TrackedLogprobsTensors(
+        logprobs=tracked_logprobs,
+        token_ids=track_token_ids,
+    )

@@ -329,6 +329,18 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        # Prepare tracked logprobs, based on delta mode
+        # Use `is not None` to distinguish "feature disabled" (None) from
+        # "feature enabled but empty" ({})
+        tracked_logprobs = self.logprobs_processor.tracked_logprobs
+        if delta and tracked_logprobs is not None:
+            # In delta mode, only return the logprobs for the new tokens
+            num_new_tokens = len(token_ids)
+            tracked_logprobs = {
+                token_id: logprob_list[-num_new_tokens:]
+                for token_id, logprob_list in tracked_logprobs.items()
+            }
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -337,6 +349,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            tracked_logprobs=tracked_logprobs,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
