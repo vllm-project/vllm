@@ -390,7 +390,7 @@ class CpuPlatform(Platform):
         if env_key in os.environ and os.environ[env_key] != "":
             visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
             allowed_numa_nodes_list = [
-                x for x in visible_nodes if x in allowed_cpu_id_list
+                x for x in sorted(list(set(visible_nodes))) if x in allowed_numa_nodes
             ]
 
         return allowed_numa_nodes_list, logical_cpu_list
