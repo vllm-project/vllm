@@ -261,7 +261,6 @@ class LlamaModel(nn.Module):
 
 
 class Eagle3LlamaForCausalLM(Eagle3Mixin, LlamaForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
