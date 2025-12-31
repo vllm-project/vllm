@@ -1695,12 +1695,7 @@ class NemotronH_Nano_VL_V2(
             patch_size=patch_size,
             norm_mean=hf_config.norm_mean,
             norm_std=hf_config.norm_std,
-            reg_tokens=(
-                hf_config_vision.args.get("register_multiple")
-                if hasattr(hf_config_vision, "args")
-                and isinstance(hf_config_vision.args, dict)
-                else None
-            ),
+            **hf_config_vision.args,
         )
 
         return RadioModel(config=radio_config)
