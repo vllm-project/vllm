@@ -45,12 +45,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
+    # register_moe_scaling_factors,
+    _convert_moe_scaling_factors,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
-    register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
@@ -945,7 +946,20 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
-        register_moe_scaling_factors(layer)
+        # register_moe_scaling_factors(layer)
+        w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
+            _convert_moe_scaling_factors(
+                layer.w13_weight_scale,
+                layer.w13_input_scale,
+                layer.w2_weight_scale,
+                layer.w2_input_scale,
+            )
+        )
+
+        layer.w13_weight_scale = Parameter(w13_weight_scale, requires_grad=False)
+        layer.w2_weight_scale = Parameter(w2_weight_scale, requires_grad=False)
+        layer.w13_input_scale = Parameter(w13_input_scale, requires_grad=False)
+        layer.w2_input_scale = Parameter(w2_input_scale, requires_grad=False)
 
     def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
         """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
@@ -999,13 +1013,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
-            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
             w2_scale=layer.w2_weight_scale,
-            g2_alphas=layer.output2_scales_scalar.squeeze(),
             a1_scale=layer.w13_input_scale,
-            a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            a2_gscale=layer.w2_input_scale_inv,
+            # g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
+            # g2_alphas=layer.output2_scales_scalar.squeeze(),
+            # a1_gscale=layer.w13_input_scale,
+            # a2_gscale=layer.w2_input_scale_inv,
             per_act_token_quant=False,
         )
 

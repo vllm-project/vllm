@@ -168,6 +168,18 @@ def get_moe_scaling_factors(
     return output1_scales_scalar, output1_scales_gate_scalar, output2_scales_scalar
 
 
+def _convert_moe_scaling_factors(
+    w13_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    w13_scale = (w13_scale * w13_input_scale).squeeze()
+    w2_scale = (w2_scale * w2_input_scale).squeeze()
+    w2_input_scale = 1.0 / w2_input_scale
+    return w13_scale, w13_input_scale, w2_scale, w2_input_scale
+
+
 def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
     output1_scales, output1_gate_scales, output2_scales = get_moe_scaling_factors(
         layer.w13_input_scale,
