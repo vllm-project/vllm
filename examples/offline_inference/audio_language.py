@@ -358,6 +358,34 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# GLM-ASR
+def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "zai-org/GLM-ASR-Nano-2512"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    # GLM-ASR uses <|pad|> token for audio
+    audio_placeholder = "<|pad|>" * audio_count
+
+    messages = [{"role": "user", "content": f"{audio_placeholder}{question}"}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Whisper
 def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "Whisper only support single audio input per prompt"
@@ -381,6 +409,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "gemma3n": run_gemma3n,
+    "glmasr": run_glmasr,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
