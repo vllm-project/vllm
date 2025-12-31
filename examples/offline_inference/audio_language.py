@@ -506,7 +506,6 @@ def main(args):
                     ]
                 }
 
-        assert args.num_prompts > 0
         inputs = {"multi_modal_data": mm_data}
 
         if req_data.prompt:
@@ -517,6 +516,7 @@ def main(args):
         return inputs
 
     # Batch inference
+    assert args.num_prompts > 0
     if audio_count != 1:
         inputs = get_input(0, audio_count)
         inputs = [inputs] * args.num_prompts
