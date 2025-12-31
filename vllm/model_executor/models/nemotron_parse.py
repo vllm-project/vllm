@@ -124,7 +124,6 @@ class BartDecoderLayer(nn.Module):
         however I left the name as "encoder_attn" to maintain consistency
         with the name of the pretrained weights.
         """
-        # TODO amitz-nv: Is this OK?
         self.encoder_attn = WhisperCrossAttention(
             self.embed_dim,
             config.decoder_attention_heads,
@@ -859,8 +858,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
             h, w = self.config.image_size
             return NemotronParsePixelInputs(
                 type="pixel_values",
-                # TODO amitz-nv: Is the flatten_bn really unnecessary here?
-                data=pixel_values,  # flatten_bn(pixel_values, concat=True),
+                data=pixel_values,
                 resolve_bindings={
                     "h": h,
                     "w": w,
