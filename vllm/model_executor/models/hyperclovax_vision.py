@@ -1526,14 +1526,10 @@ class HCXVisionV2MultiModalProcessor(
 
         return processed_outputs
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+    # NOTE: We don't override _hf_processor_applies_updates here.
+    # The default behavior returns True when processing actual image data,
+    # meaning the HF processor already handles image token expansion.
+    # This is consistent with Qwen2-VL's approach.
 
     def _get_prompt_updates(
         self,
