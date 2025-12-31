@@ -46,14 +46,14 @@ def cross_encoder_tokenizer(cross_encoder_model_config):
 
 @pytest.fixture(scope="module")
 def llm_reranker_model_config():
-    """Model config for LLM-as-reranker style (no pad token)."""
+    """Model config for LLM-as-reranker style (no sep token)."""
     config = ModelConfig(
         CROSS_ENCODER_MODEL_ID,
         runner="pooling",
     )
-    # use_pad_token is a property that reads from hf_config,
+    # use_sep_token is a property that reads from hf_config,
     # so we set it there to override the default (True)
-    config.hf_config.use_pad_token = False
+    config.hf_config.use_sep_token = False
     return config
 
 
@@ -238,7 +238,7 @@ class TestGetScorePrompt:
         mock_model_no_score_template,
     ):
         """Test fallback path when ChatTemplateResolutionError
-        and use_pad_token=True."""
+        and use_sep_token=True."""
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -250,7 +250,7 @@ class TestGetScorePrompt:
             ),
         ):
             full_prompt, engine_prompt = get_score_prompt(
-                cross_encoder_model_config,  # use_pad_token=True
+                cross_encoder_model_config,  # use_sep_token=True
                 cross_encoder_tokenizer,
                 tokenization_kwargs,
                 "query",
@@ -289,7 +289,7 @@ class TestGetScorePrompt:
         mock_model_no_score_template,
     ):
         """Test fallback path when ChatTemplateResolutionError
-        and use_pad_token=False."""
+        and use_sep_token=False."""
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -301,7 +301,7 @@ class TestGetScorePrompt:
             ),
         ):
             full_prompt, engine_prompt = get_score_prompt(
-                llm_reranker_model_config,  # use_pad_token=False
+                llm_reranker_model_config,  # use_sep_token=False
                 cross_encoder_tokenizer,
                 tokenization_kwargs,
                 "query",

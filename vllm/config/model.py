@@ -1615,10 +1615,10 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     @property
-    def use_pad_token(self) -> bool:
+    def use_sep_token(self) -> bool:
         # cross_encoder models defaults to using pad_token.
         # `llm as reranker` models defaults to not using pad_token.
-        return getattr(self.hf_config, "use_pad_token", True)
+        return getattr(self.hf_config, "use_sep_token", True)
 
     @property
     def head_dtype(self) -> torch.dtype:
