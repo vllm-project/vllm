@@ -45,15 +45,13 @@ def ref_masked_attention(
 
         # Apply sliding window masks
         sliding_window_mask = (
-            torch.zeros_like(mask)
-            if any([sliding_window_q, sliding_window_k])
-            else None
+            torch.ones_like(mask) if any([sliding_window_q, sliding_window_k]) else None
         )
         if sliding_window_q is not None and sliding_window_q > 0:
-            sliding_window_mask |= pos_q - pos_k < sliding_window_q
+            sliding_window_mask &= pos_q - pos_k <= sliding_window_q
 
         if sliding_window_k is not None and sliding_window_k > 0:
-            sliding_window_mask |= pos_k - pos_q < sliding_window_k
+            sliding_window_mask &= pos_k - pos_q <= sliding_window_k
 
         if sliding_window_mask is not None:
             mask = mask & sliding_window_mask
@@ -145,7 +143,7 @@ def test_context_attention(B, max_seq_len, H_Q, H_KV, D, is_causal, dtype):
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
 @pytest.mark.parametrize("D", [128])
-@pytest.mark.parametrize("sliding_window", [(16, 16), (32, 0), (0, 32)])
+@pytest.mark.parametrize("sliding_window", [(32, 32), (32, 0), (0, 32)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_context_attention_sliding_window(
     B, max_seq_len, H_Q, H_KV, D, sliding_window, dtype

@@ -131,16 +131,14 @@ def _fwd_kernel(
 
         # Bidirectional sliding window masks
         sliding_mask_q = (
-            pos_q - pos_k < SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
+            pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
         )
         sliding_mask_k = (
-            pos_k - pos_q < SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
+            pos_k - pos_q <= SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
         )
-        if sliding_mask_q is not None and sliding_mask_k is not None:
-            mask &= sliding_mask_q | sliding_mask_k
-        elif sliding_mask_q is not None:
+        if sliding_mask_q is not None:
             mask &= sliding_mask_q
-        elif sliding_mask_k is not None:
+        if sliding_mask_k is not None:
             mask &= sliding_mask_k
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
