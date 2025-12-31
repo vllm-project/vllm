@@ -299,3 +299,149 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
         frames_missing, metadata_missing = videoio_missing.load_bytes(b"test")
         np.testing.assert_array_equal(frames_missing, FAKE_OUTPUT_2)
         assert metadata_missing["video_backend"] == "test_video_backend_override_2"
+
+
+# ============================================================================
+# Frame Recovery Tests
+# ============================================================================
+
+
+def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that frame recovery correctly uses the next valid frame when
+    target frames fail to load.
+
+    Uses simulate_corruption.mp4 and mocks VideoCapture.grab() to fail
+    on specific frame indices, then verifies recovery produces more frames.
+    """
+    import cv2
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Load the test video
+        video_path = ASSETS_DIR / "simulate_corruption.mp4"
+        with open(video_path, "rb") as f:
+            video_data = f.read()
+
+        # Get video info to determine which frames to fail
+        # We'll fail frames at indices that would be sampled
+        # For a video sampled at 10 frames, simulate failures on 2 of them
+        fail_on_frames = {5, 15, 25}  # Fail on these frame indices
+
+        # Store original VideoCapture class
+        original_video_capture = cv2.VideoCapture
+
+        class MockVideoCapture:
+            """Wrapper that simulates grab() failures on specific frames."""
+
+            def __init__(self, *args, **kwargs):
+                self._cap = original_video_capture(*args, **kwargs)
+                self._current_frame = -1
+
+            def grab(self):
+                self._current_frame += 1
+                if self._current_frame in fail_on_frames:
+                    return False  # Simulate failure
+                return self._cap.grab()
+
+            def retrieve(self):
+                return self._cap.retrieve()
+
+            def get(self, prop):
+                return self._cap.get(prop)
+
+            def isOpened(self):
+                return self._cap.isOpened()
+
+            def release(self):
+                return self._cap.release()
+
+        # Patch cv2.VideoCapture
+        m.setattr(cv2, "VideoCapture", MockVideoCapture)
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+        # Test WITHOUT recovery - should have fewer frames due to failures
+        frames_no_recovery, meta_no = loader.load_bytes(
+            video_data, num_frames=30, frame_recovery=False
+        )
+
+        # Test WITH recovery - should recover using next valid frames
+        frames_with_recovery, meta_yes = loader.load_bytes(
+            video_data, num_frames=30, frame_recovery=True
+        )
+
+        # With recovery should have MORE frames than without
+        assert frames_with_recovery.shape[0] > frames_no_recovery.shape[0], (
+            f"Recovery should produce more frames. "
+            f"Without: {frames_no_recovery.shape[0]}, "
+            f"With: {frames_with_recovery.shape[0]}"
+        )
+
+        # Verify metadata consistency
+        assert frames_no_recovery.shape[0] == len(meta_no["frames_indices"])
+        assert frames_with_recovery.shape[0] == len(meta_yes["frames_indices"])
+
+        # Verify temporal order is preserved
+        assert meta_yes["frames_indices"] == sorted(meta_yes["frames_indices"])
+
+
+def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test frame recovery with an actual corrupted video file.
+
+    This test verifies that frame_recovery=True produces at least as many
+    frames as frame_recovery=False, and that metadata is consistent.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        corrupted_video_path = ASSETS_DIR / "corrupted.mp4"
+
+        with open(corrupted_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+        # Test without recovery
+        frames_no_recovery, meta_no_recovery = loader.load_bytes(
+            video_data, num_frames=-1, frame_recovery=False
+        )
+
+        # Test with recovery
+        frames_with_recovery, meta_with_recovery = loader.load_bytes(
+            video_data, num_frames=-1, frame_recovery=True
+        )
+
+        # With recovery, we should have at least as many frames as without
+        assert frames_with_recovery.shape[0] >= frames_no_recovery.shape[0]
+
+        # Both should have consistent metadata
+        assert frames_no_recovery.shape[0] == len(meta_no_recovery["frames_indices"])
+        num_with_recovery = len(meta_with_recovery["frames_indices"])
+        assert frames_with_recovery.shape[0] == num_with_recovery
+
+
+def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
+    """Test that frame_recovery works with the dynamic video backend."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+
+        corrupted_video_path = ASSETS_DIR / "corrupted.mp4"
+
+        with open(corrupted_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+
+        # Test with frame_recovery enabled
+        frames, metadata = loader.load_bytes(
+            video_data, fps=2, max_duration=10, frame_recovery=True
+        )
+
+        # Should have some frames loaded
+        assert frames.shape[0] > 0
+        assert "do_sample_frames" in metadata
+        assert metadata["do_sample_frames"] is False  # Dynamic backend always False
+        assert frames.shape[0] == len(metadata["frames_indices"])
