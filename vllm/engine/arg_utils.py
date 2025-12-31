@@ -761,6 +761,10 @@ class EngineArgs:
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
         )
+        parallel_group.add_argument(
+            "--disable-pp-async-send",
+            **parallel_kwargs["disable_pp_async_send"],
+        )
         parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])

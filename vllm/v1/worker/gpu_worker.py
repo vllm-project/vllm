@@ -112,6 +112,9 @@ class Worker(WorkerBase):
             self.profiler = None
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.enable_pp_async_send = (
+            not vllm_config.parallel_config.disable_pp_async_send
+        )
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -638,7 +641,7 @@ class Worker(WorkerBase):
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
-            is_async=True,
+            is_async=self.enable_pp_async_send,
         )
 
         return None
