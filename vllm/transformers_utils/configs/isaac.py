@@ -53,7 +53,7 @@ class IsaacConfig(Qwen3Config):
         super().__init__(**kwargs)
 
         if isinstance(text_config, dict):
-            # from HF config 
+            # from HF config
             self.text_config = self.sub_configs["text_config"](**text_config)
         elif text_config is None:
             # For BC use all kwargs to init text config.

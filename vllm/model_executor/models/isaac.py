@@ -1322,8 +1322,11 @@ class IsaacForConditionalGeneration(
         config.image_token_id = self.vision_token_id
 
         text_cfg = getattr(config, "text_config", None)
-        target_cfg = text_cfg if text_cfg is not None and not isinstance(
-            text_cfg, dict) else config
+        target_cfg = (
+            text_cfg
+            if text_cfg is not None and not isinstance(text_cfg, dict)
+            else config
+        )
 
         rope_scaling = getattr(target_cfg, "rope_scaling", None)
         if rope_scaling is None and target_cfg is config:
