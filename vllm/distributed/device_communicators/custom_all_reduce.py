@@ -22,8 +22,8 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 try:
     ops.meta_size()
     custom_ar = True
-except Exception:
-    # For CPUs
+except (RuntimeError, AttributeError):
+    # For CPUs or when custom AR ops not available
     custom_ar = False
 
 logger = init_logger(__name__)
