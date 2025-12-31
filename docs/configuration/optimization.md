@@ -7,7 +7,7 @@ This guide covers optimization strategies and performance tuning for vLLM V1.
 
 ## Preemption
 
-Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
+Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
 In such cases, vLLM can preempt requests to free up KV cache space for other requests. Preempted requests are recomputed when sufficient KV cache space becomes
 available again. When this occurs, you may see the following warning:
 

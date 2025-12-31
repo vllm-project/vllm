@@ -349,6 +349,8 @@ class MLACommonPrefillMetadata:
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     query_seq_lens: torch.Tensor | None = None
+    workspace_buffer: torch.Tensor | None = None
+    q_data_type: torch.dtype | None = None
 
 
 @dataclass
@@ -440,7 +442,7 @@ def use_flashinfer_prefill() -> bool:
         and flashinfer_available
         and not vllm_config.attention_config.use_cudnn_prefill
         and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
     )
 
 
@@ -451,7 +453,7 @@ def use_cudnn_prefill() -> bool:
     return (
         flashinfer_available
         and vllm_config.attention_config.use_cudnn_prefill
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and has_nvidia_artifactory()
     )
 
@@ -464,7 +466,7 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     return (
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
     )
 
 
@@ -556,6 +558,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_rank = 0
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -720,8 +723,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
@@ -771,13 +774,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
-
-        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-
-        num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -792,6 +789,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
+            num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
+
             reqs_start = num_decodes  # prefill_start
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
@@ -981,19 +980,29 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 prefill_metadata.query_seq_lens = (
                     prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
                 )
+                prefill_metadata.workspace_buffer = self._workspace_buffer
 
         decode_metadata = None
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens_cpu = dcp_local_seq_lens_cpu
                 seq_lens = dcp_local_seq_lens
+
+                # After DCP distribution, the maximum number of tokens for any rank is
+                # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
+                # and I is cp_kv_cache_interleave_size.
+                # This eliminates GPU->CPU sync while minimizing workspace
+                # over-allocation.
+                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                max_seq_len = (
+                    (max_seq_len + num_partitions - 1) // num_partitions
+                ) * self.cp_kv_cache_interleave_size
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
-                seq_lens_cpu=seq_lens_cpu[:num_decodes],
                 seq_lens_device=seq_lens[:num_decodes],
+                max_seq_len=max_seq_len,
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
@@ -1364,12 +1373,13 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.query_seq_lens is not None
+        assert prefill.workspace_buffer is not None
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=prefill.workspace_buffer,
             seq_lens=prefill.query_seq_lens,
             max_q_len=prefill.max_query_len,
             max_kv_len=prefill.max_query_len,
@@ -1398,6 +1408,7 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
 
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
+        assert prefill.workspace_buffer is not None
 
         out = torch.zeros(
             q.shape[0],
@@ -1406,13 +1417,13 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
             device=q.device,
             dtype=q.dtype,
         )
-        self._workspace_buffer.fill_(0)
+        prefill.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=prefill.workspace_buffer,
             seq_lens=prefill.chunked_context.seq_lens[chunk_idx],
             max_q_len=prefill.max_query_len,
             max_kv_len=prefill.chunked_context.max_seq_lens[chunk_idx],

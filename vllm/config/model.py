@@ -8,10 +8,9 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
-from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +28,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -71,19 +71,8 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward"]
+ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
 ConvertOption = Literal["auto", ConvertType]
-TaskOption = Literal[
-    "auto",
-    "generate",
-    "embedding",
-    "embed",
-    "classify",
-    "score",
-    "reward",
-    "transcription",
-    "draft",
-]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
@@ -92,12 +81,6 @@ LogprobsMode = Literal[
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
-
-_RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
-    "generate": ["generate", "transcription"],
-    "pooling": ["embedding", "embed", "classify", "score", "reward"],
-    "draft": ["draft"],
-}
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
@@ -126,13 +109,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    task: TaskOption | None = None
-    """[DEPRECATED] The task to use the model for. If the model supports more
-    than one model runner, this is used to select which model runner to run.
-
-    Note that the model may support other tasks using the same model runner.
-    """
-    tokenizer: SkipValidation[str] = None  # type: ignore
+    tokenizer: str = Field(default=None)
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -187,7 +164,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: int = Field(default=None, ge=-1)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -195,10 +172,13 @@ class ModelConfig:
     format. Examples:\n
     - 1k -> 1000\n
     - 1K -> 1024\n
-    - 25.6k -> 25,600"""
+    - 25.6k -> 25,600\n
+    - -1 or 'auto' -> Automatically choose the maximum model length that fits in
+    GPU memory. This will use the model's maximum context length if it fits,
+    otherwise it will find the largest length that can be accommodated."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: SkipValidation[QuantizationMethods | None] = None
+    quantization: QuantizationMethods | str | None = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
@@ -335,7 +315,6 @@ class ModelConfig:
         ignored_factors = {
             "runner",
             "convert",
-            "task",
             "tokenizer",
             "tokenizer_mode",
             "seed",
@@ -510,97 +489,6 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        def _task_to_convert(task: TaskOption) -> ConvertType:
-            if task == "embedding" or task == "embed":
-                return "embed"
-            if task == "classify":
-                return "classify"
-            if task == "reward":
-                logger.warning(
-                    "Pooling models now default support all pooling; "
-                    "you can use it without any settings."
-                )
-                return "embed"
-            if task == "score":
-                new_task = self._get_default_pooling_task(architectures)
-                return "classify" if new_task == "classify" else "embed"
-
-            return "none"
-
-        if self.task is not None:
-            runner: RunnerOption = "auto"
-            convert: ConvertOption = "auto"
-            msg_prefix = (
-                "The 'task' option has been deprecated and will be "
-                "removed in v0.13.0 or v1.0, whichever comes first."
-            )
-            msg_hint = "Please remove this option."
-
-            is_generative_task = self.task in _RUNNER_TASKS["generate"]
-            is_pooling_task = self.task in _RUNNER_TASKS["pooling"]
-
-            if is_generative_model and is_pooling_model:
-                if is_generative_task:
-                    runner = "generate"
-                    convert = "auto"
-                    msg_hint = (
-                        "Please replace this option with `--runner "
-                        "generate` to continue using this model "
-                        "as a generative model."
-                    )
-                elif is_pooling_task:
-                    runner = "pooling"
-                    convert = "auto"
-                    msg_hint = (
-                        "Please replace this option with `--runner "
-                        "pooling` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:  # task == "auto"
-                    pass
-            elif is_generative_model or is_pooling_model:
-                if is_generative_task:
-                    runner = "generate"
-                    convert = "auto"
-                    msg_hint = "Please remove this option"
-                elif is_pooling_task:
-                    runner = "pooling"
-                    convert = _task_to_convert(self.task)
-                    msg_hint = (
-                        "Please replace this option with `--convert "
-                        f"{convert}` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:  # task == "auto"
-                    pass
-            else:
-                # Neither generative nor pooling model - try to convert if possible
-                if is_pooling_task:
-                    runner = "pooling"
-                    convert = _task_to_convert(self.task)
-                    msg_hint = (
-                        "Please replace this option with `--runner pooling "
-                        f"--convert {convert}` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:
-                    debug_info = {
-                        "architectures": architectures,
-                        "is_generative_model": is_generative_model,
-                        "is_pooling_model": is_pooling_model,
-                    }
-                    raise AssertionError(
-                        "The model should be a generative or "
-                        "pooling model when task is set to "
-                        f"{self.task!r}. Found: {debug_info}"
-                    )
-
-            self.runner = runner
-            self.convert = convert
-
-            msg = f"{msg_prefix} {msg_hint}"
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
-
         self.runner_type = self._get_runner_type(architectures, self.runner)
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
@@ -654,6 +542,11 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+
+        if self.is_encoder_decoder:
+            self.mm_processor_cache_gb = 0
+            logger.info("Encoder-decoder model detected, disabling mm processor cache.")
+
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             if (
@@ -702,10 +595,18 @@ class ModelConfig:
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
-
+        self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @field_validator("tokenizer", "max_model_len", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
 
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
@@ -720,10 +621,19 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+        """Called after __post_init__"""
         if not isinstance(self.tokenizer, str):
-            raise ValueError("tokenizer must be a string after __post_init__.")
+            raise ValueError(
+                f"tokenizer must be a string, got "
+                f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
+                "Please provide a valid tokenizer path or HuggingFace model ID."
+            )
         if not isinstance(self.max_model_len, int):
-            raise ValueError("max_model_len must be an integer after __post_init__.")
+            raise ValueError(
+                f"max_model_len must be a positive integer, "
+                f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
+                "Example: max_model_len=2048"
+            )
         return self
 
     def _get_transformers_backend_cls(self) -> str:
@@ -903,6 +813,13 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
+        if convert == "reward":
+            logger.warning(
+                "`--convert reward` is deprecated and will be removed in v0.15. "
+                "Please use `--convert embed` instead."
+            )
+            return "embed"
+
         if convert != "auto":
             return convert
 
@@ -918,22 +835,6 @@ class ModelConfig:
 
         return convert_type
 
-    def _get_default_pooling_task(
-        self,
-        architectures: list[str],
-    ) -> Literal["embed", "classify", "reward"]:
-        if self.registry.is_cross_encoder_model(architectures, self):
-            return "classify"
-
-        for arch in architectures:
-            match = try_match_architecture_defaults(arch, runner_type="pooling")
-            if match:
-                _, (_, convert_type) = match
-                assert convert_type != "none"
-                return convert_type
-
-        return "embed"
-
     def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
         quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
@@ -945,12 +846,18 @@ class ModelConfig:
             producer_name = quant_cfg.get("producer", {}).get("name")
             if producer_name == "modelopt":
                 quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
-                if quant_algo == "FP8":
-                    quant_cfg["quant_method"] = "modelopt"
-                elif quant_algo == "NVFP4":
-                    quant_cfg["quant_method"] = "modelopt_fp4"
-                elif quant_algo is not None:
-                    raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
+                if quant_algo is not None:
+                    quant_algo_upper = str(quant_algo).upper()
+                    if quant_algo_upper in {
+                        "FP8",
+                        "FP8_PER_CHANNEL_PER_TOKEN",
+                        "FP8_PB_WO",
+                    }:
+                        quant_cfg["quant_method"] = "modelopt"
+                    elif quant_algo_upper == "NVFP4":
+                        quant_cfg["quant_method"] = "modelopt_fp4"
+                    else:
+                        raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
         return quant_cfg
 
@@ -1101,6 +1008,23 @@ class ModelConfig:
                 "when expert parallelism is enabled."
             )
 
+    def _try_verify_and_update_model_config(self):
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self, "config_updated", False):
+            return
+
+        architecture = self.architecture
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+        )
+
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_model_config(self)
+
     def verify_dual_chunk_attention_config(
         self,
         load_config: LoadConfig,
@@ -1190,11 +1114,10 @@ class ModelConfig:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
         # embedding models like CLIP and SigLIP
-        for target_attr in ("projection_dim", "projection_size"):
-            if hasattr(self.hf_text_config, target_attr):
-                return getattr(self.hf_text_config, target_attr)
-
-        return self.get_hidden_size()
+        names = ("projection_dim", "projection_size")
+        return getattr_iter(
+            self.hf_text_config, names, default_factory=self.get_hidden_size
+        )
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1305,7 +1228,15 @@ class ModelConfig:
                         // block.attention.n_heads_in_group
                     )
 
-            raise RuntimeError("Couldn't determine number of kv heads")
+            raise RuntimeError(
+                "Could not determine the number of key-value attention heads "
+                "from model configuration. "
+                f"Model: {self.model}, Architecture: {self.architectures}. "
+                "This usually indicates an unsupported model architecture or "
+                "missing configuration. "
+                "Please check if your model is supported at: "
+                "https://docs.vllm.ai/en/latest/models/supported_models.html"
+            )
 
         if self.is_attention_free:
             return 0
@@ -1319,14 +1250,12 @@ class ModelConfig:
             # For ChatGLM:
             "multi_query_group_num",
         ]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_text_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_text_config.num_attention_heads
+        default_factory = lambda: self.hf_text_config.num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
         """Returns the number of KV heads per GPU."""
@@ -1631,6 +1560,10 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def requires_raw_input_tokens(self) -> bool:
+        return self._model_info.requires_raw_input_tokens
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"
@@ -1646,14 +1579,14 @@ class ModelConfig:
 
     @property
     def is_hybrid(self) -> bool:
+        if not self._model_info.is_hybrid:
+            return False
         # Handle granite-4.0-micro case which uses hybrid config but does not
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
-        if layer_types is not None and all(
+        return layer_types is None or not all(
             layer == "attention" for layer in layer_types
-        ):
-            return False
-        return self._model_info.is_hybrid
+        )
 
     @property
     def has_noops(self) -> bool:
@@ -1899,6 +1832,7 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForTextEncoding", ("pooling", "embed")),
     ("EmbeddingModel", ("pooling", "embed")),
     ("ForSequenceClassification", ("pooling", "classify")),
+    ("ForTokenClassification", ("pooling", "classify")),
     ("ForAudioClassification", ("pooling", "classify")),
     ("ForImageClassification", ("pooling", "classify")),
     ("ForVideoClassification", ("pooling", "classify")),
@@ -1941,6 +1875,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
+
+
+def str_dtype_to_torch_dtype(type: str):
+    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
 
 # model_type -> reason
 _FLOAT16_NOT_SUPPORTED_MODELS = {
@@ -2207,9 +2146,7 @@ def _get_and_verify_max_len(
     # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
     # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not set(rope_parameters.keys()).issubset(
-        ALLOWED_LAYER_TYPES
-    ):
+    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
@@ -2234,9 +2171,10 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
-    # If the user didn't specify `max_model_len`, then use that derived from
-    # the model config as a default value.
-    if max_model_len is None:
+    # If the user didn't specify `max_model_len` or specified -1 (auto-fit),
+    # then use that derived from the model config as a default value.
+    # When -1 is specified, the engine will later auto-fit to available memory.
+    if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
         if rope_parameters is not None and any(
