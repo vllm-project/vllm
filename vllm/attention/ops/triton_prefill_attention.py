@@ -104,18 +104,9 @@ def _fwd_kernel(
 
     # Apply causal attention pruning and sliding window attention pruning
     end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
-    end_n = (
-        tl.minimum(end_n, block_start_loc + BLOCK_M + SLIDING_WINDOW_Q)
-        if SLIDING_WINDOW_Q > 0
-        else end_n
-    )
 
     # Calculate the start position for backward sliding window
-    start_n_limit = (
-        tl.maximum(0, block_start_loc - SLIDING_WINDOW_K - BLOCK_N + 1)
-        if SLIDING_WINDOW_K > 0
-        else 0
-    )
+    start_n_limit = 0
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
@@ -135,16 +126,15 @@ def _fwd_kernel(
         # Valid sequence mask
         mask = pos_k < cur_batch_seq_len
         # Causal mask
-        causal_mask = pos_q >= pos_k if IS_CAUSAL else None
-        if causal_mask is not None:
-            mask &= causal_mask
+        if IS_CAUSAL:
+            mask &= pos_q >= pos_k
 
         # Bidirectional sliding window masks
         sliding_mask_q = (
-            pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
+            pos_q - pos_k < SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
         )
         sliding_mask_k = (
-            pos_k - pos_q <= SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
+            pos_k - pos_q < SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
         )
         if sliding_mask_q is not None and sliding_mask_k is not None:
             mask &= sliding_mask_q | sliding_mask_k
@@ -172,6 +162,9 @@ def _fwd_kernel(
         l_i_new = alpha * l_i + beta * l_ij
         # -- update output accumulator --
         # scale p
+        # For sliding window there's a chance the l_i_new is 0 due to masking
+        # the entire row. We need to set l_i_new 1 to avoid zero division
+        l_i_new = tl.where(l_i_new > 0, l_i_new, 1.0)
         p_scale = beta / l_i_new
         p = p * p_scale[:, None]
         # scale acc
