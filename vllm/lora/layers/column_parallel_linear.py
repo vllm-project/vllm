@@ -224,6 +224,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
+        # For slab optimization: maintain direct references to GPU slab views
+        self._slab_refs_a = [{} for _ in range(self.n_slices)]  # index -> tensor view
+        self._slab_refs_b = [{} for _ in range(self.n_slices)]  # index -> tensor view
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -250,6 +253,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         self.reset_lora(index)
+        is_gpu_source = any(
+            (lora_a_i is not None and lora_a_i.is_cuda)
+            for lora_a_i in (lora_a if isinstance(lora_a, list) else [lora_a])
+        )
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
@@ -257,13 +264,27 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
-                self.lora_a_stacked[i][
-                    index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
-                ].copy_(lora_a_i, non_blocking=True)
+                if is_gpu_source:
+                    self._slab_refs_a[i][index] = lora_a_i
+                    # Zero out the stacked slot - it won't be used
+                    self.lora_a_stacked[i][index] = 0
+                else:
+                    # Standard path: CPU→GPU transfer (baseline case)
+                    self._slab_refs_a[i].pop(index, None)  # Remove slab ref if exists
+                    self.lora_a_stacked[i][
+                        index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
+                    ].copy_(lora_a_i, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
-                self.lora_b_stacked[i][
-                    index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
-                ].copy_(lora_b_i, non_blocking=True)
+                if is_gpu_source:
+                    self._slab_refs_b[i][index] = lora_b_i
+                    # Zero out the stacked slot - it won't be used
+                    self.lora_b_stacked[i][index] = 0
+                else:
+                    # Standard path: CPU→GPU transfer (baseline case)
+                    self._slab_refs_b[i].pop(index, None)  # Remove slab ref if exists
+                    self.lora_b_stacked[i][
+                        index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
+                    ].copy_(lora_b_i, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace
