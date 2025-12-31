@@ -1730,15 +1730,19 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     }
 
     # Weight mapping for loading HuggingFace checkpoints
+    # NOTE: Order matters! Ignores (None) should come before renames to prevent
+    # partial matches (e.g., "audio_model" matching "discrete_audio_model")
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "",  # Remove model. prefix if present
             "vision_model.": "visual.",  # HF uses vision_model, we use visual
         },
         orig_to_new_substr={
-            # Ignore MambaMia video-audio compressor weights (not implemented in vLLM)
-            # This module is used in HF for temporal compression of video+audio
-            "video_audio_compressor": None,
+            # Ignore modules not implemented in vLLM
+            # (must come before audio_model rename to avoid partial match!)
+            "discrete_audio_model": None,  # CosyvoiceEncoder
+            "discrete_vision_model": None,  # TextAlignedTokenizer
+            "video_audio_compressor": None,  # MambaMia compressor
             # HF uses audio_model, vLLM uses audio_tower
             "audio_model": "audio_tower",
         },
