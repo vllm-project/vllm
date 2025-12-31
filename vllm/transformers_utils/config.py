@@ -844,6 +844,7 @@ def get_sentence_transformer_tokenizer_config(
     for the Sentence Transformer BERT model.
     """
     sentence_transformer_config_files = [
+        "config_sentence_transformers.json",
         "sentence_bert_config.json",
         "sentence_roberta_config.json",
         "sentence_distilbert_config.json",
@@ -883,9 +884,7 @@ def get_sentence_transformer_tokenizer_config(
 
     logger.info("Found sentence-transformers tokenize configuration.")
 
-    if all(k in encoder_dict for k in ("max_seq_length", "do_lower_case")):
-        return encoder_dict
-    return None
+    return encoder_dict
 
 
 def maybe_register_config_serialize_by_value() -> None:

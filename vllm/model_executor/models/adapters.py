@@ -334,8 +334,15 @@ def as_seq_cls_model(cls: _T) -> _T:
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             text_config = self.config.get_text_config()
-            tokens = getattr(text_config, "classifier_from_token", None)
+            encoder_config = self.vllm_config.model_config.encoder_config
+
             method = getattr(text_config, "method", None)
+            if method is None and encoder_config is not None:
+                method = encoder_config.get("method", None)
+
+            tokens = getattr(text_config, "classifier_from_tokens", None)
+            if tokens is None and encoder_config is not None:
+                tokens = encoder_config.get("classifier_from_tokens", None)
 
             def auto_set_score_bias(weights):
                 for name, weight in weights:
@@ -367,8 +374,15 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         text_config = vllm_config.model_config.hf_config.get_text_config()
+        encoder_config = vllm_config.model_config.encoder_config
+
         method = getattr(text_config, "method", None)
-        tokens = getattr(text_config, "classifier_from_token", None)
+        if method is None and encoder_config is not None:
+            method = encoder_config.get("method", None)
+
+        tokens = getattr(text_config, "classifier_from_tokens", None)
+        if tokens is None and encoder_config is not None:
+            tokens = encoder_config.get("classifier_from_tokens", None)
 
         if method is None:
             return
@@ -383,8 +397,9 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
             text_config.num_labels = len(tokens)
 
         # `llm as reranker` defaults to not using sep_token
-        use_sep_token = getattr(text_config, "use_sep_token", False)
+        use_sep_token = getattr(encoder_config, "use_sep_token", False)
         text_config.use_sep_token = use_sep_token
+        encoder_config["use_sep_token"] = use_sep_token
 
 
 def load_weights_using_from_2_way_softmax(
@@ -397,8 +412,12 @@ def load_weights_using_from_2_way_softmax(
     model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
+    encoder_config = model.vllm_config.model_config.encoder_config
 
-    tokens = getattr(text_config, "classifier_from_token", [])
+    tokens = getattr(text_config, "classifier_from_tokens", None)
+    if tokens is None and encoder_config is not None:
+        tokens = encoder_config.get("classifier_from_tokens", None)
+
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
@@ -455,8 +474,12 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
+    encoder_config = model.vllm_config.model_config.encoder_config
 
-    tokens = getattr(text_config, "classifier_from_token", [])
+    tokens = getattr(text_config, "classifier_from_tokens", None)
+    if tokens is None and encoder_config is not None:
+        tokens = encoder_config.get("classifier_from_tokens", None)
+
     tokens = cast(list[int], tokens)
     assert len(tokens) > 0
 
@@ -517,7 +540,11 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     #     - bge-reranker-v2-gemma
 
     text_config = model.vllm_config.model_config.hf_config.get_text_config()
+    encoder_config = model.vllm_config.model_config.encoder_config
     method = getattr(text_config, "method", None)
+    if method is None and encoder_config is not None:
+        method = encoder_config.get("method", None)
+
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
 

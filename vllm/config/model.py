@@ -1616,9 +1616,14 @@ class ModelConfig:
 
     @property
     def use_sep_token(self) -> bool:
-        # cross_encoder models defaults to using pad_token.
         # `llm as reranker` models defaults to not using pad_token.
-        return getattr(self.hf_config, "use_sep_token", True)
+        if use_sep_token := getattr(self.hf_config, "use_sep_token", None) is not None:
+            return use_sep_token
+        if self.encoder_config is not None:
+            return self.encoder_config.get("use_sep_token", None)
+
+        # cross_encoder models defaults to using pad_token.
+        return True
 
     @property
     def head_dtype(self) -> torch.dtype:

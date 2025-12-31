@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 from argparse import Namespace
-from pathlib import Path
-from typing import Any
-
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -36,7 +33,7 @@ def parse_args():
     # Set default values specific to this reranking example
     # These defaults ensure the script works out-of-the-box for reranking tasks
     parser.set_defaults(
-        model="cross-encoder-testing/Qwen3-Reranker-0.6B-seq-cls-STv6",  # Default reranking model
+        model="cross-encoder-testing/Qwen3-Reranker-0.6B-STv6",  # Default reranking model
         runner="pooling",  # Required for cross-encoder/reranking models
         trust_remote_code=True,  # Allow loading models with custom code
     )
