@@ -930,8 +930,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
             logger.warning_once(
-                f"padding num_heads to {self.padding} \
-                    due to sparse attn kernel requirement"
+                f"padding num_heads to {self.padding} due to sparse attn "
+                "kernel requirement"
             )
             q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
             q_padded[:, : self.num_heads, :] = q
