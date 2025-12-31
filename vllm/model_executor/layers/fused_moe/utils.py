@@ -340,22 +340,9 @@ def apply_moe_activation(
 
     For *_and_mul activations (silu, gelu, swigluoai):
         - Expects output.size(-1) * 2 == input.size(-1)
-        - Writes result in-place to output tensor
 
     For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
         - Expects output.size(-1) == input.size(-1)
-        - Writes result in-place to output tensor
-
-    Args:
-        activation: Activation function name
-        output: Output tensor to write to
-        input: Input tensor (flattened view expected)
-
-    Returns:
-        The output tensor (same as input `output` parameter)
-
-    Raises:
-        ValueError: If activation is not supported
     """
     is_no_mul = activation.endswith("_no_mul")
     if is_no_mul:
