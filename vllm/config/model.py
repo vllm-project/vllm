@@ -1579,14 +1579,14 @@ class ModelConfig:
 
     @property
     def is_hybrid(self) -> bool:
+        if not self._model_info.is_hybrid:
+            return False
         # Handle granite-4.0-micro case which uses hybrid config but does not
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
-        if layer_types is not None and all(
+        return layer_types is None or not all(
             layer == "attention" for layer in layer_types
-        ):
-            return False
-        return self._model_info.is_hybrid
+        )
 
     @property
     def has_noops(self) -> bool:
