@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom input builders for edge-cases in different models."""
-from typing import Callable
+
+from collections.abc import Callable
 
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
-from vllm.multimodal.video import (rescale_video_size, resize_video,
-                                   sample_frames_from_video)
+from vllm.multimodal.video import (
+    rescale_video_size,
+    resize_video,
+    sample_frames_from_video,
+)
 
 from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from .builders import build_multi_image_inputs, build_single_image_inputs
@@ -15,7 +19,7 @@ from .types import ImageSizeWrapper, PromptWithMultiModalInput, SizeType
 
 def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     """Builds inputs for multi-image (varied sizes/aspect ratio) testing.
-    
+
     Args:
         formatter: model-specific prompt formatter.
     """
@@ -41,7 +45,7 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
             stop_sign,
             rescale_image_size(stop_sign, 0.25),
             cherry_blossom.resize((183, 488)),
-            cherry_blossom.resize((488, 183))
+            cherry_blossom.resize((488, 183)),
         ],
         cherry_blossom,
     ]
@@ -54,10 +58,11 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     ]
 
 
-def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
-                                          num_frames: int = 16):
+def multi_video_multi_aspect_ratio_inputs(
+    formatter: Callable[[str], str], num_frames: int = 16
+):
     """Builds inputs for multi-video (varied sizes/aspect ratio) testing.
-    
+
     Args:
         formatter: model-specific prompt formatter.
     """
@@ -81,7 +86,7 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
             video,
             rescale_video_size(video, 0.25),
             resize_video(video, (183, 488)),
-            resize_video(video, (488, 183))
+            resize_video(video, (488, 183)),
         ],
         video,
     ]
@@ -96,7 +101,9 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
 
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
-    formatter = lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+    formatter = (
+        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+    )
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
         "<image>\nWhat is the season?",
@@ -115,14 +122,14 @@ def different_patch_input_cases_internvl():
 
 
 def windows_attention_image_qwen2_5_vl():
-
     # image from regression issue: https://github.com/vllm-project/vllm/issues/15122 # noqa: E501
     image = ImageAsset("hato").pil_image
 
     question = "Describe the image."
     img_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
-    prompt = (f"<|im_start|>User\n{img_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = (
+        f"<|im_start|>User\n{img_prompt}{question}<|im_end|>\n<|im_start|>assistant\n"
+    )
 
     wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
     return build_single_image_inputs([image], [prompt], wrapped_sf)
@@ -133,11 +140,12 @@ def video_with_metadata_glm4_1v():
     metadata = VIDEO_ASSETS[0].metadata
     question = "Describe the video."
     video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
-    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+    formatted_prompt = f"[gMASK]<|user|>\n{video_prompt}{question}<|assistant|>\n"
 
     scales = [0.1, 0.2, 0.25]
-    video_input = [[(rescale_video_size(video_array, scale), metadata)]
-                   for scale in scales]
+    video_input = [
+        [(rescale_video_size(video_array, scale), metadata)] for scale in scales
+    ]
     prompts = [formatted_prompt] * len(video_input)
 
     return [

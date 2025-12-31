@@ -1,8 +1,8 @@
-FROM intel/deep-learning-essentials:2025.1.3-0-devel-ubuntu24.04 AS vllm-base
+FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
+    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging
 
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -14,6 +14,7 @@ RUN apt clean && apt-get update -y && \
     libxext6 \
     libgl1 \
     lsb-release \
+    libaio-dev \
     numactl \
     wget \
     vim \
@@ -24,10 +25,18 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing
+RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
 
-RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.4/intel-oneccl-2021.15.4.11_offline.sh
-RUN bash intel-oneccl-2021.15.4.11_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
+# This oneccl contains the BMG support which is not the case for default version of oneapi 2025.2.
+ARG ONECCL_INSTALLER="intel-oneccl-2021.15.7.6_offline.sh"
+RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/${ONECCL_INSTALLER}" && \
+    bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
+    rm "${ONECCL_INSTALLER}" && \
+    echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
+    echo "source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force" >> /root/.bashrc
+RUN rm -f /opt/intel/oneapi/ccl/latest && \
+    ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
+
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 
@@ -42,6 +51,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
     -r requirements/xpu.txt
 
+# arctic-inference is built from source which needs torch-xpu properly installed
+# used for suffix method speculative decoding
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir arctic-inference==0.1.1
+
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
@@ -54,7 +68,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 setup.py install
+    pip install --no-build-isolation .
 
 CMD ["/bin/bash"]
 
@@ -64,9 +78,18 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
+# install nixl from source code
+ENV NIXL_VERSION=0.7.0
+RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
+
+# PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
+RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
+
+# remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall oneccl oneccl-devel -y
 
-# install development dependencies (for testing)
-RUN python3 -m pip install -e tests/vllm_test_utils
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["vllm", "serve"]
