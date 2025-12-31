@@ -151,21 +151,23 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[list[int]] = field(default_factory=list)
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: LogprobsLists | None
+    logprobs: LogprobsLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
+        default_factory=dict
+    )
 
     # [num_reqs, hidden_size]
-    pooler_output: list[torch.Tensor | None]
+    pooler_output: list[torch.Tensor | None] | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 
@@ -225,21 +227,8 @@ def make_empty_encoder_model_runner_output(
         req_ids=req_ids,
         req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
-        logprobs=None,
-        prompt_logprobs_dict={},
         pooler_output=pooler_output,
-        kv_connector_output=None,
-        ec_connector_output=None,
-        num_nans_in_logits=None,
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
-    req_ids=[],
-    req_id_to_index={},
-    sampled_token_ids=[],
-    logprobs=None,
-    prompt_logprobs_dict={},
-    pooler_output=[],
-    num_nans_in_logits=None,
-)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
