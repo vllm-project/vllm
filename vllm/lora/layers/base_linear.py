@@ -86,10 +86,21 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
+        # For slab optimization: maintain direct references to GPU slab views
+        self._slab_refs_a: list[dict[int, torch.Tensor]] = [
+            {} for _ in range(self.n_slices)
+        ]
+        self._slab_refs_b: list[dict[int, torch.Tensor]] = [
+            {} for _ in range(self.n_slices)
+        ]
+
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+            # Clear slab references
+            self._slab_refs_a[s_index].pop(index, None)
+            self._slab_refs_b[s_index].pop(index, None)
 
     def set_lora(
         self,
@@ -114,15 +125,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
         # Device-aware scatter: optimize GPU→GPU case (slab optimization)
         if lora_a.is_cuda:
-            # Fast path: GPU→GPU scatter (already on GPU from slab)
-            self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]] = (
-                lora_a
-            )
-            self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]] = (
-                lora_b
-            )
+            # SLAB OPTIMIZATION: Store direct GPU slab view reference - ZERO copy!
+            self._slab_refs_a[0][index] = lora_a
+            self._slab_refs_b[0][index] = lora_b
+            # Zero out stacked slots - they won't be used
+            self.lora_a_stacked[0][index] = 0
+            self.lora_b_stacked[0][index] = 0
         else:
             # Standard path: CPU→GPU transfer (baseline case)
+            self._slab_refs_a[0].pop(index, None)  # Remove slab ref if exists
+            self._slab_refs_b[0].pop(index, None)
             self.lora_a_stacked[0][
                 index, 0, : lora_a.shape[0], : lora_a.shape[1]
             ].copy_(lora_a, non_blocking=True)

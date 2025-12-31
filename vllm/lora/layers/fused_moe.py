@@ -481,7 +481,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.w2_lora_a_stacked[0][index] = 0
         self.w2_lora_b_stacked[0][index] = 0
-        self.adapter_enabled[index] = 0
+        self.adapter_enabled[index : index + 1].fill_(0)
 
     #
 
@@ -497,7 +497,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert isinstance(lora_b, list)
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index : index + 1].fill_(1)
 
         num_experts = self.w13_lora_a_stacked[0].shape[1]
 
@@ -700,7 +700,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert len(lora_a) == len(lora_b) == 2
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index : index + 1].fill_(1)
 
         num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
