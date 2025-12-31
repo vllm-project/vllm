@@ -15,6 +15,20 @@ EMBED_SCALING_MODELS = {
     "openbmb/MiniCPM4.1-8B",
 }
 
+# This list contains the model that are using AITER kernel.
+# Skip model that are not using AITER tests.
+# When more AITER kernels are added, this list will not be
+# needed as all the models will be calling AITER kernels
+# in parts of the operators
+AITER_MODEL_LIST = [
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openbmb/MiniCPM3-4B",
+    "Qwen/Qwen-7B-Chat",
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "TitanML/tiny-mixtral",
+    "Qwen/Qwen3-8B",
+]
+
 
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
@@ -110,8 +124,14 @@ def test_models(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    if use_rocm_aiter:
+    if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    elif use_rocm_aiter and model not in AITER_MODEL_LIST:
+        # Skip model that are not using AITER tests.
+        # When more AITER kernels are added, this list will not be
+        # needed as all the models will be calling AITER kernels
+        # in parts of the operators
+        pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
