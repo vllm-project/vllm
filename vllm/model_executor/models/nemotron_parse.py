@@ -162,10 +162,8 @@ class BartDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            decoder_hidden_states
-                torch.Tensor of *decoder* input embeddings.
-            encoder_hidden_states
-                torch.Tensor of *encoder* input embeddings.
+            decoder_hidden_states: torch.Tensor of *decoder* input embeddings.
+            encoder_hidden_states: torch.Tensor of *encoder* input embeddings.
         Returns:
             Decoder layer output torch.Tensor
         """
@@ -297,12 +295,9 @@ class MBartDecoderNoPos(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            decoder_input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            encoder_hidden_states:
-                Tensor of encoder output embeddings
+            decoder_input_ids: Indices of *decoder* input sequence tokens in the
+                vocabulary. Padding will be ignored by default should you provide it.
+            encoder_hidden_states: Tensor of encoder output embeddings
         Returns:
             Decoder output torch.Tensor
         """
@@ -494,7 +489,6 @@ class NemotronParseImageProcessor:
 
         Args:
             images: Input image(s)
-            return_tensors: Type of tensors to return
         """
         # Ensure images is a list
         if not isinstance(images, list):
@@ -902,12 +896,9 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
-            encoder_outputs
-                List of encoder output tensors (vision embeddings).
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
+            encoder_outputs: List of encoder output tensors (vision embeddings).
                 During profiling, this may be None or empty.
         Returns:
             Output torch.Tensor
