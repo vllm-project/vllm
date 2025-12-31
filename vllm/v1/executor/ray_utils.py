@@ -178,13 +178,12 @@ class FutureWrapper(Future):
     def is_callable(self, ref_or_refs):
         if isinstance(ref_or_refs, list):
             return callable(ref_or_refs[0])
-        else:
-            return callable(ref_or_refs)
+        return callable(ref_or_refs)
 
     def get_refs(self, timeout=None):
         if self.is_callable(self.ref_or_refs):
             if isinstance(self.ref_or_refs, list):
-                return = [ref(timeout) for ref in self.ref_or_refs]
+                return [ref(timeout) for ref in self.ref_or_refs]
             return self.ref_or_refs(timeout)
         return self.ref_or_refs
 
