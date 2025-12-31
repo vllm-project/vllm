@@ -56,10 +56,10 @@ class Eagle3Mixin:
     def sample_chain(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.compute_draft_logits(hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
-        
+
         if self.draft_id_to_target_id is None:
             return draft_token_ids
-        
+
         offset = self.draft_id_to_target_id[draft_token_ids]
         draft_token_ids += offset
         return draft_token_ids
