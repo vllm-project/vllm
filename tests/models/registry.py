@@ -648,7 +648,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
-        "zai-org/GLM-ASR-Nano-2512", trust_remote_code=True
+        "zai-org/GLM-ASR-Nano-2512",
+        trust_remote_code=True,
+        min_transformers_version="5.0",
     ),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b"
