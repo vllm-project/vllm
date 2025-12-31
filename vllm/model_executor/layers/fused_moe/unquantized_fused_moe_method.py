@@ -30,6 +30,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
+from vllm.model_executor.layers.fused_moe.sonic_moe import (
+    SonicMoeExperts,
+    is_sonic_moe_supported,
+    permute_weights_for_sonic,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
@@ -95,6 +100,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
+
+        self.sonic_moe_enabled = (
+            is_sonic_moe_supported()
+            and envs.VLLM_USE_SONIC_MOE
+            and current_platform.has_device_capability(90)
+        )
+        if self.sonic_moe_enabled:
+            logger.info_once("Enabling Sonic MoE for UnquantizedFusedMoEMethod")
 
     @property
     def supports_eplb(self) -> bool:
@@ -215,6 +228,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
 
+        if self.sonic_moe_enabled:
+            layer.w13_weight.data = permute_weights_for_sonic(layer.w13_weight.data)
+
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
 
@@ -274,6 +290,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         ep_rank=self.moe.moe_parallel_config.ep_rank,
                         ep_size=self.moe.moe_parallel_config.ep_size,
                     ),
+                )
+            elif self.sonic_moe_enabled:
+                self.use_inplace = False
+                self.kernel = mk.FusedMoEModularKernel(
+                    MoEPrepareAndFinalizeNoEP(),
+                    SonicMoeExperts(
+                        out_dtype=layer.w13_weight.dtype,
+                        weights_prepermuted=True,
+                    ),
+                    shared_experts=None,
                 )
             else:
                 self.use_inplace = True

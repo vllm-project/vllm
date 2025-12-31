@@ -124,10 +124,11 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         out_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG,
+        weights_prepermuted: bool = False,
     ):
         super().__init__(quant_config)
         self.out_dtype = out_dtype
-        # Cache for converted weights (set during first apply or externally)
+        self.weights_prepermuted = weights_prepermuted
         self._w1_sonic: torch.Tensor | None = None
         self._w2_sonic: torch.Tensor | None = None
         self._w1_id: int = -1
@@ -166,13 +167,14 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (M, K)
         return (workspace1, workspace2, output)
 
-    def _ensure_weights_converted(
+    def _ensure_weights_ready(
         self, w1: torch.Tensor, w2: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Cache weight conversion to avoid repeated permutation."""
+        if self.weights_prepermuted:
+            return w1, w2
         if self._w1_id != id(w1) or self._w2_id != id(w2):
             self._w1_sonic = permute_weights_for_sonic(w1)
-            self._w2_sonic = w2.contiguous()  # w2 doesn't need permutation
+            self._w2_sonic = w2.contiguous()
             self._w1_id = id(w1)
             self._w2_id = id(w2)
         assert self._w1_sonic is not None and self._w2_sonic is not None
@@ -211,7 +213,7 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 f"got {activation}"
             )
 
-        w1_sonic, w2_sonic = self._ensure_weights_converted(w1, w2)
+        w1_sonic, w2_sonic = self._ensure_weights_ready(w1, w2)
 
         try:
             from sonicmoe.enums import ActivationType
@@ -230,6 +232,7 @@ class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts, _, N = w1_sonic.shape
         topk = topk_ids.shape[1]
 
+        # TODO(https://github.com/vllm-project/vllm/issues/31578): use router logits
         selected_experts = topk_ids.flatten()
         sorted_expert_idxs, sorted_scattered_idxs = selected_experts.sort()
 
