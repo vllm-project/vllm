@@ -165,8 +165,9 @@ class NanoNemotronVLImagePixelInputs(TensorSchema):
     """
 
     type: Literal["pixel_values"]
-    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
-    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
+    pixel_values_flat: torch.Tensor
+    imgs_sizes: torch.Tensor
+    image_feature_sizes: torch.Tensor
 
 
 class NanoNemotronVLImageEmbeddingInputs(TensorSchema):
@@ -449,6 +450,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 "image_num_patches": torch.tensor(
                     [len(item) for item in pixel_values_lst]
                 ),
+                "image_feature_sizes": token_counts,
             }
 
             assert len(text) == 1, (
@@ -922,54 +924,26 @@ class DynamicResolutionImageTiler(BaseNanoNemotronVLProcessor):
                 )
         assert_never(num_tokens_available_per_media)
 
-    def stack(
-        self, images: list[torch.Tensor]
-    ) -> tuple[torch.Tensor, list[tuple[int, int]], list[int] | None, list[int] | None]:
-        imgs_sizes = torch.tensor(
-            [[img.shape[1], img.shape[2]] for img in images], dtype=torch.int32
-        )
+    @staticmethod
+    def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
+        assert len(images) > 0, "No images to stack"
 
         def rearrange_img(x):
-            py = x.shape[-2] // self._patch_size
-            px = x.shape[-1] // self._patch_size
+            py = x.shape[-2] // patch_size
+            px = x.shape[-1] // patch_size
             x = einops.rearrange(
                 x,
                 "c (py yy) (px xx) -> (py px) (c yy xx)",
                 py=py,
-                yy=self._patch_size,
+                yy=patch_size,
                 px=px,
-                xx=self._patch_size,
+                xx=patch_size,
             )
             return x
 
-        if len(images) > 0:
-            imgs = [rearrange_img(img) for img in images]
-
-            current_length = 0
-            max_length = 0
-            vision_cu_lengths = [0]
-            for img in imgs:
-                if max_length < img.shape[0]:
-                    max_length = img.shape[0]
-                current_length += img.shape[0]
-                vision_cu_lengths.append(current_length)
-
-            vision_cu_lengths = torch.tensor(vision_cu_lengths, dtype=torch.int32)
-            vision_max_lengths = torch.tensor(max_length, dtype=torch.int32)
-
-            return (
-                torch.cat(imgs, dim=0).unsqueeze(0),
-                imgs_sizes,
-                vision_cu_lengths,
-                vision_max_lengths,
-            )
-        else:
-            return (
-                torch.tensor([[0]], dtype=torch.float32),
-                torch.tensor([[0, 0]], dtype=torch.int32),
-                None,
-                None,
-            )
+        imgs = [rearrange_img(img) for img in images]
+        pixel_values_flat = torch.cat(imgs, dim=0).unsqueeze(0)
+        return pixel_values_flat
 
 
 class NanoNemotronVLProcessor(DynamicResolutionImageTiler):
@@ -1377,6 +1351,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 "image", image_num_patches
             ),
             image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_feature_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -1745,41 +1720,18 @@ class NemotronH_Nano_VL_V2(
 
         return x
 
-    def extract_feature(self, pixel_values):
-        # Process images in a micro-batch of at most 128 frames per call
-        # This is done on purpose to ensure peak GPU ram usage of huge batch
-        # (namely for really long videos with EVS ON) won't cause any problems
-        # as we don't support chunked prefill for video media
-        micro_batch_size = 128
-        n = pixel_values.shape[0]
-        vit_embeds_list = []
-        for i in range(0, n, micro_batch_size):
-            current = pixel_values[i : i + micro_batch_size]
-            vit_embeds = self.vision_model(current)
-            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
-
-            # pixel_shuffle_dynamic_res expects patches concatenated along dim=-2,
-            # but vision model outputs (batch, patches, hidden). Process each image
-            # individually to handle this correctly.
-            _, _, h, w = current.shape
-            shuffled_embeds = []
-            for j in range(vit_embeds.shape[0]):
-                single_embed = vit_embeds[j : j + 1]  # (1, patches, hidden)
-                single_shuffled = self.pixel_shuffle_dynamic_res(
-                    single_embed, imgs_sizes=torch.tensor([(h, w)])
-                )
-                shuffled_embeds.append(single_shuffled)
-            vit_embeds = torch.cat(shuffled_embeds, dim=0)
-            vit_embeds = self.mlp1(vit_embeds)
-            vit_embeds_list.append(vit_embeds)
-
-        vit_embeds = torch.cat(vit_embeds_list, dim=0)
+    def extract_feature(self, pixel_values: torch.Tensor, imgs_sizes: torch.Tensor):
+        vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
+        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
+        vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> NanoNemotronVLImageInputs | None:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
+        image_feature_sizes = kwargs.pop("image_feature_sizes", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -1793,10 +1745,19 @@ class NemotronH_Nano_VL_V2(
             )
 
         if pixel_values_flat is not None:
+            imgs_sizes = torch.tensor(
+                [[pv.shape[1], pv.shape[2]] for pv in pixel_values_flat],
+                dtype=torch.int32,
+            )
+            pixel_values_flat = DynamicResolutionImageTiler.stack(
+                pixel_values_flat, self.patch_size
+            )
             return NanoNemotronVLImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
-                num_patches=image_num_patches,
+                imgs_sizes=imgs_sizes,
+                image_feature_sizes=image_feature_sizes,
+                validate=False,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -1809,20 +1770,16 @@ class NemotronH_Nano_VL_V2(
 
         assert self.vision_model is not None
 
-        image_embeds = self.extract_feature(image_input["pixel_values_flat"])
-        num_patches = image_input["num_patches"]
+        image_embeds = self.extract_feature(
+            image_input.pixel_values_flat, image_input.imgs_sizes
+        )
+        image_feature_sizes = image_input.image_feature_sizes.tolist()
+        print(f"{image_feature_sizes=}")
 
-        # Only one image in the current batch
-        if len(num_patches) == 1:
+        if len(image_feature_sizes) == 1:
             return (image_embeds.view(-1, self.config.text_config.hidden_size),)
 
-        # NOTE: Image embeddings are split into separate tensors for each image
-        # by the size of each embedding.
-        feature_size = image_embeds.shape[1]
         image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
-        image_feature_sizes = [
-            num_patches * feature_size for num_patches in num_patches
-        ]
         return image_embeds.split(image_feature_sizes)
 
     def _process_video_input(
