@@ -1538,39 +1538,37 @@ class HCXVisionV2MultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
-        # Use token IDs for both target matching and replacement
+        # Get token IDs from tokenizer vocab using HF processor's token strings
         # This is the same approach as Qwen2-VL
         placeholder = {
-            "image": hf_config.image_token_id,
-            "video": hf_config.video_token_id,
+            "image": vocab.get(hf_processor.image_token, hf_config.image_token_id),
+            "video": vocab.get(hf_processor.video_token, hf_config.video_token_id),
         }
 
         # Add audio placeholder if audio is supported
-        audio_token_id = getattr(hf_config, "audio_token_id", None)
-        if audio_token_id is not None:
-            placeholder["audio"] = audio_token_id
+        audio_token = getattr(hf_processor, "audio_token", None)
+        if audio_token is not None:
+            audio_token_id = vocab.get(
+                audio_token, getattr(hf_config, "audio_token_id", None)
+            )
+            if audio_token_id is not None:
+                placeholder["audio"] = audio_token_id
 
-        def get_replacement_v2_vision(
-            item_idx: int,
-            modality: str,
-            out_mm_kwargs: MultiModalKwargsItems,
-        ):
+        merge_size = hf_config.vision_config.spatial_merge_size
+
+        def get_replacement_v2_vision(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
-            # Get spatial merge size from config
-            hf_config = self.info.get_hf_config()
-            merge_size = hf_config.vision_config.spatial_merge_size
-
             num_tokens = int(grid_thw.prod()) // (merge_size**2)
             return [placeholder[modality]] * num_tokens
 
-        def get_replacement_v2_audio(
-            item_idx: int,
-            out_mm_kwargs: MultiModalKwargsItems,
-        ):
+        def get_replacement_v2_audio(item_idx: int):
             out_item = out_mm_kwargs["audio"][item_idx]
             feature_attention_mask = out_item.get("feature_attention_mask")
 
@@ -1593,27 +1591,19 @@ class HCXVisionV2MultiModalProcessor(
         updates: list[PromptUpdate] = [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],  # Use token ID for matching
-                replacement=partial(
-                    get_replacement_v2_vision,
-                    modality=modality,
-                    out_mm_kwargs=out_mm_kwargs,
-                ),
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_v2_vision, modality=modality),
             )
             for modality in ("image", "video")
         ]
 
         # Add audio prompt replacement if supported AND audio data was processed
-        # (HF processor may not support audios even if model has audio_config)
         if "audio" in placeholder and "audio" in out_mm_kwargs:
             updates.append(
                 PromptReplacement(
                     modality="audio",
-                    target=[placeholder["audio"]],  # Use token ID for matching
-                    replacement=partial(
-                        get_replacement_v2_audio,
-                        out_mm_kwargs=out_mm_kwargs,
-                    ),
+                    target=[placeholder["audio"]],
+                    replacement=get_replacement_v2_audio,
                 )
             )
 
