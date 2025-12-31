@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -369,6 +370,52 @@ def get_sparse_attention_config(
     return config
 
 
+def download_gguf(
+    repo_id: str,
+    quant_type: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> str:
+    # Use patterns that snapshot_download can handle directly
+    # Patterns to match:
+    # - *-{quant_type}.gguf (root)
+    # - *-{quant_type}-*.gguf (root sharded)
+    # - */*-{quant_type}.gguf (subdir)
+    # - */*-{quant_type}-*.gguf (subdir sharded)
+    allow_patterns = [
+        f"*-{quant_type}.gguf",
+        f"*-{quant_type}-*.gguf",
+        f"*/*-{quant_type}.gguf",
+        f"*/*-{quant_type}-*.gguf",
+    ]
+
+    # Use download_weights_from_hf which handles caching and downloading
+    folder = download_weights_from_hf(
+        model_name_or_path=repo_id,
+        cache_dir=cache_dir,
+        allow_patterns=allow_patterns,
+        revision=revision,
+        ignore_patterns=ignore_patterns,
+    )
+
+    # Find the downloaded file(s) in the folder
+    local_files = []
+    for pattern in allow_patterns:
+        # Convert pattern to glob pattern for local filesystem
+        glob_pattern = os.path.join(folder, pattern)
+        local_files.extend(glob.glob(glob_pattern))
+
+    if not local_files:
+        raise ValueError(
+            f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
+        )
+
+    # Sort to ensure consistent ordering (prefer non-sharded files)
+    local_files.sort(key=lambda x: (x.count("-"), x))
+    return local_files[0]
+
+
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,
@@ -402,12 +449,31 @@ def download_weights_from_hf(
             fs = HfFileSystem()
             file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-            # Use the first pattern found in the HF repo's files.
-            for pattern in allow_patterns:
-                matching = fnmatch.filter(file_list, pattern)
-                if len(matching) > 0:
-                    allow_patterns = [pattern]
-                break
+            # If downloading safetensors and an index file exists, use the
+            # specific file names from the index to avoid downloading
+            # unnecessary files (e.g., from subdirectories like "original/").
+            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
+            if "*.safetensors" in allow_patterns and index_file in file_list:
+                index_path = hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename=SAFE_WEIGHTS_INDEX_NAME,
+                    cache_dir=cache_dir,
+                    revision=revision,
+                )
+                with open(index_path) as f:
+                    weight_map = json.load(f)["weight_map"]
+                if weight_map:
+                    # Extra [] so that weight_map files are treated as a
+                    # single allow_pattern in the loop below
+                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item]
+                else:
+                    allow_patterns = ["*.safetensors"]
+            else:
+                # Use the first pattern found in the HF repo's files.
+                for pattern in allow_patterns:
+                    if fnmatch.filter(file_list, pattern):
+                        allow_patterns = [pattern]
+                        break
         except Exception as e:
             logger.warning(
                 "Failed to get file list for '%s'. Trying each pattern in "
@@ -434,6 +500,9 @@ def download_weights_from_hf(
             )
             # If we have downloaded weights for this allow_pattern,
             # we don't need to check the rest.
+            # allow_pattern can be a list (from weight_map) or str (glob)
+            if isinstance(allow_pattern, list):
+                break
             if any(Path(hf_folder).glob(allow_pattern)):
                 break
         time_taken = time.perf_counter() - start_time
@@ -595,7 +664,6 @@ def safetensors_weights_iterator(
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
-    state_dict = {}
     leftover_state_dict: dict[str, torch.Tensor] = {}
 
     for st_file in tqdm(
@@ -621,6 +689,7 @@ def safetensors_weights_iterator(
             )
 
             with safe_open(st_file, framework="pt") as f:
+                state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
 
@@ -875,7 +944,17 @@ def gguf_quant_weights_iterator(
             name = gguf_to_hf_name_map[tensor.name]
             if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
-            param = torch.tensor(weight)
+            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+                # BF16 is currently the only "quantization" type that isn't
+                # actually quantized but is read as a raw byte tensor.
+                # Reinterpret as `torch.bfloat16` tensor.
+                weight = weight.view(np.uint16)
+                if reader.byte_order == "S":
+                    # GGUF endianness != system endianness
+                    weight = weight.byteswap()
+                param = torch.tensor(weight).view(torch.bfloat16)
+            else:
+                param = torch.tensor(weight)
             yield name, param
 
 

@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
     Content,
     ResponseReasoningItem,
@@ -9,7 +15,8 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.responses_utils import (
-    construct_chat_message_with_tool_call,
+    _construct_single_message_from_response_item,
+    construct_chat_messages_with_tool_call,
     convert_tool_responses_to_completions_format,
 )
 
@@ -37,7 +44,43 @@ class TestResponsesUtils:
 
         assert result == {"type": "function", "function": input_tool}
 
-    def test_construct_chat_message_with_tool_call(self):
+    def test_construct_chat_messages_with_tool_call(self):
+        """Test construction of chat messages with tool calls."""
+        reasoning_item = ResponseReasoningItem(
+            id="lol",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Leroy Jenkins",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        mcp_tool_item = ResponseFunctionToolCall(
+            id="mcp_123",
+            call_id="call_123",
+            type="function_call",
+            status="completed",
+            name="python",
+            arguments='{"code": "123+456"}',
+        )
+        input_items = [reasoning_item, mcp_tool_item]
+        messages = construct_chat_messages_with_tool_call(input_items)
+
+        assert len(messages) == 1
+        message = messages[0]
+        assert message["role"] == "assistant"
+        assert message["reasoning"] == "Leroy Jenkins"
+        assert message["tool_calls"][0]["id"] == "call_123"
+        assert message["tool_calls"][0]["function"]["name"] == "python"
+        assert (
+            message["tool_calls"][0]["function"]["arguments"] == '{"code": "123+456"}'
+        )
+
+    def test_construct_single_message_from_response_item(self):
         item = ResponseReasoningItem(
             id="lol",
             summary=[],
@@ -51,7 +94,7 @@ class TestResponsesUtils:
             encrypted_content=None,
             status=None,
         )
-        formatted_item = construct_chat_message_with_tool_call(item)
+        formatted_item = _construct_single_message_from_response_item(item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["reasoning"] == "Leroy Jenkins"
 
@@ -69,12 +112,24 @@ class TestResponsesUtils:
             status=None,
         )
 
-        formatted_item = construct_chat_message_with_tool_call(item)
+        formatted_item = _construct_single_message_from_response_item(item)
         assert formatted_item["role"] == "assistant"
         assert (
             formatted_item["reasoning"]
             == 'Hmm, the user has just started with a simple "Hello,"'
         )
+
+        tool_call_output = ResponseFunctionToolCallOutputItem(
+            id="temp_id",
+            type="function_call_output",
+            call_id="temp",
+            output="1234",
+            status="completed",
+        )
+        formatted_item = _construct_single_message_from_response_item(tool_call_output)
+        assert formatted_item["role"] == "tool"
+        assert formatted_item["content"] == "1234"
+        assert formatted_item["tool_call_id"] == "temp"
 
         item = ResponseReasoningItem(
             id="lol",
@@ -85,4 +140,23 @@ class TestResponsesUtils:
             status=None,
         )
         with pytest.raises(ValueError):
-            construct_chat_message_with_tool_call(item)
+            _construct_single_message_from_response_item(item)
+
+        output_item = ResponseOutputMessage(
+            id="msg_bf585bbbe3d500e0",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="dongyi",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+
+        formatted_item = _construct_single_message_from_response_item(output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == "dongyi"
