@@ -724,10 +724,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     ) -> None:
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            raise NotImplementedError(
-                "ModelOptFP8MoEMethod does not support online quantization."
-            )
         assert self.quant_config.is_checkpoint_fp8_serialized
         self.fp8_backend = select_fp8_moe_backend(
             block_quant=False,
@@ -828,11 +824,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-
-        # Set weight loader attributes for scales
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
-        )
 
         # INPUT SCALES - Per-tensor scaling for ModelOpt
         w13_input_scale = PerTensorScaleParameter(
