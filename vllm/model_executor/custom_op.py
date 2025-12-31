@@ -16,10 +16,11 @@ logger = init_logger(__name__)
 
 class CustomOpBase:
     """
-    Base class for custom op. This class mainly offer the __new__,
-    __init__, registry, registry_oot and forward functions,
-    and others must be overwrite in the sub classes.
-    Dispatches the forward method to the appropriate backend.
+    Base class for custom operators, including torch and triton operators.
+    CustomOpBase mainly maintains the basic funtions, including the __new__,
+    __init__, registry, registry_oot and forward, these 4 basic functions are
+    not recommanded to be overrided. And the others should be override by the
+    specific subclasses.
     """
 
     op_registry: dict[str, Any] = {}
@@ -32,7 +33,9 @@ class CustomOpBase:
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
                 f"was not set, possibly because it was not decorated with "
-                f"@CustomOp.register, or it's the CustomOp base class itself."
+                f"@CustomOPBase.register (or @CustomOPBase.register, "
+                "@CustomTritonOp.register), or it's the CustomOPBase base "
+                "class itself."
             ) from None
 
         if op_name not in cls.op_registry_oot:
@@ -102,13 +105,15 @@ class CustomOpBase:
             return op_cls
 
         if _decorated_op_cls is None:
-            # Called with parentheses: @CustomOP.register_oot()
-            # or @CustomOP.register_oot(name="...")
+            # Called with parentheses: @CustomOPBase.register_oot()
+            # or @CustomOPBase.register_oot(name="...")
+            # CustomOPBase could be replaced by CustomOP and CustomTritonOp
             # So, _decorated_op_cls is None.
             # We return the actual decorator function.
             return decorator
         elif isinstance(_decorated_op_cls, type):  # Check if it's a class
-            # Called without parentheses: @CustomOP.register_oot
+            # Called without parentheses: @CustomOPBase.register_oot
+            # CustomOPBase could be replaced by CustomOP and CustomTritonOp
             # The first argument is the class itself.
             # We call the 'decorator' function immediately with the class.
             return decorator(_decorated_op_cls)
@@ -119,8 +124,8 @@ class CustomOpBase:
 
 class CustomOp(nn.Module, CustomOpBase):
     """
-    Base class for custom ops.
-    Dispatches the forward method to the appropriate backend.
+    Base class for torch custom ops.
+    Impletments and dispatches the forward method to the appropriate backend.
     """
 
     def forward_native(self, *args, **kwargs):
@@ -225,17 +230,14 @@ class CustomOp(nn.Module, CustomOpBase):
 
 
 class CustomTritonOp(CustomOpBase):
+    """
+    Base class for triton custom ops.
+    Impletments and dispatches the forward method to the appropriate backend.
+    """
+
     @classmethod
     def enabled(cls) -> bool:
         return HAS_TRITON
-
-    def forward_native(self, *args, **kwargs):
-        """PyTorch-native implementation of the forward method.
-        This method is optional. If implemented, it can be used with compilers
-        such as torch.compile or PyTorch XLA. Also, it can be used for testing
-        purposes.
-        """
-        raise NotImplementedError
 
     def forward_cuda(self, *args, **kwargs):
         raise NotImplementedError
@@ -245,24 +247,24 @@ class CustomTritonOp(CustomOpBase):
         return self.forward_cuda(*args, **kwargs)
 
     def forward_xpu(self, *args, **kwargs):
-        # By default, we assume that XPU ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
+        # By default, we assume that XPU ops are compatible with CUDA ops.
+        # NOTE: This is a placeholder for future extensions.
+        return self.forward_cuda(*args, **kwargs)
 
     def forward_cpu(self, *args, **kwargs):
         # By default, we assume that CPU ops are compatible with CUDA ops.
+        # NOTE: This is a placeholder for future extensions.
         return self.forward_cuda(*args, **kwargs)
 
     def forward_tpu(self, *args, **kwargs):
-        # By default, we assume that TPU ops are compatible with the
-        # PyTorch-native implementation.
-        # NOTE(woosuk): This is a placeholder for future extensions.
-        return self.forward_native(*args, **kwargs)
+        # By default, we assume that CPU ops are compatible with CUDA ops.
+        # NOTE: This is a placeholder for future extensions.
+        return self.forward_cuda(*args, **kwargs)
 
     def forward_oot(self, *args, **kwargs):
-        # By default, we assume that OOT ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
+        # By default, we assume that CPU ops are compatible with CUDA ops.
+        # NOTE: This is a placeholder for future extensions.
+        return self.forward_cuda(*args, **kwargs)
 
     def dispatch_forward(self):
         enabled = self._enforce_enable or self.enabled()

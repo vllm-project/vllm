@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.model_executor.custom_op import CustomTritonOp
 from vllm.triton_utils import tl, triton
 
 from .op import exp
@@ -388,3 +389,9 @@ def fused_recurrent_gated_delta_rule(
         use_qk_l2norm_in_kernel,
     )
     return o, final_state
+
+
+@CustomTritonOp.register("fused_recurrent_gated_delta_rule")
+class FusedRecurrentGatedDeltaRule(CustomTritonOp):
+    def forward_cuda(self, *args, **kwargs):
+        return fused_recurrent_gated_delta_rule(*args, **kwargs)

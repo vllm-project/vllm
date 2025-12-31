@@ -30,9 +30,10 @@ from vllm.distributed import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomTritonOp
 from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule,
+    ChunkGatedDeltaRule,
+    FusedRecurrentGatedDeltaRule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -275,6 +276,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # This is not an layer of GDN, this is just an operator
         self.causal_conv1d = CausalConv1d()
         self.causal_conv1d_update = CausalConv1dUpdate()
+        self.fused_gdn_gating = FusedGDNGating()
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.fused_recurrent_gated_delta_rule = FusedRecurrentGatedDeltaRule()
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -597,7 +601,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
-        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        g, beta = self.fused_gdn_gating.forward(self.A_log, a, b, self.dt_bias)
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -620,18 +624,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
-                q=query_spec,
-                k=key_spec,
-                v=value_spec,
-                g=g_spec,
-                beta=beta_spec,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
-                use_qk_l2norm_in_kernel=True,
+            core_attn_out_spec, last_recurrent_state = (
+                self.fused_recurrent_gated_delta_rule.forward(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=spec_query_start_loc[
+                        : attn_metadata.num_spec_decodes + 1
+                    ],
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    use_qk_l2norm_in_kernel=True,
+                )
             )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
@@ -643,7 +651,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = chunk_gated_delta_rule(
+            ) = self.chunk_gated_delta_rule.forward(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -661,7 +669,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
+                self.fused_recurrent_gated_delta_rule.forward(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -1396,3 +1404,9 @@ def fused_gdn_gating(
         num_warps=1,
     )
     return g, beta_output
+
+
+@CustomTritonOp.register("fused_gdn_gating")
+class FusedGDNGating(CustomTritonOp):
+    def forward_cuda(self, *args, **kwargs):
+        return fused_gdn_gating(*args, **kwargs)
