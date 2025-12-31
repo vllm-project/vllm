@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import random
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -19,7 +21,7 @@ MODEL_NAME = "facebook/opt-125m"
 def default_server_args():
     return [
         "--dtype",
-        "float32",
+        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -274,7 +276,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str
         temperature=1.0,
         stream=False,
         logprobs=0,
-        seed=42,
+        seed=random.randint(0, 10000),
     )
 
     # Assert `n` completions
@@ -322,7 +324,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
         n=n,
         temperature=1.0,
         stream=True,
-        seed=42,
+        seed=random.randint(0, 10000),
     )
     chunks: list[list[str]] = [[] for _ in range(n)]
     finish_reason_count = 0
