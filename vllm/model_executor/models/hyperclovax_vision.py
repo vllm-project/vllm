@@ -1739,6 +1739,8 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # Ignore MambaMia video-audio compressor weights (not implemented in vLLM)
             # This module is used in HF for temporal compression of video+audio
             "video_audio_compressor": None,
+            # HF uses audio_model, vLLM uses audio_tower
+            "audio_model": "audio_tower",
         },
     )
 
