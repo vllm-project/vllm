@@ -5232,10 +5232,10 @@ class GPUModelRunner(
         compilation_cases: list[int],
     ) -> None:
         tmp_dummy_mm_inputs = self._get_mm_dummy_batch(
-            "image",
+            "video",
             1,
         )
-        img_feature_dim = tmp_dummy_mm_inputs["pixel_values"].shape[1]
+        img_feature_dim = tmp_dummy_mm_inputs["pixel_values_videos"].shape[1]
 
         if is_global_first_rank():
             compilation_cases = tqdm(
