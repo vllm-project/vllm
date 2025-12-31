@@ -55,8 +55,6 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# tools/pre_commit scripts must be Python 3.9 compatible
-"tools/pre_commit/**" = ["UP"]
 
 [tool.ruff.lint]
 select = [

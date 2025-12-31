@@ -9,7 +9,7 @@ import ast
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Final, List, Optional, Tuple
+from typing import Final
 
 INIT_PATH: Final = Path("vllm/__init__.py")
 
@@ -26,7 +26,7 @@ ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _is_internal(name: Optional[str], *, level: int = 0) -> bool:
+def _is_internal(name: str | None, *, level: int = 0) -> bool:
     if level > 0:
         return True
     if name is None:
@@ -34,7 +34,7 @@ def _is_internal(name: Optional[str], *, level: int = 0) -> bool:
     return name.startswith("vllm.") or name == "vllm"
 
 
-def _fail(violations: Iterable[Tuple[int, str]]) -> None:
+def _fail(violations: Iterable[tuple[int, str]]) -> None:
     print("ERROR: Disallowed eager imports in vllm/__init__.py:\n", file=sys.stderr)
     for lineno, msg in violations:
         print(f"  Line {lineno}: {msg}", file=sys.stderr)
@@ -45,7 +45,7 @@ def main() -> None:
     source = INIT_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(INIT_PATH))
 
-    violations: List[Tuple[int, str]] = []
+    violations: list[tuple[int, str]] = []
 
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
