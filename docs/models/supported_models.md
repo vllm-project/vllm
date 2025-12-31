@@ -540,7 +540,7 @@ Cross-encoder and reranker models are a subset of classification models that acc
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
-|--------------|--------|-------------------|-----------------------------------------|-----------------------------|-----------------------------------------|
+|--------------|--------|-------------------|---------------------------|-----------------------------|-----------------------------------------|
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
 | `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
