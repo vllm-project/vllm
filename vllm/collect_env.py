@@ -635,7 +635,6 @@ def get_env_vars():
     
     return "\n".join(formatted_vars)
 
-
 def get_env_vars_structured():
     """
     Collect environment variables in a structured format.
@@ -644,31 +643,41 @@ def get_env_vars_structured():
         dict: Structured dictionary containing categorized environment variables.
     """
     from collections import defaultdict
+
+    SECRET_TERMS = {
+        "secret", "token", "api", "access", "password", "key", "credential",
+        "auth", "cert", "signature", "private", "pwd", "passwd", "certificate"
+    }
+    
+    PYTORCH_PREFIXES = ("TORCH", "PYTORCH", "CUDA", "CUBLAS", "CUDNN", "NCCL")
+    ROCM_PREFIXES = ("HIP", "ROCM", "AMD")
+    TENSORFLOW_PREFIXES = ("TF_", "TENSORFLOW")
+    JAX_PREFIXES = ("JAX", "XLA")
+    SYSTEM_MATH_PREFIXES = ("OMP_", "MKL_", "OPENMP", "OPENBLAS")
+    RUNTIME_PREFIXES = ("PATH", "LD_", "PYTHON", "CONDA", "PIP", "UV")
     
     categories = defaultdict(dict)
     
     for key, value in os.environ.items():
         key_upper = key.upper()
+        key_lower = key.lower()
+        
+        if not value or any(term in key_lower for term in SECRET_TERMS):
+            continue
         
         if key_upper.startswith("VLLM_"):
             categories["vllm"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["TORCH", "PYTORCH", "CUDA", "CUBLAS", "CUDNN", "NCCL"]):
+        elif key_upper.startswith(PYTORCH_PREFIXES):
             categories["pytorch"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["HIP", "ROCM", "AMD"]):
+        elif key_upper.startswith(ROCM_PREFIXES):
             categories["rocm"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["TF_", "TENSORFLOW"]):
+        elif key_upper.startswith(TENSORFLOW_PREFIXES):
             categories["tensorflow"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["JAX", "XLA"]):
+        elif key_upper.startswith(JAX_PREFIXES):
             categories["jax"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["OMP_", "MKL_", "OPENMP", "OPENBLAS"]):
+        elif key_upper.startswith(SYSTEM_MATH_PREFIXES):
             categories["system_math"][key] = value
-        elif any(key_upper.startswith(prefix) for prefix in
-                ["PATH", "LD_", "PYTHON", "CONDA", "PIP", "UV"]):
+        elif key_upper.startswith(RUNTIME_PREFIXES):
             categories["runtime"][key] = value
         elif key in environment_variables:
             categories["vllm_registry"][key] = value
@@ -676,7 +685,6 @@ def get_env_vars_structured():
             categories["other"][key] = value
     
     return dict(categories)
-
 
 def get_env_var_summary():
     """
