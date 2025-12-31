@@ -1447,13 +1447,23 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
 
 
 def process_fp8_weight_tensor_strategy_moe(
-    weight: torch.Tensor, weight_scales: torch.Tensor, shard_size: int, num_experts: int
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    shard_size: int,
+    num_experts: int,
+    is_act_and_mul: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe weights for tensor-wise quantization strategy."""
-
-    # Per tensor kernels require single weight scale for w13 per expert, but
-    # on disk there is a scale for w1 and w3. Use the max to requantize.
     max_scales = weight_scales.max(dim=1).values
+
+    # For w1 case (i.e. not w13): just collapse the last dim since
+    # there is already just one scale per expert in this case.
+    if not is_act_and_mul:
+        assert weight_scales.shape[1] == 1
+        return weight, weight_scales.max()
+
+    # For w13 case (common): require single scale for w13 per expert, but
+    # on disk there is a scale for w1 and w3. Use the max to requantize.
     for expert_id in range(num_experts):
         start = 0
         for shard_id in range(2):

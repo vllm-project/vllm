@@ -37,9 +37,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
-    register_moe_scaling_factors,
-    rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31,
+    prepare_moe_fp8_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
@@ -70,6 +68,7 @@ def select_fp8_moe_backend(
     block_quant: bool,
     tp_size: int,
     with_lora_support: bool,
+    is_act_and_mul: bool = True,
     allow_vllm_cutlass: bool = False,
 ) -> Fp8MoeBackend:
     """
@@ -99,14 +98,21 @@ def select_fp8_moe_backend(
         backend = get_flashinfer_moe_backend()
         if backend == FlashinferMoeBackend.TENSORRT_LLM:
             logger.info_once(_make_log_backend("FlashInfer TRTLLM"))
+            if not is_act_and_mul:
+                raise ValueError(
+                    "FlashInfer TRTLLM FP8 MoE backend only supports "
+                    "act_and_mul gate_up_project fusion. Please set "
+                    "VLLM_USE_FLASHINFER_MOE_FP8=throughput to use the "
+                    "FlashInfer CUTLASS backend instead."
+                )
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
             if block_quant and current_platform.is_device_capability_family(100):
                 raise ValueError(
                     "FlashInfer FP8 MoE throughput backend does not "
                     "support block quantization. Please use "
-                    "VLLM_FLASHINFER_MOE_BACKEND=latency "
-                    "instead."
+                    "VLLM_FLASHINFER_MOE_BACKEND=latency to use the "
+                    "FlashInfer TRTLLM backend instead."
                 )
             logger.info_once(_make_log_backend("FlashInfer CUTLASS"))
             return Fp8MoeBackend.FLASHINFER_CUTLASS
@@ -197,15 +203,17 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13 = swap_w13_to_w31(w13)
-        if block_quant:
-            w13_scale = swap_w13_to_w31(w13_scale)
-        else:
-            # TODO(rob): this function is a hack that renames the scaling
-            # factors in the Module. This is a hack we should clean up.
-            register_moe_scaling_factors(layer)
-            if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                rotate_flashinfer_fp8_moe_weights(w13, w2)
+        w13, w2, w13_scale, w2_scale = prepare_moe_fp8_layer_for_fi(
+            fp8_backend,
+            layer,
+            w13,
+            w2,
+            w13,
+            block_quant,
+        )
+
+        if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and not block_quant:
+            pass
 
     return w13, w2, w13_scale, w2_scale
 

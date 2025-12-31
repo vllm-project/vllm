@@ -629,7 +629,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
-        self.layer = layer
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
@@ -802,6 +801,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
+        # NOTE(rob): this is currently not a pure function because of
+        # flashinfer nonsense. Fix it.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
@@ -1000,7 +1001,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             # TODO(rob): convert this to MK.
             if layer.enable_eplb:
                 raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")

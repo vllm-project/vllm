@@ -164,6 +164,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             and not self.use_deepseek_fp8_block_scale
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
+            # TODO(rob): this is a gigantic hack that is overloading the meaning
+            # of g1_alphas, a1_gscale, which are intended for nvfp4. Fix it.
             quant_scales = [
                 self.g1_alphas,
                 self.a2_gscale,
