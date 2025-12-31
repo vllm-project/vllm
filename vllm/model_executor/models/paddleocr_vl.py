@@ -22,8 +22,7 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.modeling_outputs import (
@@ -32,15 +31,10 @@ from transformers.modeling_outputs import (
 from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (
-    check_upstream_fa_availability,
-    maybe_get_vit_flash_attn_backend,
+from vllm.attention.layers.mm_encoder_attention import (
+    MMEncoderAttention,
 )
-from vllm.attention.ops.vit_attn_wrappers import (
-    vit_flash_attn_wrapper,
-    vit_xformers_attn_wrapper,
-)
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -53,7 +47,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
-    dispatch_rotary_emb_function,
+    ApplyRotaryEmb,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -64,7 +58,7 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
@@ -134,47 +128,6 @@ def smart_resize(
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
-
-
-def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    x1, x2 = x[..., ::2], x[..., 1::2]
-    return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
-
-
-def apply_rotary_emb_torch(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False
-) -> torch.Tensor:
-    """
-    x: (batch_size, seqlen, nheads, headdim)
-    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
-    """
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    sin = repeat(
-        sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
-            x[..., ro_dim:],
-        ],
-        dim=-1,
-    )
-
-
-def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    rotary_emb_function = dispatch_rotary_emb_function(default=apply_rotary_emb_torch)
-    t_ = t.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    output = rotary_emb_function(t_, cos, sin).type_as(t)
-    return output
 
 
 class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
@@ -309,7 +262,7 @@ class PaddleOCRVLMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
@@ -580,10 +533,8 @@ class SiglipAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
 
@@ -611,20 +562,16 @@ class SiglipAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
-
-        self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                self.use_upstream_fa,
-                attn_backend_override=attn_backend_override,
-            )
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
+            head_size=self.hidden_size_per_attention_head,
+            multimodal_config=multimodal_config,
+            prefix=f"{prefix}.attn",
         )
-        self.is_flash_attn_backend = self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
+        )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
@@ -657,7 +604,6 @@ class SiglipAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         batch_size, _, _ = hidden_states.shape
 
@@ -668,52 +614,23 @@ class SiglipAttention(nn.Module):
 
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            qk_rotated = self.apply_rotary_emb(
+                qk_concat,
+                rotary_pos_emb.cos(),
+                rotary_pos_emb.sin(),
+            )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
-        if self.is_flash_attn_backend:
-            if max_seqlen is None:
-                raise ValueError("Flash attention backend requires max_seqlen.")
-            context_layer = vit_flash_attn_wrapper(
-                q,
-                k,
-                v,
-                cu_seqlens,
-                max_seqlen,
-                batch_size,
-                self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
-            )
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (
-                    rearrange(tensor, "b s h d -> b h s d")
-                    for tensor in (q_i, k_i, v_i)
-                )
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = rearrange(output_i, "b h s d -> b s h d")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            if seqlens is None:
-                raise ValueError("xFormers attention backend requires seqlens tensor.")
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
-        else:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+        context_layer = self.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        context_layer = rearrange(context_layer, "b s h d -> b s (h d)")
 
         output, _ = self.out_proj(context_layer)
-        output = rearrange(output, "s b d -> b s d")
         return output
 
 
@@ -785,11 +702,8 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        *,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -799,10 +713,8 @@ class SiglipEncoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             projection_size=config.hidden_size,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
-            attn_backend=attn_backend,
-            attn_backend_override=attn_backend_override,
-            use_upstream_fa=use_upstream_fa,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -818,7 +730,6 @@ class SiglipEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -828,7 +739,6 @@ class SiglipEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
 
         hidden_states = residual + hidden_states
@@ -847,30 +757,26 @@ class SiglipEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         num_heads = config.num_attention_heads
         head_dim = embed_dim // num_heads
+
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
+        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        } and check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
-            self.use_upstream_fa = True
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -881,10 +787,8 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
+                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    attn_backend=self.attn_backend,
-                    attn_backend_override=attn_backend_override,
-                    use_upstream_fa=self.use_upstream_fa,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
@@ -943,14 +847,11 @@ class SiglipEncoder(nn.Module):
             cu_seqlens = cu_seqlens.to(device=device)
 
         max_seqlen = None
-        seqlens = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -959,7 +860,6 @@ class SiglipEncoder(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
         return hidden_states
 
@@ -969,8 +869,8 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -980,8 +880,8 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.encoder",
-            attn_backend_override=attn_backend_override,
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -1019,16 +919,16 @@ class SiglipVisionModel(nn.Module):
         self,
         config,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vision_model",
-            attn_backend_override=attn_backend_override,
         )
         self.quant_config = quant_config
 
@@ -1131,8 +1031,6 @@ class SiglipVisionModel(nn.Module):
     dummy_inputs=PaddleOCRVLDummyInputsBuilder,
 )
 class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -1149,17 +1047,11 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         self.config = config
         self.multimodal_config = multimodal_config
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
-
         self.visual = SiglipVisionModel(
             config=config.vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
-            attn_backend_override=attn_backend_override,
         )
         self.mlp_AR = Projector(config, config.vision_config)
 

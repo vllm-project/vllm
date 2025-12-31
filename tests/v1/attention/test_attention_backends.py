@@ -74,6 +74,9 @@ BATCH_SPECS = {
     ),
     "large_decode": BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
     "large_prefill": BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
+    "mixed_large": BatchSpec(
+        seq_lens=[1024, 2048, 4096, 1024, 2048, 4096], query_lens=[1, 1, 1, 32, 32, 32]
+    ),
     "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
 }
@@ -554,9 +557,21 @@ def test_causal_backend_correctness(
         if is_torch_equal_or_newer("2.9.0.dev0")
         else []
     )
-    SMALL_BLOCK_BACKENDS = [
-        x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
-    ]
+
+    if current_platform.is_rocm():
+        SMALL_BLOCK_BACKENDS = [
+            x
+            for x in BACKENDS_TO_TEST
+            if (
+                x not in LARGE_BLOCK_BACKENDS
+                and x is not AttentionBackendEnum.FLASH_ATTN
+            )
+        ]
+    else:
+        SMALL_BLOCK_BACKENDS = [
+            x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+        ]
+
     _test_backend_correctness(
         batch_spec,
         model,
@@ -577,17 +592,32 @@ def test_causal_backend_correctness(
         )
 
 
-SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    AttentionBackendEnum.FLASH_ATTN,
-    AttentionBackendEnum.FLEX_ATTENTION,
-    AttentionBackendEnum.TRITON_ATTN,
-    "FLEX_ATTENTION_SLOW",
-]
+if current_platform.is_rocm():
+    # FLASH_ATTN is not supported on ROCm
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
+else:
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
 
 
 @pytest.mark.parametrize(
     "batch_spec_name",
-    ["small_decode", "small_prefill", "mixed_medium", "large_decode", "large_prefill"],
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "mixed_large",
+    ],
 )
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])

@@ -20,3 +20,12 @@ def get_batch_metadata_across_dp(
     tensor[1][dp_rank] = cudagraph_size
     dist.all_reduce(tensor, group=group)
     return tensor[0], tensor[1]
+
+
+def make_num_tokens_across_dp(
+    dp_size: int,
+    num_tokens: int,
+) -> torch.Tensor | None:
+    if dp_size == 1:
+        return None
+    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")

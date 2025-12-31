@@ -40,7 +40,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 except ImportError:
     from backend_request_func import get_tokenizer
 

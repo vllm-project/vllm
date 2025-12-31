@@ -6,9 +6,7 @@ Define EC connector functionality mixin for model runners.
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import (
-    TYPE_CHECKING,  # noqa: UP035
-)
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -59,7 +57,7 @@ class ECConnectorModelRunnerMixin:
         )
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire EC conector lifecycle within execute_model
+    # It encapsulates the entire EC connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_ec_connector_output(
