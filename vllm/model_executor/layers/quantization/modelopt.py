@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     select_cutlass_fp8_gemm_impl,
@@ -730,20 +729,22 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             tp_size=layer.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
         )
+        self.kernel: mk.FusedMoEModularKernel | None = None
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        # TRT LLM not supported with all2all yet.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            pf = build_flashinfer_fp8_cutlass_moe_prepare_finalize(self.moe)
-            logger.debug_once("%s", pf.__class__.__name__)
-            return pf
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        return None
+        # # TRT LLM not supported with all2all yet.
+        # if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+        #     return None
+        # elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+        #     pf = build_flashinfer_fp8_cutlass_moe_prepare_finalize(self.moe)
+        #     logger.debug_once("%s", pf.__class__.__name__)
+        #     return pf
+        # else:
+        #     return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,

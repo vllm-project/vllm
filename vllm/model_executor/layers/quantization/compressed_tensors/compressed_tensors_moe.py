@@ -699,6 +699,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
         self.disable_expert_map = False
 
+        self.kernel: mk.FusedMoEModularKernel | None = None
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -910,13 +912,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        self.kernel, self.use_inplace = make_fp8_moe_kernel(
-            layer=layer,
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
-        )
+        if self.moe_quant_config:
+            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                layer=layer,
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+            )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1056,6 +1058,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             router_logits=router_logits,
         )
 
+        assert self.kernel is not None
         result = self.kernel(
             x,
             layer.w13_weight,

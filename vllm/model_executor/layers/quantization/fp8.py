@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -670,6 +669,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "activation function, but got {layer.activation}."
                 )
 
+        self.kernel: mk.FusedMoEModularKernel | None = None
+
     def create_weights(
         self,
         layer: Module,
@@ -821,13 +822,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Setup modular kernel for TP case.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        self.kernel, self.use_inplace = make_fp8_moe_kernel(
-            layer=layer,
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.fp8_backend,
-        )
+        if self.moe_quant_config:
+            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                layer=layer,
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+            )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -880,27 +881,27 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         return None
-        if (
-            self.fp8_backend == Fp8MoeBackend.AITER
-            or self.fp8_backend == Fp8MoeBackend.MARLIN
-            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        ):
-            return None
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            if self.block_quant:
-                assert self.weight_block_size == [128, 128], (
-                    f"Only support weight_block_size == [128, 128], "
-                    f"got {self.weight_block_size}"
-                )
-            # Wire block-scale flag through prepare/finalize when using CUTLASS
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        # if (
+        #     self.fp8_backend == Fp8MoeBackend.AITER
+        #     or self.fp8_backend == Fp8MoeBackend.MARLIN
+        #     or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        # ):
+        #     return None
+        # elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        #     if self.block_quant:
+        #         assert self.weight_block_size == [128, 128], (
+        #             f"Only support weight_block_size == [128, 128], "
+        #             f"got {self.weight_block_size}"
+        #         )
+        #     # Wire block-scale flag through prepare/finalize when using CUTLASS
+        #     prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+        #         self.moe,
+        #         use_deepseek_fp8_block_scale=self.block_quant,
+        #     )
+        #     logger.debug_once("%s", prepare_finalize.__class__.__name__)
+        #     return prepare_finalize
+        # else:
+        #     return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -972,7 +973,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return None
+
+        elif self.fp8_backend == Fp8MoeBackend.MARLIN:
             return fp8_w8a16_moe_quant_config(
                 w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
                 w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
@@ -1059,6 +1063,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
+
+        assert self.kernel is not None
         result = self.kernel(
             x,
             layer.w13_weight,
