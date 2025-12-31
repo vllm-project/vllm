@@ -786,12 +786,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             raise ValueError(
                 f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
-                f"should be one of: {Mxfp4Backend.MARLIN}, "
-                f"{Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM}, "
-                f"{Mxfp4Backend.SM100_FI_MXFP4_BF16}, "
-                f"{Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS}, "
-                f"{Mxfp4Backend.SM90_FI_MXFP4_BF16}, "
-                f"{Mxfp4Backend.TRITON}."
+                f"should be one of: {list(Mxfp4Backend)}."
             )
 
     def get_fused_moe_quant_config(

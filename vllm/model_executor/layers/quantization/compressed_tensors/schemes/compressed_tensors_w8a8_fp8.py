@@ -159,10 +159,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         else:
             raise ValueError(
-                f"Unknown quantization strategy {self.strategy}: should be one of "
-                f"{QuantizationStrategy.TENSOR}, "
-                f"{QuantizationStrategy.CHANNEL}, "
-                f"{QuantizationStrategy.BLOCK}."
+                f"Unknown quantization strategy {self.strategy}: "
+                f"should be one of {list(QuantizationStrategy)}"
             )
 
         # required by torch.compile to be torch.nn.Parameter
