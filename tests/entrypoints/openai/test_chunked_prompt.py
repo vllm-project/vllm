@@ -8,7 +8,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +20,6 @@ def server():
         "--max-model-len",
         "8192",
         "--enforce-eager",
-        # lora config below
         "--max-num-seqs",
         "128",
         "--enable-chunked-prefill",
@@ -40,7 +39,8 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_completion_stream_options_and_logprobs_with_long_prompts(
-        client: openai.AsyncOpenAI):
+    client: openai.AsyncOpenAI,
+):
     # Test stream with long prompt
     prompt = "What is the capital of France?" * 400
 
@@ -62,8 +62,9 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
     async for chunk in stream:
         assert chunk.usage.prompt_tokens >= 0
         assert chunk.usage.completion_tokens >= 0
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
+        assert chunk.usage.total_tokens == (
+            chunk.usage.prompt_tokens + chunk.usage.completion_tokens
+        )
         if not finished:
             tokens_received += 1
             assert chunk.choices[0].text
@@ -77,15 +78,13 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
 
 @pytest.mark.asyncio
 async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
-        client: openai.AsyncOpenAI):
+    client: openai.AsyncOpenAI,
+):
     # Test stream with long prompt
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": "What is the capital of France?" * 400
-    }]
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?" * 400},
+    ]
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
@@ -106,8 +105,9 @@ async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
     async for chunk in stream:
         assert chunk.usage.prompt_tokens >= 0
         assert chunk.usage.completion_tokens >= 0
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
+        assert chunk.usage.total_tokens == (
+            chunk.usage.prompt_tokens + chunk.usage.completion_tokens
+        )
 
         if not finished:
             if chunk.choices[0].delta.content == "":

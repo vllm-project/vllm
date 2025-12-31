@@ -39,7 +39,7 @@ def test_pack_seq_basic_fp8():
             start_idx = sum(lengths_list[:b])
             seq_len = lengths_list[b]
 
-            expected_data = x[start_idx:start_idx + seq_len].to(torch.float32)
+            expected_data = x[start_idx : start_idx + seq_len].to(torch.float32)
             actual_data = packed[b, :seq_len].to(torch.float32)
 
             assert_close(actual_data, expected_data, rtol=1e-1, atol=1e-2)
@@ -62,7 +62,7 @@ def test_pack_seq_custom_padding_fp8():
         # Check valid data
         for b in range(B):
             start_idx = b * 10
-            expected_data = x[start_idx:start_idx + 10].to(torch.float32)
+            expected_data = x[start_idx : start_idx + 10].to(torch.float32)
             actual_data = result[b, :10].to(torch.float32)
             assert_close(actual_data, expected_data, rtol=1e-1, atol=1e-2)
 
@@ -73,9 +73,7 @@ def test_pack_seq_custom_padding_fp8():
         elif pad_value > 0:
             assert torch.all(padded_data > 50)  # Large positive values
         else:
-            assert torch.allclose(padded_data,
-                                  torch.zeros_like(padded_data),
-                                  atol=1e-2)
+            assert torch.allclose(padded_data, torch.zeros_like(padded_data), atol=1e-2)
 
 
 def test_pack_seq_default_negative_inf_padding_fp8():
@@ -93,7 +91,8 @@ def test_pack_seq_default_negative_inf_padding_fp8():
     # Check that padding is large negative values (fp8 representation of -inf)
     padded_data = result[:, 10:].to(torch.float32)
     assert torch.all(
-        padded_data < -100)  # fp8 -inf is represented as large negative number
+        padded_data < -100
+    )  # fp8 -inf is represented as large negative number
 
 
 def test_pack_seq_edge_cases_fp8():
@@ -142,7 +141,7 @@ def test_pack_seq_different_block_sizes_fp8():
         # Check that valid data is preserved (within fp8 precision)
         for b in range(B):
             start_idx = b * 25
-            expected_data = x[start_idx:start_idx + 25].to(torch.float32)
+            expected_data = x[start_idx : start_idx + 25].to(torch.float32)
             actual_data = result[b, :25].to(torch.float32)
             assert_close(actual_data, expected_data, rtol=1e-1, atol=1e-2)
 
@@ -198,10 +197,7 @@ def test_pack_unpack_roundtrip_fp8():
 
         # Unpack without explicit start locations (computed in kernel)
         unpacked_with_loc = unpack_seq_triton(packed, lengths)
-        assert_close(x_f32,
-                     unpacked_with_loc.to(torch.float32),
-                     rtol=1e-3,
-                     atol=1e-2)
+        assert_close(x_f32, unpacked_with_loc.to(torch.float32), rtol=1e-3, atol=1e-2)
 
 
 def test_unpack_seq_triton_edge_cases_fp8():
@@ -216,10 +212,7 @@ def test_unpack_seq_triton_edge_cases_fp8():
     packed = pack_seq_triton(x, lengths)
     unpacked = unpack_seq_triton(packed, lengths)
     assert unpacked.shape == x.shape
-    assert_close(x.to(torch.float32),
-                 unpacked.to(torch.float32),
-                 rtol=1e-1,
-                 atol=1e-2)
+    assert_close(x.to(torch.float32), unpacked.to(torch.float32), rtol=1e-1, atol=1e-2)
 
     # Test with very short sequences
     x = torch.randn(20, 4, 8, dtype=torch.float32, device=device) * 0.1
@@ -228,10 +221,9 @@ def test_unpack_seq_triton_edge_cases_fp8():
     packed = pack_seq_triton(x, lengths)
     unpacked = unpack_seq_triton(packed, lengths)
     # Only compare the first 3 elements that were actually packed
-    assert_close(x[:3].to(torch.float32),
-                 unpacked.to(torch.float32),
-                 rtol=1e-1,
-                 atol=1e-2)
+    assert_close(
+        x[:3].to(torch.float32), unpacked.to(torch.float32), rtol=1e-1, atol=1e-2
+    )
 
     x = torch.randn(15, 8, 16, dtype=torch.float32, device=device) * 0.1
     x = x.to(dtype=dtype)
@@ -239,7 +231,4 @@ def test_unpack_seq_triton_edge_cases_fp8():
     packed = pack_seq_triton(x, lengths)
     unpacked = unpack_seq_triton(packed, lengths)
     assert unpacked.shape == x.shape
-    assert_close(x.to(torch.float32),
-                 unpacked.to(torch.float32),
-                 rtol=1e-1,
-                 atol=1e-2)
+    assert_close(x.to(torch.float32), unpacked.to(torch.float32), rtol=1e-1, atol=1e-2)

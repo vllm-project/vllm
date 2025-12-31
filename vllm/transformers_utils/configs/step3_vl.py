@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -52,20 +52,70 @@ class Step3TextConfig(PretrainedConfig):
         moe_intermediate_size: int = 5120,
         moe_num_experts: int = 48,
         moe_top_k: int = 3,
-        rope_theta: float = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embedding: int = 65536,
         share_expert_dim: int = 5120,
         share_q_dim: int = 2048,
         head_dim: int = 256,
         norm_expert_weight: bool = False,
-        moe_layers_enum: tuple[int,
-                               ...] = (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-                                       15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-                                       25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
-                                       35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
-                                       45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
-                                       55, 56, 57, 58, 59),
+        moe_layers_enum: tuple[int, ...] = (
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+        ),
         **kwargs,
     ) -> None:
         self.hidden_size = hidden_size
@@ -79,8 +129,13 @@ class Step3TextConfig(PretrainedConfig):
         self.moe_intermediate_size = moe_intermediate_size
         self.moe_num_experts = moe_num_experts
         self.moe_top_k = moe_top_k
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
+        rope_theta = kwargs.pop("rope_theta", 500000.0)
+        if "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
+        self.rope_parameters = rope_parameters
         self.max_position_embedding = max_position_embedding
         self.share_expert_dim = share_expert_dim
         self.share_q_dim = share_q_dim
@@ -96,8 +151,8 @@ class Step3VLConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vision_config: Optional[Union[dict, Step3VisionEncoderConfig]] = None,
-        text_config: Optional[Union[dict, Step3TextConfig]] = None,
+        vision_config: dict | Step3VisionEncoderConfig | None = None,
+        text_config: dict | Step3TextConfig | None = None,
         understand_projector_stride: int = 1,
         projector_bias: bool = True,
         image_token_id: int = 128001,

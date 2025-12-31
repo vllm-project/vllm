@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from nvfp4_utils import (FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX,
-                         convert_swizzled_to_linear, dequantize_nvfp4_to_dtype)
+from nvfp4_utils import (
+    FLOAT4_E2M1_MAX,
+    FLOAT8_E4M3_MAX,
+    convert_swizzled_to_linear,
+    dequantize_nvfp4_to_dtype,
+)
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -41,18 +45,12 @@ def get_ref_results(
     _, m_k = a_fp4.shape
     _, n_k = b_fp4.shape
     assert m_k == n_k
-    a_in_dtype = dequantize_nvfp4_to_dtype(a_fp4,
-                                           a_sf,
-                                           a_global_scale,
-                                           dtype=dtype,
-                                           device=device,
-                                           block_size=block_size)
-    b_in_dtype = dequantize_nvfp4_to_dtype(b_fp4,
-                                           b_sf,
-                                           b_global_scale,
-                                           dtype=dtype,
-                                           device=device,
-                                           block_size=block_size)
+    a_in_dtype = dequantize_nvfp4_to_dtype(
+        a_fp4, a_sf, a_global_scale, dtype=dtype, device=device, block_size=block_size
+    )
+    b_in_dtype = dequantize_nvfp4_to_dtype(
+        b_fp4, b_sf, b_global_scale, dtype=dtype, device=device, block_size=block_size
+    )
     return torch.matmul(a_in_dtype, b_in_dtype.t())
 
 
@@ -72,8 +70,7 @@ def test_flashinfer_nvfp4_gemm(
     autotune: bool,
 ) -> None:
     if backend == "trtllm" and dtype == torch.float16:
-        pytest.skip(
-            "Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
+        pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
 
     current_platform.seed_everything(seed)
     m, n, packed_k = shape
@@ -82,10 +79,12 @@ def test_flashinfer_nvfp4_gemm(
     a_dtype = torch.randn((m, k), dtype=dtype, device=device)
     b_dtype = torch.randn((n, k), dtype=dtype, device=device)
 
-    a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) /
-                      torch.amax(a_dtype.flatten(), dim=-1)).to(torch.float32)
-    b_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) /
-                      torch.amax(b_dtype.flatten(), dim=-1)).to(torch.float32)
+    a_global_scale = (
+        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
+    ).to(torch.float32)
+    b_global_scale = (
+        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(b_dtype.flatten(), dim=-1)
+    ).to(torch.float32)
     alpha = 1.0 / (a_global_scale * b_global_scale)
     # ops.scaled_fp4_quant returns swizzled scales, while weights
     # from checkpoints are in linear scales.
@@ -113,14 +112,18 @@ def test_flashinfer_nvfp4_gemm(
 
     if backend == "trtllm":
         epilogue_tile_m = 128
-        b_fp4 = flashinfer.shuffle_matrix_a(b_fp4.view(torch.uint8),
-                                            epilogue_tile_m)
+        b_fp4 = flashinfer.shuffle_matrix_a(b_fp4.view(torch.uint8), epilogue_tile_m)
 
         b_scale_interleaved = convert_swizzled_to_linear(
-            b_scale_interleaved, n, k, block_size)
-        b_scale_interleaved = (flashinfer.shuffle_matrix_sf_a(
-            b_scale_interleaved.view(torch.uint8), epilogue_tile_m).reshape(
-                b_scale_interleaved.shape).view(torch.float8_e4m3fn))
+            b_scale_interleaved, n, k, block_size
+        )
+        b_scale_interleaved = (
+            flashinfer.shuffle_matrix_sf_a(
+                b_scale_interleaved.view(torch.uint8), epilogue_tile_m
+            )
+            .reshape(b_scale_interleaved.shape)
+            .view(torch.float8_e4m3fn)
+        )
 
     with flashinfer.autotune(autotune):
         out = flashinfer_scaled_fp4_mm(
@@ -133,7 +136,4 @@ def test_flashinfer_nvfp4_gemm(
             backend=backend,
         )
 
-    torch.testing.assert_close(out,
-                               expected_out.to(dtype=dtype),
-                               atol=1e-1,
-                               rtol=1e-1)
+    torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
