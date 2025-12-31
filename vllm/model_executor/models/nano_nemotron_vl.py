@@ -105,8 +105,8 @@ DEFAULT_NUM_TILES = 12
 def num_image_token_per_tile(
     *, width: int, height: int, patch_size: int, downsample_ratio: int
 ) -> int:
-    tile_size = math.sqrt((width // patch_size) * (height // patch_size))
-    num_tokens = int(tile_size**2 // (downsample_ratio**2))
+    num_patches = (width // patch_size) * (height // patch_size)
+    num_tokens = num_patches // (downsample_ratio**2)
     return num_tokens
 
 
