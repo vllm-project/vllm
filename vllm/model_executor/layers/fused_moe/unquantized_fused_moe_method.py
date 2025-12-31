@@ -97,6 +97,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def is_monolithic(self) -> bool:
         return self._is_monolithic
 
+        self.sonic_moe_enabled = (
+            is_sonic_moe_supported()
+            and envs.VLLM_USE_SONIC_MOE
+            and current_platform.has_device_capability(90)
+        )
+        if self.sonic_moe_enabled:
+            logger.info_once("Enabling Sonic MoE for UnquantizedFusedMoEMethod")
+
     @property
     def supports_eplb(self) -> bool:
         return True
