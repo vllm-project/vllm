@@ -1771,20 +1771,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    batch_size=prefill_metadata.chunked_context.cu_seq_lens[i].shape[0]
-                    - 1,
+                    batch_size=attn_metadata.num_prefills,
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
 
-            kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
-
             # kv_b_proj may not be quantized, for example NVFP4 models.
-            if (
-                self.kv_b_proj.weight.dtype != current_platform.fp8_dtype()
-                and attn_metadata.prefill.q_data_type == current_platform.fp8_dtype()
-            ):
-                kv_c_normed = kv_c_normed.to(attn_metadata.prefill.output_dtype)
+            kv_c_normed = workspace[:toks][..., : self.kv_lora_rank].to(
+                self.kv_b_proj.weight.dtype
+            )
+            k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
