@@ -28,9 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.config import (
-    maybe_register_config_serialize_by_value,
-)
+from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
@@ -39,10 +37,7 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import (
-    OutputProcessor,
-    RequestOutputCollector,
-)
+from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
@@ -770,9 +765,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
-        self,
-        reset_running_requests: bool = False,
-        reset_connector: bool = False,
+        self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector

@@ -433,11 +433,9 @@ class OutputProcessor:
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
-                        pooling_output=(
-                            torch.randn(0, device="cpu")
-                            if req_state.detokenizer is None
-                            else None
-                        ),
+                        pooling_output=torch.randn(0, device="cpu")
+                        if req_state.detokenizer is None
+                        else None,
                         finish_reason=FinishReason.ABORT,
                         stop_reason=None,
                         kv_transfer_params=None,
@@ -529,10 +527,7 @@ class OutputProcessor:
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
-                req_state,
-                engine_core_output,
-                engine_core_timestamp,
-                iteration_stats,
+                req_state, engine_core_output, engine_core_timestamp, iteration_stats
             )
 
             new_token_ids = engine_core_output.new_token_ids
@@ -647,15 +642,13 @@ class OutputProcessor:
                 metrics.num_generation_tokens,
             )
             span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL,
-                prefill_time,
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time
             )
             span.set_attribute(
                 SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time
             )
             span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
-                inference_time,
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time
             )
 
             # meta
@@ -666,13 +659,11 @@ class OutputProcessor:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
             if req_state.max_tokens_param:
                 span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
-                    req_state.max_tokens_param,
+                    SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, req_state.max_tokens_param
                 )
             if req_state.temperature:
                 span.set_attribute(
-                    SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
-                    req_state.temperature,
+                    SpanAttributes.GEN_AI_REQUEST_TEMPERATURE, req_state.temperature
                 )
             if req_state.n:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
@@ -721,7 +712,5 @@ class OutputProcessor:
         )
 
         ParentRequest.observe_finished_request(
-            req_state.parent_req,
-            iteration_stats,
-            req_state.stats.num_generation_tokens,
+            req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens
         )

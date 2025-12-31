@@ -26,10 +26,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import (
-    OutputProcessor,
-    RequestOutputCollector,
-)
+from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -50,8 +47,7 @@ def _ref_convert_id_to_token(
 
 
 @pytest.mark.parametrize(
-    "request_output_kind",
-    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
+    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.parametrize("stream_interval", [1, 5, 10])
 def test_incremental_detokenization(
@@ -60,9 +56,7 @@ def test_incremental_detokenization(
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer,
-        log_stats=False,
-        stream_interval=stream_interval,
+        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
     )
 
     # Make N requests.
@@ -135,10 +129,7 @@ def test_incremental_detokenization(
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_toks) in enumerate(
-        zip(
-            dummy_test_vectors.generation_strings,
-            dummy_test_vectors.generation_tokens,
-        )
+        zip(dummy_test_vectors.generation_strings, dummy_test_vectors.generation_tokens)
     ):
         gen_str = gen_strings[f"request-{idx}"]
         gen_toks = gen_tokens[f"request-{idx}"]
@@ -195,11 +186,9 @@ def _validate_logprobs(
                 # logprob token id tensors associated with this
                 # position in the completion. Also break out the
                 # sampled token ranks
-                (
-                    ref_pos_logprob_toks,
-                    ref_pos_logprob_vals,
-                    ref_sampled_token_rank,
-                ) = ref_logprobs[idx]
+                (ref_pos_logprob_toks, ref_pos_logprob_vals, ref_sampled_token_rank) = (
+                    ref_logprobs[idx]
+                )
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
@@ -443,8 +432,7 @@ def _validate_logprobs(
 
 
 @pytest.mark.parametrize(
-    "request_output_kind",
-    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
+    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize("num_prompt_logprobs", [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
@@ -487,14 +475,12 @@ def test_logprobs_processor(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=(
-            None
-            if num_sample_logprobs is None
-            else dummy_test_vectors.generation_logprobs
-        ),
-        prompt_logprobs_raw=(
-            None if num_prompt_logprobs is None else dummy_test_vectors.prompt_logprobs
-        ),
+        generated_logprobs_raw=None
+        if num_sample_logprobs is None
+        else dummy_test_vectors.generation_logprobs,
+        prompt_logprobs_raw=None
+        if num_prompt_logprobs is None
+        else dummy_test_vectors.prompt_logprobs,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -777,9 +763,9 @@ def test_stop_string(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=(
-            dummy_test_vectors.generation_logprobs if num_sample_logprobs else None
-        ),
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
+        if num_sample_logprobs
+        else None,
         prompt_logprobs_raw=None,
         request_ids=[req.request_id for req in requests],
     )
@@ -1140,7 +1126,7 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
-                        finish_reason=("length" if (idx == NUM_REQS - 1) else None),
+                        finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
                 finished=(idx == NUM_REQS - 1),
@@ -1302,9 +1288,7 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             cache_salt=None,
             data_parallel_rank=None,
             sampling_params=SamplingParams() if runner == "generate" else None,
-            pooling_params=(
-                PoolingParams(task="embed") if runner == "pooling" else None
-            ),
+            pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
         )
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
