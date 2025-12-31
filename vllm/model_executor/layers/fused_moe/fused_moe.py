@@ -45,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     activation_without_mul,
     disable_inplace,
+    mm_k,
     moe_kernel_quantize_input,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
@@ -365,6 +366,8 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    IS_PRIMARY: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -484,40 +487,36 @@ def fused_moe_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the
-        # K dimension.
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        # We accumulate along the K dimension.
-        if use_int8_w8a16:
-            accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
-        elif use_fp8_w8a8 or use_int8_w8a8:
-            if group_k > 0 and group_n > 0:
-                k_start = k * BLOCK_SIZE_K
-                offs_ks = k_start // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                )
-                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+    base_k = 0
+    accumulator = mm_k(
+        a_ptrs=a_ptrs,
+        b_ptrs=b_ptrs,
+        ak_stride=stride_ak,
+        bk_stride=stride_bk,
+        token_mask=token_mask,
+        K=K,
+        BLOCK_M=BLOCK_SIZE_M,
+        BLOCK_N=BLOCK_SIZE_N,
+        BLOCK_K=BLOCK_SIZE_K,
+        EVEN_K=EVEN_K,
+        SPLIT_K=SPLIT_K,
+        CAST_TYPE=False,
+        b_dtype=None,
+        USE_GDC=False,
+        IS_PRIMARY=IS_PRIMARY,
+        base_k=base_k,
+        a_scale_ptrs=a_scale_ptrs if a_scale_ptr else None,
+        b_scale_ptrs=b_scale_ptrs if b_scale_ptr else None,
+        stride_ask=stride_ask,
+        stride_bsk=stride_bsk,
+        group_k=group_k,
+        group_n=group_n,
+        use_int8_w8a16=use_int8_w8a16,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        compute_type=compute_type,
+    )
 
-                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
-            else:
-                if use_fp8_w8a8:
-                    # acc used to enable fp8_fast_accum
-                    accumulator = tl.dot(a, b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(a, b)
-        else:
-            accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
     if HAS_BIAS:
         accumulator = accumulator + bias[None, :]
     if MUL_ROUTED_WEIGHT:
@@ -563,6 +562,7 @@ def invoke_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    IS_PRIMARY: bool = True,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -584,7 +584,7 @@ def invoke_fused_moe_kernel(
         assert A_scale is None
         assert B_scale is None
 
-    M = A.size(0)
+    M, K = A.size()
     num_tokens = M * top_k
 
     EM = sorted_token_ids.size(0)
@@ -688,6 +688,7 @@ def invoke_fused_moe_kernel(
         config = config.copy()
         config["SPLIT_K"] = 1
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+        EVEN_K = K % (BLOCK_SIZE_K * config["SPLIT_K"]) == 0
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
         fused_moe_kernel[grid](
@@ -730,6 +731,8 @@ def invoke_fused_moe_kernel(
             per_channel_quant=per_channel_quant,
             HAS_BIAS=HAS_BIAS,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
+            EVEN_K=EVEN_K,
+            IS_PRIMARY=IS_PRIMARY,
             **config,
         )
 
@@ -2019,6 +2022,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w1_bias,
+            IS_PRIMARY=True,
         )
 
         # Activation function with multiplication
@@ -2078,6 +2082,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w2_bias,
+            IS_PRIMARY=False,
         )
 
         ops.moe_sum(

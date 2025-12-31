@@ -7,6 +7,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe.utils import mm_k
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -91,6 +92,7 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
+    EVEN_K: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
@@ -105,7 +107,6 @@ def _fused_moe_lora_kernel(
         # Early exit for the no moe lora case.
         return
     max_loras = tl.num_programs(axis=2)
-    grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
     pid_sk = pid % SPLIT_K
@@ -156,31 +157,24 @@ def _fused_moe_lora_kernel(
         + offs_bn[None, :] * stride_bn
     )
 
-    if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
-        tl.extra.cuda.gdc_launch_dependents()
-
-    # accumulator
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    # GDC wait waits for ALL programs in the prior kernel to complete
-    # before continuing.
-    if USE_GDC and not IS_PRIMARY:
-        tl.extra.cuda.gdc_wait()
-
-    for k in range(0, grid_k):
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
-        # pre-fetch lora weight
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-            other=0.0,
-        )
-        accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+    accumulator = mm_k(
+        a_ptrs=a_ptrs,
+        b_ptrs=b_ptrs,
+        ak_stride=stride_ak,
+        bk_stride=stride_bk,
+        token_mask=token_mask,
+        K=K,
+        BLOCK_M=BLOCK_SIZE_M,
+        BLOCK_N=BLOCK_SIZE_N,
+        BLOCK_K=BLOCK_SIZE_K,
+        EVEN_K=EVEN_K,
+        SPLIT_K=SPLIT_K,
+        CAST_TYPE=None,
+        b_dtype=b_ptr.dtype.element_ty,
+        USE_GDC=USE_GDC,
+        IS_PRIMARY=IS_PRIMARY,
+        base_k=pid_sk * BLOCK_SIZE_K,
+    )
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -245,7 +239,7 @@ def _fused_moe_lora_shrink(
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
-
+    EVEN_K = K % (block_size_k * split_k) == 0
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -285,6 +279,7 @@ def _fused_moe_lora_shrink(
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
         IS_PRIMARY=True,
+        EVEN_K=EVEN_K,
         **shrink_config,
     )
 
@@ -347,7 +342,7 @@ def _fused_moe_lora_expand(
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
-
+    EVEN_K = K % (block_size_k * split_k) == 0
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
@@ -385,6 +380,7 @@ def _fused_moe_lora_expand(
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         IS_PRIMARY=False,
+        EVEN_K=EVEN_K,
         **expand_config,
     )
     for i in range(num_slices):
