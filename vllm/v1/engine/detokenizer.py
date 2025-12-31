@@ -30,6 +30,9 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
+        self.token_text_lengths: list[int] = []
+        self.visible_token_index: int = 0
+        self.delta_token_count: int = 0
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -86,7 +89,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
-        self._last_output_text_offset: int = 0
+        self._last_visible_text_offset: int = 0
 
         # Generation data
         self.output_text = ""
@@ -117,7 +120,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         stop_check_offset = len(self.output_text)
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
+            next_text = self.decode_next(new_token_id)
+            self.output_text += next_text
+            self.token_text_lengths.append(len(next_text))
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and len(self.output_token_ids) <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
@@ -158,11 +163,27 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 if buffer_length
                 else (self.output_text)
             )
-        length = len(self.output_text) - buffer_length
-        last_offset = self._last_output_text_offset
-        if last_offset < length:
-            self._last_output_text_offset = length
-            return self.output_text[last_offset:length]
+
+        visible_text_len = len(self.output_text) - buffer_length
+        last_offset = self._last_visible_text_offset
+
+        self.delta_token_count = 0
+        released_text_len = 0
+        start_token_index = self.visible_token_index
+
+        for i in range(start_token_index, len(self.token_text_lengths)):
+            token_len = self.token_text_lengths[i]
+            if visible_text_len - last_offset < released_text_len + token_len:
+                break
+
+            released_text_len += token_len
+            self.visible_token_index += 1
+            self.delta_token_count += 1
+
+        if self.visible_token_index > start_token_index:
+            self._last_visible_text_offset = last_offset + released_text_len
+            return self.output_text[last_offset : self._last_visible_text_offset]
+
         return ""
 
 
