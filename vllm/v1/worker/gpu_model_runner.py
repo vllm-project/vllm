@@ -245,7 +245,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                     self.vocab_size,
                     self._invalid_req_indices,
                     logprobs_tensors=self._logprobs_tensors_cpu,
-                    need_filter_logprobs=True,
                 )
             )
 
@@ -413,9 +412,7 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(
-                self.sampler, is_async=self.use_async_scheduling
-            )
+            self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -2649,6 +2646,7 @@ class GPUModelRunner(
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
         cu_num_tokens: list[int] | None = None
+        logprobs_lists = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2658,9 +2656,12 @@ class GPUModelRunner(
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
                     valid_sampled_token_ids[int(i)].clear()
+
+                if logprobs_tensors is not None:
+                    logprobs_lists = logprobs_tensors.tolists()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids, cu_num_tokens, _ = (
+                valid_sampled_token_ids, cu_num_tokens, logprobs_lists = (
                     RejectionSampler.parse_output(
                         sampled_token_ids,
                         self.input_batch.vocab_size,
@@ -2718,12 +2719,6 @@ class GPUModelRunner(
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
-
-        logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_tokens)
-            if not self.use_async_scheduling and logprobs_tensors is not None
-            else None
-        )
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(

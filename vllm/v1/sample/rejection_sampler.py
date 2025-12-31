@@ -49,10 +49,9 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler, is_async: bool = False):
+    def __init__(self, sampler: Sampler):
         super().__init__()
         self.sampler = sampler
-        self.is_async = is_async
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -186,30 +185,20 @@ class RejectionSampler(nn.Module):
         final_logits[target_logits_indices] = target_logits.to(torch.float32)
         final_logits[bonus_logits_indices] = bonus_logits.to(torch.float32)
 
-        if self.is_async:
-            # NOTE: To avoid cpu-gpu synchronization, we now simply compute indices for
-            # all draft tokens, including the rejected ones. The rejected tokens will
-            # be filtered out in the `parse_output`.
-            logit_start_indices = cu_num_sampled_tokens
-            offsets = torch.arange(
-                sampled_token_ids.shape[-1], device=logit_start_indices.device
-            )
-            accepted_logit_indices = (
-                logit_start_indices.unsqueeze(1) + offsets.unsqueeze(0)
-            ).flatten()
-            accepted_logit_indices.clamp_(max=final_logits.shape[0] - 1)
-            accepted_tokens = sampled_token_ids.clone().flatten()
-            # we replace rejected token ids with 0 to avoid gather_logprobs error
-            accepted_tokens[accepted_tokens == PLACEHOLDER_TOKEN_ID] = 0
-        else:
-            # Compute accepted token indices.
-            accepted_mask = sampled_token_ids != PLACEHOLDER_TOKEN_ID
-            num_accepted_tokens = accepted_mask.sum(dim=-1)
-            accepted_logit_indices = accepted_mask.nonzero(as_tuple=True)[1]
-            accepted_logit_indices += cu_num_sampled_tokens.repeat_interleave(
-                num_accepted_tokens
-            )
-            accepted_tokens = sampled_token_ids[accepted_mask]
+        # NOTE: To avoid cpu-gpu synchronization, we now simply compute indices for
+        # all draft tokens, including the rejected ones. The rejected tokens will
+        # be filtered out in the `parse_output`.
+        logit_start_indices = cu_num_sampled_tokens
+        offsets = torch.arange(
+            sampled_token_ids.shape[-1], device=logit_start_indices.device
+        )
+        accepted_logit_indices = (
+            logit_start_indices.unsqueeze(1) + offsets.unsqueeze(0)
+        ).flatten()
+        accepted_logit_indices.clamp_(max=final_logits.shape[0] - 1)
+        accepted_tokens = sampled_token_ids.clone().flatten()
+        # we replace rejected token ids with 0 to avoid gather_logprobs error
+        accepted_tokens[accepted_tokens == PLACEHOLDER_TOKEN_ID] = 0
 
         # Compute logprobs for accepted tokens.
         accepted_logits = final_logits[accepted_logit_indices]
@@ -230,7 +219,6 @@ class RejectionSampler(nn.Module):
         vocab_size: int,
         discard_req_indices: Sequence[int] = (),
         logprobs_tensors: LogprobsTensors | None = None,
-        need_filter_logprobs: bool = False,
     ) -> tuple[list[list[int]], list[int] | None, LogprobsLists | None]:
         """Parse the output of the rejection sampler.
         Args:
@@ -241,22 +229,18 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
             logprobs_tensors: Optional logprobs tensors to filter.
-            need_filter_logprobs: Whether to filter logprobs.
         Returns:
             A list of lists of token IDs.
         """
-        return_cu_num_tokens = logprobs_tensors is not None
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
         cu_num_tokens = None
-        if return_cu_num_tokens:
-            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
-
         output_logprobs = None
-        if need_filter_logprobs and logprobs_tensors is not None:
+        if logprobs_tensors is not None:
+            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
             flat_mask = valid_mask.flatten()
             filtered_tensors = logprobs_tensors.filter(flat_mask)
             output_logprobs = filtered_tensors.tolists(cu_num_tokens)
