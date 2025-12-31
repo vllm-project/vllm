@@ -77,7 +77,7 @@ from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, getattr_iter
 from vllm.config.vllm import OptimizationLevel
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
@@ -1654,8 +1654,8 @@ class EngineArgs:
         )
 
         # Set num_input_prefix_tokens from model config
-        scheduler_config.num_input_prefix_tokens = (
-            model_config.get_input_seq_prefix_length()
+        scheduler_config.num_input_prefix_tokens = getattr_iter(
+            model_config, ("num_meta_tokens", "num_memory_tokens"), 0
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
