@@ -66,6 +66,19 @@ V2_VIDEO_TOKEN: str = "<|VIDEO_PAD|>"
 V2_AUDIO_TOKEN: str = "<|AUDIO|>"
 
 
+class AudioProjectorMLP(nn.Module):
+    """Audio projector MLP with fc1/fc2 naming to match HF checkpoint."""
+
+    def __init__(self, input_size: int, output_size: int):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, output_size)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(output_size, output_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
+
+
 # Based on combine_frames_into_images in
 # https://huggingface.co/naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B/blob/main/processing_hyperclovax.py
 def get_num_combined_frames(
@@ -1781,10 +1794,9 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             audio_hidden_size = audio_config.d_model
             audio_projector_type = getattr(config, "audio_projector_type", "linear")
             if audio_projector_type == "mlp":
-                self.audio_projector = nn.Sequential(
-                    nn.Linear(audio_hidden_size, text_hidden_size),
-                    nn.GELU(),
-                    nn.Linear(text_hidden_size, text_hidden_size),
+                # Use AudioProjectorMLP with fc1/fc2 naming to match HF checkpoint
+                self.audio_projector = AudioProjectorMLP(
+                    audio_hidden_size, text_hidden_size
                 )
             else:
                 self.audio_projector = nn.Linear(audio_hidden_size, text_hidden_size)
