@@ -31,6 +31,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -64,6 +65,7 @@ from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+logger = init_logger(__name__)
 DEFAULT_FINAL_IMAGE_SIZE = (2048, 1648)
 
 
@@ -145,12 +147,14 @@ class BartDecoderLayer(nn.Module):
             ffn_intermediate_size,
             bias=ffn_has_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             ffn_intermediate_size,
             ffn_hidden_size,
             bias=ffn_has_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
         )
 
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -504,33 +508,26 @@ class NemotronParseImageProcessor:
         # Apply NemotronParse-specific transforms
         pixel_values = []
         for image in processed_images:
-            try:
-                # Manual resize with aspect ratio preservation
-                # (replaces LongestMaxSizeHW)
-                processed_image = self._resize_with_aspect_ratio(image)
+            # Manual resize with aspect ratio preservation
+            # (replaces LongestMaxSizeHW)
+            processed_image = self._resize_with_aspect_ratio(image)
 
-                # Apply remaining albumentations transforms if available
-                if self.transform is not None:
-                    transformed = self.transform(image=processed_image)
-                    processed_image = transformed["image"]
-                else:
-                    # Fallback: just pad to target size
-                    processed_image = self._pad_to_size(processed_image)
+            # Apply remaining albumentations transforms if available
+            if self.transform is not None:
+                transformed = self.transform(image=processed_image)
+                processed_image = transformed["image"]
+            else:
+                # Fallback: just pad to target size
+                processed_image = self._pad_to_size(processed_image)
 
-                # Convert to tensor
-                pixel_values_tensor = self.torch_transform(processed_image)
+            # Convert to tensor
+            pixel_values_tensor = self.torch_transform(processed_image)
 
-                # Handle grayscale images
-                if pixel_values_tensor.shape[0] == 1:
-                    pixel_values_tensor = pixel_values_tensor.expand(3, -1, -1)
+            # Handle grayscale images
+            if pixel_values_tensor.shape[0] == 1:
+                pixel_values_tensor = pixel_values_tensor.expand(3, -1, -1)
 
-                pixel_values.append(pixel_values_tensor)
-
-            except Exception as e:
-                print(f"Warning: Error processing image: {e}")
-                # Fallback: create a dummy tensor
-                dummy_tensor = torch.zeros((3, self.target_height, self.target_width))
-                pixel_values.append(dummy_tensor)
+            pixel_values.append(pixel_values_tensor)
 
         # Stack into batch
         pixel_values = torch.stack(pixel_values)
@@ -576,7 +573,7 @@ class NemotronParseProcessor:
         images: Image.Image | list[Image.Image] | None = None,
         return_tensors: str | TensorType | None = None,
         **kwargs,
-    ):
+    ) -> BatchFeature:
         text, images = [self._make_batch_input(x) for x in (text, images)]
         image_inputs = {} if len(images) == 0 else self.image_processor(images)
 
@@ -704,7 +701,7 @@ class RadioWithNeck(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -744,9 +741,9 @@ class RadioWithNeck(nn.Module):
 
     def get_vit_model_from_radio_config(
         self,
-        hf_config,
-        quant_config=None,
-    ):
+        hf_config: PretrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+    ) -> RadioModel:
         hf_config_vision = hf_config.encoder
         model_name = hf_config_vision.args.get("model")
         if model_name is None:
@@ -760,9 +757,8 @@ class RadioWithNeck(nn.Module):
 
         return RadioModel(config=radio_config, quant_config=quant_config)
 
-    def forward(self, pixel_values, **kwargs):
-        radio_output = self.model_encoder(pixel_values)
-        summary, feature = radio_output
+    def forward(self, pixel_values: torch.Tensor, **kwargs) -> torch.Tensor:
+        summary, feature = self.model_encoder(pixel_values)
 
         output = self.conv1(feature.permute(0, 2, 1)).permute(0, 2, 1)
         output = self.layer_norm1(output)
@@ -842,7 +838,9 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         raise ValueError("Only image modality is supported")
 
-    def _parse_and_validate_image_input(self, **kwargs: object):
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> NemotronParsePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -944,7 +942,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 with torch.no_grad():
                     default_weight_loader(param, w)
             else:
-                print("Found unexpected weight: ", name)
+                logger.info("Found unexpected weight: %s", name)
 
         # Load encoder weights
         self.encoder.load_weights(encoder_weights)
