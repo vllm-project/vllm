@@ -90,13 +90,16 @@ if HAS_TRITON:
 
         # Process blocks of 16 elements
         for block_idx_in_head in range(SCALE_SIZE):
-            # Load scale (1 byte as E4M3)
-            scale_byte = tl.load(
-                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head
-            )
-            # Reinterpret uint8 as E4M3 and convert to float32
+            # Load scale (2 bytes as FP16)
+            scale_lo = tl.load(
+                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head * 2
+            ).to(tl.uint16)
+            scale_hi = tl.load(
+                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head * 2 + 1
+            ).to(tl.uint16)
+            # Reinterpret uint16 as FP16 and convert to float32
             scale = (
-                scale_byte.to(tl.uint8).to(tl.float8e4nv, bitcast=True).to(tl.float32)
+                (scale_lo | (scale_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             )
 
             # Process 8 bytes (16 elements)

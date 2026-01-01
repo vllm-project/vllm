@@ -73,7 +73,8 @@ class AttentionSpec(KVCacheSpec):
         # For NVFP4, use packed head size: data (head_size//2) + scales (head_size//16)
         # and 1 byte per element (uint8)
         if self.cache_dtype_str == "nvfp4":
-            packed_head_size = self.head_size // 2 + self.head_size // 16
+            # NVFP4: 4 bits per element (head_size//2) + 16 bits per scale (head_size//16 * 2 = head_size//8)
+            packed_head_size = self.head_size // 2 + self.head_size // 8
             element_size = 1  # uint8
         else:
             packed_head_size = self.head_size

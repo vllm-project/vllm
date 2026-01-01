@@ -128,14 +128,22 @@ if HAS_TRITON:
                 k_s = tl.max(tl.abs(k_vals)) / 6.0 + 1e-6
                 v_s = tl.max(tl.abs(v_vals)) / 6.0 + 1e-6
 
-                # Store scales as E4M3 at the end of the packed head
+                # Store scales as FP16 at the end of the packed head (2 bytes per scale)
+                k_s_u16 = k_s.to(tl.float16).to(tl.uint16, bitcast=True)
+                v_s_u16 = v_s.to(tl.float16).to(tl.uint16, bitcast=True)
+
                 tl.store(
-                    tgt_key_base + DATA_SIZE + b,
-                    k_s.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
+                    tgt_key_base + DATA_SIZE + b * 2, (k_s_u16 & 0xFF).to(tl.uint8)
                 )
                 tl.store(
-                    tgt_val_base + DATA_SIZE + b,
-                    v_s.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
+                    tgt_key_base + DATA_SIZE + b * 2 + 1, (k_s_u16 >> 8).to(tl.uint8)
+                )
+
+                tl.store(
+                    tgt_val_base + DATA_SIZE + b * 2, (v_s_u16 & 0xFF).to(tl.uint8)
+                )
+                tl.store(
+                    tgt_val_base + DATA_SIZE + b * 2 + 1, (v_s_u16 >> 8).to(tl.uint8)
                 )
 
                 # Quantize

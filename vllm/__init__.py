@@ -118,3 +118,4 @@ __all__ = [
 # triton upgrade 20260101130113
 # fixed install order 20260101130623
 # float8e4nv fix 20260101131924
+# bitcast fix 20260101132230
