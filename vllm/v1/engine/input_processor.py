@@ -21,10 +21,13 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
-from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
+from vllm.v1.structured_output.backend_guidance import (
+    has_guidance_unsupported_json_features,
+    validate_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
 )
@@ -340,8 +343,22 @@ class InputProcessor:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
-                if isinstance(self.tokenizer, MistralTokenizer):
+
+                # Check if schema has features unsupported by guidance
+                so_params = params.structured_outputs
+                skip_guidance = False
+                if so_params.json:
+                    if isinstance(so_params.json, str):
+                        import json
+
+                        schema = json.loads(so_params.json)
+                    else:
+                        schema = so_params.json
+                    skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                if isinstance(self.tokenizer, MistralTokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
+                    # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(params)
                     params.structured_outputs._backend = "outlines"
                 else:
@@ -388,6 +405,37 @@ class InputProcessor:
             )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
+
+    def _get_mm_identifier(
+        self,
+        mm_hash: str,
+        lora_request: LoRARequest | None,
+    ) -> str:
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
+        """
+        if (
+            lora_request is None
+            or self.lora_config is None
+            or not self.lora_config.enable_tower_connector_lora
+        ):
+            return mm_hash
+        return f"{lora_request.lora_name}:{mm_hash}"
+
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniquness.
+        """
+        if request.external_req_id is not None:
+            raise ValueError(
+                "The external_req_id field should not be set on EngineCoreRequests"
+                " passed to vLLM; use the request_id field."
+            )
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,
@@ -509,7 +557,10 @@ class InputProcessor:
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=decoder_mm_hashes[modality][idx],
+                        identifier=self._get_mm_identifier(
+                            decoder_mm_hashes[modality][idx],
+                            lora_request,
+                        ),
                         mm_position=decoder_mm_positions[modality][idx],
                     )
                 )
@@ -567,7 +618,7 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            max_input_id = max(prompt_ids or [], default=0)
+            max_input_id = max(prompt_ids or (), default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
             # self.model_config.get_vocab_size() is the model’s vocab size.

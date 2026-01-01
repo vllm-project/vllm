@@ -42,6 +42,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     """
 
     FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+    FLASH_ATTN_DIFFKV = (
+        "vllm.v1.attention.backends.flash_attn_diffkv.FlashAttentionDiffKVBackend"
+    )
     TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
@@ -77,7 +80,8 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
-    CUSTOM = ""
+    # set to None to avoid alias with other backend, whose value is an empty string
+    CUSTOM = None
 
     def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
@@ -139,7 +143,8 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
     GDN_ATTN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
-    CUSTOM = ""
+    # set to None to avoid alias with other backend, whose value is an empty string
+    CUSTOM = None
 
     def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
