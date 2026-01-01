@@ -376,6 +376,10 @@ _MULTIMODAL_MODELS = {
         "Mistral3ForConditionalGeneration",
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
+    "MusicFlamingoForConditionalGeneration": (
+        "musicflamingo",
+        "MusicFlamingoForConditionalGeneration",
+    ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
