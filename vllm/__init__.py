@@ -111,3 +111,5 @@ __all__ = [
 # rebuild 20260101114840
 # nvfp4 dequant 20260101120235
 # e4m3 scale 20260101121056
+# selective dequant 20260101122246
+# eager mode 20260101122729
