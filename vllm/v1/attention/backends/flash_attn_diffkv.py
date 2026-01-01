@@ -258,7 +258,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             max_num_splits=attn_metadata.max_num_splits,
-            fa_version=self.vllm_flash_attn_version,
+            fa_version=self.vllm_flash_attn_version or 0,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
             q_descale=layer._q_scale,
