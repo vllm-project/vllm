@@ -117,9 +117,9 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # For NVFP4, use packed head size: data (head_size//2) + scales (head_size//16 * 2 = head_size//8)
+        # For NVFP4, use packed head size: data (head_size//2) + scales (head_size//16 * 1)
         if cache_dtype_str == "nvfp4":
-            packed_head_size = head_size // 2 + head_size // 8
+            packed_head_size = head_size // 2 + head_size // 16
             return (2, num_blocks, block_size, num_kv_heads, packed_head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -696,18 +696,18 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
 
+        block_table = attn_metadata.block_table
         if self.kv_cache_dtype == "nvfp4":
             # NVFP4 requires dequantization: unpack 4-bit values and apply scales
             # Only dequantize blocks that will be accessed (from block_table)
             # to preserve memory savings
             from vllm.attention.ops.nvfp4_dequant import (
-                dequantize_nvfp4_kv_cache_simple,
+                dequantize_nvfp4_kv_cache,
             )
 
             head_size = self.head_size
 
             # Get unique blocks that will be accessed
-            block_table = attn_metadata.block_table
             if block_table is not None and block_table.numel() > 0:
                 # Get unique block indices being accessed
                 unique_blocks = torch.unique(block_table.flatten())
@@ -716,25 +716,38 @@ class FlashAttentionImpl(AttentionImpl):
                 if unique_blocks.numel() > 0:
                     # Only dequantize the blocks being accessed
                     # key_cache shape: [num_blocks, block_size, num_heads, packed_head_size]
+                    num_blocks = key_cache.shape[0]
                     key_blocks = key_cache[unique_blocks]  # [n_used, ...]
                     value_blocks = value_cache[unique_blocks]
 
                     # Dequantize only the used blocks
-                    key_dequant = dequantize_nvfp4_kv_cache_simple(
+                    key_dequant = dequantize_nvfp4_kv_cache(
                         key_blocks, head_size=head_size, output_dtype=query.dtype
                     )
-                    value_dequant = dequantize_nvfp4_kv_cache_simple(
+                    value_dequant = dequantize_nvfp4_kv_cache(
                         value_blocks, head_size=head_size, output_dtype=query.dtype
                     )
 
                     # Create mapping from original to new indices
                     num_used = unique_blocks.shape[0]
-                    new_block_table = torch.zeros_like(block_table)
-                    for new_idx, orig_idx in enumerate(unique_blocks):
-                        new_block_table[block_table == orig_idx] = new_idx
+                    new_block_table = torch.full_like(block_table, -1)
+
+                    # Efficient mapping without Python loop:
+                    # Create a mapping tensor that maps original block index -> new compacted index
+                    # The size is num_blocks (total blocks in the cache)
+                    mapping_tensor = torch.full(
+                        (num_blocks,), -1, dtype=block_table.dtype, device=query.device
+                    )
+                    mapping_tensor[unique_blocks.long()] = torch.arange(
+                        num_used, dtype=block_table.dtype, device=query.device
+                    )
+
+                    # Apply mapping to non-empty slots
+                    mask = block_table >= 0
+                    new_block_table[mask] = mapping_tensor[block_table[mask].long()]
 
                     # Replace block_table and caches with compacted versions
-                    attn_metadata.block_table = new_block_table
+                    block_table = new_block_table
                     key_cache = key_dequant
                     value_cache = value_dequant
                 else:
@@ -747,10 +760,10 @@ class FlashAttentionImpl(AttentionImpl):
                     value_cache = torch.zeros_like(key_cache)
             else:
                 # No block table - fall back to full dequant (prefill without cache)
-                key_cache = dequantize_nvfp4_kv_cache_simple(
+                key_cache = dequantize_nvfp4_kv_cache(
                     key_cache, head_size=head_size, output_dtype=query.dtype
                 )
-                value_cache = dequantize_nvfp4_kv_cache_simple(
+                value_cache = dequantize_nvfp4_kv_cache(
                     value_cache, head_size=head_size, output_dtype=query.dtype
                 )
 
@@ -767,7 +780,7 @@ class FlashAttentionImpl(AttentionImpl):
             seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
             max_seqlen_k = attn_metadata.max_seq_len
-            block_table = attn_metadata.block_table
+            # block_table is already set above (possibly remapped)
             scheduler_metadata = attn_metadata.scheduler_metadata
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
@@ -828,7 +841,7 @@ class FlashAttentionImpl(AttentionImpl):
             alibi_slopes=self.alibi_slopes,
             sliding_window=self.sliding_window,
             logits_soft_cap=self.logits_soft_cap,
-            block_table=attn_metadata.block_table,
+            block_table=block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             max_num_splits=attn_metadata.max_num_splits,
             fa_version=self.vllm_flash_attn_version,

@@ -35,85 +35,46 @@ if HAS_TRITON:
 
     @triton.jit
     def nvfp4_dequant_cached_kv_kernel(
-        # Input: packed NVFP4 cache
-        packed_cache_ptr,  # [num_blocks, block_size, num_heads, packed_head_size]
-        # Output: dequantized bf16 cache
-        output_ptr,  # [num_blocks, block_size, num_heads, head_size]
-        # Dimensions
-        num_blocks: tl.constexpr,
-        block_size: tl.constexpr,
+        packed_ptr,
+        output_ptr,
+        total_slots: tl.constexpr,
         num_heads: tl.constexpr,
         head_size: tl.constexpr,
-        packed_head_size: tl.constexpr,
-        # Strides for packed cache (in bytes)
-        stride_packed_block: tl.int64,
-        stride_packed_slot: tl.int64,
-        stride_packed_head: tl.int64,
-        # Strides for output (in elements)
-        stride_out_block: tl.int64,
-        stride_out_slot: tl.int64,
-        stride_out_head: tl.int64,
-        # Block parameters
-        BLOCK_HEAD: tl.constexpr,  # Tile size for head dimension
+        stride_p_slot: tl.int64,
+        stride_p_head: tl.int64,
+        stride_o_slot: tl.int64,
+        stride_o_head: tl.int64,
     ):
-        # Program indices
         pid = tl.program_id(0)
-        total_slots = num_blocks * block_size * num_heads
 
-        if pid >= total_slots:
-            return
-
-        # Compute indices
+        # pid maps to (slot_idx, head_idx)
         head_idx = pid % num_heads
-        slot_idx = (pid // num_heads) % block_size
-        block_idx = pid // (num_heads * block_size)
+        slot_idx = pid // num_heads
 
-        # Calculate base offsets
-        packed_base = (
-            block_idx * stride_packed_block
-            + slot_idx * stride_packed_slot
-            + head_idx * stride_packed_head
-        )
-
-        out_base = (
-            block_idx * stride_out_block
-            + slot_idx * stride_out_slot
-            + head_idx * stride_out_head
-        )
-
-        # NVFP4 layout within packed_head_size:
-        # - First head_size//2 bytes: packed 4-bit data (2 values per byte)
-        # - Next head_size//16 bytes: E4M3 scales (one scale per 16 elements)
+        p_base = slot_idx * stride_p_slot + head_idx * stride_p_head
+        o_base = slot_idx * stride_o_slot + head_idx * stride_o_head
 
         DATA_SIZE: tl.constexpr = head_size // 2
         SCALE_SIZE: tl.constexpr = head_size // 16
 
-        # Process blocks of 16 elements
-        for block_idx_in_head in range(SCALE_SIZE):
-            # Load scale (2 bytes as FP16)
-            scale_lo = tl.load(
-                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head * 2
-            ).to(tl.uint16)
-            scale_hi = tl.load(
-                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head * 2 + 1
-            ).to(tl.uint16)
-            # Reinterpret uint16 as FP16 and convert to float32
-            scale = (
-                (scale_lo | (scale_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            )
+        # Process each 16-element block within the head
+        for b in range(SCALE_SIZE):
+            # Load 8 packed bytes (16 elements)
+            packed_bytes = tl.load(packed_ptr + p_base + b * 8 + tl.arange(0, 8))
 
-            # Process 8 bytes (16 elements) vectorized
-            packed_bytes = tl.load(
-                packed_cache_ptr + packed_base + block_idx_in_head * 8 + tl.arange(0, 8)
-            )
+            # Load scale (uint8 exp + 127)
+            scale_u8 = tl.load(packed_ptr + p_base + DATA_SIZE + b).to(tl.float32)
+            scale = tl.math.exp2(scale_u8 - 127.0)
 
-            # Extract 16 values
-            vals_low = packed_bytes & 0x0F
-            vals_high = (packed_bytes >> 4) & 0x0F
+            # Extract nibbles
+            low = packed_bytes & 0x0F
+            high = (packed_bytes >> 4) & 0x0F
 
+            # Dequantize (E2M1 logic matching nvfp4_reshape_and_cache)
+            # Sign bit is 8 (1000)
             # Dequantize first 8 (low nibbles)
-            sign_low = tl.where((vals_low & 0x08) != 0, -1.0, 1.0)
-            mag_idx_low = vals_low & 0x07
+            sign_low = tl.where((low & 8) != 0, -1.0, 1.0)
+            mag_idx_low = low & 7
             mag_low = tl.where(
                 mag_idx_low == 0,
                 0.0,
@@ -142,8 +103,8 @@ if HAS_TRITON:
             dq_low = sign_low * mag_low * scale
 
             # Dequantize next 8 (high nibbles)
-            sign_high = tl.where((vals_high & 0x08) != 0, -1.0, 1.0)
-            mag_idx_high = vals_high & 0x07
+            sign_high = tl.where((high & 8) != 0, -1.0, 1.0)
+            mag_idx_high = high & 7
             mag_high = tl.where(
                 mag_idx_high == 0,
                 0.0,
@@ -171,12 +132,16 @@ if HAS_TRITON:
             )
             dq_high = sign_high * mag_high * scale
 
-            # Store dequantized values (interleaved)
-            offs_low = block_idx_in_head * 16 + tl.arange(0, 8) * 2
-            offs_high = block_idx_in_head * 16 + tl.arange(0, 8) * 2 + 1
+            # Interleave into output (low, high, low, high...)
+            offs_low = b * 16 + tl.arange(0, 8) * 2
+            offs_high = b * 16 + tl.arange(0, 8) * 2 + 1
 
-            tl.store(output_ptr + out_base + offs_low, dq_low.to(tl.bfloat16))
-            tl.store(output_ptr + out_base + offs_high, dq_high.to(tl.bfloat16))
+            tl.store(
+                output_ptr + o_base + offs_low, dq_low.to(output_ptr.dtype.element_ty)
+            )
+            tl.store(
+                output_ptr + o_base + offs_high, dq_high.to(output_ptr.dtype.element_ty)
+            )
 
 
 def dequantize_nvfp4_kv_cache(
@@ -229,18 +194,13 @@ def dequantize_nvfp4_kv_cache(
     nvfp4_dequant_cached_kv_kernel[grid](
         packed_cache_flat,
         output,
-        num_blocks=num_blocks * kv_dim,
-        block_size=block_size if not has_kv_dim else 1,
+        total_slots=total_slots,
         num_heads=num_heads,
         head_size=head_size,
-        packed_head_size=packed_head_size,
-        stride_packed_block=packed_cache_flat.stride(0) if not has_kv_dim else 0,
-        stride_packed_slot=packed_cache_flat.stride(0),
-        stride_packed_head=packed_cache_flat.stride(1),
-        stride_out_block=output.stride(0) if not has_kv_dim else 0,
-        stride_out_slot=output.stride(0),
-        stride_out_head=output.stride(1),
-        BLOCK_HEAD=32,
+        stride_p_slot=packed_cache_flat.stride(0),
+        stride_p_head=packed_cache_flat.stride(1),
+        stride_o_slot=output.stride(0),
+        stride_o_head=output.stride(1),
     )
 
     # Reshape output
@@ -264,9 +224,10 @@ def dequantize_nvfp4_kv_cache_simple(
     Bits 0-2: magnitude index (0-7) -> [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
     Bit 3: sign bit (0=positive, 1=negative)
 
-    Scales: E4M3 format (1 byte per 16 elements)
+    Scales: uint8 exponential format (1 byte per 16 elements)
+    - Stored as exp + 127
     """
-    # Packed layout: data (head_size//2) + scales (head_size//16 bytes as E4M3)
+    # Packed layout: data (head_size//2) + scales (head_size//16 bytes as uint8 exp)
     data_size = head_size // 2
     scale_size = head_size // 16
     packed_head_size = data_size + scale_size
@@ -276,13 +237,11 @@ def dequantize_nvfp4_kv_cache_simple(
     device = packed_cache.device
 
     # Flatten for processing
-    # Expected: [..., packed_head_size] where ... can be any leading dims
     *leading_dims, phs = packed_cache.shape
     assert (
         phs == packed_head_size
     ), f"Expected packed_head_size={packed_head_size}, got {phs}"
 
-    # Reshape to (total_positions, packed_head_size)
     total_positions = 1
     for d in leading_dims:
         total_positions *= d
@@ -290,24 +249,19 @@ def dequantize_nvfp4_kv_cache_simple(
 
     # Split data and scales
     data_bytes = flat[:, :data_size]  # [N, data_size]
-    scale_bytes = flat[:, data_size:]  # [N, scale_size] (1 byte per E4M3 scale)
+    scale_bytes = flat[:, data_size:]  # [N, scale_size]
 
-    # Convert E4M3 scales to float32
-    # E4M3 is torch.float8_e4m3fn - need to convert uint8 -> float8 -> float32
-    # For now, interpret as scaled values: scale = 2^(exponent-7) * (1 + mantissa/8)
-    # Simpler approach: view as float8_e4m3fn directly
-    try:
-        # Try native torch.float8_e4m3fn support (PyTorch 2.1+)
-        scales_f8 = scale_bytes.view(torch.float8_e4m3fn)
-        scales = scales_f8.to(torch.float32)  # [N, scale_size]
-    except (TypeError, RuntimeError):
-        # Fallback: manual E4M3 decode
-        # E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits
-        # For simplicity, use a linear approximation or unity scales
-        # This is a placeholder - actual E4M3 decode needed
-        scales = torch.ones(
-            total_positions, scale_size, device=device, dtype=torch.float32
+    # Convert uint8 exponential scales to float32
+    # scale = 2^(val - 127)
+    scale_exp = scale_bytes.to(torch.float32) - 127.0
+    scales = torch.pow(2.0, scale_exp)  # [N, scale_size]
+
+    # FAIL-FAST: Check for suspicious scales (ignore zero blocks)
+    if scales.max() > 1e10 or (scales.min() < 1e-40 and scales.min() > 0):
+        print(
+            f"SUSPICIOUS NVFP4 scales detected! Max: {scales.max()}, Min: {scales.min()}"
         )
+        # We don't raise here to allow logging, but we will check results later
 
     # Expand scales to match elements (each scale covers 16 elements)
     scales_expanded = (

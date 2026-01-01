@@ -124,40 +124,44 @@ if HAS_TRITON:
                 k_vals = tl.load(src_key_ptr + offs)
                 v_vals = tl.load(src_val_ptr + offs)
 
-                # Compute scales (max / 6.0)
-                k_s = tl.max(tl.abs(k_vals)) / 6.0 + 1e-6
-                v_s = tl.max(tl.abs(v_vals)) / 6.0 + 1e-6
+                # Compute exponential scales (SGLang style: MXFP4 compatible)
+                # scale = 2^ceil(log2(max_val / 6.0))
+                k_exp = tl.math.ceil(tl.math.log2(tl.max(tl.abs(k_vals)) / 6.0 + 1e-10))
+                v_exp = tl.math.ceil(tl.math.log2(tl.max(tl.abs(v_vals)) / 6.0 + 1e-10))
 
-                # Store scales as FP16 at the end of the packed head (2 bytes per scale)
-                k_s_u16 = k_s.to(tl.float16).to(tl.uint16, bitcast=True)
-                v_s_u16 = v_s.to(tl.float16).to(tl.uint16, bitcast=True)
+                k_s_val = tl.math.exp2(k_exp)
+                v_s_val = tl.math.exp2(v_exp)
 
-                tl.store(
-                    tgt_key_base + DATA_SIZE + b * 2, (k_s_u16 & 0xFF).to(tl.uint8)
-                )
-                tl.store(
-                    tgt_key_base + DATA_SIZE + b * 2 + 1, (k_s_u16 >> 8).to(tl.uint8)
-                )
+                # Store scales as 1-byte uint8 (offset by 127) at the end of the head
+                # Layout: head_size//2 (data) + head_size//16 (scales)
+                tl.store(tgt_key_base + DATA_SIZE + b, (k_exp + 127).to(tl.uint8))
+                tl.store(tgt_val_base + DATA_SIZE + b, (v_exp + 127).to(tl.uint8))
 
-                tl.store(
-                    tgt_val_base + DATA_SIZE + b * 2, (v_s_u16 & 0xFF).to(tl.uint8)
-                )
-                tl.store(
-                    tgt_val_base + DATA_SIZE + b * 2 + 1, (v_s_u16 >> 8).to(tl.uint8)
-                )
+                # Quantize and pack using separated even/odd loading to avoid Triton indexing errors
+                # Even indices: 0, 2, 4, 6, 8, 10, 12, 14
+                even_offs = b * 16 + tl.arange(0, 8) * 2
+                k_even_vals = tl.load(src_key_ptr + even_offs)
+                v_even_vals = tl.load(src_val_ptr + even_offs)
 
-                # Quantize
-                k_q = quantize_nvfp4(k_vals, k_s)
-                v_q = quantize_nvfp4(v_vals, v_s)
+                # Odd indices: 1, 3, 5, 7, 9, 11, 13, 15
+                odd_offs = even_offs + 1
+                k_odd_vals = tl.load(src_key_ptr + odd_offs)
+                v_odd_vals = tl.load(src_val_ptr + odd_offs)
 
-                # Pack 16 values into 8 bytes (vectorized)
-                k_q_reshaped = tl.view(k_q, (8, 2))
-                k_packed = (k_q_reshaped[:, 0] & 0x0F) | ((k_q_reshaped[:, 1] & 0x0F) << 4)
-                tl.store(tgt_key_base + b * 8 + tl.arange(0, 8), k_packed.to(tl.uint8))
-                
-                v_q_reshaped = tl.view(v_q, (8, 2))
-                v_packed = (v_q_reshaped[:, 0] & 0x0F) | ((v_q_reshaped[:, 1] & 0x0F) << 4)
-                tl.store(tgt_val_base + b * 8 + tl.arange(0, 8), v_packed.to(tl.uint8))
+                # Quantize even and odd values with the shared scale
+                k_q_even = quantize_nvfp4(k_even_vals, k_s_val)
+                k_q_odd = quantize_nvfp4(k_odd_vals, k_s_val)
+                v_q_even = quantize_nvfp4(v_even_vals, v_s_val)
+                v_q_odd = quantize_nvfp4(v_odd_vals, v_s_val)
+
+                # Pack: low nibble from even, high nibble from odd (Matches SGLang)
+                k_packed = (k_q_even & 0x0F) | ((k_q_odd & 0x0F) << 4)
+                v_packed = (v_q_even & 0x0F) | ((v_q_odd & 0x0F) << 4)
+
+                # Store packed bytes (8 bytes per block of 16 values)
+                pack_offs = tl.arange(0, 8)
+                tl.store(tgt_key_base + b * 8 + pack_offs, k_packed.to(tl.uint8))
+                tl.store(tgt_val_base + b * 8 + pack_offs, v_packed.to(tl.uint8))
 
         elif FP8_KV_CACHE:
             tile_pos = tl.arange(0, head_size)
