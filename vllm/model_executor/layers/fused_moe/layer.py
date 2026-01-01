@@ -951,9 +951,6 @@ class FusedMoE(CustomOp):
                 load_full=load_full_w2,
             )
         elif shard_id in ("w1", "w3"):
-            logger.info(
-                f"{loaded_weight.is_contiguous()=} | {expert_data.is_contiguous()=}"
-            )
             self._load_w13(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
