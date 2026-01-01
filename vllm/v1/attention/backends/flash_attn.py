@@ -157,6 +157,8 @@ class FlashAttentionBackend(AttentionBackend):
             return True
         if kv_cache_dtype.startswith("fp8"):
             return flash_attn_supports_fp8()
+        if kv_cache_dtype == "nvfp4":
+            return True  # NVFP4 supported via Triton kernel
         return kv_cache_dtype in ["auto"]
 
     @classmethod
