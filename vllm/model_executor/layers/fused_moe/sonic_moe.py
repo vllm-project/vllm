@@ -112,7 +112,7 @@ def permute_weights_for_sonic(w: torch.Tensor) -> torch.Tensor:
     return w_permuted.reshape(E, two_N, K).contiguous()
 
 
-class SonicMoEExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     Sonic MoE experts implementation for Hopper GPUs.
 
@@ -317,7 +317,7 @@ def sonic_moe_forward(
     if dtype not in _kernel_cache:
         _kernel_cache[dtype] = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            SonicMoEExperts(out_dtype=dtype),
+            SonicMoeExperts(out_dtype=dtype),
         )
     fused_experts = _kernel_cache[dtype]
 

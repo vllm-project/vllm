@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.sonic_moe import (
-    SonicMoEExperts,
+    SonicMoeExperts,
     is_sonic_moe_supported,
     is_valid_sonic_moe,
     permute_weights_for_sonic,
@@ -76,7 +76,7 @@ __all__ = [
     "is_valid_sonic_moe",
     "sonic_moe_forward",
     "permute_weights_for_sonic",
-    "SonicMoEExperts",
+    "SonicMoeExperts",
 ]
 
 if HAS_TRITON:
