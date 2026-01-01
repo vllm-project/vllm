@@ -254,6 +254,50 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
+class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        raw_pooler_output: PoolerOutput,
+        finished_mask: list[bool],
+        async_output_copy_stream: torch.cuda.Stream,
+    ):
+        self._model_runner_output = model_runner_output
+        self._finished_mask = finished_mask
+
+        # Event on the copy stream so we can synchronize the non-blocking copy.
+        self.async_copy_ready_event = torch.Event()
+
+        # Keep a reference to the device tensors to avoid them being
+        # deallocated until we finish copying it to the host.
+        self._raw_pooler_output = raw_pooler_output
+
+        # Initiate the copy on a separate stream, but do not synchronize it.
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(async_output_copy_stream):
+            async_output_copy_stream.wait_stream(default_stream)
+            self._raw_pooler_output_cpu = json_map_leaves(
+                lambda x: None if x is None else x.to("cpu", non_blocking=True),
+                self._raw_pooler_output,
+            )
+            self.async_copy_ready_event.record()
+
+    def get_output(self) -> ModelRunnerOutput:
+        """Copy the device tensors to the host and return a ModelRunnerOutput.
+        This function blocks until the copy is finished.
+        """
+        self.async_copy_ready_event.synchronize()
+
+        # Release the device tensors once the copy has completed.
+        del self._raw_pooler_output
+
+        self._model_runner_output.pooler_output = [
+            out if include else None
+            for out, include in zip(self._raw_pooler_output_cpu, self._finished_mask)
+        ]
+        return self._model_runner_output
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -684,7 +728,7 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
-    def _init_model_kwargs(self, num_tokens: int):
+    def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
 
         if not self.is_pooling_model:
@@ -2476,17 +2520,19 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == len(self.input_batch.pooling_params), (
+        kv_connector_output: KVConnectorOutput | None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs == len(self.input_batch.pooling_params), (
             "Either all or none of the requests in a batch must be pooling request"
         )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
+        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np.tolist(), seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
         )
 
         model = cast(VllmModelForPooling, self.model)
@@ -2494,27 +2540,41 @@ class GPUModelRunner(
             hidden_states=hidden_states,
             pooling_metadata=pooling_metadata,
         )
+
+        finished_mask = [
+            seq_len == prompt_len
+            for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
+        ]
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids.copy(),
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
+            kv_connector_output=kv_connector_output,
+        )
+
+        if raw_pooler_output is None or not any(finished_mask):
+            model_runner_output.pooler_output = [None] * num_reqs
+            return model_runner_output
+
+        if self.use_async_scheduling:
+            return AsyncGPUPoolingModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                raw_pooler_output=raw_pooler_output,
+                finished_mask=finished_mask,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
+
         raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True) if x is not None else x,
+            lambda x: None if x is None else x.to("cpu", non_blocking=True),
             raw_pooler_output,
         )
         self._sync_device()
 
-        pooler_output: list[torch.Tensor | None] = []
-        for raw_output, seq_len, prompt_len in zip(
-            raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens
-        ):
-            output = raw_output if seq_len == prompt_len else None
-            pooler_output.append(output)
-
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-        )
+        model_runner_output.pooler_output = [
+            out if include else None
+            for out, include in zip(raw_pooler_output, finished_mask)
+        ]
+        return model_runner_output
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -2579,7 +2639,7 @@ class GPUModelRunner(
 
             input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
-                **self._init_model_kwargs(num_scheduled_tokens),
+                **self._init_model_kwargs(),
                 **self._extract_mm_kwargs(scheduler_output),
             }
         elif self.enable_prompt_embeds and is_first_rank:
@@ -2607,7 +2667,7 @@ class GPUModelRunner(
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            model_kwargs = self._init_model_kwargs()
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
@@ -2616,7 +2676,7 @@ class GPUModelRunner(
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            model_kwargs = self._init_model_kwargs()
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
@@ -3036,7 +3096,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3244,11 +3304,12 @@ class GPUModelRunner(
 
                 if self.is_pooling_model:
                     # Return the pooling output.
-                    output = self._pool(
-                        hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
+                    return self._pool(
+                        hidden_states,
+                        num_scheduled_tokens,
+                        num_scheduled_tokens_np,
+                        kv_connector_output,
                     )
-                    output.kv_connector_output = kv_connector_output
-                    return output
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
@@ -3437,7 +3498,6 @@ class GPUModelRunner(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
@@ -4293,7 +4353,7 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs(num_tokens_padded)
+            model_kwargs = self._init_model_kwargs()
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
@@ -4304,7 +4364,7 @@ class GPUModelRunner(
             elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
-                model_kwargs = self._init_model_kwargs(num_tokens_padded)
+                model_kwargs = self._init_model_kwargs()
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
@@ -4508,17 +4568,14 @@ class GPUModelRunner(
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
-        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
-        assert sum(num_scheduled_tokens_list) == num_tokens
-        assert len(num_scheduled_tokens_list) == num_reqs
+        num_scheduled_tokens_np = np.full(num_reqs, min_tokens_per_req)
+        num_scheduled_tokens_np[-1] += num_tokens % num_reqs
+        assert np.sum(num_scheduled_tokens_np) == num_tokens
+        assert len(num_scheduled_tokens_np) == num_reqs
 
         req_num_tokens = num_tokens // num_reqs
 
-        dummy_prompt_lens = torch.tensor(
-            num_scheduled_tokens_list,
-            device="cpu",
-        )
+        dummy_prompt_lens = torch.from_numpy(num_scheduled_tokens_np)
         dummy_token_ids = torch.zeros(
             (num_reqs, req_num_tokens), dtype=torch.int32, device=self.device
         )
@@ -4537,7 +4594,7 @@ class GPUModelRunner(
         )
 
         dummy_metadata.build_pooling_cursor(
-            num_scheduled_tokens_list,
+            num_scheduled_tokens_np,
             seq_lens_cpu=dummy_prompt_lens,
             device=hidden_states.device,
         )

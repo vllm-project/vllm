@@ -84,6 +84,19 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
+def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for GLM-ASR model.
+    GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
+    """
+    if "audio" in mm_data:
+        audio = mm_data["audio"]
+        if isinstance(audio, list) and len(audio) > 1:
+            # Limit to single audio to match text requirement
+            mm_data["audio"] = [audio[0]]
+    return mm_data
+
+
 # For some multimodal models, tokenizer will always add bos_token
 # at the beginning of prompt by default, causing hf_processor outputs
 # incorrect token ids. So we need use `add_special_tokens=False` here
@@ -108,6 +121,7 @@ MM_DATA_PATCHES = {
     "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
+    "glmasr": glmasr_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
