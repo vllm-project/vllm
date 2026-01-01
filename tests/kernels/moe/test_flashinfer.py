@@ -14,8 +14,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8,
+    convert_flashinfer_fp8_moe_per_tensor_scales,
     flashinfer_cutlass_moe_fp8,
-    register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31,
 )
@@ -122,7 +122,19 @@ class TestData:
             all2all_backend="naive",
         )
 
-        register_moe_scaling_factors(layer)
+        # Convert scales to flashinfer format.
+        w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
+            convert_flashinfer_fp8_moe_per_tensor_scales(
+                w13_scale=layer.w13_weight_scale,
+                w13_input_scale=layer.w13_input_scale,
+                w2_scale=layer.w2_weight_scale,
+                w2_input_scale=layer.w2_input_scale,
+            )
+        )
+        layer.w13_weight_scale.data = w13_weight_scale
+        layer.w13_input_scale.data = w13_input_scale
+        layer.w2_weight_scale.data = w2_weight_scale
+        layer.w2_input_scale.data = w2_input_scale
 
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)

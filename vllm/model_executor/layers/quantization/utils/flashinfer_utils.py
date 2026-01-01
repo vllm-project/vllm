@@ -151,47 +151,32 @@ def convert_flashinfer_fp8_moe_per_tensor_scales(
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    On disk, we have an explicit scale for each weight / input:
+        * w13_scale
+        * w13_input_scale
+        * w2_scale
+        * w2_input_scale
+
+    Flashinfer kernels instead expect:
+        * output1_scales_gate_scalar = w13_scale * w13_input_scale
+        * output2_scales_scalar = w2_scale * w2_input_scale
+        * w2_input_scale_inv = 1.0 / w2_input_scale
+
+    So, we put:
+        * w13_scale = output1_scales_gate_scalar
+        * w2_scale = output2_scales_scalar
+        * w2_input_scale = w2_input_scale_inv
+
+    NOTE(rob): we should consider updating moe_quant_config to make
+    this more explicit in the future rather than smuggling it
+    through the existing names.
+    """
     w13_scale = (w13_scale * w13_input_scale).squeeze()
     w2_scale = (w2_scale * w2_input_scale).squeeze()
     w2_input_scale = 1.0 / w2_input_scale
 
     return w13_scale, w13_input_scale, w2_scale, w2_input_scale
-
-
-def get_moe_scaling_factors(
-    input_scale: torch.Tensor,
-    gemm1_weights_scale: torch.Tensor,
-    activation_scale: torch.Tensor,
-    gemm2_weights_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    output1_scales_scalar = gemm1_weights_scale * input_scale * (1.0 / activation_scale)
-    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
-    output2_scales_scalar = activation_scale * gemm2_weights_scale
-
-    return output1_scales_scalar, output1_scales_gate_scalar, output2_scales_scalar
-
-
-def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
-    output1_scales, output1_gate_scales, output2_scales = get_moe_scaling_factors(
-        layer.w13_input_scale,
-        layer.w13_weight_scale,
-        layer.w2_input_scale,
-        layer.w2_weight_scale,
-    )
-    layer.register_parameter(
-        "output1_scales_scalar", torch.nn.Parameter(output1_scales, requires_grad=False)
-    )
-    layer.register_parameter(
-        "output1_scales_gate_scalar",
-        torch.nn.Parameter(output1_gate_scales, requires_grad=False),
-    )
-    layer.register_parameter(
-        "output2_scales_scalar", torch.nn.Parameter(output2_scales, requires_grad=False)
-    )
-    layer.register_parameter(
-        "w2_input_scale_inv",
-        torch.nn.Parameter(1.0 / layer.w2_input_scale, requires_grad=False),
-    )
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
