@@ -9,8 +9,8 @@ import torch
 from vllm.platforms import current_platform
 
 
-def pytest_collection_modifyitems(config, items):
-    """Configure ROCm-specific settings based on collected tests."""
+def pytest_sessionstart(session):
+    """Configure ROCm-specific settings before test session starts."""
     if not current_platform.is_rocm():
         return
 
