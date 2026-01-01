@@ -158,29 +158,26 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"
         )
 
-        # Select quantization metadata based on FP8 format/path
+        # Select quantization arguments based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
         ):
-            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
+            # FP8 PER TENSOR:
+            #   * scales are computed in process_weights as per below
+            #   * input is quantized
             quant_scales = [
-                self.w1_scale,  # done: g1_alphas
-                self.w2_scale,  # done: a2_gscale
-                self.a2_scale,  # done: g2_alphas
-                self.a1_scale,  # done: a1_gscale
+                self.w1_scale,  # w1_scale = w1_scale * w13_input_scale
+                self.a2_scale,  # a2_scale = 1.0 / a2_input_scale
+                self.w2_scale,  # w2_scale = w2_scale * w2_input_scale
+                self.a1_scale,  # a1_scale = w1_input_scale
             ]
-            for i, quant_scale in enumerate(quant_scales):
-                logger.info_once(f"{i}, {quant_scale.shape=}")
-
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
             fc2_expert_weights = w2
         elif self.quant_dtype == "nvfp4":
-            # Ensure w1_scale and w2_scale are not None before calling view
-            assert self.w1_scale is not None and self.w2_scale is not None, (
-                "w1_scale and w2_scale must not be None for FlashInferExperts"
-            )
+            # NVFP4
+            assert self.w1_scale is not None and self.w2_scale is not None
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
@@ -195,7 +192,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         elif self.use_deepseek_fp8_block_scale:
-            # FP8 block-scale path: provide block-scale weights, omit a1q_scale
+            # FP8 BLOCK:
+            #   * dynamic input quantization
+            #   * calculation of input scales is fused in the kernel.
             quant_scales = [
                 self.w1_scale,
                 self.w2_scale,
