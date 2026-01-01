@@ -697,12 +697,25 @@ class FlashAttentionImpl(AttentionImpl):
                 )
 
         if self.kv_cache_dtype == "nvfp4":
-            # NVFP4 requires dequantization: packed uint8 -> bfloat16
-            # For now, convert cache shape to model dtype for compatibility
-            # Full dequantization requires unpacking 4-bit values and applying scales
-            # This is a placeholder that treats the cache as model dtype view
-            key_cache = key_cache.view(query.dtype)
-            value_cache = value_cache.view(query.dtype)
+            # NVFP4 requires dequantization: unpack 4-bit values and apply scales
+            from vllm.attention.ops.nvfp4_dequant import (
+                dequantize_nvfp4_kv_cache_simple,
+            )
+
+            # Cache shape: [2, num_blocks, block_size, num_heads, packed_head_size]
+            # Need to dequantize to: [2, num_blocks, block_size, num_heads, head_size]
+            head_size = self.head_size
+
+            # Dequantize key and value caches
+            key_cache_dequant = dequantize_nvfp4_kv_cache_simple(
+                key_cache, head_size=head_size, output_dtype=query.dtype
+            )
+            value_cache_dequant = dequantize_nvfp4_kv_cache_simple(
+                value_cache, head_size=head_size, output_dtype=query.dtype
+            )
+
+            key_cache = key_cache_dequant
+            value_cache = value_cache_dequant
         elif self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
