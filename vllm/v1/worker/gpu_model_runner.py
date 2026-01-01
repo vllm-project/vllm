@@ -429,9 +429,9 @@ class GPUModelRunner(
         # layers in the draft model.
         found_draft = False
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter: (
-                NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
-            )
+            self.drafter_ngram: NgramProposer | None = None
+            self.drafter_eagle: EagleProposer | None = None
+            self.drafter: SuffixDecodingProposer | MedusaProposer | None = None
             if (
                 self.speculative_config.method == "ngram"
                 or self.speculative_config.method == "ngram-eagle"
