@@ -165,7 +165,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             # FP8 PER TENSOR:
             #   * scales are computed in process_weights as per below
-            #   * input is quantized
+            #   * hidden states are quantized
             quant_scales = [
                 self.w1_scale,  # w1_scale = w1_scale * w13_input_scale
                 self.a2_scale,  # a2_scale = 1.0 / a2_input_scale
