@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.sonic_moe import (
-    SonicMoEExperts,
+    SonicMoeExperts,
     _check_sonicmoe_available,
     _is_hopper_gpu,
     is_sonic_moe_supported,
@@ -72,8 +72,8 @@ def test_permute_weights_for_sonic():
 
 
 def test_sonic_moe_experts_init():
-    """Test SonicMoEExperts initialization."""
-    experts = SonicMoEExperts(out_dtype=torch.bfloat16)
+    """Test SonicMoeExperts initialization."""
+    experts = SonicMoeExperts(out_dtype=torch.bfloat16)
     assert experts.out_dtype == torch.bfloat16
     assert experts.supports_chunking() is True
     assert experts.supports_expert_map() is False
@@ -127,7 +127,7 @@ def test_sonic_moe_forward_unsupported():
 
 def test_import_from_fused_moe():
     from vllm.model_executor.layers.fused_moe import (
-        SonicMoEExperts,
+        SonicMoeExperts,
         is_sonic_moe_supported,
         is_valid_sonic_moe,
         permute_weights_for_sonic,
@@ -138,7 +138,7 @@ def test_import_from_fused_moe():
     assert callable(is_valid_sonic_moe)
     assert callable(sonic_moe_forward)
     assert callable(permute_weights_for_sonic)
-    assert SonicMoEExperts is not None
+    assert SonicMoeExperts is not None
 
 
 SONIC_MNKS = [
@@ -207,7 +207,7 @@ def test_sonic_moe_vs_triton(
     w1_sonic = permute_weights_for_sonic(w1)
     sonic_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        SonicMoEExperts(out_dtype=dtype, weights_prepermuted=True),
+        SonicMoeExperts(out_dtype=dtype, weights_prepermuted=True),
     )
     out_sonic = sonic_kernel(
         hidden_states=hidden_states,
