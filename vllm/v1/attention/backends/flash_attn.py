@@ -698,24 +698,62 @@ class FlashAttentionImpl(AttentionImpl):
 
         if self.kv_cache_dtype == "nvfp4":
             # NVFP4 requires dequantization: unpack 4-bit values and apply scales
+            # Only dequantize blocks that will be accessed (from block_table)
+            # to preserve memory savings
             from vllm.attention.ops.nvfp4_dequant import (
                 dequantize_nvfp4_kv_cache_simple,
             )
 
-            # Cache shape: [2, num_blocks, block_size, num_heads, packed_head_size]
-            # Need to dequantize to: [2, num_blocks, block_size, num_heads, head_size]
             head_size = self.head_size
 
-            # Dequantize key and value caches
-            key_cache_dequant = dequantize_nvfp4_kv_cache_simple(
-                key_cache, head_size=head_size, output_dtype=query.dtype
-            )
-            value_cache_dequant = dequantize_nvfp4_kv_cache_simple(
-                value_cache, head_size=head_size, output_dtype=query.dtype
-            )
+            # Get unique blocks that will be accessed
+            block_table = attn_metadata.block_table
+            if block_table is not None and block_table.numel() > 0:
+                # Get unique block indices being accessed
+                unique_blocks = torch.unique(block_table.flatten())
+                unique_blocks = unique_blocks[unique_blocks >= 0]  # Filter -1 padding
 
-            key_cache = key_cache_dequant
-            value_cache = value_cache_dequant
+                if unique_blocks.numel() > 0:
+                    # Only dequantize the blocks being accessed
+                    # key_cache shape: [num_blocks, block_size, num_heads, packed_head_size]
+                    key_blocks = key_cache[unique_blocks]  # [n_used, ...]
+                    value_blocks = value_cache[unique_blocks]
+
+                    # Dequantize only the used blocks
+                    key_dequant = dequantize_nvfp4_kv_cache_simple(
+                        key_blocks, head_size=head_size, output_dtype=query.dtype
+                    )
+                    value_dequant = dequantize_nvfp4_kv_cache_simple(
+                        value_blocks, head_size=head_size, output_dtype=query.dtype
+                    )
+
+                    # Create mapping from original to new indices
+                    num_used = unique_blocks.shape[0]
+                    new_block_table = torch.zeros_like(block_table)
+                    for new_idx, orig_idx in enumerate(unique_blocks):
+                        new_block_table[block_table == orig_idx] = new_idx
+
+                    # Replace block_table and caches with compacted versions
+                    attn_metadata.block_table = new_block_table
+                    key_cache = key_dequant
+                    value_cache = value_dequant
+                else:
+                    # No blocks used - shouldn't happen
+                    key_cache = torch.zeros(
+                        (0,) + key_cache.shape[1:-1] + (head_size,),
+                        dtype=query.dtype,
+                        device=key_cache.device,
+                    )
+                    value_cache = torch.zeros_like(key_cache)
+            else:
+                # No block table - fall back to full dequant (prefill without cache)
+                key_cache = dequantize_nvfp4_kv_cache_simple(
+                    key_cache, head_size=head_size, output_dtype=query.dtype
+                )
+                value_cache = dequantize_nvfp4_kv_cache_simple(
+                    value_cache, head_size=head_size, output_dtype=query.dtype
+                )
+
         elif self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
