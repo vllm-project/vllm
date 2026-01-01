@@ -220,8 +220,14 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
-        # TODO smor- custom for now
+
+        # TODO smor - will be adjusted once checkpoint is corrected
+        # Currently they accidently defined 2 MTP layers instead of 1
+        assert self.num_mtp_layers == 2, (
+            "Only one MTP layer is supported for NemotronH-MTP"
+        )
         self.num_mtp_layers = 1
+
         self.pattern_str = config.mtp_hybrid_override_pattern
         self.pattern_len = len(self.pattern_str)
         assert self.pattern_len > 0
@@ -287,19 +293,13 @@ class NemotronHMultiTokenPredictor(nn.Module):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_idx: int = 0,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
-        if spec_step_idx >= self.num_mtp_layers:
-            spec_step_idx = self.num_mtp_layers - 1
-
-        start_idx = spec_step_idx * self.pattern_len
-        end_idx = start_idx + self.pattern_len
 
         residual = None
 
-        for i in range(start_idx, end_idx):
+        for i in range(self.pattern_len):
             hidden_states, residual = self.layers[str(i)](
                 inputs_embeds=inputs_embeds,
                 positions=positions,
@@ -365,7 +365,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_idx: int = 0,
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
@@ -375,23 +374,18 @@ class NemotronHMTP(nn.Module, SupportsPP):
             hidden_states,
             intermediate_tensors,
             inputs_embeds,
-            spec_step_idx,
         )
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         """Compute logits for DRAFT token generation."""
         assert self.lm_head is not None, (
             "lm_head not initialized - must be shared from target model"
         )
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def should_use_spec_step_idx(self) -> bool:
-        return self.model.num_mtp_layers > 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -427,21 +421,21 @@ class NemotronHMTP(nn.Module, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if "mtp.layers." in name:
-                # TODO SMOR remove once checkpoint is updated
-                name = name.replace("layers.0.layers.0", "layers.0")
-                name = name.replace("layers.0.layers.1", "layers.1")
-                name = name.replace("layers.1.layers.0", "layers.2")
-                name = name.replace("layers.1.layers.1", "layers.3")
-                name = name.replace(
-                    "layers.1.final_layernorm", "layers.3.final_layernorm"
-                )
-                name = name.replace(
-                    "layers.0.final_layernorm", "layers.1.final_layernorm"
-                )
-                name = name.replace("layers.1.hnorm", "layers.2.hnorm")
-                name = name.replace("layers.1.enorm", "layers.2.enorm")
-                name = name.replace("layers.1.eh_proj", "layers.2.eh_proj")
+            # if "mtp.layers." in name:
+            # TODO SMOR remove once checkpoint is updated
+            # name = name.replace("layers.0.layers.0", "layers.0")
+            # name = name.replace("layers.0.layers.1", "layers.1")
+            # name = name.replace("layers.1.layers.0", "layers.2")
+            # name = name.replace("layers.1.layers.1", "layers.3")
+            # name = name.replace(
+            #     "layers.1.final_layernorm", "layers.3.final_layernorm"
+            # )
+            # name = name.replace(
+            #     "layers.0.final_layernorm", "layers.1.final_layernorm"
+            # )
+            # name = name.replace("layers.1.hnorm", "layers.2.hnorm")
+            # name = name.replace("layers.1.enorm", "layers.2.enorm")
+            # name = name.replace("layers.1.eh_proj", "layers.2.eh_proj")
 
             name = name.replace("mtp.layers.", "model.layers.")
 
