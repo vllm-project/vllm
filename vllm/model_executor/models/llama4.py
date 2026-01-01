@@ -534,8 +534,8 @@ class Llama4Model(LlamaModel):
         #     loaded_weight = loaded_weight.to("cpu")
         #     new_loaded_weight = new_loaded_weight.contiguous()
         #     new_loaded_weight = new_loaded_weight.to("cpu")
-        end = time.perf_counter()
-        logger.info(f"move to cpu time: {end - start}s")
+        # end = time.perf_counter()
+        # logger.info(f"move to cpu time: {end - start}s")
         return expert_param_loaded
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

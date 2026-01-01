@@ -1123,22 +1123,18 @@ class Llama4ForConditionalGeneration(
         updated_params.update(updated_params_from_experts)
 
         loader = AutoWeightsLoader(self)
-        print("starting load weights...")
         loaded_language_model_params = loader.load_weights(regular_weights)
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
-        print("finished load weights...")
 
         if expert_scale_weights:
             loaded_expert_scale_params = loader.load_weights(expert_scale_weights)
             if loaded_expert_scale_params:
                 updated_params.update(loaded_expert_scale_params)
-        print("finished load scales...")
 
         updated_params.update(
             self._load_other_weights(other_weights, params_dict, stacked_params_mapping)
         )
-        print("finished load other weights...")
 
         return updated_params
 
