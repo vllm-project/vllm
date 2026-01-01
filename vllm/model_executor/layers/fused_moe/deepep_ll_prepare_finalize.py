@@ -479,7 +479,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             total_num_sms = torch.cuda.get_device_properties(
                 device="cuda"
             ).multi_processor_count
-            communicate_num_sms = 56
+            communicate_num_sms = 32
             compute_num_sms = total_num_sms - communicate_num_sms
 
             combine_wait_event = torch.cuda.Event()
