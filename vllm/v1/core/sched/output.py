@@ -197,9 +197,16 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
+    # Whether any of the scheduled requests use structured output.
+    # Set only in async scheduling case.
+    has_structured_output_requests: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
+
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
@@ -228,5 +235,3 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
-    # Number of invalid tokens per structured output request.
-    num_invalid_tokens_per_req: list[int] | None = None

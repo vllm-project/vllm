@@ -469,36 +469,20 @@ class EngineCore:
             # If we are doing speculative decoding with structured output,
             # we need to get the draft token ids from the prior step before
             # we can compute the grammar bitmask for the deferred request.
-            draft_token_ids = self.model_executor.take_draft_token_ids()
-            num_invalid_spec_tokens = None
-            if draft_token_ids is not None:
-                # Update the draft token ids on the scheduler output
-                # to filter out the invalid spec tokens, which will be padded with -1
-                # and ignored by the grammar bitmask computation.
-                self.scheduler.update_draft_token_ids(
-                    draft_token_ids,
-                    update_requests=False,
-                    update_scheduler_output=deferred_scheduler_output,
-                    pad_filtered_draft_tokens=True,
+            if self.use_spec_decode:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
+                assert draft_token_ids is not None
+                # Update the draft token ids in the scheduler output to
+                # filter out the invalid spec tokens, which will be padded
+                # with -1 and skipped by the grammar bitmask computation.
+                self.scheduler.update_draft_token_ids_in_output(
+                    draft_token_ids, deferred_scheduler_output
                 )
-                scheduled_spec_tokens = (
-                    deferred_scheduler_output.scheduled_spec_decode_tokens
-                )
-                num_invalid_spec_tokens = {
-                    req_id: sum(token_id == -1 for token_id in spec_token_ids)
-                    for req_id, spec_token_ids in scheduled_spec_tokens.items()
-                }
-
-            # Compute the grammar bitmask using the draft tokens (if any),
-            # and then unblock the model executor.
+            # We now have the tokens needed to compute the bitmask for the
+            # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            if num_invalid_spec_tokens and grammar_output is not None:
-                grammar_output.num_invalid_tokens_per_req = [
-                    num_invalid_spec_tokens.get(req_id, 0)
-                    for req_id in grammar_output.structured_output_request_ids
-                ]
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
