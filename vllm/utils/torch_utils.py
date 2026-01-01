@@ -41,6 +41,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "nvfp4": torch.uint8,  # NVFP4 uses uint8 for packed 4-bit data
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -567,10 +568,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: torch.Tensor
-    | list[torch.Tensor]
-    | tuple[torch.Tensor]
-    | IntermediateTensors,
+    tensors: (
+        torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor] | IntermediateTensors
+    ),
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
