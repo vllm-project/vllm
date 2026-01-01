@@ -277,22 +277,24 @@ class OpenAIServingResponses(OpenAIServing):
             return
 
         while True:
+            evicted_task: asyncio.Task | None = None
+            new_event_signal: asyncio.Event | None = None
             async with self.response_store_lock:
                 if len(self._responses_store_lru) <= max_items:
                     return
                 evicted_id, _ = self._responses_store_lru.popitem(last=False)
                 self.response_store.pop(evicted_id, None)
+                self.msg_store.pop(evicted_id, None)
 
-            # Best-effort cleanup across all stores.
-            self.msg_store.pop(evicted_id, None)
-            if evicted_id in self.event_store:
-                _, new_event_signal = self.event_store[evicted_id]
+                if val := self.event_store.pop(evicted_id, None):
+                    _, new_event_signal = val
+
+                evicted_task = self.background_tasks.get(evicted_id)
+
+            if new_event_signal is not None:
                 new_event_signal.set()
-                self.event_store.pop(evicted_id, None)
-
-            # Cancel any running background task for the evicted id.
-            if task := self.background_tasks.get(evicted_id):
-                task.cancel()
+            if evicted_task is not None:
+                evicted_task.cancel()
 
     def _validate_generator_input(
         self, engine_prompt: TokensPrompt
@@ -506,7 +508,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Store the input messages.
         if request.store:
-            self.msg_store[request.request_id] = messages
+            async with self.response_store_lock:
+                self.msg_store[request.request_id] = messages
             await self._touch_response_store_id(request.request_id)
             await self._evict_responses_store_if_needed()
 
@@ -601,11 +604,15 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: TokenizerLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        prev_msg = None
+        if prev_response is not None:
+            async with self.response_store_lock:
+                prev_msg = self.msg_store.get(prev_response.id)
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
+            prev_msg=prev_msg,
             prev_response_output=prev_response.output if prev_response else None,
         )
         _, engine_prompts = await self._preprocess_chat(
@@ -1061,7 +1068,12 @@ class OpenAIServingResponses(OpenAIServing):
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
+            prev_msgs = self.msg_store.get(prev_response.id)
+            if prev_msgs is None:
+                raise ValueError(
+                    "Previous response messages not found for response_id: "
+                    f"{prev_response.id}"
+                )
             # Remove the previous chain-of-thoughts if there is a new "final"
             # message. Note that this also removes these messages from the
             # msg_store.
@@ -1110,7 +1122,8 @@ class OpenAIServingResponses(OpenAIServing):
     ):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
-        self.event_store[request.request_id] = (event_deque, new_event_signal)
+        async with self.response_store_lock:
+            self.event_store[request.request_id] = (event_deque, new_event_signal)
         await self._touch_response_store_id(request.request_id)
         await self._evict_responses_store_if_needed()
         response = None
@@ -1164,14 +1177,16 @@ class OpenAIServingResponses(OpenAIServing):
         response_id: str,
         starting_after: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        if response_id not in self.event_store:
+        async with self.response_store_lock:
+            val = self.event_store.get(response_id)
+        if val is None:
             raise VLLMValidationError(
                 f"Unknown response_id: {response_id}",
                 parameter="response_id",
                 value=response_id,
             )
 
-        event_deque, new_event_signal = self.event_store[response_id]
+        event_deque, new_event_signal = val
         start_index = 0 if starting_after is None else starting_after + 1
         current_index = start_index
 
