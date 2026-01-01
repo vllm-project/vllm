@@ -15,6 +15,7 @@ from openai.types.responses.tool import (
     Tool,
 )
 
+from vllm import envs
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
 from vllm.entrypoints.openai.serving_responses import (
@@ -23,8 +24,7 @@ from vllm.entrypoints.openai.serving_responses import (
     extract_tool_types,
 )
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm import envs
+from vllm.inputs.data import TokensPrompt
 
 
 class MockConversationContext(ConversationContext):
@@ -401,6 +401,14 @@ async def test_responses_store_lru_eviction(monkeypatch: pytest.MonkeyPatch) -> 
 
     await asyncio.sleep(0)
 
+    t1.cancel()
+    try:
+        await asyncio.wait_for(t1, timeout=0.1)
+    except asyncio.CancelledError:
+        await asyncio.sleep(0)
+    except asyncio.TimeoutError:
+        await asyncio.sleep(0)
+
     assert "resp_2" in instance.response_store
     assert "resp_2" in instance.msg_store
     assert "resp_2" in instance.event_store
@@ -408,4 +416,4 @@ async def test_responses_store_lru_eviction(monkeypatch: pytest.MonkeyPatch) -> 
     assert "resp_1" not in instance.response_store
     assert "resp_1" not in instance.msg_store
     assert "resp_1" not in instance.event_store
-    assert t1.cancelled() or t1.cancelling()
+    assert t1.cancelled()
