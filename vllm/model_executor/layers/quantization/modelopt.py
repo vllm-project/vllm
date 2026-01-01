@@ -47,7 +47,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    convert_flashinfer_fp8_moe_scales,
+    convert_flashinfer_fp8_moe_per_tensor_scales,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
@@ -948,7 +948,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # NOTE(rob): we should not do this if we are using fp8 block.
         w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
-            convert_flashinfer_fp8_moe_scales(
+            convert_flashinfer_fp8_moe_per_tensor_scales(
                 w13_scale=layer.w13_weight_scale,
                 w13_input_scale=layer.w13_input_scale,
                 w2_scale=layer.w2_weight_scale,
