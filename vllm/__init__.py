@@ -109,3 +109,4 @@ __all__ = [
 # NVFP4 rebuild 20260101113817
 # rebuild 20260101114305
 # rebuild 20260101114840
+# nvfp4 dequant 20260101120235
