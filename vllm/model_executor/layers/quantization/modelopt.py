@@ -949,10 +949,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # register_moe_scaling_factors(layer)
         w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
             _convert_moe_scaling_factors(
-                layer.w13_weight_scale,
-                layer.w13_input_scale,
-                layer.w2_weight_scale,
-                layer.w2_input_scale,
+                w13_scale=layer.w13_weight_scale,
+                w13_input_scale=layer.w13_input_scale,
+                w2_scale=layer.w2_weight_scale,
+                w2_input_scale=layer.w2_input_scale,
             )
         )
 
@@ -1016,10 +1016,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            # g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
-            # g2_alphas=layer.output2_scales_scalar.squeeze(),
-            # a1_gscale=layer.w13_input_scale,
-            # a2_gscale=layer.w2_input_scale_inv,
             per_act_token_quant=False,
         )
 
