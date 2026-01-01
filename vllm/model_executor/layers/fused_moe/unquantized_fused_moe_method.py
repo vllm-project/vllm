@@ -19,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferAllGatherMoEPrepareAndFinalize,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -266,11 +263,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.w13_weight.data = w13_weight_swapped.contiguous()
 
                 self.kernel = mk.FusedMoEModularKernel(
-                    FlashInferAllGatherMoEPrepareAndFinalize(
-                        use_dp=(self.moe.dp_size > 1),
-                    ),
+                    MoEPrepareAndFinalizeNoEP(),
                     FlashInferExperts(
-                        out_dtype=torch.bfloat16,
+                        out_dtype=layer.params_dtype,
                         quant_config=self.moe_quant_config,
                         tp_rank=self.moe.moe_parallel_config.tp_rank,
                         tp_size=self.moe.moe_parallel_config.tp_size,
