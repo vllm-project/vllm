@@ -74,6 +74,17 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Sonic MoE Test (H100)
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - tests/kernels/moe/test_sonic_moe.py
+  commands:
+    - pip install sonicmoe
+    - pytest -v -s kernels/moe/test_sonic_moe.py
+
 - label: Kernels (B200)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
