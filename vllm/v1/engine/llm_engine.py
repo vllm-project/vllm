@@ -209,7 +209,8 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         request_ids = self.output_processor.abort_requests(request_ids, internal)
-        self.engine_core.abort_requests(request_ids)
+        # record_metrics=True for user-initiated aborts (need metrics recorded)
+        self.engine_core.abort_requests(request_ids, record_metrics=True)
 
     def add_request(
         self,

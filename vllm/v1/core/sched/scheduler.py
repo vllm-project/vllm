@@ -161,6 +161,10 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # Aborted requests that need EngineCoreOutput created for metrics.
+        # This is populated in finish_requests() and consumed in update_from_output().
+        self.aborted_requests_for_output: list[tuple[int, EngineCoreOutput]] = []
+
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
@@ -1249,6 +1253,12 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Include outputs for aborted requests (for metrics with correct engine_idx)
+        if self.aborted_requests_for_output:
+            for client_index, abort_output in self.aborted_requests_for_output:
+                outputs.setdefault(client_index, []).append(abort_output)
+            self.aborted_requests_for_output.clear()
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -1364,11 +1374,19 @@ class Scheduler(SchedulerInterface):
         self,
         request_ids: str | Iterable[str],
         finished_status: RequestStatus,
+        record_metrics: bool = False,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
         disconnects.
+
+        Args:
+            request_ids: Request ID(s) to finish.
+            finished_status: The finished status to set.
+            record_metrics: If True and status is FINISHED_ABORTED, create
+                EngineCoreOutput so abort metrics are recorded. Should be True
+                for user-initiated aborts, False for stop-string cleanup.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -1402,6 +1420,24 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             request.status = finished_status
+
+            # For user-initiated aborts (record_metrics=True), create
+            # EngineCoreOutput BEFORE freeing so metrics can be recorded with
+            # correct engine_idx in output flow. Skip for stop-string cleanup
+            # (record_metrics=False) since those already have metrics recorded.
+            if finished_status == RequestStatus.FINISHED_ABORTED and record_metrics:
+                abort_output = EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    finish_reason=request.get_finished_reason(),
+                    events=request.take_events(),
+                    trace_headers=request.trace_headers,
+                    num_cached_tokens=request.num_cached_tokens,
+                )
+                self.aborted_requests_for_output.append(
+                    (request.client_index, abort_output)
+                )
+
             self._free_request(request)
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:

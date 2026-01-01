@@ -106,6 +106,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
+        record_metrics: bool = False,
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing.
@@ -118,6 +119,9 @@ class SchedulerInterface(ABC):
         Args:
             request_ids: A single or a list of request IDs.
             finished_status: The finished status of the given requests.
+            record_metrics: If True and status is FINISHED_ABORTED, create
+                EngineCoreOutput so abort metrics are recorded. Should be True
+                for user-initiated aborts, False for stop-string cleanup.
         """
         raise NotImplementedError
 

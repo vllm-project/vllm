@@ -554,7 +554,10 @@ class AsyncLLM(EngineClient):
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
         all_request_ids = self.output_processor.abort_requests(request_ids, internal)
-        await self.engine_core.abort_requests_async(all_request_ids)
+        # record_metrics=True for user-initiated aborts (need metrics recorded)
+        await self.engine_core.abort_requests_async(
+            all_request_ids, record_metrics=True
+        )
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))

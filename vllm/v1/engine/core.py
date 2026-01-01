@@ -206,7 +206,7 @@ class EngineCore:
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
-        self.aborts_queue = queue.Queue[list[str]]()
+        self.aborts_queue = queue.Queue[tuple[list[str], bool]]()
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -312,13 +312,18 @@ class EngineCore:
 
         self.scheduler.add_request(request)
 
-    def abort_requests(self, request_ids: list[str]):
-        """Abort requests from the scheduler."""
+    def abort_requests(self, request_ids: list[str], record_metrics: bool = False):
+        """Abort requests from the scheduler.
 
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
-        self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+        Args:
+            request_ids: List of request IDs to abort.
+            record_metrics: If True, create EngineCoreOutput for these requests
+                so abort metrics are recorded. Should be True for user-initiated
+                aborts, False for stop-string cleanup (which already has metrics).
+        """
+        self.scheduler.finish_requests(
+            request_ids, RequestStatus.FINISHED_ABORTED, record_metrics=record_metrics
+        )
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -484,13 +489,18 @@ class EngineCore:
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
-            request_ids = []
+            request_ids: list[str] = []
+            record_metrics = False
             while not self.aborts_queue.empty():
-                ids = self.aborts_queue.get_nowait()
+                abort_request = self.aborts_queue.get_nowait()
+                # Abort requests are now tuples of (request_ids, record_metrics)
+                ids, should_record = abort_request
                 # Should be a list here, but also handle string just in case.
                 request_ids.extend((ids,) if isinstance(ids, str) else ids)
+                # If any abort in the batch needs metrics, record for all
+                record_metrics = record_metrics or should_record
             # More efficient to abort all as a single batch.
-            self.abort_requests(request_ids)
+            self.abort_requests(request_ids, record_metrics=record_metrics)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -952,7 +962,8 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
-            self.abort_requests(request)
+            request_ids, record_metrics = request
+            self.abort_requests(request_ids, record_metrics=record_metrics)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
