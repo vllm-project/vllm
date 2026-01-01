@@ -114,3 +114,6 @@ __all__ = [
 # selective dequant 20260101122246
 # eager mode 20260101122729
 # 65k eager 20260101122954
+# fixed kernels 20260101125838
+# triton upgrade 20260101130113
+# fixed install order 20260101130623

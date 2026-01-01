@@ -96,9 +96,7 @@ if HAS_TRITON:
             )
             # Reinterpret uint8 as E4M3 and convert to float32
             scale = (
-                scale_byte.to(tl.uint8)
-                .to(tl.float8_e4m3fn, bitcast=True)
-                .to(tl.float32)
+                scale_byte.to(tl.uint8).to(tl.float8e4nv, bitcast=True).to(tl.float32)
             )
 
             # Process 8 bytes (16 elements)
