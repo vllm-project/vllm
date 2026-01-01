@@ -60,83 +60,81 @@ async def stream_long_audio(
         "Authorization": f"Bearer {api_key}",
     }
 
-    # Prepare multipart form-data
-    form = aiohttp.FormData()
-    form.add_field("model", model)
-    form.add_field("stream", f"{args.streaming}".lower())
-    form.add_field("language", "en")
-    form.add_field("response_format", "json")
-
     audio_path, reference = data
 
-    # Attach the file
-    form.add_field(
-        "file",
-        open(audio_path, "rb"),
-        filename=os.path.basename(audio_path),
-        content_type="audio/mpeg"
-    )
+    with open(audio_path, "rb") as f:
 
-    # Output file for concurrent mode
-    audio_name = os.path.basename(audio_path)
-    output_file = f"{audio_name}_transcription_{user_id}.txt"
-    buffer = ""
+        # Prepare multipart form-data
+        form = aiohttp.FormData()
+        form.add_field("model", model)
+        form.add_field("stream", f"{args.streaming}".lower())
+        form.add_field("language", "en")
+        form.add_field("response_format", "json")
 
-    print(f"\n[User {user_id}] transcription result:", end=" ")
-    async with session.post(api_url, headers=headers, data=form) as response:
+        # Attach the file
+        form.add_field(
+            "file",
+            f,
+            filename=os.path.basename(audio_path),
+            content_type="audio/mpeg"
+        )
 
-        if response.status != 200:
-            text = await response.text()
-            print(f"\nError from server: {response.status}\n{text}")
-            return
+        # Output file for concurrent mode
+        audio_name = os.path.basename(audio_path)
+        output_file = f"{audio_name}_transcription_{user_id}.txt"
+        buffer = ""
 
-        # Where to write (console or file)
-        f_out = None
-
-        if concurrency > 1:
-            f_out = open(output_file, "w")
-
-        # async for raw_line in response.content:
-        #     line = raw_line.strip()
+        if concurrency == 1:
+            print(f"\n[User {user_id}] transcription result:", end=" ")
+        else:
+            print(f"\n[User {user_id}] transcription result will be saved to {output_file}")
             
-        #     if not line:
-        #         continue
+        async with session.post(api_url, headers=headers, data=form) as response:
 
-        hypothesis = ""
+            if response.status != 200:
+                text = await response.text()
+                print(f"\nError from server: {response.status}\n{text}")
+                return
 
-        async for chunk in response.content.iter_chunked(4096):
-            if not chunk:
-                continue
+            # Where to write (console or file)
+            f_out = None
+            hypothesis = ""
 
-            # line = chunk.decode("utf-8", errors="ignore")
-            text = chunk.decode("utf-8", errors="ignore")
-            buffer += text
+            try:
+                if concurrency > 1:
+                    f_out = open(output_file, "w")
 
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-                if args.streaming:
-                    data = async_process(line)
-                else:
-                    data = sync_process(line)
+                async for chunk in response.content.iter_chunked(4096):
+                    if not chunk:
+                        continue
 
-                if data == -1:
-                    break
+                    text = chunk.decode("utf-8", errors="replace")
+                    buffer += text
 
-                if data is None:
-                    continue
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if args.streaming:
+                            data = async_process(line)
+                        else:
+                            data = sync_process(line)
 
-                if concurrency == 1:
-                    print(data, end="", flush=True)
-                else:
-                    f_out.write(data)
-                    f_out.flush()
+                        if data == -1:
+                            break
 
-                hypothesis += data
+                        if data is None:
+                            continue
 
+                        if concurrency == 1:
+                            print(data, end="", flush=True)
+                        else:
+                            f_out.write(data)
+                            f_out.flush()
 
-        if f_out:
-            f_out.close()
+                        hypothesis += data
+            finally:
+                if f_out:
+                    f_out.close()
 
     # Evaluation
     if reference:
@@ -181,10 +179,11 @@ def get_long_audio_data(model):
         assert transcript_name is not None and transcript_name in transcript_names, \
             f"No mapping found for audio file {audio_name}"
 
-        reference = open(
+        with open(
             os.path.join(transcripts_dir, transcript_name),
             "r"
-        ).read().strip()
+        ) as f:
+            reference = f.read().strip()
         data.append((audio_path, reference))
 
     return data
@@ -195,8 +194,9 @@ async def main(args):
 
     openai_api_base = "http://localhost:8000/v1"
 
+    # data: [(audio_path, reference), ...]
     if args.audio_path:
-        data = [args.audio_path, ""]
+        data = [(args.audio_path, "")]
     else:
         data = get_long_audio_data(args.model)
     
@@ -215,7 +215,6 @@ async def main(args):
                 stream_long_audio(
                     session,
                     data[user_id % len(data)],
-                    # data[-1],
                     args.model,
                     tokenizer,
                     openai_api_base,
