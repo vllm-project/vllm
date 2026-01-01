@@ -86,6 +86,57 @@ def test_sleep_mode():
         assert discard_all == 0
 
 
+def test_wake_up_with_invalid_tags():
+    """Test wake_up behavior with invalid tags"""
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "128",
+        "--enable-sleep-mode",
+    ]
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", "CUDA_VISIBLE_DEVICES": "0"},
+    ) as remote_server:
+        # Put the engine to sleep first
+        response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.json().get("is_sleeping") is True
+        
+        # Test: use completely invalid tag
+        response = requests.post(
+            remote_server.url_for("wake_up"), params={"tags": ["invalid_tag"]}
+        )
+        assert response.status_code == 200
+        # Engine should still be sleeping (no valid tags)
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.json().get("is_sleeping") is True
+        
+        # Test: mix valid and invalid tags
+        response = requests.post(
+            remote_server.url_for("wake_up"), 
+            params={"tags": ["weights", "invalid_tag"]}
+        )
+        assert response.status_code == 200
+        # weights should be awake, but kv_cache is still sleeping
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.json().get("is_sleeping") is True
+        
+        # Wake up remaining parts
+        response = requests.post(
+            remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
+        )
+        assert response.status_code == 200
+        response = requests.get(remote_server.url_for("is_sleeping"))
+        assert response.json().get("is_sleeping") is False
+
+
 def _get_sleep_metrics_from_api(response: requests.Response):
     """Return (awake, weights_offloaded, discard_all)"""
 

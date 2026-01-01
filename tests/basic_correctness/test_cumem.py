@@ -279,3 +279,38 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_wake_up_invalid_tags():
+    """Test wake_up method's handling of invalid tags"""
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    
+    # Generate baseline output
+    output = llm.generate(prompt, sampling_params)
+    
+    # Enter sleep mode
+    llm.sleep(level=1)
+    assert llm.llm_engine.model_executor.is_sleeping
+    
+    # Try to wake up with completely invalid tag
+    llm.wake_up(tags=["invalid_tag"])
+    # Should still be sleeping
+    assert llm.llm_engine.model_executor.is_sleeping
+    
+    # Wake up with mixed valid and invalid tags
+    llm.wake_up(tags=["weights", "invalid_tag", "another_invalid"])
+    # weights should be awake
+    assert "weights" not in llm.llm_engine.model_executor.sleeping_tags
+    assert "kv_cache" in llm.llm_engine.model_executor.sleeping_tags
+    
+    # Fully wake up
+    llm.wake_up(tags=["kv_cache"])
+    assert not llm.llm_engine.model_executor.is_sleeping
+    
+    # Verify functionality
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
