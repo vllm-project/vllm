@@ -252,7 +252,6 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
-        logger.info("load module!!!!!")
         if isinstance(module, PPMissingLayer):
             return
 
@@ -299,7 +298,6 @@ class AutoWeightsLoader:
 
                     continue
 
-                logger.info("calling _load_param from _load_module")
                 yield from self._load_param(
                     prefix, child_params[child_prefix], child_weights
                 )
@@ -331,7 +329,6 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
-        logger.info(f"load_weights: {mapper=}")
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
