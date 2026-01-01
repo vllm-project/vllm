@@ -429,7 +429,6 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
-
 ### Facebook Code World Model (`facebook-cwm`)
 
 Custom tool parser for facebook cwm tool calling format 
@@ -438,7 +437,6 @@ Custom tool parser for facebook cwm tool calling format
 * `facebook/cwm-sft`
 
 Flags: `--tool-call-parser cwm`
-
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
