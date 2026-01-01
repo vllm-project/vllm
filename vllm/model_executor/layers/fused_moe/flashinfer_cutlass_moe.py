@@ -193,8 +193,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc2_expert_weights = w2.view(torch.long)
         elif self.use_deepseek_fp8_block_scale:
             # FP8 BLOCK:
-            #   * dynamic input quantization
-            #   * calculation of input scales is fused in the kernel.
+            #   * hidden_states are bf16
+            #   * dyanmic input quant fused into kernels
             quant_scales = [
                 self.w1_scale,
                 self.w2_scale,
