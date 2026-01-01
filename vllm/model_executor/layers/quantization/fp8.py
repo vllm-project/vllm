@@ -49,7 +49,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    convert_flashinfer_fp8_moe_per_tensor_scales,
+    convert_flashinfer_fp8_moe_per_tensor_scales_for_fi,
     get_flashinfer_moe_backend,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
@@ -928,7 +928,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
                 w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
-                    convert_flashinfer_fp8_moe_per_tensor_scales(
+                    convert_flashinfer_fp8_moe_per_tensor_scales_for_fi(
                         w13_scale=w13_weight_scale,
                         w13_input_scale=w13_input_scale,
                         w2_scale=w2_weight_scale,
