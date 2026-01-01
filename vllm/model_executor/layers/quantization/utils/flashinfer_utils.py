@@ -116,11 +116,13 @@ def apply_flashinfer_per_tensor_scale_fp8(
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
 
+    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
         "FusedMoE flashinfer kernels are only supported for Llama4"
     )
+
     return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
         routing_logits=router_logits,
         routing_bias=routing_bias,
@@ -128,11 +130,8 @@ def apply_flashinfer_per_tensor_scale_fp8(
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
         gemm2_weights=layer.w2_weight,
-        # output1_scales_scalar=layer.output1_scales_scalar,
         output1_scales_scalar=(layer.w2_input_scale * layer.w13_weight_scale),
-        # output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
         output1_scales_gate_scalar=layer.w13_weight_scale,
-        # output2_scales_scalar=layer.output2_scales_scalar,
         output2_scales_scalar=layer.w2_weight_scale,
         num_experts=global_num_experts,
         top_k=top_k,
