@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
@@ -21,7 +23,8 @@ from vllm.entrypoints.openai.serving_responses import (
     extract_tool_types,
 )
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm import envs
 
 
 class MockConversationContext(ConversationContext):
@@ -350,3 +353,59 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+@pytest.mark.asyncio
+async def test_responses_store_lru_eviction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_ENABLE_RESPONSES_API_STORE",
+        lambda: True,
+    )
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_RESPONSES_API_STORE_MAX_ITEMS",
+        lambda: 1,
+    )
+
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "test"
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    models = MagicMock()
+
+    instance = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    instance.response_store["resp_1"] = MagicMock()
+    instance.msg_store["resp_1"] = [MagicMock()]
+    instance.event_store["resp_1"] = (deque(), asyncio.Event())
+    t1 = asyncio.create_task(asyncio.sleep(10))
+    instance.background_tasks["resp_1"] = t1
+    await instance._touch_response_store_id("resp_1")
+
+    instance.response_store["resp_2"] = MagicMock()
+    instance.msg_store["resp_2"] = [MagicMock()]
+    instance.event_store["resp_2"] = (deque(), asyncio.Event())
+    await instance._touch_response_store_id("resp_2")
+
+    await instance._evict_responses_store_if_needed()
+
+    await asyncio.sleep(0)
+
+    assert "resp_2" in instance.response_store
+    assert "resp_2" in instance.msg_store
+    assert "resp_2" in instance.event_store
+
+    assert "resp_1" not in instance.response_store
+    assert "resp_1" not in instance.msg_store
+    assert "resp_1" not in instance.event_store
+    assert t1.cancelled() or t1.cancelling()

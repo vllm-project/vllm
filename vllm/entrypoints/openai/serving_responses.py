@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
@@ -241,6 +241,9 @@ class OpenAIServingResponses(OpenAIServing):
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
 
+        self._responses_store_max_items = envs.VLLM_RESPONSES_API_STORE_MAX_ITEMS
+        self._responses_store_lru: OrderedDict[str, None] = OrderedDict()
+
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove messages from the store.
@@ -256,6 +259,40 @@ class OpenAIServingResponses(OpenAIServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+
+    async def _touch_response_store_id(self, response_id: str) -> None:
+        """Mark a response_id as most recently used for eviction purposes."""
+        async with self.response_store_lock:
+            if response_id in self._responses_store_lru:
+                self._responses_store_lru.move_to_end(response_id)
+            else:
+                self._responses_store_lru[response_id] = None
+
+    async def _evict_responses_store_if_needed(self) -> None:
+        """Evict least-recently-used stored responses to cap memory usage."""
+        if not self.enable_store:
+            return
+        max_items = self._responses_store_max_items
+        if max_items <= 0:
+            return
+
+        while True:
+            async with self.response_store_lock:
+                if len(self._responses_store_lru) <= max_items:
+                    return
+                evicted_id, _ = self._responses_store_lru.popitem(last=False)
+                self.response_store.pop(evicted_id, None)
+
+            # Best-effort cleanup across all stores.
+            self.msg_store.pop(evicted_id, None)
+            if evicted_id in self.event_store:
+                _, new_event_signal = self.event_store[evicted_id]
+                new_event_signal.set()
+                self.event_store.pop(evicted_id, None)
+
+            # Cancel any running background task for the evicted id.
+            if task := self.background_tasks.get(evicted_id):
+                task.cancel()
 
     def _validate_generator_input(
         self, engine_prompt: TokensPrompt
@@ -470,6 +507,8 @@ class OpenAIServingResponses(OpenAIServing):
         # Store the input messages.
         if request.store:
             self.msg_store[request.request_id] = messages
+            await self._touch_response_store_id(request.request_id)
+            await self._evict_responses_store_if_needed()
 
         if request.background:
             created_time = int(time.time())
@@ -484,6 +523,9 @@ class OpenAIServingResponses(OpenAIServing):
             )
             async with self.response_store_lock:
                 self.response_store[response.id] = response
+
+            await self._touch_response_store_id(response.id)
+            await self._evict_responses_store_if_needed()
 
             # Run the request in the background.
             if request.stream:
@@ -738,6 +780,8 @@ class OpenAIServingResponses(OpenAIServing):
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
+            await self._touch_response_store_id(response.id)
+            await self._evict_responses_store_if_needed()
         return response
 
     def _topk_logprobs(
@@ -1067,6 +1111,8 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
+        await self._touch_response_store_id(request.request_id)
+        await self._evict_responses_store_if_needed()
         response = None
         try:
             generator = self.responses_stream_generator(request, *args, **kwargs)
