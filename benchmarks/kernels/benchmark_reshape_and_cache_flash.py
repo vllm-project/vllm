@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
 import time
 
@@ -14,9 +12,9 @@ from vllm.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    FlexibleArgumentParser,
     create_kv_caches_with_random_flash,
 )
 

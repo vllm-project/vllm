@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import AsyncGenerator
-from typing import Optional, Union
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
-    TranscriptionResponse, TranscriptionResponseStreamChoice,
-    TranscriptionStreamResponse, TranslationRequest, TranslationResponse,
-    TranslationResponseStreamChoice, TranslationStreamResponse)
+    ErrorResponse,
+    RequestResponseMetadata,
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranscriptionResponseStreamChoice,
+    TranscriptionResponseVerbose,
+    TranscriptionStreamResponse,
+    TranslationRequest,
+    TranslationResponse,
+    TranslationResponseStreamChoice,
+    TranslationResponseVerbose,
+    TranslationStreamResponse,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
 from vllm.logger import init_logger
@@ -27,26 +34,31 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         task_type="transcribe",
-                         log_error_stack=log_error_stack)
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            task_type="transcribe",
+            log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
+        )
 
     async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest,
-        raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
-               ErrorResponse]:
+        self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
+    ) -> (
+        TranscriptionResponse
+        | TranscriptionResponseVerbose
+        | AsyncGenerator[str, None]
+        | ErrorResponse
+    ):
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -56,15 +68,22 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=TranscriptionResponse,
+            response_class=(
+                TranscriptionResponseVerbose
+                if request.response_format == "verbose_json"
+                else TranscriptionResponse
+            ),
             stream_generator_method=self.transcription_stream_generator,
         )
 
     async def transcription_stream_generator(
-            self, request: TranscriptionRequest,
-            result_generator: list[AsyncGenerator[RequestOutput, None]],
-            request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        self,
+        request: TranscriptionRequest,
+        result_generator: list[AsyncGenerator[RequestOutput, None]],
+        request_id: str,
+        request_metadata: RequestResponseMetadata,
+        audio_duration_s: float,
+    ) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             list_result_generator=result_generator,
@@ -85,25 +104,31 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         task_type="translate",
-                         log_error_stack=log_error_stack)
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            task_type="translate",
+            log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
+        )
 
     async def create_translation(
-        self, audio_data: bytes, request: TranslationRequest,
-        raw_request: Request
-    ) -> Union[TranslationResponse, AsyncGenerator[str, None], ErrorResponse]:
+        self, audio_data: bytes, request: TranslationRequest, raw_request: Request
+    ) -> (
+        TranslationResponse
+        | TranslationResponseVerbose
+        | AsyncGenerator[str, None]
+        | ErrorResponse
+    ):
         """Translation API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranslation
@@ -113,15 +138,22 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=TranslationResponse,
+            response_class=(
+                TranslationResponseVerbose
+                if request.response_format == "verbose_json"
+                else TranslationResponse
+            ),
             stream_generator_method=self.translation_stream_generator,
         )
 
     async def translation_stream_generator(
-            self, request: TranslationRequest,
-            result_generator: list[AsyncGenerator[RequestOutput, None]],
-            request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        self,
+        request: TranslationRequest,
+        result_generator: list[AsyncGenerator[RequestOutput, None]],
+        request_id: str,
+        request_metadata: RequestResponseMetadata,
+        audio_duration_s: float,
+    ) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             list_result_generator=result_generator,
