@@ -150,16 +150,14 @@ if HAS_TRITON:
                 k_q = quantize_nvfp4(k_vals, k_s)
                 v_q = quantize_nvfp4(v_vals, v_s)
 
-                # Pack 2 4-bit values into 1 uint8
-                # k_q is [16], we want 8 bytes
-                for i in range(8):
-                    k_low = k_q[i * 2] & 0x0F
-                    k_high = (k_q[i * 2 + 1] & 0x0F) << 4
-                    tl.store(tgt_key_base + b * 8 + i, (k_low | k_high).to(tl.uint8))
-
-                    v_low = v_q[i * 2] & 0x0F
-                    v_high = (v_q[i * 2 + 1] & 0x0F) << 4
-                    tl.store(tgt_val_base + b * 8 + i, (v_low | v_high).to(tl.uint8))
+                # Pack 16 values into 8 bytes (vectorized)
+                k_q_reshaped = tl.view(k_q, (8, 2))
+                k_packed = (k_q_reshaped[:, 0] & 0x0F) | ((k_q_reshaped[:, 1] & 0x0F) << 4)
+                tl.store(tgt_key_base + b * 8 + tl.arange(0, 8), k_packed.to(tl.uint8))
+                
+                v_q_reshaped = tl.view(v_q, (8, 2))
+                v_packed = (v_q_reshaped[:, 0] & 0x0F) | ((v_q_reshaped[:, 1] & 0x0F) << 4)
+                tl.store(tgt_val_base + b * 8 + tl.arange(0, 8), v_packed.to(tl.uint8))
 
         elif FP8_KV_CACHE:
             tile_pos = tl.arange(0, head_size)

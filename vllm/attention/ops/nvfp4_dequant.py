@@ -102,80 +102,81 @@ if HAS_TRITON:
                 (scale_lo | (scale_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             )
 
-            # Process 8 bytes (16 elements)
-            for i in range(8):
-                byte_idx = block_idx_in_head * 8 + i
-                packed_byte = tl.load(packed_cache_ptr + packed_base + byte_idx)
+            # Process 8 bytes (16 elements) vectorized
+            packed_bytes = tl.load(
+                packed_cache_ptr + packed_base + block_idx_in_head * 8 + tl.arange(0, 8)
+            )
 
-                # Extract two 4-bit values
-                low_nibble = packed_byte & 0x0F
-                high_nibble = (packed_byte >> 4) & 0x0F
+            # Extract 16 values
+            vals_low = packed_bytes & 0x0F
+            vals_high = (packed_bytes >> 4) & 0x0F
 
-                # Dequantize first value
-                sign_0 = tl.where((low_nibble & 0x08) != 0, -1.0, 1.0)
-                mag_idx_0 = low_nibble & 0x07
-                mag_0 = tl.where(
-                    mag_idx_0 == 0,
-                    0.0,
+            # Dequantize first 8 (low nibbles)
+            sign_low = tl.where((vals_low & 0x08) != 0, -1.0, 1.0)
+            mag_idx_low = vals_low & 0x07
+            mag_low = tl.where(
+                mag_idx_low == 0,
+                0.0,
+                tl.where(
+                    mag_idx_low == 1,
+                    0.5,
                     tl.where(
-                        mag_idx_0 == 1,
-                        0.5,
+                        mag_idx_low == 2,
+                        1.0,
                         tl.where(
-                            mag_idx_0 == 2,
-                            1.0,
+                            mag_idx_low == 3,
+                            1.5,
                             tl.where(
-                                mag_idx_0 == 3,
-                                1.5,
+                                mag_idx_low == 4,
+                                2.0,
                                 tl.where(
-                                    mag_idx_0 == 4,
-                                    2.0,
-                                    tl.where(
-                                        mag_idx_0 == 5,
-                                        3.0,
-                                        tl.where(mag_idx_0 == 6, 4.0, 6.0),
-                                    ),
+                                    mag_idx_low == 5,
+                                    3.0,
+                                    tl.where(mag_idx_low == 6, 4.0, 6.0),
                                 ),
                             ),
                         ),
                     ),
-                )
-                val_0 = sign_0 * mag_0 * scale
+                ),
+            )
+            dq_low = sign_low * mag_low * scale
 
-                # Dequantize second value
-                sign_1 = tl.where((high_nibble & 0x08) != 0, -1.0, 1.0)
-                mag_idx_1 = high_nibble & 0x07
-                mag_1 = tl.where(
-                    mag_idx_1 == 0,
-                    0.0,
+            # Dequantize next 8 (high nibbles)
+            sign_high = tl.where((vals_high & 0x08) != 0, -1.0, 1.0)
+            mag_idx_high = vals_high & 0x07
+            mag_high = tl.where(
+                mag_idx_high == 0,
+                0.0,
+                tl.where(
+                    mag_idx_high == 1,
+                    0.5,
                     tl.where(
-                        mag_idx_1 == 1,
-                        0.5,
+                        mag_idx_high == 2,
+                        1.0,
                         tl.where(
-                            mag_idx_1 == 2,
-                            1.0,
+                            mag_idx_high == 3,
+                            1.5,
                             tl.where(
-                                mag_idx_1 == 3,
-                                1.5,
+                                mag_idx_high == 4,
+                                2.0,
                                 tl.where(
-                                    mag_idx_1 == 4,
-                                    2.0,
-                                    tl.where(
-                                        mag_idx_1 == 5,
-                                        3.0,
-                                        tl.where(mag_idx_1 == 6, 4.0, 6.0),
-                                    ),
+                                    mag_idx_high == 5,
+                                    3.0,
+                                    tl.where(mag_idx_high == 6, 4.0, 6.0),
                                 ),
                             ),
                         ),
                     ),
-                )
-                val_1 = sign_1 * mag_1 * scale
+                ),
+            )
+            dq_high = sign_high * mag_high * scale
 
-                # Store to output
-                elem_idx_0 = byte_idx * 2
-                elem_idx_1 = byte_idx * 2 + 1
-                tl.store(output_ptr + out_base + elem_idx_0, val_0.to(tl.bfloat16))
-                tl.store(output_ptr + out_base + elem_idx_1, val_1.to(tl.bfloat16))
+            # Store dequantized values (interleaved)
+            offs_low = block_idx_in_head * 16 + tl.arange(0, 8) * 2
+            offs_high = block_idx_in_head * 16 + tl.arange(0, 8) * 2 + 1
+
+            tl.store(output_ptr + out_base + offs_low, dq_low.to(tl.bfloat16))
+            tl.store(output_ptr + out_base + offs_high, dq_high.to(tl.bfloat16))
 
 
 def dequantize_nvfp4_kv_cache(
