@@ -127,8 +127,7 @@ def get_gpu_memory_info(device: int = 0) -> Dict[str, float]:
     
     allocated = torch.cuda.memory_allocated(device)
     reserved = torch.cuda.memory_reserved(device)
-    free = total_memory - reserved
-    
+    free, _ = torch.cuda.mem_get_info(device)    
     return {
         'total_gb': total_memory / (1024**3),
         'allocated_gb': allocated / (1024**3),
@@ -177,91 +176,53 @@ def get_available_gpu_memory(device: int = 0) -> float:
     if device < 0 or device >= torch.cuda.device_count():
         return -1.0
     
-    torch.cuda.synchronize(device)
-    props = torch.cuda.get_device_properties(device)
-    reserved = torch.cuda.memory_reserved(device)
-    free = props.total_memory - reserved
-    
+        torch.cuda.synchronize(device)
+    free, _ = torch.cuda.mem_get_info(device)
     return free / (1024**3)
 
 
-def clear_gpu_caches(device: Optional[int] = None) -> None:
-    """Clear GPU memory caches for specified device(s).
-    
-    This function releases cached memory back to the GPU allocator,
-    which can help when switching between different workloads or
-    when troubleshooting memory issues.
-    
-    Args:
-        device: Specific GPU ID, or None to clear all devices
-    
-    Example:
-        >>> # Clear cache on current device
-        >>> clear_gpu_caches()
-        >>> # Clear cache on specific device
-        >>> clear_gpu_caches(device=1)
-        >>> # Clear cache on all devices
-        >>> clear_gpu_caches(device=None)
-    """
-    if not torch.cuda.is_available():
+def clear_gpu_caches(device:  Optional[int] = None) -> None:
+    if not torch. cuda.is_available():
         return
     
     if device is not None:
-        if 0 <= device < torch.cuda.device_count():
-            torch.cuda.empty_cache()
+        if 0 <= device < torch.cuda. device_count():
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
     else:
-        for _ in range(torch.cuda.device_count()):
-            torch.cuda.empty_cache()
-
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
 
 @contextmanager
-def device_memory_tracing(device: int = 0) -> Generator[Dict[str, float], None, None]:
-    """Context manager to trace memory usage before and after a code block.
-    
-    This provides a convenient way to measure the memory impact of
-    specific operations or code sections.
-    
-    Args:
-        device: The CUDA device ID to trace (default: 0)
-    
-    Yields:
-        A dictionary containing memory statistics that gets updated
-        with delta information after the context exits.
-    
-    Example:
-        >>> with device_memory_tracing() as mem_before:
-        ...     # Memory stats at entry
-        ...     pass
-        >>> # After exit, mem_before contains delta information
-        >>> print(f"Memory delta: {mem_before.get('delta_gb', 0):.3f} GB")
-    """
+def device_memory_tracing(device: int = 0) -> Generator[Dict[str, float], None, None]: 
     if not torch.cuda.is_available():
-        yield {
+        mem_info = {
             'device': device,
             'before_allocated_gb': 0.0,
-            'after_allocated_gb': 0.0,
+            'after_allocated_gb':  0.0,
             'delta_gb': 0.0,
         }
+        yield mem_info
         return
     
     torch.cuda.synchronize(device)
     before_allocated = torch.cuda.memory_allocated(device)
     
-    yield {
-        'device': device,
+    mem_info = {
+        'device':  device,
         'before_allocated_gb': before_allocated / (1024**3),
     }
+    
+    yield mem_info
     
     # After the context, calculate delta
     torch.cuda.synchronize(device)
-    after_allocated = torch.cuda.memory_allocated(device)
+    after_allocated = torch.cuda. memory_allocated(device)
     
-    yield {
-        'device': device,
-        'before_allocated_gb': before_allocated / (1024**3),
-        'after_allocated_gb': after_allocated / (1024**3),
-        'delta_gb': (after_allocated - before_allocated) / (1024**3),
-    }
+    mem_info['after_allocated_gb'] = after_allocated / (1024**3)
+    mem_info['delta_gb'] = (after_allocated - before_allocated) / (1024**3)
+   
 
 
 def get_device_count() -> int:
@@ -365,13 +326,13 @@ def estimate_model_memory_requirements(
     if precision == "auto":
         if torch.cuda.is_available():
             # Check current precision
-            try:
+                        try:
                 current_dtype = torch.cuda.get_device_properties(0).major
                 if current_dtype >= 8:  # Ampere or newer
                     precision = "bf16"
                 else:
                     precision = "fp16"
-            except:
+            except Exception:
                 precision = "bf16"
         else:
             precision = "fp32"
@@ -409,10 +370,12 @@ def estimate_model_memory_requirements(
         embedding_memory = (vocab_size * hidden_size * bytes_per_param) / (1024**3)
         estimates["embeddings_gb"] = embedding_memory
     
-    # Total estimate
+       # Total estimate
     total = weight_memory
     if "activations_gb" in estimates:
         total += estimates["activations_gb"]
+    if "embeddings_gb" in estimates: 
+        total += estimates["embeddings_gb"]
     estimates["total_estimate_gb"] = total
     
     return estimates
