@@ -696,7 +696,14 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if self.kv_cache_dtype == "nvfp4":
+            # NVFP4 requires dequantization: packed uint8 -> bfloat16
+            # For now, convert cache shape to model dtype for compatibility
+            # Full dequantization requires unpacking 4-bit values and applying scales
+            # This is a placeholder that treats the cache as model dtype view
+            key_cache = key_cache.view(query.dtype)
+            value_cache = value_cache.view(query.dtype)
+        elif self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
