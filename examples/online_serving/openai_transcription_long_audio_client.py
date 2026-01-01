@@ -172,7 +172,7 @@ def get_long_audio_data(model):
 
     for audio_path in audio_paths:
         audio_name = os.path.basename(audio_path)
-        transcript_name = mapping.get(audio_name)
+        transcript_name = mapping.get(audio_name)[0]
         assert transcript_name is not None and transcript_name in transcript_names, (
             f"No mapping found for audio file {audio_name}"
         )
