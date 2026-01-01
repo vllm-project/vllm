@@ -49,8 +49,11 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
+# --8<-- [start:mixer2_gated_rms_norm]
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
+    # --8<-- [end:mixer2_gated_rms_norm]
+
     def __init__(
         self,
         full_hidden_size: int,
@@ -214,6 +217,7 @@ def mamba_v2_sharded_weight_loader(
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# --8<-- [start:mamba_mixer2]
 @CustomOp.register("mamba_mixer2")
 class MambaMixer2(MambaBase, CustomOp):
     """
@@ -225,6 +229,8 @@ class MambaMixer2(MambaBase, CustomOp):
     invariant S4, and is why Mamba is called
     **selective** state spaces)
     """
+
+    # --8<-- [end:mamba_mixer2]
 
     def __init__(
         self,

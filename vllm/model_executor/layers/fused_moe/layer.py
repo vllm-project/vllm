@@ -293,6 +293,7 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+# --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -315,6 +316,8 @@ class FusedMoE(CustomOp):
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
     """
+
+    # --8<-- [end:fused_moe]
 
     def __init__(
         self,
