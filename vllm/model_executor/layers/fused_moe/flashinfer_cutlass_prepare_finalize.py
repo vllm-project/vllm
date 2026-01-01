@@ -188,7 +188,6 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         if not self.use_deepseek_fp8_block_scale:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                # TODO(rob): look at the signature of the nvfp4 case.
                 quant_config.a1_gscale if is_nvfp4 else quant_config.a1_scale,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
