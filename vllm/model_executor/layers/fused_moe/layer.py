@@ -356,7 +356,8 @@ class FusedMoE(CustomOp):
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
-            logger.debug_once("Disabling MoE shared_experts cuda stream")
+            logger.debug_once("Disabling MoE shared_experts cuda stream",
+                                             scope="local")
             self.shared_experts_stream = None
         else:
             # TODO(rob): enable shared expert overlap with non-cuda-alike.
