@@ -16,12 +16,6 @@ from vllm.model_executor.layers.fused_moe.sonic_moe import (
 )
 from vllm.platforms import current_platform
 
-# Skip decorator for Hopper-only tests
-requires_hopper = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Sonic MoE requires Hopper GPU (SM90+)",
-)
-
 requires_cuda = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="CUDA required",
@@ -145,3 +139,86 @@ def test_import_from_fused_moe():
     assert callable(sonic_moe_forward)
     assert callable(permute_weights_for_sonic)
     assert SonicMoEExperts is not None
+
+
+SONIC_MNKS = [
+    (128, 1024, 256),
+    (256, 2048, 512),
+    (512, 4096, 1024),
+]
+SONIC_TOPKS = [2, 4]
+SONIC_NUM_EXPERTS = [8, 16]
+SONIC_DTYPES = [torch.float16, torch.bfloat16]
+
+
+@pytest.mark.parametrize(("m", "n", "k"), SONIC_MNKS)
+@pytest.mark.parametrize("topk", SONIC_TOPKS)
+@pytest.mark.parametrize("num_experts", SONIC_NUM_EXPERTS)
+@pytest.mark.parametrize("dtype", SONIC_DTYPES)
+@pytest.mark.skipif(
+    not is_sonic_moe_supported(),
+    reason="Requires sonicmoe + Hopper GPU",
+)
+def test_sonic_moe_vs_triton(
+    m: int,
+    n: int,
+    k: int,
+    topk: int,
+    num_experts: int,
+    dtype: torch.dtype,
+):
+    """Compare Sonic MoE against Triton reference."""
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoEP,
+    )
+    from vllm.utils.deep_gemm import calc_diff
+
+    if topk > num_experts:
+        pytest.skip(f"topk={topk} > num_experts={num_experts}")
+
+    hidden_states = torch.randn(m, k, device="cuda", dtype=dtype) / 10
+    w1 = torch.randn(num_experts, n, k, device="cuda", dtype=dtype) / 10
+    w2 = torch.randn(num_experts, k, n // 2, device="cuda", dtype=dtype) / 10
+
+    router_logits = torch.randn(m, num_experts, device="cuda", dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1).to(dtype)
+
+    triton_kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG),
+    )
+    out_triton = triton_kernel(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=False,
+        activation="silu",
+        global_num_experts=num_experts,
+    )
+
+    w1_sonic = permute_weights_for_sonic(w1)
+    sonic_kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        SonicMoEExperts(out_dtype=dtype, weights_prepermuted=True),
+    )
+    out_sonic = sonic_kernel(
+        hidden_states=hidden_states,
+        w1=w1_sonic,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=False,
+        activation="silu",
+        global_num_experts=num_experts,
+    )
+
+    diff = calc_diff(out_sonic, out_triton)
+    assert diff < 0.01, f"Diff exceeded 1%: {diff}"
