@@ -57,7 +57,7 @@ def get_attn_backend(
     """Selects which attention backend to use and lazily imports it."""
 
     if kv_cache_dtype is not None:
-        valid_cache_dtypes = get_args(CacheDType)
+        valid_cache_dtypes = get_args(CacheDType) + ("nvfp4",)  # Add nvfp4 support
         assert kv_cache_dtype in valid_cache_dtypes, (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
             f"Valid values are: {valid_cache_dtypes}"
