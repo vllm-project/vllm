@@ -56,11 +56,6 @@ if HAS_TRITON:
         # Block parameters
         BLOCK_HEAD: tl.constexpr,  # Tile size for head dimension
     ):
-        """
-        Dequantize NVFP4 packed KV cache to bfloat16.
-
-        Each program handles one (block_idx, slot_idx, head_idx) combination.
-        """
         # Program indices
         pid = tl.program_id(0)
         total_slots = num_blocks * block_size * num_heads
@@ -88,122 +83,98 @@ if HAS_TRITON:
 
         # NVFP4 layout within packed_head_size:
         # - First head_size//2 bytes: packed 4-bit data (2 values per byte)
-        # - Next head_size//16 * 2 bytes: fp16 scales (one scale per 16 elements)
+        # - Next head_size//16 bytes: E4M3 scales (one scale per 16 elements)
 
         DATA_SIZE: tl.constexpr = head_size // 2
         SCALE_SIZE: tl.constexpr = head_size // 16
 
-        # Process head_size elements (in this simplified version, we loop)
-        # Each byte contains 2 packed 4-bit values
-        for byte_idx in range(DATA_SIZE):
-            # Load packed byte
-            packed_byte = tl.load(packed_cache_ptr + packed_base + byte_idx)
+        # Process blocks of 16 elements
+        for block_idx_in_head in range(SCALE_SIZE):
+            # Load scale (1 byte as E4M3)
+            scale_byte = tl.load(
+                packed_cache_ptr + packed_base + DATA_SIZE + block_idx_in_head
+            )
+            # Reinterpret uint8 as E4M3 and convert to float32
+            scale = (
+                scale_byte.to(tl.uint8)
+                .to(tl.float8_e4m3fn, bitcast=True)
+                .to(tl.float32)
+            )
 
-            # Extract two 4-bit values
-            low_nibble = packed_byte & 0x0F  # Lower 4 bits -> first value
-            high_nibble = (packed_byte >> 4) & 0x0F  # Upper 4 bits -> second value
+            # Process 8 bytes (16 elements)
+            for i in range(8):
+                byte_idx = block_idx_in_head * 8 + i
+                packed_byte = tl.load(packed_cache_ptr + packed_base + byte_idx)
 
-            # Determine which scale block these values belong to
-            elem_idx_0 = byte_idx * 2
-            elem_idx_1 = byte_idx * 2 + 1
-            scale_idx_0 = elem_idx_0 // 16
-            scale_idx_1 = elem_idx_1 // 16
+                # Extract two 4-bit values
+                low_nibble = packed_byte & 0x0F
+                high_nibble = (packed_byte >> 4) & 0x0F
 
-            # Load scales (stored as fp16 after data section)
-            scale_offset_0 = DATA_SIZE + scale_idx_0 * 2
-            scale_offset_1 = DATA_SIZE + scale_idx_1 * 2
-
-            # Load scale bytes and reinterpret as fp16
-            scale_bytes_0_lo = tl.load(
-                packed_cache_ptr + packed_base + scale_offset_0
-            ).to(tl.uint16)
-            scale_bytes_0_hi = tl.load(
-                packed_cache_ptr + packed_base + scale_offset_0 + 1
-            ).to(tl.uint16)
-            scale_u16_0 = scale_bytes_0_lo | (scale_bytes_0_hi << 8)
-
-            scale_bytes_1_lo = tl.load(
-                packed_cache_ptr + packed_base + scale_offset_1
-            ).to(tl.uint16)
-            scale_bytes_1_hi = tl.load(
-                packed_cache_ptr + packed_base + scale_offset_1 + 1
-            ).to(tl.uint16)
-            scale_u16_1 = scale_bytes_1_lo | (scale_bytes_1_hi << 8)
-
-            # Convert uint16 to float16 view (reinterpret bits)
-            scale_0 = scale_u16_0.to(tl.float16, bitcast=True).to(tl.float32)
-            scale_1 = scale_u16_1.to(tl.float16, bitcast=True).to(tl.float32)
-
-            # Dequantize: extract sign and magnitude from 4-bit value
-            # Bit 3 = sign, Bits 0-2 = magnitude index
-            sign_0 = tl.where((low_nibble & 0x08) != 0, -1.0, 1.0)
-            mag_idx_0 = low_nibble & 0x07
-
-            sign_1 = tl.where((high_nibble & 0x08) != 0, -1.0, 1.0)
-            mag_idx_1 = high_nibble & 0x07
-
-            # Magnitude lookup (NVFP4 uses specific magnitude values)
-            # For simplicity, use approximate linear mapping
-            # True NVFP4: [0, 0.5, 1, 1.5, 2, 3, 4, 6]
-            mag_0 = tl.where(
-                mag_idx_0 == 0,
-                0.0,
-                tl.where(
-                    mag_idx_0 == 1,
-                    0.5,
+                # Dequantize first value
+                sign_0 = tl.where((low_nibble & 0x08) != 0, -1.0, 1.0)
+                mag_idx_0 = low_nibble & 0x07
+                mag_0 = tl.where(
+                    mag_idx_0 == 0,
+                    0.0,
                     tl.where(
-                        mag_idx_0 == 2,
-                        1.0,
+                        mag_idx_0 == 1,
+                        0.5,
                         tl.where(
-                            mag_idx_0 == 3,
-                            1.5,
+                            mag_idx_0 == 2,
+                            1.0,
                             tl.where(
-                                mag_idx_0 == 4,
-                                2.0,
+                                mag_idx_0 == 3,
+                                1.5,
                                 tl.where(
-                                    mag_idx_0 == 5,
-                                    3.0,
-                                    tl.where(mag_idx_0 == 6, 4.0, 6.0),
+                                    mag_idx_0 == 4,
+                                    2.0,
+                                    tl.where(
+                                        mag_idx_0 == 5,
+                                        3.0,
+                                        tl.where(mag_idx_0 == 6, 4.0, 6.0),
+                                    ),
                                 ),
                             ),
                         ),
                     ),
-                ),
-            )
+                )
+                val_0 = sign_0 * mag_0 * scale
 
-            mag_1 = tl.where(
-                mag_idx_1 == 0,
-                0.0,
-                tl.where(
-                    mag_idx_1 == 1,
-                    0.5,
+                # Dequantize second value
+                sign_1 = tl.where((high_nibble & 0x08) != 0, -1.0, 1.0)
+                mag_idx_1 = high_nibble & 0x07
+                mag_1 = tl.where(
+                    mag_idx_1 == 0,
+                    0.0,
                     tl.where(
-                        mag_idx_1 == 2,
-                        1.0,
+                        mag_idx_1 == 1,
+                        0.5,
                         tl.where(
-                            mag_idx_1 == 3,
-                            1.5,
+                            mag_idx_1 == 2,
+                            1.0,
                             tl.where(
-                                mag_idx_1 == 4,
-                                2.0,
+                                mag_idx_1 == 3,
+                                1.5,
                                 tl.where(
-                                    mag_idx_1 == 5,
-                                    3.0,
-                                    tl.where(mag_idx_1 == 6, 4.0, 6.0),
+                                    mag_idx_1 == 4,
+                                    2.0,
+                                    tl.where(
+                                        mag_idx_1 == 5,
+                                        3.0,
+                                        tl.where(mag_idx_1 == 6, 4.0, 6.0),
+                                    ),
                                 ),
                             ),
                         ),
                     ),
-                ),
-            )
+                )
+                val_1 = sign_1 * mag_1 * scale
 
-            # Final dequantized values
-            val_0 = sign_0 * mag_0 * scale_0
-            val_1 = sign_1 * mag_1 * scale_1
-
-            # Store to output as bfloat16
-            tl.store(output_ptr + out_base + elem_idx_0, val_0.to(tl.bfloat16))
-            tl.store(output_ptr + out_base + elem_idx_1, val_1.to(tl.bfloat16))
+                # Store to output
+                elem_idx_0 = byte_idx * 2
+                elem_idx_1 = byte_idx * 2 + 1
+                tl.store(output_ptr + out_base + elem_idx_0, val_0.to(tl.bfloat16))
+                tl.store(output_ptr + out_base + elem_idx_1, val_1.to(tl.bfloat16))
 
 
 def dequantize_nvfp4_kv_cache(

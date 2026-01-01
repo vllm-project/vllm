@@ -27,6 +27,41 @@ except ImportError:
 if HAS_TRITON:
 
     @triton.jit
+    def quantize_nvfp4(val, scale):
+        # NVFP4 magnitude set: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+        # Rounded midpoints: [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0]
+        norm_val = tl.abs(val / scale)
+        sign = tl.where(val < 0, 8, 0)  # 4th bit is sign
+
+        idx = tl.where(
+            norm_val < 0.25,
+            0,
+            tl.where(
+                norm_val < 0.75,
+                1,
+                tl.where(
+                    norm_val < 1.25,
+                    2,
+                    tl.where(
+                        norm_val < 1.75,
+                        3,
+                        tl.where(
+                            norm_val < 2.5,
+                            4,
+                            tl.where(
+                                norm_val < 3.5,
+                                5,
+                                tl.where(norm_val < 5.0, 6, 7),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        return (sign | idx).to(tl.uint8)
+
+    @triton.jit
     def reshape_and_cache_kernel_flash(
         key_ptr,  # [num_tokens, num_heads, head_size]
         value_ptr,  # [num_tokens, num_heads, head_size]
@@ -36,100 +71,114 @@ if HAS_TRITON:
         k_scale,  # float32
         v_scale,  # float32
         # strides
-        key_stride: tl.int64,
-        value_stride: tl.int64,
+        key_stride_tok: tl.int64,
+        key_stride_head: tl.int64,
+        value_stride_tok: tl.int64,
+        value_stride_head: tl.int64,
         block_stride: tl.int64,
         page_stride: tl.int64,
+        head_stride: tl.int64,
         num_heads: tl.constexpr,
         head_size: tl.constexpr,
         block_size: tl.constexpr,
         # FP8 and NVFP4 flags
         FP8_KV_CACHE: tl.constexpr,
         NVFP4_KV_CACHE: tl.constexpr,
-        # tune parameters
-        TILE_SIZE: tl.constexpr,
     ):
         token_idx = tl.program_id(axis=0)
+        head_idx = tl.program_id(axis=1)
+
         slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
         if slot_idx < 0:
-            # Padding token that should be ignored.
             return
-
-        tile_i = tl.program_id(axis=1)
-        tile_offs = tl.arange(0, TILE_SIZE)
-        tile_pos = tile_i * TILE_SIZE + tile_offs
 
         block_idx = slot_idx // block_size
         block_offset = slot_idx % block_size
 
-        src_key_idx = token_idx * key_stride
-        src_value_idx = token_idx * value_stride
-
-        tgt_idx = block_idx * block_stride + block_offset * page_stride
-
-        # [TILE_SIZE]
-        key_load = tl.load(
-            key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
+        src_key_ptr = key_ptr + token_idx * key_stride_tok + head_idx * key_stride_head
+        src_val_ptr = (
+            value_ptr + token_idx * value_stride_tok + head_idx * value_stride_head
         )
 
-        # [TILE_SIZE]
-        value_load = tl.load(
-            value_ptr + src_value_idx + tile_pos,
-            mask=tile_pos < (num_heads * head_size),
+        tgt_key_base = (
+            key_cache_ptr
+            + block_idx * block_stride
+            + block_offset * page_stride
+            + head_idx * head_stride
+        )
+        tgt_val_base = (
+            value_cache_ptr
+            + block_idx * block_stride
+            + block_offset * page_stride
+            + head_idx * head_stride
         )
 
         if NVFP4_KV_CACHE:
-            # NVFP4 quantization with block-based microscaling
-            # packed_head_size = head_size // 2 + head_size // 16
-            PHS: tl.constexpr = head_size // 2 + head_size // 16
+            # Block-based microscaling (16 elements per block)
             DATA_SIZE: tl.constexpr = head_size // 2
             SCALE_SIZE: tl.constexpr = head_size // 16
 
-            # For simplicity in this version, just store the values as-is
-            # with simple quantization - full NVFP4 requires more complex
-            # block-based microscaling
-            tl.store(
-                key_cache_ptr + tgt_idx + tile_pos,
-                key_load.to(tl.uint8),
-                mask=tile_pos < (num_heads * PHS),
-            )
-            tl.store(
-                value_cache_ptr + tgt_idx + tile_pos,
-                value_load.to(tl.uint8),
-                mask=tile_pos < (num_heads * PHS),
-            )
+            # Process in blocks of 16
+            for b in range(SCALE_SIZE):
+                offs = b * 16 + tl.arange(0, 16)
+                k_vals = tl.load(src_key_ptr + offs)
+                v_vals = tl.load(src_val_ptr + offs)
+
+                # Compute scales (max / 6.0)
+                k_s = tl.max(tl.abs(k_vals)) / 6.0 + 1e-6
+                v_s = tl.max(tl.abs(v_vals)) / 6.0 + 1e-6
+
+                # Store scales as E4M3 at the end of the packed head
+                tl.store(
+                    tgt_key_base + DATA_SIZE + b,
+                    k_s.to(tl.float8_e4m3fn).to(tl.uint8),
+                )
+                tl.store(
+                    tgt_val_base + DATA_SIZE + b,
+                    v_s.to(tl.float8_e4m3fn).to(tl.uint8),
+                )
+
+                # Quantize
+                k_q = quantize_nvfp4(k_vals, k_s)
+                v_q = quantize_nvfp4(v_vals, v_s)
+
+                # Pack 2 4-bit values into 1 uint8
+                # k_q is [16], we want 8 bytes
+                for i in range(8):
+                    k_low = k_q[i * 2] & 0x0F
+                    k_high = (k_q[i * 2 + 1] & 0x0F) << 4
+                    tl.store(tgt_key_base + b * 8 + i, (k_low | k_high).to(tl.uint8))
+
+                    v_low = v_q[i * 2] & 0x0F
+                    v_high = (v_q[i * 2 + 1] & 0x0F) << 4
+                    tl.store(tgt_val_base + b * 8 + i, (v_low | v_high).to(tl.uint8))
 
         elif FP8_KV_CACHE:
-            # tl.store will do the correct implicit cast to fp8,
-            # based on the key_cache_ptr.dtype.element_ty
+            # [TILE_SIZE] loop fallback or optimization needed if TILE_SIZE used
+            # For now, handle full head in this thread
+            tile_pos = tl.arange(0, head_size)
+            key_load = tl.load(src_key_ptr + tile_pos)
+            value_load = tl.load(src_val_ptr + tile_pos)
+
             key_tile = (
                 key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
             )
-            if value_load.dtype.is_fp8():
-                value_tile = value_load
-            else:
-                value_tile = value_load / tl.load(v_scale)
+            value_tile = (
+                value_load
+                if value_load.dtype.is_fp8()
+                else value_load / tl.load(v_scale)
+            )
+
             tl.store(
-                key_cache_ptr + tgt_idx + tile_pos,
-                key_tile.to(key_cache_ptr.dtype.element_ty),
-                mask=tile_pos < (num_heads * head_size),
+                tgt_key_base + tile_pos, key_tile.to(key_cache_ptr.dtype.element_ty)
             )
             tl.store(
-                value_cache_ptr + tgt_idx + tile_pos,
-                value_tile.to(value_cache_ptr.dtype.element_ty),
-                mask=tile_pos < (num_heads * head_size),
+                tgt_val_base + tile_pos, value_tile.to(value_cache_ptr.dtype.element_ty)
             )
         else:
-            tl.store(
-                key_cache_ptr + tgt_idx + tile_pos,
-                key_load,
-                mask=tile_pos < (num_heads * head_size),
-            )
-            tl.store(
-                value_cache_ptr + tgt_idx + tile_pos,
-                value_load,
-                mask=tile_pos < (num_heads * head_size),
-            )
+            tile_pos = tl.arange(0, head_size)
+            tl.store(tgt_key_base + tile_pos, tl.load(src_key_ptr + tile_pos))
+            tl.store(tgt_val_base + tile_pos, tl.load(src_val_ptr + tile_pos))
 
 
 def triton_reshape_and_cache_flash(
@@ -168,25 +217,21 @@ def triton_reshape_and_cache_flash(
     if kv_cache_dtype == "nvfp4":
         if original_head_size is not None:
             head_size = original_head_size
-        packed_head_size = head_size // 2 + head_size // 16
-    else:
-        packed_head_size = head_size
 
     block_size = key_cache.shape[1]
 
     # Compute strides
-    key_stride = key.stride(0)
-    value_stride = value.stride(0)
+    key_stride_tok = key.stride(0)
+    key_stride_head = key.stride(1)
+    value_stride_tok = value.stride(0)
+    value_stride_head = value.stride(1)
+
     block_stride = key_cache.stride(0)
     page_stride = key_cache.stride(1)
+    head_stride = key_cache.stride(2)
 
-    # Tile size for processing
-    TILE_SIZE = 128  # Process 128 elements at a time
-
-    # Grid: (num_tokens, num_tiles_per_token)
-    num_elements = num_heads * head_size
-    num_tiles = (num_elements + TILE_SIZE - 1) // TILE_SIZE
-    grid = (num_tokens, num_tiles)
+    # Grid: (num_tokens, num_heads)
+    grid = (num_tokens, num_heads)
 
     # Determine cache type flags
     fp8_kv_cache = kv_cache_dtype.startswith("fp8")
@@ -200,14 +245,16 @@ def triton_reshape_and_cache_flash(
         slot_mapping,
         k_scale,
         v_scale,
-        key_stride,
-        value_stride,
+        key_stride_tok,
+        key_stride_head,
+        value_stride_tok,
+        value_stride_head,
         block_stride,
         page_stride,
+        head_stride,
         num_heads,
         head_size,
         block_size,
         FP8_KV_CACHE=fp8_kv_cache,
         NVFP4_KV_CACHE=nvfp4_kv_cache,
-        TILE_SIZE=TILE_SIZE,
     )
