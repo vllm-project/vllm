@@ -282,8 +282,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # layers in the draft model.
         found_draft = False
         if self.speculative_config and get_pp_group().is_last_rank:
-            # use ifs and not elifs to allow multiple
-            # draft models to be initialized
+            # allow multiple draft methods to be used together
             if self.speculative_config.method == "ngram" \
                 or self.speculative_config.method == "ngram-eagle":
                 self.drafter_ngram = NgramProposer(self.vllm_config)

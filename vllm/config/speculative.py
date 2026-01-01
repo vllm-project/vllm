@@ -245,7 +245,7 @@ class SpeculativeConfig:
         # for methods like ngram-eagle
         if self.num_speculative_tokens_per_method is not None:
             assert all(
-                isinstance(v, int) and v > 0
+                v > 0
                 for v in self.num_speculative_tokens_per_method.values()), (
                     "All values in num_speculative_tokens_per_method must be "
                     "positive integers.")
