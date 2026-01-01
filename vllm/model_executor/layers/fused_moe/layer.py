@@ -1006,16 +1006,7 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        import time
-
-        start = time.perf_counter()
-        loaded_weight = loaded_weight.contiguous()
-        done_cont = time.perf_counter()
         expert_data.copy_(loaded_weight)
-        done = time.perf_counter()
-        logger.info(
-            f"{done_cont - start:.3f}s to contiguous, {done - done_cont:.3f}s to copy"
-        )
 
     def _load_w2(
         self,
