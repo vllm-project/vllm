@@ -109,12 +109,14 @@ markers = [
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 
-[tool.ty.src]
-root = "./vllm"
-respect-ignore-files = true
+[tool.ty.rules]
+# Minimize noise from optional/extra dependencies not installed in pre-commit environment
+unresolved-import = "ignore"
+unresolved-attribute = "ignore"
 
-[tool.ty.environment]
-python = "./.venv"
+# Be tolerant with framework/typing edge-cases and runtime-validated code paths
+possibly-missing-import = "ignore"
+possibly-missing-attribute = "ignore"
 
 [tool.typos.files]
 # these files may be written in non english words
