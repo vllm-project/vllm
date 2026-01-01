@@ -56,7 +56,7 @@ class CacheConfig:
     set the GPU memory utilization to 0.5 for each instance."""
     swap_space: float = Field(default=4, ge=0)
     """Size of the CPU swap space per GPU (in GiB)."""
-    cache_dtype: CacheDType = "auto"
+    cache_dtype: str = "auto"  # Changed from CacheDType to allow nvfp4
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).

@@ -55,9 +55,9 @@ class KVCacheSpec:
         """
         Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
         """
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All layers in the same KV cache group must be the same."
-        )
+        assert all(
+            spec == specs[0] for spec in specs[1:]
+        ), "All layers in the same KV cache group must be the same."
         return copy.deepcopy(specs[0])
 
 
@@ -66,15 +66,24 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    cache_dtype_str: str = "auto"  # Added for NVFP4 support
 
     @property
     def page_size_bytes(self) -> int:
+        # For NVFP4, use packed head size: data (head_size//2) + scales (head_size//16)
+        # and 1 byte per element (uint8)
+        if self.cache_dtype_str == "nvfp4":
+            packed_head_size = self.head_size // 2 + self.head_size // 16
+            element_size = 1  # uint8
+        else:
+            packed_head_size = self.head_size
+            element_size = get_dtype_size(self.dtype)
         return (
-            2
+            2  # K and V
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
+            * packed_head_size
+            * element_size
         )
 
 
@@ -123,9 +132,9 @@ class FullAttentionSpec(AttentionSpec):
         Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
+        assert all(
+            isinstance(spec, FullAttentionSpec) for spec in specs
+        ), "All attention layers in the same KV cache group must be FullAttentionSpec."
 
         sliding_window = set(
             spec.sliding_window for spec in specs if spec.sliding_window is not None
@@ -135,14 +144,15 @@ class FullAttentionSpec(AttentionSpec):
             for spec in specs
             if spec.attention_chunk_size is not None
         )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
+        assert not any(
+            isinstance(spec, MLAAttentionSpec) for spec in specs
+        ), "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
+            cache_dtype_str=specs[0].cache_dtype_str,  # Propagate cache_dtype_str
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -181,9 +191,9 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
-        )
+        assert all(
+            isinstance(spec, MLAAttentionSpec) for spec in specs
+        ), "All attention layers in the same KV cache group must be MLAAttentionSpec."
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same "
@@ -200,7 +210,7 @@ class MLAAttentionSpec(FullAttentionSpec):
 
 @dataclass(frozen=True)
 class ChunkedLocalAttentionSpec(AttentionSpec):
-    attention_chunk_size: int
+    attention_chunk_size: int = -1  # Required, must be set explicitly
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -219,12 +229,12 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 
 @dataclass(frozen=True)
 class SlidingWindowSpec(AttentionSpec):
-    sliding_window: int
+    sliding_window: int = -1  # Required, must be set explicitly
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
-            "DCP not support sliding window."
-        )
+        assert (
+            vllm_config.parallel_config.decode_context_parallel_size == 1
+        ), "DCP not support sliding window."
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 

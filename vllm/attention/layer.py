@@ -164,11 +164,12 @@ class Attention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
+        self.kv_cache_dtype_str = kv_cache_dtype  # Store string for NVFP4 support
         if num_kv_heads is None:
             num_kv_heads = num_heads
-        assert num_heads % num_kv_heads == 0, (
-            f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
-        )
+        assert (
+            num_heads % num_kv_heads == 0
+        ), f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(
@@ -387,15 +388,16 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         if self.sliding_window is not None:
-            assert not vllm_config.model_config.use_mla, (
-                "MLA is not supported for slidingwindow"
-            )
+            assert (
+                not vllm_config.model_config.use_mla
+            ), "MLA is not supported for slidingwindow"
             return SlidingWindowSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 sliding_window=self.sliding_window,
+                cache_dtype_str=self.kv_cache_dtype_str,
             )
         else:
             return FullAttentionSpec(
@@ -403,6 +405,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
+                cache_dtype_str=self.kv_cache_dtype_str,
             )
 
 
