@@ -122,7 +122,6 @@ def apply_flashinfer_per_tensor_scale_fp8(
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
         "FusedMoE flashinfer kernels are only supported for Llama4"
     )
-
     return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
         routing_logits=router_logits,
         routing_bias=routing_bias,
