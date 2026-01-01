@@ -144,7 +144,7 @@ def apply_flashinfer_per_tensor_scale_fp8(
     )
 
 
-def convert_flashinfer_fp8_moe_per_tensor_scales_for_fi(
+def convert_fp8_moe_per_tensor_scales_for_fi(
     w13_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
     w2_scale: torch.Tensor,
