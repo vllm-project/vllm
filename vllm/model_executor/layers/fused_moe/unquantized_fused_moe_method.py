@@ -30,7 +30,10 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    swap_w13_to_w31,
+)
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -258,9 +261,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             if self.flashinfer_cutlass_moe_enabled:
                 self.use_inplace = False
                 # Swap halves to arrange as [w3; w1] (kernel expectation)
-                w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
-                w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
-                layer.w13_weight.data = w13_weight_swapped.contiguous()
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                replace_parameter(layer, "w13_weight", w13_weight)
 
                 self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
