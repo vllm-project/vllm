@@ -951,6 +951,9 @@ class FusedMoE(CustomOp):
                 load_full=load_full_w2,
             )
         elif shard_id in ("w1", "w3"):
+            logger.info(
+                f"{loaded_weight.is_contiguous()=} | {expert_data.is_contiguous()=}"
+            )
             self._load_w13(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
@@ -1006,7 +1009,16 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+        import time
+
+        start = time.perf_counter()
+        loaded_weight = loaded_weight.contiguous()
+        done_cont = time.perf_counter()
         expert_data.copy_(loaded_weight)
+        done = time.perf_counter()
+        logger.info(
+            f"{done_cont - start:.3f}s to contiguous, {done - done_cont:.3f}s to copy"
+        )
 
     def _load_w2(
         self,
@@ -1259,6 +1271,7 @@ class FusedMoE(CustomOp):
                 else "weight_scale" in weight_name
             ) or "input_scale" in weight_name
             if is_per_tensor:
+                logger.info("_load_per_tensor_weight_scale")
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
@@ -1276,6 +1289,7 @@ class FusedMoE(CustomOp):
                 loaded_weight_hidden_out = loaded_weight.shape[-2]
                 param_hidden_out = param.data.shape[-2] * self.tp_size
                 if loaded_weight_hidden_out == param_hidden_out:
+                    logger.info("_load_combined_w13_weight_scale")
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
@@ -1287,6 +1301,7 @@ class FusedMoE(CustomOp):
             # For other weights, call _load_model_weight_or_group_weight_scale()
             # to load it.
             if "weight" in weight_name:
+                logger.info(f"_load_model_weight_or_group_weight_scale: {weight_name}")
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1348,6 +1363,7 @@ class FusedMoE(CustomOp):
 
         # Case model weights
         if "weight" in weight_name:
+            # logger.info("H: _load_model_weight_or_group_weight_scale")
             self._load_model_weight_or_group_weight_scale(
                 shard_id=shard_id,
                 shard_dim=shard_dim,

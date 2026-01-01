@@ -165,8 +165,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
-                self.w1_scale,  # done: g1_alphas, layer.output1_scales_gate_scalar.squeeze(), # noqa: E501
-                self.w2_scale,  # done: a2_gscale, layer.output2_scales_scalar.squeeze(), # noqa: E501
+                self.w1_scale,  # done: g1_alphas, layer.output1_scales_gate_scalar.squeeze(),  # noqa: E501
+                self.w2_scale,  # done: a2_gscale, layer.output2_scales_scalar.squeeze(),       # noqa: E501
                 self.a2_scale,  # done: self.g2_alphas, # layer.w2_input_scale_inv
                 self.a1_scale,  # done: self.a1_gscale, # layer.w13_input_scale
             ]

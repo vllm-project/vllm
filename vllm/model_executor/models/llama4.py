@@ -432,6 +432,7 @@ class Llama4Model(LlamaModel):
 
         # Whether the MoE expert weights are loaded successfully.
         expert_param_loaded = False
+        loaded_weight = loaded_weight.to("cuda")
 
         # If fused is True, the loaded weight is in the layout of:
         # [num_experts, hidden_in, hidden_out], so we must transpose the last
@@ -520,6 +521,21 @@ class Llama4Model(LlamaModel):
             loaded_params.add(full_param_name)
             expert_param_loaded = True
 
+        # start = time.perf_counter()
+        # if isinstance(loaded_weight, tuple):
+        #     for w in loaded_weight:
+        #         w = w.contiguous()
+        #         w = w.to("cpu")
+        #     for w in new_loaded_weight:
+        #         w = w.contiguous()
+        #         w = w.to("cpu")
+        # else:
+        #     loaded_weight = loaded_weight.contiguous()
+        #     loaded_weight = loaded_weight.to("cpu")
+        #     new_loaded_weight = new_loaded_weight.contiguous()
+        #     new_loaded_weight = new_loaded_weight.to("cpu")
+        end = time.perf_counter()
+        logger.info(f"move to cpu time: {end - start}s")
         return expert_param_loaded
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

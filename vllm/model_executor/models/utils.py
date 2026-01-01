@@ -195,6 +195,7 @@ class AutoWeightsLoader:
         param: nn.Parameter,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
+        logger.info("Load param!!!!!")
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
@@ -215,6 +216,7 @@ class AutoWeightsLoader:
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            logger.info(f"{weight_qualname=}: {weight_data.is_contiguous()=}")
             weight_loader(param, weight_data)
 
             logger.debug("Loaded weight %s with shape %s", weight_qualname, param.shape)
@@ -250,6 +252,7 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
+        logger.info("load module!!!!!")
         if isinstance(module, PPMissingLayer):
             return
 
@@ -258,6 +261,7 @@ class AutoWeightsLoader:
         if module != self.module:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
+                logger.info("calling module_load_weights")
                 loaded_params = module_load_weights(weights)
                 if loaded_params is None:
                     logger.warning(
@@ -285,6 +289,7 @@ class AutoWeightsLoader:
 
                     continue
 
+                logger.info("calling _load_module from _load_module")
                 yield from self._load_module(
                     prefix, child_modules[child_prefix], child_weights
                 )
@@ -294,6 +299,7 @@ class AutoWeightsLoader:
 
                     continue
 
+                logger.info("calling _load_param from _load_module")
                 yield from self._load_param(
                     prefix, child_params[child_prefix], child_weights
                 )
@@ -325,6 +331,7 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        logger.info(f"load_weights: {mapper=}")
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
