@@ -660,8 +660,9 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 # Pass the same chat template kwargs as used in tokenization
-                chat_template_kwargs = self.default_chat_template_kwargs | (
-                    request.chat_template_kwargs or {}
+                chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                    request.chat_template_kwargs,
+                    self.default_chat_template_kwargs,
                 )
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
@@ -1442,8 +1443,9 @@ class OpenAIServingChat(OpenAIServing):
                         )
 
                     # Pass the same chat template kwargs as used in tokenization
-                    chat_template_kwargs = self.default_chat_template_kwargs | (
-                        request.chat_template_kwargs or {}
+                    chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                        request.chat_template_kwargs,
+                        self.default_chat_template_kwargs,
                     )
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
