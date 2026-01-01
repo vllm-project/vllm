@@ -119,3 +119,4 @@ __all__ = [
 # fixed install order 20260101130623
 # float8e4nv fix 20260101131924
 # bitcast fix 20260101132230
+# fp16-scales fix 20260101132643

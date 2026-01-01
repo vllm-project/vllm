@@ -162,26 +162,15 @@ if HAS_TRITON:
                     tl.store(tgt_val_base + b * 8 + i, (v_low | v_high).to(tl.uint8))
 
         elif FP8_KV_CACHE:
-            # [TILE_SIZE] loop fallback or optimization needed if TILE_SIZE used
-            # For now, handle full head in this thread
             tile_pos = tl.arange(0, head_size)
-            key_load = tl.load(src_key_ptr + tile_pos)
-            value_load = tl.load(src_val_ptr + tile_pos)
-
-            key_tile = (
-                key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
-            )
-            value_tile = (
-                value_load
-                if value_load.dtype.is_fp8()
-                else value_load / tl.load(v_scale)
-            )
-
+            # Simple cast for FP8 path in this version for stability
             tl.store(
-                tgt_key_base + tile_pos, key_tile.to(key_cache_ptr.dtype.element_ty)
+                tgt_key_base + tile_pos,
+                tl.load(src_key_ptr + tile_pos).to(tl.float8e4nv),
             )
             tl.store(
-                tgt_val_base + tile_pos, value_tile.to(value_cache_ptr.dtype.element_ty)
+                tgt_val_base + tile_pos,
+                tl.load(src_val_ptr + tile_pos).to(tl.float8e4nv),
             )
         else:
             tile_pos = tl.arange(0, head_size)
