@@ -49,8 +49,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+    convert_flashinfer_fp8_moe_per_tensor_scales,
     get_flashinfer_moe_backend,
-    register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
@@ -893,6 +893,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_weight: torch.Tensor,
         w13_weight_scale: torch.Tensor,
         w2_weight_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
     ) -> None:
         if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             assert self.block_quant
@@ -937,9 +939,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
-                # TODO(rob): this function is a hack that renames the scaling
-                # factors in the Module. This is a hack we should clean up.
-                register_moe_scaling_factors(layer)
+                w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
+                    convert_flashinfer_fp8_moe_per_tensor_scales(
+                        w13_scale=w13_weight_scale,
+                        w13_input_scale=w13_input_scale,
+                        w2_scale=w2_weight_scale,
+                        w2_input_scale=w2_input_scale,
+                    )
+                )
+
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
         elif self.fp8_backend == Fp8MoeBackend.AITER:
@@ -1093,7 +1101,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Shuffle weights into the runtime format.
         self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
         )
 
         # Setup modular kernel for TP case.
@@ -1427,7 +1441,13 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         # Shuffle weights into the runtime format.
         self._convert_weights_to_kernel_format(
-            layer, w13_weight, w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
         )
 
         # Setup modular kernel for TP case.
