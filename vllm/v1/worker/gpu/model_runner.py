@@ -968,11 +968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Only for compatibility with the existing model runner and scheduler.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
-            logprobs=None,
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore
-            pooler_output=[],
-            kv_connector_output=None,
-            num_nans_in_logits=None,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
