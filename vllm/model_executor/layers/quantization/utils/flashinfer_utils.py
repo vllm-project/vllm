@@ -140,9 +140,12 @@ def apply_flashinfer_per_tensor_scale_fp8(
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
         gemm2_weights=layer.w2_weight,
-        output1_scales_scalar=layer.output1_scales_scalar,
-        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
-        output2_scales_scalar=layer.output2_scales_scalar,
+        # output1_scales_scalar=layer.output1_scales_scalar,
+        output1_scales_scalar=(layer.w2_input_scale * layer.w13_scale),
+        # output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+        output1_scales_gate_scalar=layer.w13_scale,
+        # output2_scales_scalar=layer.output2_scales_scalar,
+        output2_scales_scalar=layer.w2_scale,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
@@ -164,6 +167,7 @@ def convert_flashinfer_fp8_moe_scales(
     w13_scale = (w13_scale * w13_input_scale).squeeze()
     w2_scale = (w2_scale * w2_input_scale).squeeze()
     w2_input_scale = 1.0 / w2_input_scale
+
     return w13_scale, w13_input_scale, w2_scale, w2_input_scale
 
 
