@@ -252,7 +252,9 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func as _vllm_fa
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func as _vllm_fa,
+    )
 
     flash_attn_varlen_func = _vllm_fa
     is_vllm_fa = True
