@@ -561,9 +561,9 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert flash_attn_supports_sinks(), (
-                "Sinks are only supported in FlashAttention 3"
-            )
+            assert (
+                flash_attn_supports_sinks()
+            ), "Sinks are only supported in FlashAttention 3"
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
@@ -653,16 +653,34 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.kv_cache_dtype == "nvfp4":
+                # NVFP4 uses Triton path for quantization and packing
+                from vllm.attention.ops.triton_reshape_and_cache_flash import (
+                    triton_reshape_and_cache_flash,
+                )
+
+                triton_reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                    original_head_size=self.head_size,
+                )
+            else:
+                reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
@@ -998,9 +1016,10 @@ def cascade_attention(
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
-    assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window."
-    )
+    assert sliding_window == (
+        -1,
+        -1,
+    ), "Cascade attention does not support sliding window."
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
