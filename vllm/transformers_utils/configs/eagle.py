@@ -63,7 +63,8 @@ class EAGLEConfig(PretrainedConfig):
         else:
             raise ValueError(
                 f"Invalid method {method}. "
-                "Supported methods are eagle, ngram-eagle and eagle3.")
+                "Supported methods are eagle, ngram-eagle and eagle3."
+            )
 
         super().__init__(**kwargs)
 

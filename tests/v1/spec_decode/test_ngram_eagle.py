@@ -6,9 +6,16 @@ from unittest import mock
 import pytest
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VllmConfig)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    LoadConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -25,11 +32,10 @@ PROMPT_LOOKUP_MAX = 5
 DEVICE = current_platform.device_type
 
 
-def _create_vllm_config(num_speculative_tokens_ngram: int,
-                        num_speculative_tokens_eagle: int):
-    model_config = ModelConfig(model=model_dir,
-                               runner="generate",
-                               max_model_len=100)
+def _create_vllm_config(
+    num_speculative_tokens_ngram: int, num_speculative_tokens_eagle: int
+):
+    model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir
@@ -41,7 +47,7 @@ def _create_vllm_config(num_speculative_tokens_ngram: int,
         method="ngram-eagle",
         num_speculative_tokens_per_method={
             "ngram": num_speculative_tokens_ngram,
-            "eagle": num_speculative_tokens_eagle
+            "eagle": num_speculative_tokens_eagle,
         },
         prompt_lookup_max=PROMPT_LOOKUP_MAX,
         prompt_lookup_min=PROMPT_LOOKUP_MIN,
@@ -54,15 +60,16 @@ def _create_vllm_config(num_speculative_tokens_ngram: int,
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig())
+        scheduler_config=SchedulerConfig(),
+    )
 
     return vllm_config
 
 
 def test_proposer_config():
-
-    vllm_config = _create_vllm_config(NUM_SPECULATIVE_TOKENS_NGRAM,
-                                      NUM_SPECULATIVE_TOKENS_EAGLE)
+    vllm_config = _create_vllm_config(
+        NUM_SPECULATIVE_TOKENS_NGRAM, NUM_SPECULATIVE_TOKENS_EAGLE
+    )
 
     # ngram proposer
     ngram_proposer = NgramProposer(vllm_config=vllm_config)
@@ -71,8 +78,9 @@ def test_proposer_config():
     assert ngram_proposer.max_n == PROMPT_LOOKUP_MAX
 
     # eagle proposer
-    eagle_proposer = EagleProposer(vllm_config=vllm_config,
-                                   device=current_platform.device_type)
+    eagle_proposer = EagleProposer(
+        vllm_config=vllm_config, device=current_platform.device_type
+    )
     assert eagle_proposer.num_speculative_tokens == NUM_SPECULATIVE_TOKENS_EAGLE
 
 
@@ -82,23 +90,28 @@ def test_proposer_config():
         {
             "sampled_token_ids": [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
             # ngram draft is empty
-            "propose_ngram_draft_token_ids": [[]]
+            "propose_ngram_draft_token_ids": [[]],
         },
         {
             "sampled_token_ids": [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3]],
             # ngram draft is not empty
-            "propose_ngram_draft_token_ids": [[4, 5, 6, 7, 8]]
-        }
-    ])
-@pytest.mark.parametrize("pp_size", [1, 2])
-@mock.patch('vllm.v1.worker.gpu_model_runner.get_pp_group')
-@mock.patch(
-    'vllm.v1.worker.gpu_model_runner.GPUModelRunner.propose_ngram_draft_token_ids'
+            "propose_ngram_draft_token_ids": [[4, 5, 6, 7, 8]],
+        },
+    ],
 )
-@mock.patch('vllm.v1.worker.gpu_model_runner.EagleProposer.propose',
-            return_value=torch.tensor([[0, 1, 2]]))
-@mock.patch('vllm.v1.worker.gpu_model_runner.EagleProposer.prepare_inputs',
-            return_value=(None, 0))
+@pytest.mark.parametrize("pp_size", [1, 2])
+@mock.patch("vllm.v1.worker.gpu_model_runner.get_pp_group")
+@mock.patch(
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner.propose_ngram_draft_token_ids"
+)
+@mock.patch(
+    "vllm.v1.worker.gpu_model_runner.EagleProposer.propose",
+    return_value=torch.tensor([[0, 1, 2]]),
+)
+@mock.patch(
+    "vllm.v1.worker.gpu_model_runner.EagleProposer.prepare_inputs",
+    return_value=(None, 0),
+)
 def test_propose_draft_token_ids(
     mock_eagle_proposer_prepare_input,
     mock_eagle_proposer_propose,
@@ -107,9 +120,9 @@ def test_propose_draft_token_ids(
     test_value,
     pp_size,
 ):
-
-    vllm_config = _create_vllm_config(NUM_SPECULATIVE_TOKENS_NGRAM,
-                                      NUM_SPECULATIVE_TOKENS_EAGLE)
+    vllm_config = _create_vllm_config(
+        NUM_SPECULATIVE_TOKENS_NGRAM, NUM_SPECULATIVE_TOKENS_EAGLE
+    )
 
     runner = GPUModelRunner(vllm_config, DEVICE)
 
@@ -125,18 +138,15 @@ def test_propose_draft_token_ids(
     # we will find the prefix [1, 2, 3] in the history
     # and speculate [4, 5, 6, 7, 8] for ngram
     expected_ngram_proposals = [[4, 5, 6, 7, 8]]
-    expected_eagle_proposals = [[
-        i for i in range(NUM_SPECULATIVE_TOKENS_EAGLE)
-    ]]
-    mock_propose_ngram_draft_token_ids \
-        .return_value = propose_ngram_draft_token_ids
+    expected_eagle_proposals = [[i for i in range(NUM_SPECULATIVE_TOKENS_EAGLE)]]
+    mock_propose_ngram_draft_token_ids.return_value = propose_ngram_draft_token_ids
 
     # doesnt matter what this is for this test: START
     scheduler_output = mock.MagicMock()
     scheduler_output.total_num_scheduled_tokens = 1 + max(
-        vllm_config.speculative_config.
-        num_speculative_tokens_per_method["ngram"], vllm_config.
-        speculative_config.num_speculative_tokens_per_method["eagle"])
+        vllm_config.speculative_config.num_speculative_tokens_per_method["ngram"],
+        vllm_config.speculative_config.num_speculative_tokens_per_method["eagle"],
+    )
     hidden_states = torch.randn(len(sampled_token_ids[0]), 4096)
     sample_hidden_states = None
     aux_hidden_states = None
@@ -177,11 +187,13 @@ def test_propose_draft_token_ids(
 
     # case 1: ngram draft is empty. Eagle draft is used
     if sampled_token_ids == [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]:
-        assert final_draft == expected_eagle_proposals, \
+        assert final_draft == expected_eagle_proposals, (
             "ngram-eagle should have selected eagle draft"
+        )
     # case 2: ngram draft is not empty. Ngram draft is used
     elif sampled_token_ids == [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3]]:
-        assert final_draft == expected_ngram_proposals, \
+        assert final_draft == expected_ngram_proposals, (
             "ngram-eagle should have selected ngram draft"
+        )
     else:
         raise ValueError("unexpected sampled_token_ids")

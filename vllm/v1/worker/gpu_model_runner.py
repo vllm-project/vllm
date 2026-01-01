@@ -432,8 +432,10 @@ class GPUModelRunner(
             self.drafter: (
                 NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
             )
-            if self.speculative_config.method == "ngram" \
-                or self.speculative_config.method == "ngram-eagle":
+            if (
+                self.speculative_config.method == "ngram"
+                or self.speculative_config.method == "ngram-eagle"
+            ):
                 self.drafter_ngram = NgramProposer(self.vllm_config)
                 found_draft = True
             if self.speculative_config.method == "suffix":
@@ -451,7 +453,7 @@ class GPUModelRunner(
                     vllm_config=self.vllm_config, device=self.device
                 )
                 found_draft = True
-            
+
             if not found_draft:
                 raise ValueError(
                     "Unknown speculative decoding method: "
@@ -459,7 +461,8 @@ class GPUModelRunner(
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
 
-        # EKAGRA: figure out the right value for num_spec_tokens (maybe be max since ngram also has variable len but should be working)
+        # EKAGRA: figure out the right value for num_spec_tokens
+        # (maybe be max since ngram also has variable len but should be working)
         self.num_spec_tokens = 0
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
@@ -1767,7 +1770,10 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter_eagle, EagleProposer):
-                    if self.drafter_eagle.attn_layer_names[0] in kv_cache_group.layer_names:
+                    if (
+                        self.drafter_eagle.attn_layer_names[0]
+                        in kv_cache_group.layer_names
+                    ):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -3430,7 +3436,7 @@ class GPUModelRunner(
         use_padded_batch_for_eagle = (
             spec_config is not None
             and spec_config.use_eagle()
-            and not spec_config.use_ngram() # disable for ngram + eagle hybrid
+            and not spec_config.use_ngram()  # disable for ngram + eagle hybrid
             and not spec_config.disable_padded_drafter_batch
         )
         effective_drafter_max_model_len = self.max_model_len
@@ -3600,8 +3606,7 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-        if spec_config.method == "ngram" \
-            or spec_config.method == "ngram-eagle":
+        if spec_config.method == "ngram" or spec_config.method == "ngram-eagle":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter_ngram, NgramProposer)
             draft_token_ids = self.drafter_ngram.propose(
@@ -3699,10 +3704,12 @@ class GPUModelRunner(
             else:
                 if spec_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
-                    common_attn_metadata, token_indices = self.drafter_eagle.prepare_inputs(
-                        common_attn_metadata,
-                        sampled_token_ids,
-                        spec_decode_metadata.num_draft_tokens,
+                    common_attn_metadata, token_indices = (
+                        self.drafter_eagle.prepare_inputs(
+                            common_attn_metadata,
+                            sampled_token_ids,
+                            spec_decode_metadata.num_draft_tokens,
+                        )
                     )
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)

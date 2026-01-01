@@ -26,13 +26,11 @@ class NgramProposer:
         # tokens until the end.
         self.method = vllm_config.speculative_config.method
         if self.method == "ngram-eagle":
-            self.k = vllm_config \
-                .speculative_config \
-                    .num_speculative_tokens_per_method["ngram"]
+            self.k = vllm_config.speculative_config.num_speculative_tokens_per_method[
+                "ngram"
+            ]
         else:
-            self.k = vllm_config \
-                .speculative_config \
-                .num_speculative_tokens
+            self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
@@ -71,7 +69,7 @@ class NgramProposer:
             np.zeros((1024, self.max_model_len), dtype=np.int32),
             set(),
         )
-        
+
         logger.info(
             "NgramProposer: min_n=%s, max_n=%s, k=%s, max_model_len=%s",
             self.min_n,

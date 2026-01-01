@@ -75,11 +75,10 @@ class EagleProposer:
 
         if self.method == "ngram-eagle":
             self.num_speculative_tokens = (
-                self.speculative_config.
-                num_speculative_tokens_per_method["eagle"])
+                self.speculative_config.num_speculative_tokens_per_method["eagle"]
+            )
         else:
-            self.num_speculative_tokens = (
-                self.speculative_config.num_speculative_tokens)
+            self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
         logger.info(
             "EagleProposer: method=%s, num_speculative_tokens=%s",

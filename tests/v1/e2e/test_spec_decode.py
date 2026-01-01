@@ -502,10 +502,7 @@ def test_eagle_correctness(
                 "model": spec_model_name,
                 "prompt_lookup_max": 5,
                 "prompt_lookup_min": 3,
-                "num_speculative_tokens_per_method": {
-                    "ngram": 3,
-                    "eagle": 3
-                },
+                "num_speculative_tokens_per_method": {"ngram": 3, "eagle": 3},
                 "max_model_len": max_model_len,
             }
         else:
@@ -522,6 +519,10 @@ def test_eagle_correctness(
             tensor_parallel_size=tp_size,
             speculative_config=speculative_config,
             max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=enable_chunked_prefill,
+            model_impl=model_impl,
+            attention_config=attention_config,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
