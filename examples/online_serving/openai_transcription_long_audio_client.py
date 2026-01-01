@@ -1,32 +1,35 @@
-import asyncio
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-import os
+import asyncio
 import json
+import os
+
 import aiohttp
 from evaluate import load
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
+
 def async_process(line):
-    
-    if type(line) == bytes:
+    if type(line) is bytes:
         line = line.decode("utf-8")
 
     if not line.startswith("data: "):
         return None
-    
+
     # End of stream
     if line == "data: [DONE]":
         print("\n[Stream finished]")
         return -1
 
-    payload = line[len("data: "):]
+    payload = line[len("data: ") :]
 
     data = json.loads(payload)
 
     choice = data["choices"][0]
     delta = choice["delta"]["content"]
-    
+
     if choice.get("finish_reason") and choice["finish_reason"] != "stop":
         print(f"\n[Stream finished reason: {choice['finish_reason']}] != stop")
         return -1
@@ -43,16 +46,15 @@ def sync_process(line):
 
 
 async def stream_long_audio(
-        session: aiohttp.ClientSession,
-        data: tuple[str, str],
-        model: str,
-        tokenizer,
-        openai_api_base: str,
-        api_key: str,
-        concurrency: int,
-        user_id: int
-    ):
-
+    session: aiohttp.ClientSession,
+    data: tuple[str, str],
+    model: str,
+    tokenizer,
+    openai_api_base: str,
+    api_key: str,
+    concurrency: int,
+    user_id: int,
+):
     api_url = f"{openai_api_base}/audio/transcriptions"
 
     headers = {
@@ -63,7 +65,6 @@ async def stream_long_audio(
     audio_path, reference = data
 
     with open(audio_path, "rb") as f:
-
         # Prepare multipart form-data
         form = aiohttp.FormData()
         form.add_field("model", model)
@@ -73,10 +74,7 @@ async def stream_long_audio(
 
         # Attach the file
         form.add_field(
-            "file",
-            f,
-            filename=os.path.basename(audio_path),
-            content_type="audio/mpeg"
+            "file", f, filename=os.path.basename(audio_path), content_type="audio/mpeg"
         )
 
         # Output file for concurrent mode
@@ -87,23 +85,21 @@ async def stream_long_audio(
         if concurrency == 1:
             print(f"\n[User {user_id}] transcription result:", end=" ")
         else:
-            print(f"\n[User {user_id}] transcription result will be saved to {output_file}")
-            
-        async with session.post(api_url, headers=headers, data=form) as response:
+            print(
+                f"\n[User {user_id}] transcription result will "
+                f"be saved to {output_file}"
+            )
 
+        async with session.post(api_url, headers=headers, data=form) as response:
             if response.status != 200:
                 text = await response.text()
                 print(f"\nError from server: {response.status}\n{text}")
                 return
 
             # Where to write (console or file)
-            f_out = None
             hypothesis = ""
 
-            try:
-                if concurrency > 1:
-                    f_out = open(output_file, "w")
-
+            with open(output_file, "w") as f_out:
                 async for chunk in response.content.iter_chunked(4096):
                     if not chunk:
                         continue
@@ -132,9 +128,6 @@ async def stream_long_audio(
                             f_out.flush()
 
                         hypothesis += data
-            finally:
-                if f_out:
-                    f_out.close()
 
     # Evaluation
     if reference:
@@ -148,14 +141,18 @@ async def stream_long_audio(
 
 
 def get_long_audio_data(model):
-    repo_dir = snapshot_download("amgadhasan/longform-audio-transcription", repo_type="dataset")
+    repo_dir = snapshot_download(
+        "amgadhasan/longform-audio-transcription", repo_type="dataset"
+    )
     audio_dir = os.path.join(repo_dir, "audio")
     transcripts_dir = os.path.join(repo_dir, "transcripts")
 
     mapping = {
-        "fireside_chat_w_mistral_ceo_arthur_mensch.mp3": "nondiarized_fireside_chat_w_mistral_ceo_arthur_mensch_transcript.txt",
-        "gpu_mode_karpathy.mp3": "gpumode_irl_2024_karpathy_transcript.txt",
-        "state_of_gpt_BRK216HFS.mp3": "state_of_gpt_BRK216HFS_transcript.txt"
+        "fireside_chat_w_mistral_ceo_arthur_mensch.mp3": (
+            "nondiarized_fireside_chat_w_mistral_ceo_arthur_mensch_transcript.txt",
+        ),
+        "gpu_mode_karpathy.mp3": ("gpumode_irl_2024_karpathy_transcript.txt",),
+        "state_of_gpt_BRK216HFS.mp3": ("state_of_gpt_BRK216HFS_transcript.txt",),
     }
 
     audio_paths = [
@@ -175,23 +172,19 @@ def get_long_audio_data(model):
 
     for audio_path in audio_paths:
         audio_name = os.path.basename(audio_path)
-        transcript_name = mapping.get(audio_name, None)
-        assert transcript_name is not None and transcript_name in transcript_names, \
+        transcript_name = mapping.get(audio_name)
+        assert transcript_name is not None and transcript_name in transcript_names, (
             f"No mapping found for audio file {audio_name}"
+        )
 
-        with open(
-            os.path.join(transcripts_dir, transcript_name),
-            "r"
-        ) as f:
+        with open(os.path.join(transcripts_dir, transcript_name)) as f:
             reference = f.read().strip()
         data.append((audio_path, reference))
 
     return data
-        
 
 
 async def main(args):
-
     openai_api_base = "http://localhost:8000/v1"
 
     # data: [(audio_path, reference), ...]
@@ -199,14 +192,14 @@ async def main(args):
         data = [(args.audio_path, "")]
     else:
         data = get_long_audio_data(args.model)
-    
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     # necessary to avoid timeout for long audio streaming
     timeout = aiohttp.ClientTimeout(
-        total=None,        # let streaming run forever
-        sock_read=600,     # 10-minute chunk wait
-        sock_connect=60    # 1-minute connect timeout
+        total=None,  # let streaming run forever
+        sock_read=600,  # 10-minute chunk wait
+        sock_connect=60,  # 1-minute connect timeout
     )
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -220,7 +213,7 @@ async def main(args):
                     openai_api_base,
                     args.api_key,
                     args.concurrency,
-                    user_id
+                    user_id,
                 )
             )
             for user_id in range(args.concurrency)
@@ -230,12 +223,16 @@ async def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="OpenAI Transcription Client using vLLM API Server")
+    parser = argparse.ArgumentParser(
+        description="OpenAI Transcription Client using vLLM API Server"
+    )
     parser.add_argument("--model", type=str, default="openai/whisper-large-v3-turbo")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--api_key", type=str, default="EMPTY")
     parser.add_argument("--audio_path", type=str, default=None)
-    parser.add_argument("--streaming", action="store_true", help="Whether to use streaming mode")
+    parser.add_argument(
+        "--streaming", action="store_true", help="Whether to use streaming mode"
+    )
     args = parser.parse_args()
 
     asyncio.run(main(args))
