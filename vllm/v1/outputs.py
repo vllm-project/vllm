@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
+    KVConnectorKVEvents = object
 
 
 class LogprobsLists(NamedTuple):
@@ -88,7 +91,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = torch.Tensor | list[torch.Tensor]
+PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
 
 
 @dataclass
@@ -107,6 +110,7 @@ class KVConnectorOutput:
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
+    kv_cache_events: KVConnectorKVEvents | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -122,6 +126,7 @@ class KVConnectorOutput:
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
+            and not self.kv_cache_events
             and not self.invalid_block_ids
         )
 
@@ -146,21 +151,23 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[list[int]] = field(default_factory=list)
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: LogprobsLists | None
+    logprobs: LogprobsLists | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
+        default_factory=dict
+    )
 
     # [num_reqs, hidden_size]
-    pooler_output: list[torch.Tensor | None]
+    pooler_output: list[torch.Tensor | None] | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 
@@ -168,6 +175,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # information related to cudagraph execution
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.
@@ -217,21 +227,8 @@ def make_empty_encoder_model_runner_output(
         req_ids=req_ids,
         req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
-        logprobs=None,
-        prompt_logprobs_dict={},
         pooler_output=pooler_output,
-        kv_connector_output=None,
-        ec_connector_output=None,
-        num_nans_in_logits=None,
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
-    req_ids=[],
-    req_id_to_index={},
-    sampled_token_ids=[],
-    logprobs=None,
-    prompt_logprobs_dict={},
-    pooler_output=[],
-    num_nans_in_logits=None,
-)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})

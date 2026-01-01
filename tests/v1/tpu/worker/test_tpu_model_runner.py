@@ -26,15 +26,16 @@ from vllm.v1.worker.tpu_model_runner import (
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         dtype="bfloat16",  # TPUs typically use bfloat16
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=16,

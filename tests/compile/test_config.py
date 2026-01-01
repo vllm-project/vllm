@@ -9,11 +9,14 @@ from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+)
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -26,6 +29,29 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
+
+
+def test_get_raw_stream_patch():
+    """Test that get_raw_stream patch is applied only for torch 2.9.0 or 2.9.1."""
+    import builtins
+
+    # Check if get_raw_stream exists in builtins
+    has_patch = hasattr(builtins, "get_raw_stream")
+
+    # Import torch to get actual version
+
+    is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
+
+    if is_torch_2_9:
+        # For torch 2.9.x, the patch should be applied
+        assert has_patch, "get_raw_stream should be patched for torch 2.9.x"
+        # Verify it's callable (it should be the _cuda_getCurrentRawStream function)
+        get_raw_stream = builtins.get_raw_stream  # type: ignore[attr-defined]
+        assert callable(get_raw_stream)
+        # Verify it's the correct function from torch._C
+        from torch._C import _cuda_getCurrentRawStream
+
+        assert get_raw_stream is _cuda_getCurrentRawStream
 
 
 def test_copy_pass():
@@ -191,7 +217,7 @@ def test_splitting_ops_dynamic():
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -206,7 +232,7 @@ def test_splitting_ops_dynamic():
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
+                pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 # work around for accessing all attntion ops
@@ -219,7 +245,7 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -227,10 +253,36 @@ def test_splitting_ops_dynamic():
     # With inductor graph partition, attn_fusion and splitting_ops
     # work together. Default splitting_ops include attention ops.
     assert config.compilation_config.splitting_ops_contain_attention()
-    # enable_attn_fusion is directly supported under
+    # fuse_attn_quant is directly supported under
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_moe_splitting_ops_deepep_ht_inductor_partition():
+    # Inductor partition case: user-provided splitting_ops should be
+    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=[
+                "vllm::unified_attention",
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ],
+        ),
+    )
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops == [
+        "vllm::unified_attention",
+        "vllm::moe_forward",
+        "vllm::moe_forward_shared",
+    ]
 
 
 def test_should_split():
@@ -301,7 +353,7 @@ def test_should_split():
         "cudagraph_capture_sizes",
         "max_cudagraph_capture_size",
         "tp_size",
-        "enable_sequence_parallelism",
+        "enable_sp",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
@@ -339,7 +391,7 @@ def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
     max_cudagraph_capture_size,
     tp_size,
-    enable_sequence_parallelism,
+    enable_sp,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
@@ -355,11 +407,12 @@ def test_cudagraph_sizes_post_init(
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
-            pass_config={
-                "enable_sequence_parallelism": enable_sequence_parallelism,
-                "enable_fusion": True,
-                "enable_noop": True,
-            },
+            pass_config=PassConfig(
+                enable_sp=enable_sp,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+            ),
             cudagraph_mode=cudagraph_mode,
         )
         engine_args = EngineArgs(
@@ -375,3 +428,45 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+def test_cached_compilation_config():
+    import torch
+    from torch._inductor.utils import run_and_get_code
+
+    from vllm.config import get_cached_compilation_config, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    dtype = torch.bfloat16
+    device = torch.device("cuda:0")
+    batch_size, num_qo_heads, head_size = 8, 16, 128
+
+    # access and cache default compilation config
+    # default compilation config does not contain +quant_fp8 custom op. If this is
+    # used, the generated code would use inductor-generated triton kernel instead
+    # of the custom op `torch.ops._C.static_scaled_fp8_quant`.
+    get_cached_compilation_config()
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+quant_fp8"],
+        )
+    )
+
+    # set_current_vllm_config should clear cached compilation config and
+    # use the new compilation_config in vllm_config
+    with set_current_vllm_config(vllm_config):
+        query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        query_quant = torch.compile(query_quant)
+
+        _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        query = torch.randn(
+            batch_size, num_qo_heads * head_size, dtype=dtype, device=device
+        )
+
+        _, code = run_and_get_code(query_quant, query, _q_scale)
+
+    code = " ".join(code)
+    assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
