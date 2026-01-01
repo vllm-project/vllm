@@ -117,3 +117,4 @@ __all__ = [
 # fixed kernels 20260101125838
 # triton upgrade 20260101130113
 # fixed install order 20260101130623
+# float8e4nv fix 20260101131924

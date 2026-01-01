@@ -131,11 +131,11 @@ if HAS_TRITON:
                 # Store scales as E4M3 at the end of the packed head
                 tl.store(
                     tgt_key_base + DATA_SIZE + b,
-                    k_s.to(tl.float8e4nv).to(tl.uint8),
+                    k_s.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
                 )
                 tl.store(
                     tgt_val_base + DATA_SIZE + b,
-                    v_s.to(tl.float8e4nv).to(tl.uint8),
+                    v_s.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
                 )
 
                 # Quantize
