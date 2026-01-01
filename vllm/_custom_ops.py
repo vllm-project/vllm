@@ -731,7 +731,9 @@ def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
     try:
         return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(cuda_device_capability)
     except AttributeError:
-        logger.warning("CUTLASS block FP8 ops not available - was vLLM built correctly?")
+        logger.warning(
+            "CUTLASS block FP8 ops not available - was vLLM built correctly?"
+        )
         return False
 
 
