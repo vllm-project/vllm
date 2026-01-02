@@ -3,8 +3,6 @@
 
 from typing import Any, Literal
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -15,7 +13,6 @@ PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
 
 
 @config
-@dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
