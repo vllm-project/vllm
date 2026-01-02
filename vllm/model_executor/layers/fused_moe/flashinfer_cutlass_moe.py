@@ -170,6 +170,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 self.g2_alphas,  # w2_weight_scale * w2_input_scale
                 self.a1_scale,
             ]
+
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
             fc2_expert_weights = w2
