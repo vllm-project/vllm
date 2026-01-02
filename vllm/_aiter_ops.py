@@ -52,7 +52,7 @@ def if_aiter_supported(func: Callable) -> Callable:
 
 
 def is_aiter_function_found(function_name: str) -> bool:
-    """Check if aiter module exists and has the specified function."""
+    """Returns True iff aiter module exists and has the specified symbol."""
     # First check if module exists
     if IS_AITER_FOUND:
         import aiter
@@ -61,6 +61,7 @@ def is_aiter_function_found(function_name: str) -> bool:
     return False
 
 
+# aiter.topk_sigmoid is in a relatively new version of aiter, so check for existence.
 AITER_TOPK_SIGMOID_FOUND = is_aiter_function_found("topk_sigmoid")
 
 
@@ -768,6 +769,12 @@ if AITER_TOPK_SIGMOID_FOUND:
     def _rocm_aiter_topk_sigmoid_impl(
         gating_output: torch.Tensor, topk: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Executes aiter's fused topk(dim=-1)+sigmoid+casting.
+
+        This operation avoids the limiting factor of kernel launch overhead on some AMD
+        hardware. See model_executors/models/utils.py:torch_topk_sigmoid_routing_func for the torch
+        version of this functionality.
+        """
         from aiter import topk_sigmoid
 
         tokens, _ = gating_output.shape

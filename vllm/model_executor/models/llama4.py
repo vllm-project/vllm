@@ -54,7 +54,7 @@ from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    dispatch_routing_function,
+    dispatch_topk_sigmoid_routing_func,
     extract_layer_index,
     is_pp_missing_parameter,
 )
@@ -70,7 +70,7 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return dispatch_routing_function()(gating_output, topk)
+        return dispatch_topk_sigmoid_routing_func()(gating_output, topk)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

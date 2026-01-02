@@ -768,16 +768,21 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
-def torch_routing_func(
+def torch_topk_sigmoid_routing_func(
     gating_output: torch.Tensor,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call topk(dim=-1)+sigmoid+pseudo-standard casting.
+
+    This uses fast_topk, to choose the faster implementation dependent
+    on the topk argument value.
+    """
     router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
     router_scores = torch.sigmoid(router_scores.float())
     return (router_scores, router_indices.to(torch.int32))
 
 
-def dispatch_routing_function(
+def dispatch_topk_sigmoid_routing_func(
     fallback_func: Callable[[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]]
     | None = None,
 ) -> Callable[[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]]:
@@ -787,7 +792,7 @@ def dispatch_routing_function(
         return fallback_func
 
     # torch implementation
-    return torch_routing_func
+    return torch_topk_sigmoid_routing_func
 
 
 # Chunk x along the num_tokens axis for sequence parallelism
