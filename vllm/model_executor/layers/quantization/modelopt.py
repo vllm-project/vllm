@@ -957,10 +957,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 layer.output1_scales_gate_scalar = g1_alphas
                 layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
                 layer.output2_scales_scalar = g2_alphas
-            else:
-                raise ValueError(
-                    f"Unknown FlashInfer MoE backend: {self.flashinfer_moe_backend}"
-                )
 
     def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
         """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
