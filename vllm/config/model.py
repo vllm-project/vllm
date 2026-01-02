@@ -642,7 +642,7 @@ class ModelConfig:
         cls = "Transformers"
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
-        cls += "MoE" if self.get_num_experts() > 1 else ""
+        cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
@@ -1001,8 +1001,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
-        num_experts = self.get_num_experts()
-        if num_experts < 1:
+        if not self.is_moe:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled."
@@ -1797,11 +1796,11 @@ class ModelConfig:
                 logger.debug("Generative models support prefix caching.")
                 return True
 
-    def is_model_moe(
-        self,
-    ) -> bool:
-        return self.get_num_experts() > 1
+    @property
+    def is_moe(self) -> bool:
+        return self.get_num_experts() > 0
 
+    @property
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
 

@@ -343,6 +343,29 @@ class VllmConfig:
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
+    @property
+    def needs_dp_coordinator(self) -> bool:
+        """
+        Determine if the DPCoordinator process is needed.
+
+        The DPCoordinator is needed in two cases:
+        1. For MoE models with DP > 1: to handle wave coordination
+           (even in external LB mode, since wave coordination runs in the coordinator)
+        2. For non-MoE models in internal/hybrid LB mode: to collect and publish
+           queue stats for load balancing across DP ranks
+
+        Returns:
+            True if DPCoordinator process is needed, False otherwise.
+        """
+
+        # For non-MoE models, only need coordinator in internal/hybrid LB mode
+        # (for stats collection).
+        return self.parallel_config.data_parallel_size > 1 and (
+            self.model_config is None
+            or self.model_config.is_moe
+            or not self.parallel_config.data_parallel_external_lb
+        )
+
     def enable_trace_function_call_for_thread(self) -> None:
         """
         Set up function tracing for the current thread,
@@ -521,6 +544,8 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
+
+            self.parallel_config.is_moe_model = self.model_config.is_moe
 
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
@@ -827,9 +852,14 @@ class VllmConfig:
             )
 
         # Do this after all the updates to compilation_config.mode
+        effective_dp_size = (
+            self.parallel_config.data_parallel_size
+            if self.model_config is None or self.model_config.is_moe
+            else 1
+        )
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,
-            data_parallel_size=self.parallel_config.data_parallel_size,
+            data_parallel_size=effective_dp_size,
         )
 
         if self.compilation_config.pass_config.enable_sp:
@@ -1273,13 +1303,8 @@ class VllmConfig:
         if self.compilation_config.debug_dump_path is None:
             return None
         tp_rank = self.parallel_config.rank
-        dp_rank = self.parallel_config.data_parallel_rank
-        data_parallel_size = self.parallel_config.data_parallel_size
-        append_path = (
-            f"rank_{tp_rank}"
-            if data_parallel_size == 1
-            else f"rank_{tp_rank}_dp_{dp_rank}"
-        )
+        dp_rank = self.parallel_config.data_parallel_index
+        append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
