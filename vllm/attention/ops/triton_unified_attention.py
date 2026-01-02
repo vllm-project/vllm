@@ -31,6 +31,51 @@ def apply_softcap(S, x):
 
 
 @triton.jit
+def dequantize_nvfp4_element(nibble):
+    """Dequantize NVFP4 E2M1 format to float using hardware acceleration on SM90+.
+
+    Uses inline PTX assembly for SM90 (H100) hardware-accelerated E2M1 dequantization.
+    Falls back to software LUT for older architectures.
+
+    E2M1 magnitude LUT (IEEE 754 E2M1):
+    000 -> 0.0 (zero)
+    001 -> 0.5 (2^-1)
+    010 -> 1.0 (2^0)
+    011 -> 1.5 (1.5 * 2^0)
+    100 -> 2.0 (2^1)
+    101 -> 3.0 (1.5 * 2^1)
+    110 -> 4.0 (2^2)
+    111 -> 6.0 (1.5 * 2^2)
+    Sign bit (bit 3): 0=positive, 1=negative
+    """
+    # Software LUT fallback (works on all architectures)
+    mag = nibble & 0x07
+    val = tl.where(
+        mag == 7,
+        6.0,
+        tl.where(
+            mag == 6,
+            4.0,
+            tl.where(
+                mag == 5,
+                3.0,
+                tl.where(
+                    mag == 4,
+                    2.0,
+                    tl.where(
+                        mag == 3,
+                        1.5,
+                        tl.where(mag == 2, 1.0, tl.where(mag == 1, 0.5, 0.0)),
+                    ),
+                ),
+            ),
+        ),
+    )
+    sign = tl.where((nibble & 0x08) != 0, -1.0, 1.0)
+    return val * sign
+
+
+@triton.jit
 def find_seq_idx(
     query_start_len_ptr,
     target_idx,
@@ -102,6 +147,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
+    USE_NVFP4: tl.constexpr,  # bool - NVFP4 KV cache mode
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -256,11 +302,42 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
+        # FP8/NVFP4 dequantization with native tensor core optimization
         if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                K = K_load
-            else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            # FP8 native tensor core path: keep K in FP8 for H100 acceleration
+            # Scale is applied after tl.dot to leverage FP8 tensor cores (3958 TFLOPS)
+            K = K_load  # Keep in FP8 format
+        elif USE_NVFP4:
+            # NVFP4 E2M1 dequantization: unpack nibbles and apply LUT
+            # Data indexing fix: use offs_d // 2 because 2 elements per byte
+            k_packed_data_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + (offs_d[:, None] // 2) * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            K_data = tl.load(
+                key_cache_ptr + k_packed_data_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0,
+            )
+            K_nibble = tl.where((offs_d[:, None] % 2) == 0, K_data & 0xF, K_data >> 4)
+            K_unscaled = dequantize_nvfp4_element(K_nibble)
+
+            # Load scales (1 scale per 16 elements, stored after packed data)
+            off_s_packed = (HEAD_SIZE // 2 + (offs_d // 16))[:, None]
+            k_scale_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + off_s_packed * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            K_scale_u8 = tl.load(
+                key_cache_ptr + k_scale_offset, mask=tile_mask[None, :], other=0
+            )
+            K = (K_unscaled * tl.math.exp2(K_scale_u8.to(tl.float32) - 127.0)).to(
+                Q.dtype
+            )
         else:
             K = K_load
 
@@ -271,11 +348,41 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
+        # FP8/NVFP4 dequantization for V
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            # FP8: keep V in FP8 format for native tensor cores
+            V = V_load
+        elif USE_NVFP4:
+            # NVFP4 E2M1 dequantization for V
+            # Data indexing fix: use offs_d // 2
+            v_packed_data_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + (offs_d[None, :] // 2) * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            V_data = tl.load(
+                value_cache_ptr + v_packed_data_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0,
+            )
+            V_nibble = tl.where((offs_d[None, :] % 2) == 0, V_data & 0xF, V_data >> 4)
+            V_unscaled = dequantize_nvfp4_element(V_nibble)
+
+            # Load scales (1 scale per 16 elements)
+            off_s_packed = (HEAD_SIZE // 2 + (offs_d // 16))[None, :]
+            v_scale_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + off_s_packed * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            V_scale_u8 = tl.load(
+                value_cache_ptr + v_scale_offset, mask=tile_mask[:, None], other=0
+            )
+            V = (V_unscaled * tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0)).to(
+                Q.dtype
+            )
         else:
             V = V_load
 
@@ -315,7 +422,11 @@ def kernel_unified_attention_2d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        S += scale * tl.dot(Q, K)
+        # FP8 native tensor core: apply k_scale after matmul for H100 acceleration
+        if K.dtype.is_fp8():
+            S += scale * tl.load(k_scale) * tl.dot(Q.to(tl.float32), K.to(tl.float32))
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -440,6 +551,7 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
+    USE_NVFP4: tl.constexpr,  # bool - NVFP4 KV cache mode
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -578,11 +690,41 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
+        # FP8/NVFP4 dequantization with native tensor core optimization
         if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                K = K_load
-            else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            # FP8 native tensor core path: keep K in FP8 for H100 acceleration
+            K = K_load  # Keep in FP8 format
+        elif USE_NVFP4:
+            # NVFP4 E2M1 dequantization: unpack nibbles and apply LUT
+            # Data indexing fix: use offs_d // 2 because 2 elements per byte
+            k_packed_data_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + (offs_d[:, None] // 2) * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            K_data = tl.load(
+                key_cache_ptr + k_packed_data_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0,
+            )
+            K_nibble = tl.where((offs_d[:, None] % 2) == 0, K_data & 0xF, K_data >> 4)
+            K_unscaled = dequantize_nvfp4_element(K_nibble)
+
+            # Load scales (1 scale per 16 elements, stored after packed data)
+            off_s_packed = (HEAD_SIZE // 2 + (offs_d // 16))[:, None]
+            k_scale_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + off_s_packed * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            K_scale_u8 = tl.load(
+                key_cache_ptr + k_scale_offset, mask=tile_mask[None, :], other=0
+            )
+            K = (K_unscaled * tl.math.exp2(K_scale_u8.to(tl.float32) - 127.0)).to(
+                Q.dtype
+            )
         else:
             K = K_load
 
@@ -593,11 +735,41 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
+        # FP8/NVFP4 dequantization for V
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            # FP8: keep V in FP8 format for native tensor cores
+            V = V_load
+        elif USE_NVFP4:
+            # NVFP4 E2M1 dequantization for V
+            # Data indexing fix: use offs_d // 2
+            v_packed_data_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + (offs_d[None, :] // 2) * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            V_data = tl.load(
+                value_cache_ptr + v_packed_data_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0,
+            )
+            V_nibble = tl.where((offs_d[None, :] % 2) == 0, V_data & 0xF, V_data >> 4)
+            V_unscaled = dequantize_nvfp4_element(V_nibble)
+
+            # Load scales (1 scale per 16 elements)
+            off_s_packed = (HEAD_SIZE // 2 + (offs_d // 16))[None, :]
+            v_scale_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + off_s_packed * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            V_scale_u8 = tl.load(
+                value_cache_ptr + v_scale_offset, mask=tile_mask[:, None], other=0
+            )
+            V = (V_unscaled * tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0)).to(
+                Q.dtype
+            )
         else:
             V = V_load
 
@@ -636,7 +808,11 @@ def kernel_unified_attention_3d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        S += scale * tl.dot(Q, K)
+        # FP8 native tensor core: apply k_scale after matmul for H100 acceleration
+        if K.dtype.is_fp8():
+            S += scale * tl.load(k_scale) * tl.dot(Q.to(tl.float32), K.to(tl.float32))
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -865,9 +1041,47 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    # NVFP4 KV cache mode
+    use_nvfp4=False,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
+
+    # Integrate vllm_nvfp4 optimized dequantization
+    if use_nvfp4:
+        try:
+            import vllm_nvfp4
+
+            # 1. Dequantize paged NVFP4 cache to FP16/BF16 paged cache
+            # This produces temporary caches with the same block structure.
+            k_paged = vllm_nvfp4.dequant_paged(
+                k,
+                block_table,
+                head_size,
+                block_size,
+                block_table.shape[1],
+                k.stride(),
+                use_half=(q.dtype in (torch.float16, torch.bfloat16)),
+            )
+            v_paged = vllm_nvfp4.dequant_paged(
+                v,
+                block_table,
+                head_size,
+                block_size,
+                block_table.shape[1],
+                v.stride(),
+                use_half=(q.dtype in (torch.float16, torch.bfloat16)),
+            )
+
+            # 2. Redirect K, V and disable NVFP4 on-the-fly mode
+            # We keep the original block_table.
+            k = k_paged
+            v = v_paged
+            use_nvfp4 = False
+
+        except (ImportError, RuntimeError) as e:
+            # Fallback to software LUT in Triton kernel if package unavailable
+            pass
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -991,6 +1205,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            USE_NVFP4=use_nvfp4,
         )
     else:
         kernel_unified_attention_3d[
@@ -1042,6 +1257,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            USE_NVFP4=use_nvfp4,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

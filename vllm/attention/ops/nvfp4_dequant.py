@@ -212,6 +212,87 @@ def dequantize_nvfp4_kv_cache(
     return output
 
 
+def gathered_dequantize_nvfp4_kv_cache(
+    packed_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    head_size: int,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dequantize NVFP4 packed KV cache directly to a linear buffer.
+    (Fused Gather + Dequantize)
+
+    Args:
+        packed_cache: Packed NVFP4 cache [num_blocks, block_size, num_heads, packed_head_size]
+        block_table: Block table [num_seqs, max_blocks]
+        head_size: Original head size
+        output_dtype: Output dtype
+
+    Returns:
+        Tuple of:
+        - Dequantized linear tensor [num_active_blocks, block_size, num_heads, head_size]
+        - New block table mapping to the linear indices [num_seqs, max_blocks]
+    """
+    # 1. Compact the block table to find only valid physical indices
+    # This avoids allocating a massive rectangular buffer (e.g. 32GB spike)
+    # when most entries are -1.
+    flat_table = block_table.flatten()
+    valid_mask = flat_table >= 0
+    active_indices = flat_table[valid_mask].to(torch.int32)
+    num_active = active_indices.numel()
+
+    # Handle edge case: no active tokens
+    if num_active == 0:
+        num_heads = packed_cache.shape[2]
+        block_size = packed_cache.shape[1]
+        empty_cache = torch.empty(
+            0,
+            block_size,
+            num_heads,
+            head_size,
+            dtype=output_dtype,
+            device=packed_cache.device,
+        )
+        return empty_cache, block_table
+
+    # 2. Build the new block table mapping
+    new_block_table = torch.full_like(block_table, -1)
+    new_block_table.flatten()[valid_mask] = torch.arange(
+        num_active, device=block_table.device, dtype=block_table.dtype
+    )
+
+    # 3. Use the optimized CUDA gather-dequant kernel
+    try:
+        import vllm_nvfp4
+    except ImportError:
+        # Fallback to eager gather + triton dequant if CUDA extension missing
+        # This will be slow and might hang in CUDA graphs, but provides a functional path
+        gathered = packed_cache[
+            active_indices.long()
+        ]  # [N_active, block_size, heads, packed_phs]
+        return (
+            dequantize_nvfp4_kv_cache(gathered, head_size, output_dtype),
+            new_block_table,
+        )
+
+    block_size = packed_cache.shape[1]
+    strides = list(packed_cache.stride())
+
+    # We call dequant_gather with num_seqs=1 and max_blocks=num_active
+    # to reuse the existing kernel which writes to [0...N-1]
+    dequantized = vllm_nvfp4.dequant_gather(
+        packed_cache,
+        active_indices.unsqueeze(0),  # Shape [1, num_active]
+        head_size,
+        block_size,
+        num_active,
+        strides,
+        output_dtype,
+    )
+
+    return dequantized, new_block_table
+
+
 def dequantize_nvfp4_kv_cache_simple(
     packed_cache: torch.Tensor,
     head_size: int,

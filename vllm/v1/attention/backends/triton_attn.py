@@ -263,6 +263,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
 
     @staticmethod
@@ -287,6 +288,12 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if cache_dtype_str == "nvfp4":
+            # [num_blocks, 1, block_size, num_kv_heads, packed_head_size]
+            # Since TritonAttentionImpl unbinds(1), we still use 2 here for K/V separation
+            # but the head_size is packed.
+            packed_head_size = head_size // 2 + head_size // 16
+            return (num_blocks, 2, block_size, num_kv_heads, packed_head_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -447,9 +454,9 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported."
-            )
+            assert (
+                layer._q_scale_float == 1.0
+            ), "A non 1.0 q_scale is not currently supported."
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -492,6 +499,7 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
+            use_nvfp4=(self.kv_cache_dtype == "nvfp4"),
         )
 
         return output
