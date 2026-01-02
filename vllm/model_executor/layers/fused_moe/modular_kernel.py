@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     count_expert_num_tokens,
     disable_inplace,
 )
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -682,14 +681,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
-        shared_experts_stream: torch.cuda.Stream | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-        self.shared_experts_stream = shared_experts_stream
 
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).
@@ -903,34 +900,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_num_tokens=c_expert_num_tokens,
             expert_num_tokens_cpu=c_expert_num_tokens_cpu,
         )
-
-    def _maybe_setup_shared_experts_stream(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[bool, torch.Tensor | None]:
-        # decide whether to run shared experts on a separate CUDA stream to
-        # overlap with the main fused MoE kernel.
-        use_shared_experts_stream = (
-            self.shared_experts is not None
-            and self.shared_experts_stream is not None
-            and hidden_states.is_cuda
-            and (
-                hidden_states.shape[0]
-                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            )
-        )
-
-        hidden_states_clone: torch.Tensor | None = None
-        if use_shared_experts_stream and self.shared_experts_stream is not None:
-            # TODO: Optimize this (complicated)
-            # Note: this clone adds overhead but is required
-            # for correctness with multiple CUDA streams and CUDA graph capture.
-            hidden_states_clone = hidden_states.clone()
-            # record that the clone will be used by the separate stream so its
-            # lifetime is correctly tracked.
-            hidden_states_clone.record_stream(self.shared_experts_stream)
-            self.shared_experts_stream.wait_stream(torch.cuda.current_stream())
-
-        return use_shared_experts_stream, hidden_states_clone
 
     def _prepare(
         self,
@@ -1177,20 +1146,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             assert shared_output is not None
             return shared_output, output
-
-    def _wait_for_shared_experts_stream(
-        self, hidden_states: torch.Tensor, use_shared_experts_stream: bool
-    ) -> None:
-        # ensure that any work enqueued on the shared_experts_stream is
-        # completed before the shared_output tensor is consumed
-        if (
-            self.shared_experts is not None
-            and use_shared_experts_stream
-            and self.shared_experts_stream is not None
-            and hidden_states.is_cuda
-            and current_platform.is_cuda()
-        ):
-            torch.cuda.current_stream().wait_stream(self.shared_experts_stream)
 
     def forward(
         self,
