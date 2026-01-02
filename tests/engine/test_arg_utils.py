@@ -193,7 +193,7 @@ def test_get_kwargs():
     json_tip = "Should either be a valid JSON string or JSON keys"
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
-    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
+    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(
