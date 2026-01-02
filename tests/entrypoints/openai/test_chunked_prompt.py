@@ -66,6 +66,7 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
             chunk.usage.prompt_tokens + chunk.usage.completion_tokens
         )
         if not finished:
+            assert chunk.choices[0].text
             # Count actual tokens from logprobs since multiple tokens
             # can be batched into a single chunk
             assert chunk.choices[0].logprobs and chunk.choices[0].logprobs.tokens
