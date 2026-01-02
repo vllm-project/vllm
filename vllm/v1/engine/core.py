@@ -461,12 +461,6 @@ class EngineCore:
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
 
-            # Handle None return from execute_model (async scheduling).
-            # This mirrors the same check in step() method.
-            if model_output is None:
-                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-                model_output = self.model_executor.sample_tokens(grammar_output)
-
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
