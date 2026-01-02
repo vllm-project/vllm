@@ -4,6 +4,7 @@ from itertools import repeat
 from typing import Any
 
 import pytest
+import torch
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
@@ -102,7 +103,10 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
 
     test_sampling_params = [
         dict(),
+        dict(presence_penalty=-1.0),
+        dict(bad_words=["the", " the"]),
         dict(logprobs=2),
+        dict(logprobs=2, presence_penalty=-1.0),
     ]
 
     # test_preemption, executor, async_scheduling,
@@ -155,6 +159,7 @@ def run_tests(
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
         m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
+        torch.backends.cuda.matmul.allow_tf32 = False
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
