@@ -1269,8 +1269,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
-            g1_alphas=g1_alphas,
-            g2_alphas=g2_alphas,
         )
 
     @property
