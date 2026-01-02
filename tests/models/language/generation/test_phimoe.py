@@ -8,6 +8,21 @@ from vllm.platforms import current_platform
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
+# There is a known issue that triggers `AttributeError: 'DynamicCache'
+# object has no attribute 'seen_tokens'` when running:
+# `tests/models/language/generation/test_phimoe.py::test_models
+#   [5-64-bfloat16-microsoft/Phi-3.5-MoE-instruct]`
+# This issue is being investigated and tracked in:
+#   https://huggingface.co/microsoft/Phi-3.5-MoE-instruct/discussions/58
+# It is platform-agnostic. Therefore, we skip this test on all platforms for now.
+pytest.skip(
+    "Skipping due to known issue: "
+    "'DynamicCache' object has no attribute 'seen_tokens'. See: "
+    "https://huggingface.co/microsoft/Phi-3.5-MoE-instruct/discussions/58 "
+    "for details.",
+    allow_module_level=True,
+)
+
 MODELS = [
     "microsoft/Phi-3.5-MoE-instruct",
 ]
