@@ -3828,6 +3828,7 @@ class GPUModelRunner(
                         self.model, self.vllm_config, self.device
                     )
 
+                drafter_to_load: EagleProposer | SuffixDecodingProposer | MedusaProposer
                 if hasattr(self, "drafter"):
                     drafter_to_load = self.drafter
                 elif hasattr(self, "drafter_eagle"):
