@@ -947,18 +947,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
-                assert self.quant_config.activation_scheme == "static"
-                g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                    w13_scale=w13_weight_scale,
-                    w13_input_scale=w13_input_scale,
-                    w2_scale=w2_weight_scale,
-                    w2_input_scale=w2_input_scale,
-                )
-
                 # NOTE(rob): the following are not set as nn.Parameters
                 # they are not needed for weight loading/re-loading.
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+                    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                        w13_scale=w13_weight_scale,
+                        w13_input_scale=w13_input_scale,
+                        w2_scale=w2_weight_scale,
+                        w2_input_scale=w2_input_scale,
+                    )
                     layer.output1_scales_gate_scalar = g1_alphas
                     layer.output1_scales_scalar = g1_alphas * (
                         1.0 / layer.w2_input_scale
