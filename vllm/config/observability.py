@@ -67,6 +67,14 @@ class ObservabilityConfig:
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
 
+    enable_mm_processor_stats: bool = False
+    """Enable collection of timing statistics for multimodal processor operations.
+    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
+    argument."""
+
+    enable_mfu_metrics: bool = False
+    """Enable Model FLOPs Utilization (MFU) metrics."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
