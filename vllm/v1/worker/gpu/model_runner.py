@@ -25,7 +25,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
 )
-from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_barrier
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -53,6 +52,7 @@ from vllm.v1.worker.gpu.sample.metadata import (
     SamplingMetadata,
     expand_sampling_metadata,
 )
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
@@ -968,11 +968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Only for compatibility with the existing model runner and scheduler.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
-            logprobs=None,
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore
-            pooler_output=[],
-            kv_connector_output=None,
-            num_nans_in_logits=None,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

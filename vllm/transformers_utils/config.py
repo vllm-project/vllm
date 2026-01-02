@@ -15,7 +15,6 @@ from huggingface_hub import (
 )
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -25,7 +24,6 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
-from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
@@ -44,6 +42,16 @@ from .repo_utils import (
     try_get_local_file,
     with_retry,
 )
+
+try:
+    # Transformers v5
+    from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
+except ImportError:
+    # Transformers v4
+    from transformers.configuration_utils import (
+        ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
+    )
+
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -67,11 +75,13 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
+    bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     hunyuan_vl="HunYuanVLConfig",
+    isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -104,6 +114,14 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
+    """Check if rope_parameters is nested by layer types."""
+    # Cannot be nested if rope_parameters is empty
+    if not rope_parameters:
+        return False
+    return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -118,6 +136,7 @@ class HFConfigParser(ConfigParserBase):
             model,
             revision=revision,
             code_revision=code_revision,
+            trust_remote_code=trust_remote_code,
             token=_get_hf_token(),
             **kwargs,
         )
@@ -139,6 +158,7 @@ class HFConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
+                trust_remote_code=trust_remote_code,
                 token=_get_hf_token(),
                 **kwargs,
             )
@@ -305,24 +325,41 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    rope_theta_names = ("rope_theta", "rotary_emb_base")
-    rope_theta = getattr_iter(config, rope_theta_names, None)
+    from vllm.config.utils import getattr_iter
+
+    # Older custom models may use non-standard field names
+    # which need patching for both Transformers v4 and v5.
+    names = ["rope_theta", "rotary_emb_base"]
+    rope_theta = getattr_iter(config, names, None, warn=True)
+    names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
+    partial_rotary_factor = getattr_iter(config, names, None, warn=True)
+    ompe = getattr(config, "original_max_position_embeddings", None)
+
     if Version(version("transformers")) < Version("5.0.0.dev0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
+        if (
+            rope_theta is not None
+            or partial_rotary_factor is not None
+            or ompe is not None
+        ) and not getattr(config, "rope_parameters", None):
+            config.rope_parameters = {"rope_type": "default"}
+        # Patch legacy fields into rope_parameters
         if rope_theta is not None:
-            if not hasattr(config, "rope_parameters"):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
-        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
-        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
         if partial_rotary_factor is not None:
-            if not hasattr(config, "rope_parameters"):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-    elif rope_theta is not None or hasattr(config, "rope_parameters"):
+        if ompe is not None:
+            config.rope_parameters["original_max_position_embeddings"] = ompe
+    elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
+        # Patch these fields in case they used non-standard names
+        if rope_theta is not None:
+            config.rope_theta = rope_theta
+        if partial_rotary_factor is not None:
+            config.partial_rotary_factor = partial_rotary_factor
+        # Standardize and validate RoPE parameters
         config.standardize_rope_params()
         config.validate_rope()
 
@@ -330,12 +367,8 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     if getattr(config, "rope_parameters", None) is None:
         return
 
-    # Add original_max_position_embeddings if present
-    if ompe := getattr(config, "original_max_position_embeddings", None):
-        config.rope_parameters["original_max_position_embeddings"] = ompe
-
     # Handle nested rope_parameters in interleaved sliding attention models
-    if set(config.rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+    if is_rope_parameters_nested(config.rope_parameters):
         for rope_parameters_layer_type in config.rope_parameters.values():
             patch_rope_parameters_dict(rope_parameters_layer_type)
     else:
@@ -607,6 +640,28 @@ def get_config(
         hf_overrides=hf_overrides_kw,
         **kwargs,
     )
+
+    # Patching defaults for GGUF models
+    if _is_gguf:
+        # Some models have different default values between GGUF and HF.
+        def apply_gguf_default(key: str, gguf_default: Any):
+            """
+            Apply GGUF defaults unless explicitly configured.
+
+            This function reads/writes external `config` and `config_dict`.
+            If the specified `key` is not in `config_dict` (i.e. not explicitly
+            configured and the default HF value is used), it updates the
+            corresponding `config` value to `gguf_default`.
+            """
+            if key not in config_dict:
+                config.update({key: gguf_default})
+
+        # Apply architecture-specific GGUF defaults.
+        if config.model_type in {"qwen3_moe"}:
+            # Qwen3 MoE: norm_topk_prob is always true.
+            # Note that, this parameter is always false (HF default) on Qwen2 MoE.
+            apply_gguf_default("norm_topk_prob", True)
+
     # Special architecture mapping check for GGUF models
     if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
@@ -953,6 +1008,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,

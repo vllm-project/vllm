@@ -47,6 +47,8 @@ We currently support the following OpenAI APIs:
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
+- [Responses API](#responses-api) (`/v1/responses`)
+    - Only applicable to [text generation models](../models/generative_models.md).
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
     - *Note: `user` parameter is ignored.*
@@ -227,6 +229,31 @@ The following extra parameters are supported:
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
+    ```
+
+### Responses API
+
+Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/online_serving/openai_responses_client_with_tools.py)
+
+#### Extra parameters
+
+The following extra parameters in the request object are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/openai/protocol.py:responses-extra-params"
+    ```
+
+The following extra parameters in the response object are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/openai/protocol.py:responses-response-extra-params"
     ```
 
 ### Embeddings API
@@ -642,6 +669,21 @@ You can find the documentation for cross encoder models at [sbert.net](https://w
 
 Code example: [examples/pooling/score/openai_cross_encoder_score.py](../../examples/pooling/score/openai_cross_encoder_score.py)
 
+#### Score Template
+
+Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](#chat-template)).
+
+Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
+
+Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
+
+- **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
+- **Document**: `{{ (messages | selectattr("role", "eq", "document") | first).content }}`
+
+This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
+
+Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja)
+
 #### Single inference
 
 You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
@@ -851,7 +893,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: [examples/pooling/score/jinaai_rerank_client.py](../../examples/pooling/score/jinaai_rerank_client.py)
+Code example: [examples/pooling/score/openai_reranker.py](../../examples/pooling/score/openai_reranker.py)
 
 #### Example Request
 

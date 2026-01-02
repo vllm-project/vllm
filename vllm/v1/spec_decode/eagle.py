@@ -71,7 +71,6 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
-        self.block_size = vllm_config.cache_config.block_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -178,6 +177,12 @@ class EagleProposer:
                 )
 
                 rocm_types.append(AiterFlashAttentionMetadata)
+
+            # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
+            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+
+            rocm_types.append(MLACommonMetadata)
+
             self.allowed_attn_types = tuple(rocm_types)
 
         # Parse the speculative token tree.
@@ -230,6 +235,7 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -408,6 +414,17 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
+
+        # In padded drafter batch, we need to adjust the sequence lengths
+        # to remove the "padding" (i.e. rejected tokens).
+        # Only apply this adjustment when we have rejected tokens
+        # (i.e., not the first proposal).
+        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+            common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+            # Invalidate the CPU-side shadows to avoid H<>D sync.
+            common_attn_metadata._seq_lens_cpu = None
+            common_attn_metadata._num_computed_tokens_cpu = None
+
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -440,34 +457,35 @@ class EagleProposer:
             # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            # This is an out-of-place operation to avoid modifying the original tensor.
-            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
-            common_attn_metadata.num_computed_tokens_cpu = (
-                common_attn_metadata.seq_lens_cpu - 1
-            )
+            # Also update the CPU-side shadow; NOTE: this is hacky and should be
+            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
+            if common_attn_metadata._seq_lens_cpu is not None:
+                common_attn_metadata._seq_lens_cpu += 1
+            if common_attn_metadata._num_computed_tokens_cpu is not None:
+                common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
+            block_size = attn_metadata_builder.kv_cache_spec.block_size
             if self.uses_mrope:
                 # all dimensions of positions are the same
-                block_numbers = clamped_positions[0] // self.block_size
+                block_numbers = clamped_positions[0] // block_size
             else:
-                block_numbers = clamped_positions // self.block_size
+                block_numbers = clamped_positions // block_size
             block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1)
             )
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size + clamped_positions[0] % self.block_size
+                    block_ids * block_size + clamped_positions[0] % block_size
                 )
             else:
                 common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size + clamped_positions % self.block_size
+                    block_ids * block_size + clamped_positions % block_size
                 )
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
@@ -622,13 +640,14 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
         used as padding and filtered out later by `token_indices_to_sample`.
+        No blocking CPU operations should be introduced in this function.
         """
         num_reqs = common_attn_metadata.num_reqs
         device = valid_sampled_tokens_count.device
@@ -636,14 +655,17 @@ class EagleProposer:
         token_indices_to_sample = torch.empty(
             (num_reqs,), dtype=torch.int32, device=device
         )
+        num_rejected_tokens_gpu = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+        )
 
-        # Kernel grid: one program per request (row)
         grid = (num_reqs,)
         eagle_prepare_inputs_padded_kernel[grid](
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,
             token_indices_to_sample,
+            num_rejected_tokens_gpu,
             num_reqs,
         )
 
@@ -656,8 +678,8 @@ class EagleProposer:
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
-            num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -668,7 +690,11 @@ class EagleProposer:
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
-        return spec_common_attn_metadata, token_indices_to_sample
+        return (
+            spec_common_attn_metadata,
+            token_indices_to_sample,
+            num_rejected_tokens_gpu,
+        )
 
     def propose_tree(
         self,
@@ -774,12 +800,11 @@ class EagleProposer:
             attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
             # Compute the slot mapping.
+            block_size = tree_attn_metadata_builder.kv_cache_spec.block_size
             query_positions = flattened_draft_positions[:, level : level + query_len]
-            block_numbers = query_positions // self.block_size
+            block_numbers = query_positions // block_size
             block_ids = attn_metadata.block_table.gather(dim=1, index=block_numbers)
-            slot_mapping = (
-                block_ids * self.block_size + query_positions % self.block_size
-            )
+            slot_mapping = block_ids * block_size + query_positions % block_size
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
@@ -932,8 +957,8 @@ class EagleProposer:
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
-            seq_lens_cpu=new_seq_lens_cpu,
-            num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _seq_lens_cpu=new_seq_lens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -1258,7 +1283,7 @@ class EagleProposer:
         num_tokens_padded: int,
     ) -> tuple[int, torch.Tensor]:
         # TODO(Flechman): support DBO ubatching
-        should_ubatch, num_toks_across_dp = coordinate_batch_across_dp(
+        should_ubatch, num_toks_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,

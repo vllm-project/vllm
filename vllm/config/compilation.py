@@ -8,7 +8,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -17,7 +17,6 @@ from vllm.config.utils import (
     Range,
     config,
     get_hash_factors,
-    handle_deprecated,
     hash_factors,
 )
 from vllm.logger import init_logger
@@ -97,7 +96,7 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -126,27 +125,6 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
-
-    # Deprecated flags
-    enable_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_norm_quant and fuse_act_quant 
-    instead. Will be removed in v0.13.0 or v1.0.0, whichever is sooner.
-    """
-    enable_attn_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_attn_quant instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_noop: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use eliminate_noops instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_sequence_parallelism: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use enable_sp instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_async_tp: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_gemm_comms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_fi_allreduce_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_allreduce_rms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -206,15 +184,7 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
 
-        ignored_fields = [
-            "enable_fusion",
-            "enable_attn_fusion",
-            "enable_noop",
-            "enable_sequence_parallelism",
-            "enable_async_tp",
-            "enable_fi_allreduce_fusion",
-        ]
-        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
+        return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
         "fuse_norm_quant",
@@ -224,12 +194,6 @@ class PassConfig:
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
-        "enable_fusion",
-        "enable_attn_fusion",
-        "enable_noop",
-        "enable_sequence_parallelism",
-        "enable_async_tp",
-        "enable_fi_allreduce_fusion",
         mode="wrap",
     )
     @classmethod
@@ -241,49 +205,6 @@ class PassConfig:
 
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
-
-        # Map old flags to new flags and issue warnings
-        handle_deprecated(
-            self,
-            "enable_fusion",
-            ["fuse_norm_quant", "fuse_act_quant"],
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_attn_fusion",
-            "fuse_attn_quant",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_sequence_parallelism",
-            "enable_sp",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_async_tp",
-            "fuse_gemm_comms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_fi_allreduce_fusion",
-            "fuse_allreduce_rms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_noop",
-            "eliminate_noops",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
 
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:
@@ -330,7 +251,7 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -344,7 +265,18 @@ class DynamicShapesConfig:
       backed/unbacked.
     """
 
-    # TODO add a debug mode to fail
+    evaluate_guards: bool = False
+    """
+    A debug mode to detect and fail if Dynamo ever specializes a dynamic shape by
+    guarding on it. When True, dynamic shape guards are not dropped from dynamo.
+    And a failure will be triggered if a recompilation ever happens due to that.
+    This mode requires VLLM_USE_BYTECODE_HOOK to be 0.
+    Enabling this allow observing the dynamic shapes guards in the tlparse
+    artifacts also.
+    When type is backed, aot_compile must be disabled for this mode to work.
+    until this change picked up https://github.com/pytorch/pytorch/pull/169239.
+
+    """
 
     def compute_hash(self) -> str:
         """
@@ -358,7 +290,7 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -455,8 +387,8 @@ class CompilationConfig:
     We use string to avoid serialization issues when using compilation in a
     distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation mode is 3, the backend supports both whole graph and piecewise 
-    compilation, available backends include eager, inductor, and custom backends, 
+    compilation mode is 3, the backend supports both whole graph and piecewise
+    compilation, available backends include eager, inductor, and custom backends,
     the latter of which can be defined via `get_compile_backend`. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
@@ -505,14 +437,14 @@ class CompilationConfig:
 
     compile_ranges_split_points: list[int] | None = None
     """Split points that represent compile ranges for inductor.
-    The compile ranges are 
-    [1, split_points[0]], 
-    [split_points[0] + 1, split_points[1]], ..., 
+    The compile ranges are
+    [1, split_points[0]],
+    [split_points[0] + 1, split_points[1]], ...,
     [split_points[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
-    
-    If a range overlaps with the compile size, graph for compile size 
+
+    If a range overlaps with the compile size, graph for compile size
     will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
     graph for compile size 4 will be compiled and used instead of the graph
     for range [1, 8].
@@ -966,7 +898,9 @@ class CompilationConfig:
         # May get recomputed in the model runner if adjustment is needed for spec-decode
         self.compute_bs_to_padded_graph_size()
 
-    def set_splitting_ops_for_v1(self):
+    def set_splitting_ops_for_v1(
+        self, all2all_backend: str, data_parallel_size: int = 1
+    ):
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
         if self.mode != CompilationMode.VLLM_COMPILE:
@@ -981,50 +915,63 @@ class CompilationConfig:
             "mode is CompilationMode.VLLM_COMPILE"
         )
 
-        if self.use_inductor_graph_partition:
-            self.set_splitting_ops_for_inductor_graph_partition()
-            return
-
-        if self.pass_config.fuse_attn_quant:
-            # here use_inductor_graph_partition is False
+        if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
-            return
+        else:
+            if self.splitting_ops is None:
+                # NOTE: When using full cudagraph, instead of setting an empty
+                # list and capture the full cudagraph inside the flattened fx
+                # graph, we keep the piecewise fx graph structure but capture
+                # the full cudagraph outside the fx graph. This reduces some
+                # cpu overhead when the runtime batch_size is not cudagraph
+                # captured. see https://github.com/vllm-project/vllm/pull/20059
+                # for details. Make a copy to avoid mutating the class-level
+                # list via reference.
+                self.splitting_ops = list(self._attention_ops)
+            elif len(self.splitting_ops) == 0:
+                if (
+                    self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+                ):
+                    logger.warning_once(
+                        "Using piecewise cudagraph with empty splitting_ops"
+                    )
+                if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops do not"
+                        "contains piecewise cudagraph. Setting cudagraph_"
+                        "mode to NONE. Hint: If you are using attention "
+                        "backends that support cudagraph, consider manually "
+                        "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
+                        "to enable full cudagraphs."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.NONE
+                elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops do "
+                        "not contains piecewise cudagraph. Setting "
+                        "cudagraph_mode to FULL."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.FULL
+                self.splitting_ops = []
 
-        if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture
-            # the full cudagraph outside the fx graph. This reduces some
-            # cpu overhead when the runtime batch_size is not cudagraph
-            # captured. see https://github.com/vllm-project/vllm/pull/20059
-            # for details. Make a copy to avoid mutating the class-level
-            # list via reference.
-            self.splitting_ops = list(self._attention_ops)
-        elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty splitting_ops")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-                logger.warning_once(
-                    "Piecewise compilation with empty splitting_ops do not"
-                    "contains piecewise cudagraph. Setting cudagraph_"
-                    "mode to NONE. Hint: If you are using attention backends "
-                    "that support cudagraph, consider manually setting "
-                    "cudagraph_mode to FULL or FULL_DECODE_ONLY to enable "
-                    "full cudagraphs."
-                )
-                self.cudagraph_mode = CUDAGraphMode.NONE
-            elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-                logger.warning_once(
-                    "Piecewise compilation with empty splitting_ops do not "
-                    "contains piecewise cudagraph. Setting cudagraph_mode "
-                    "to FULL."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-            self.splitting_ops = []
-
-    def set_splitting_ops_for_inductor_graph_partition(self):
-        assert self.use_inductor_graph_partition
-        if self.splitting_ops is None:
-            self.splitting_ops = list(self._attention_ops)
+        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
+        if (
+            all2all_backend == "deepep_high_throughput"
+            and data_parallel_size > 1
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
+            logger.info(
+                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
+                "are optimized for prefill and are incompatible with CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "use --all2all-backend with another option, such as "
+                "deepep_low_latency, pplx, or allgather_reducescatter."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
