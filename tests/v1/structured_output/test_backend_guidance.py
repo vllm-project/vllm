@@ -26,11 +26,8 @@ def test_backend_guidance_rollback_terminated():
     # guidance backend. In that case we are in a stopped state, but
     # it should be reverted in case EOS is not accepted by the target
     # model.
-    vllm_config = VllmConfig(
-        decoding_config=StructuredOutputsConfig(
-            backend="guidance",
-        )
-    )
+    structured_outputs_config = StructuredOutputsConfig(backend="guidance")
+    vllm_config = VllmConfig(structured_outputs_config=structured_outputs_config)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
 
     backend = GuidanceBackend(
