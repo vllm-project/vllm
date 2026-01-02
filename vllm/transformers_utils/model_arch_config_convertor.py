@@ -29,6 +29,9 @@ class ModelArchConfigConvertorBase:
     def get_architecture(self) -> str | None:
         architectures = getattr(self.hf_config, "architectures", None)
         if architectures:
+            assert len(architectures) == 1, (
+                f"len(architectures) should be 1, got {len(architectures)}"
+            )
             return architectures[0]
         return None
 

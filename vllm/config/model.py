@@ -519,6 +519,9 @@ class ModelConfig:
         model_info, arch = registry.inspect_model_cls(architecture, self)
         self._model_info = model_info
         self._architecture = arch
+        assert architecture == arch, (
+            f"vllm inspected {arch=}, and is different from config {architecture=}"
+        )
         logger.info("Resolved architecture: %s", arch)
 
         # Init pooler config if needed
