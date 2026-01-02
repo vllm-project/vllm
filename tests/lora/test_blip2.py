@@ -6,7 +6,7 @@ from vllm.lora.request import LoRARequest
 
 BLIP2_MODEL = "Salesforce/blip2-opt-2.7b"
 PROMPT = "Question: <image> What is shown in the photo? Answer:"
-EXPECTED_OUTPUT = "a pedestrian crossing the street"
+EXPECTED_OUTPUT = "a stop sign"
 
 
 def test_blip2_single_lora_vqa(blip2_vision_lora_files):
