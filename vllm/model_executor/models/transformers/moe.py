@@ -224,7 +224,7 @@ class MoEMixin(MixtureOfExperts):
 
         # MoE activation function
         activation = "silu"
-        wrapped_arch = self.config.architecture.lower()
+        wrapped_arch = self.config.architectures[0].lower()
         if "gptoss" in wrapped_arch:
             activation = "swigluoai"
         elif "grok1" in wrapped_arch:
