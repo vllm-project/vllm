@@ -750,6 +750,12 @@ class AsyncLLM(EngineClient):
         )
 
     async def sleep(self, level: int = 1) -> None:
+        if self.output_processor.has_unfinished_requests():
+            raise RuntimeError(
+                "Cannot put engine to sleep while requests are being processed. "
+                "Please wait for all requests to complete before calling sleep()."
+            )
+
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 

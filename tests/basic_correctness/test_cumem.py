@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
+import time
 
 import pytest
 import torch
@@ -279,3 +281,104 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_sleep_with_active_requests():
+    """Test that sleep() raises RuntimeError when requests are active."""
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=100, ignore_eos=True)
+    
+    # Start a generation in a background thread
+    exception_holder = []
+    
+    def generate_in_background():
+        try:
+            llm.generate(prompt, sampling_params)
+        except Exception as e:
+            exception_holder.append(e)
+    
+    gen_thread = threading.Thread(target=generate_in_background)
+    gen_thread.start()
+    
+    # Poll until request is actually running (more reliable than time.sleep)
+    max_wait = 5.0  # 5 seconds timeout
+    start_time = time.time()
+    while not llm.llm_engine.has_unfinished_requests():
+        if time.time() - start_time > max_wait:
+            raise TimeoutError("Request never started processing")
+        time.sleep(0.01)
+    
+    # Try to sleep while request is active - should raise RuntimeError
+    with pytest.raises(RuntimeError, match="Cannot put engine to sleep while requests are being processed"):
+        llm.sleep(level=1)
+    
+    # Wait for generation to complete
+    gen_thread.join()
+    
+    # Verify generation completed successfully
+    assert len(exception_holder) == 0
+    
+    # Now sleep should work since no requests are active
+    llm.sleep(level=1)
+    
+    # Verify we can wake up and generate again
+    llm.wake_up()
+    output = llm.generate(prompt, SamplingParams(temperature=0, max_tokens=10))
+    assert len(output) == 1
+
+
+@create_new_process_for_each_test()
+def test_sleep_async_with_active_requests():
+    """Test that async sleep() raises RuntimeError when requests are active."""
+    async def _consume_outputs(gen):
+        """Helper to consume all outputs from a generator."""
+        output = None
+        async for output in gen:
+            pass
+        return output
+    
+    async def test():
+        model = "hmellor/tiny-random-LlamaForCausalLM"
+        engine_args = AsyncEngineArgs(
+            model=model,
+            enable_sleep_mode=True,
+        )
+        
+        llm = AsyncLLMEngine.from_engine_args(engine_args)
+        prompt = "How are you?"
+        sampling_params = SamplingParams(temperature=0, max_tokens=100, ignore_eos=True)
+        
+        # Start a generation but don't await it
+        gen_task = asyncio.create_task(_consume_outputs(
+            llm.generate(prompt, sampling_params, request_id="test_request_id1")
+        ))
+        
+        # Poll until request is actually running (more reliable than asyncio.sleep)
+        max_wait = 5.0  # 5 seconds timeout
+        start_time = time.time()
+        while not llm.engine.output_processor.has_unfinished_requests():
+            if time.time() - start_time > max_wait:
+                raise TimeoutError("Request never started processing")
+            await asyncio.sleep(0.01)
+        
+        # Try to sleep while request is active - should raise RuntimeError
+        with pytest.raises(RuntimeError, match="Cannot put engine to sleep while requests are being processed"):
+            await llm.sleep(level=1)
+        
+        # Wait for generation to complete
+        await gen_task
+        
+        # Now sleep should work since no requests are active
+        await llm.sleep(level=1)
+        
+        # Verify we can wake up and generate again
+        await llm.wake_up()
+        output = await _consume_outputs(
+            llm.generate(prompt, SamplingParams(temperature=0, max_tokens=10), request_id="test_request_id2")
+        )
+        assert output is not None
+    
+    asyncio.run(test())

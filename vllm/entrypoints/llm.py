@@ -1533,6 +1533,12 @@ class LLM:
                 different model or update the model, where previous model
                 weights are not needed. It reduces CPU memory pressure.
         """
+        if self.llm_engine.has_unfinished_requests():
+            raise RuntimeError(
+                "Cannot put engine to sleep while requests are being processed. "
+                "Please wait for all requests to complete before calling sleep()."
+            )
+
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
