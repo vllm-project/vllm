@@ -4,7 +4,6 @@
 from contextlib import contextmanager
 from typing import Any, Literal
 
-import regex as re
 import torch
 
 from vllm.config import VllmConfig

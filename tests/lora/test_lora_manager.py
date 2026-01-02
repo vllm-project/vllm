@@ -207,7 +207,7 @@ def test_replace_submodules_with_target_modules(
         torch.device(DEVICES[0]),
     )
     model = manager.model
-    
+
     # Check that expected modules are replaced with LoRA wrappers
     for module_name in expected_lora_modules:
         module = model.get_submodule(module_name)

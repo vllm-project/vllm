@@ -201,13 +201,13 @@ By using `--lora-target-modules` to target only the self-attention layers, you c
 
 You can specify the target modules as a list of strings (matched as suffix or exact) or a regex string (matched anywhere).
 
-**Example: List of modules (suffix matching)**
+##### Example: List of modules (suffix matching)
 
 ```bash
 --lora-target-modules q_proj v_proj k_proj o_proj
 ```
 
-**Example: Regex**
+##### Example: Regex
 
 ```bash
 --lora-target-modules '.*\.self_attn\..*'

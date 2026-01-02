@@ -3,7 +3,6 @@
 
 from typing import TYPE_CHECKING, Any, Literal
 
-import regex as re
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
