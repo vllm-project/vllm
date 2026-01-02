@@ -948,8 +948,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
-                # NOTE(rob): the following are not set as nn.Parameters
-                # they are not needed for weight loading/re-loading.
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                     register_scales_for_trtllm_fp8_per_tensor_moe(
