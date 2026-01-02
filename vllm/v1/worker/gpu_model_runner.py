@@ -3828,12 +3828,17 @@ class GPUModelRunner(
                         self.model, self.vllm_config, self.device
                     )
 
-                def load_drafter_model(drafter):
+                if hasattr(self, "drafter"):
+                    drafter_to_load = self.drafter
+                elif hasattr(self, "drafter_eagle"):
+                    drafter_to_load = self.drafter_eagle
+
+                if drafter_to_load:
                     logger.info_once("Loading drafter model...")
-                    drafter.load_model(self.model)
+                    drafter_to_load.load_model(self.model)
                     if (
-                        hasattr(drafter, "model")
-                        and is_mixture_of_experts(drafter.model)
+                        hasattr(drafter_to_load, "model")
+                        and is_mixture_of_experts(drafter_to_load.model)
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
@@ -3859,19 +3864,13 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            drafter.model,
+                            drafter_to_load.model,
                             spec_config.draft_model_config,
                             global_expert_load,
                             old_global_expert_indices,
                             rank_mapping,
                         )
                         eplb_models += 1
-                
-                # allow loading multiple drafter models 
-                if hasattr(self, "drafter"):
-                    load_drafter_model(self.drafter)
-                if hasattr(self, "drafter_eagle"):
-                    load_drafter_model(self.drafter_eagle)
 
                 if self.use_aux_hidden_state_outputs:
                     if not supports_eagle3(self.get_model()):
