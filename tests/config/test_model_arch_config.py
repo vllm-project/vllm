@@ -146,9 +146,7 @@ def test_draft_model_arch_config(
     # model_arch_config was introduced, so we conditionally check it
     check_head_size = isinstance(expected["head_size"], int)
 
-    _assert_model_arch_config(
-        model_config, expected, check_head_size=check_head_size
-    )
+    _assert_model_arch_config(model_config, expected, check_head_size=check_head_size)
     _assert_model_config_methods(
         model_config, expected, check_head_size=check_head_size
     )
