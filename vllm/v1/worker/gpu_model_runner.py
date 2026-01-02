@@ -461,8 +461,6 @@ class GPUModelRunner(
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
 
-        # EKAGRA: figure out the right value for num_spec_tokens
-        # (maybe be max since ngram also has variable len but should be working)
         self.num_spec_tokens = 0
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
@@ -3418,6 +3416,14 @@ class GPUModelRunner(
 
         self.input_batch.prev_sampled_token_ids = None
 
+        spec_config = self.speculative_config
+        use_padded_batch_for_eagle = (
+            spec_config is not None
+            and spec_config.use_eagle()
+            and not spec_config.use_ngram()  # disable for ngram + eagle hybrid
+            and not spec_config.disable_padded_drafter_batch
+        )
+
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("gpu_model_runner: draft"):
@@ -3427,18 +3433,12 @@ class GPUModelRunner(
                     self.input_batch.sampling_metadata,
                     hidden_states,
                     sample_hidden_states,
+                    use_padded_batch_for_eagle,
                     aux_hidden_states,
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
 
-        spec_config = self.speculative_config
-        use_padded_batch_for_eagle = (
-            spec_config is not None
-            and spec_config.use_eagle()
-            and not spec_config.use_ngram()  # disable for ngram + eagle hybrid
-            and not spec_config.disable_padded_drafter_batch
-        )
         effective_drafter_max_model_len = self.max_model_len
         if effective_drafter_max_model_len is None:
             effective_drafter_max_model_len = self.model_config.max_model_len
@@ -3456,7 +3456,7 @@ class GPUModelRunner(
         )
         if use_padded_batch_for_eagle:
             assert self.speculative_config is not None
-            assert isinstance(self.drafter, EagleProposer)
+            assert isinstance(self.drafter_eagle, EagleProposer)
             sampled_token_ids = sampler_output.sampled_token_ids
             if input_fits_in_drafter:
                 # EAGLE speculative decoding can use the GPU sampled tokens
@@ -3465,7 +3465,7 @@ class GPUModelRunner(
             elif self.valid_sampled_token_count_event is not None:
                 assert spec_decode_common_attn_metadata is not None
                 next_token_ids, valid_sampled_tokens_count = (
-                    self.drafter.prepare_next_token_ids_padded(
+                    self.drafter_eagle.prepare_next_token_ids_padded(
                         spec_decode_common_attn_metadata,
                         sampled_token_ids,
                         self.requests,
@@ -3599,6 +3599,7 @@ class GPUModelRunner(
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
+        use_padded_batch_for_eagle: bool,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
@@ -3652,7 +3653,7 @@ class GPUModelRunner(
         if spec_config.use_eagle():
             assert isinstance(self.drafter_eagle, EagleProposer)
 
-            if spec_config.disable_padded_drafter_batch:
+            if not use_padded_batch_for_eagle:
                 # When padded-batch is disabled, the sampled_token_ids should be
                 # the cpu-side list[list[int]] of valid sampled tokens for each
                 # request, with invalid requests having empty lists.
@@ -3702,7 +3703,7 @@ class GPUModelRunner(
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                if spec_config.disable_padded_drafter_batch:
+                if not use_padded_batch_for_eagle:
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices = (
                         self.drafter_eagle.prepare_inputs(
