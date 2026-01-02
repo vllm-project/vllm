@@ -734,20 +734,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
 
-        is_flashinfer = self.fp8_backend in [
-            Fp8MoeBackend.FLASHINFER_TRTLLM,
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-        ]
-        if (
-            is_flashinfer
-            and not self.block_quant
-            and self.quant_config.activation_scheme != "static"
-        ):
-            raise NotImplementedError(
-                "FlashInfer FP8 MoE backend only dynamic block quantization"
-                "or static per tensor activation quantization."
-            )
-
         self.marlin_input_dtype = None
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
@@ -776,6 +762,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
                     "activation function, but got {layer.activation}."
                 )
+        dynamic_per_token = (
+            not self.block_quant and self.quant_config.activation_scheme != "static"
+        )
+        if self.flashinfer_moe_backend is not None and dynamic_per_token:
+            raise NotImplementedError(
+                "FlashInfer FP8 MoE backend does not support dynamic per token "
+                "activation quantization."
+            )
 
     def create_weights(
         self,
