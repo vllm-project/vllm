@@ -429,9 +429,9 @@ class GPUModelRunner(
         # layers in the draft model.
         found_draft = False
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter_ngram: NgramProposer | None = None
-            self.drafter_eagle: EagleProposer | None = None
-            self.drafter: SuffixDecodingProposer | MedusaProposer | None = None
+            self.drafter_ngram: NgramProposer
+            self.drafter_eagle: EagleProposer
+            self.drafter: SuffixDecodingProposer | MedusaProposer
             if (
                 self.speculative_config.method == "ngram"
                 or self.speculative_config.method == "ngram-eagle"
@@ -445,7 +445,7 @@ class GPUModelRunner(
                 self.drafter_eagle = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
-                        self.drafter.eagle3_use_aux_hidden_state
+                        self.drafter_eagle.eagle3_use_aux_hidden_state
                     )
                 found_draft = True
             if self.speculative_config.method == "medusa":
@@ -3770,6 +3770,7 @@ class GPUModelRunner(
             assert draft_token_ids_ngram is not None, "ngram proposer failed"
             assert draft_token_ids_eagle is not None, "eagle proposer failed"
             # eagle draft is torch but we need list
+            assert isinstance(draft_token_ids_eagle, torch.Tensor)
             draft_token_ids_eagle = draft_token_ids_eagle.tolist()
             draft_token_ids = []
 
@@ -3827,18 +3828,12 @@ class GPUModelRunner(
                         self.model, self.vllm_config, self.device
                     )
 
-                drafter_to_load = None
-                if hasattr(self, "drafter"):
-                    drafter_to_load = self.drafter
-                if hasattr(self, "drafter_eagle"):
-                    drafter_to_load = self.drafter_eagle
-
-                if drafter_to_load is not None:
+                def load_drafter_model(drafter):
                     logger.info_once("Loading drafter model...")
-                    drafter_to_load.load_model(self.model)
+                    drafter.load_model(self.model)
                     if (
-                        hasattr(drafter_to_load, "model")
-                        and is_mixture_of_experts(drafter_to_load.model)
+                        hasattr(drafter, "model")
+                        and is_mixture_of_experts(drafter.model)
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
@@ -3864,13 +3859,19 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            drafter_to_load.model,
+                            drafter.model,
                             spec_config.draft_model_config,
                             global_expert_load,
                             old_global_expert_indices,
                             rank_mapping,
                         )
                         eplb_models += 1
+                
+                # allow loading multiple drafter models 
+                if hasattr(self, "drafter"):
+                    load_drafter_model(self.drafter)
+                if hasattr(self, "drafter_eagle"):
+                    load_drafter_model(self.drafter_eagle)
 
                 if self.use_aux_hidden_state_outputs:
                     if not supports_eagle3(self.get_model()):
