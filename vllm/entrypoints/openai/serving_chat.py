@@ -1067,7 +1067,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_text=delta_text,
                             previous_token_ids=previous_token_ids,
                             current_token_ids=current_token_ids,
-                            delta_token_ids=output.token_ids,
+                            delta_token_ids=as_list(output.token_ids),
                             request=request,
                         )
                         if delta_message and delta_message.tool_calls:
@@ -1081,7 +1081,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_text,
                             previous_token_ids,
                             current_token_ids,
-                            output.token_ids,
+                            as_list(output.token_ids),
                         )
                     # handle streaming just a content delta
                     else:
