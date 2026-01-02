@@ -378,18 +378,35 @@ class OpenAISpeechToText(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
+        tokenizer: PreTrainedTokenizerBase | None,
     ) -> list[TranscriptionLogprob]:
         """Create logprobs for transcription API response.
 
         Returns a list of TranscriptionLogprob objects matching OpenAI's format
         from openai.types.audio.transcription.Logprob.
+
+        Args:
+            token_ids: Sequence of token IDs.
+            top_logprobs: Sequence of logprob dictionaries for each token.
+            num_output_top_logprobs: Number of top logprobs requested.
+            tokenizer: Tokenizer to decode tokens. Must not be None.
+
+        Raises:
+            VLLMValidationError: If tokenizer is None (skip_tokenizer_init=True).
         """
+        if tokenizer is None:
+            raise VLLMValidationError(
+                "Unable to get tokenizer because `skip_tokenizer_init=True`",
+                parameter="skip_tokenizer_init",
+                value=True,
+            )
+
         result: list[TranscriptionLogprob] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = self.tokenizer.decode(token_id)
+                token = tokenizer.decode(token_id)
                 result.append(
                     TranscriptionLogprob(
                         token=token,
@@ -400,7 +417,7 @@ class OpenAISpeechToText(OpenAIServing):
             else:
                 step_token = step_top_logprobs.get(token_id)
                 if step_token is None:
-                    token = self.tokenizer.decode(token_id)
+                    token = tokenizer.decode(token_id)
                     result.append(
                         TranscriptionLogprob(
                             token=token,
@@ -412,7 +429,7 @@ class OpenAISpeechToText(OpenAIServing):
                     token = (
                         step_token.decoded_token
                         if step_token.decoded_token is not None
-                        else self.tokenizer.decode(token_id)
+                        else tokenizer.decode(token_id)
                     )
                     token_logprob = max(step_token.logprob, -9999.0)
 
@@ -574,6 +591,7 @@ class OpenAISpeechToText(OpenAIServing):
                     token_ids=all_token_ids,
                     top_logprobs=all_logprobs,
                     num_output_top_logprobs=req_logprobs,
+                    tokenizer=self.tokenizer,
                 )
 
             if self.task_type == "transcribe":
@@ -683,6 +701,7 @@ class OpenAISpeechToText(OpenAIServing):
                             token_ids=output.token_ids,
                             top_logprobs=output.logprobs,
                             num_output_top_logprobs=req_logprobs,
+                            tokenizer=self.tokenizer,
                         )
 
                     if output.finish_reason is None:
