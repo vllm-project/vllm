@@ -127,7 +127,8 @@ class TestData:
         if is_trtllm:
             rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
             register_scales_for_trtllm_fp8_per_tensor_moe(
-                layer.w13_weight,
+                layer,
+                layer.w13_weight_scale,
                 layer.w13_input_scale,
                 layer.w2_weight_scale,
                 layer.w2_input_scale,
