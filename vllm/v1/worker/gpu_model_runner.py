@@ -1767,7 +1767,7 @@ class GPUModelRunner(
                 )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter_eagle, EagleProposer):
+                if self.speculative_config.use_eagle():
                     if (
                         self.drafter_eagle.attn_layer_names[0]
                         in kv_cache_group.layer_names
@@ -3828,7 +3828,9 @@ class GPUModelRunner(
                         self.model, self.vllm_config, self.device
                     )
 
-                drafter_to_load: EagleProposer | SuffixDecodingProposer | MedusaProposer
+                drafter_to_load: (
+                    EagleProposer | SuffixDecodingProposer | MedusaProposer | None
+                ) = None
                 if hasattr(self, "drafter"):
                     drafter_to_load = self.drafter
                 elif hasattr(self, "drafter_eagle"):

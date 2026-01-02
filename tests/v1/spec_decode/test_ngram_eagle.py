@@ -30,12 +30,15 @@ NUM_SPECULATIVE_TOKENS_EAGLE = 3
 PROMPT_LOOKUP_MIN = 2
 PROMPT_LOOKUP_MAX = 5
 DEVICE = current_platform.device_type
+MAX_MODEL_LEN = 100
 
 
 def _create_vllm_config(
     num_speculative_tokens_ngram: int, num_speculative_tokens_eagle: int
 ):
-    model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
+    model_config = ModelConfig(
+        model=model_dir, runner="generate", max_model_len=MAX_MODEL_LEN
+    )
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir
@@ -60,7 +63,9 @@ def _create_vllm_config(
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=MAX_MODEL_LEN, is_encoder_decoder=False
+        ),
     )
 
     return vllm_config
@@ -102,7 +107,7 @@ def test_proposer_config():
 @pytest.mark.parametrize("pp_size", [1, 2])
 @mock.patch("vllm.v1.worker.gpu_model_runner.get_pp_group")
 @mock.patch(
-    "vllm.v1.worker.gpu_model_runner.GPUModelRunner.propose_ngram_draft_token_ids"
+    "vllm.v1.worker.gpu_model_runner.NgramProposer.propose",
 )
 @mock.patch(
     "vllm.v1.worker.gpu_model_runner.EagleProposer.propose",
@@ -180,6 +185,7 @@ def test_propose_draft_token_ids(
         sampling_metadata=sampling_metadata,
         hidden_states=hidden_states,
         sample_hidden_states=sample_hidden_states,
+        use_padded_batch_for_eagle=False,
         aux_hidden_states=aux_hidden_states,
         spec_decode_metadata=spec_decode_metadata,
         common_attn_metadata=common_attn_metadata,
