@@ -18,6 +18,32 @@ following `quantization.quant_algo` values:
 - `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
 
+## Pruned checkpoints with per-layer MLP sizes
+
+Some ModelOpt/GradNAS pruned checkpoints change the MLP width per layer. In
+that case, the global `intermediate_size` in `config.json` is not sufficient
+and vLLM needs the per-layer sizes.
+
+To enable inference of per-layer MLP sizes at load time, use the flag:
+
+```bash
+vllm serve <path_to_checkpoint> \
+  --quantization modelopt \
+  --enable-modelopt-pruning
+```
+
+Notes:
+
+- This requires local or cached safetensors weights; it does not download
+  missing files on demand.
+- The inference logic supports gate_proj-style MLP weights (Qwen/LLaMA-style).
+
+You can also patch the sizes into the local `config.json` once:
+
+```bash
+python examples/modelopt/patch_qwen2_layer_intermediate_sizes.py --model_dir <path_to_checkpoint>
+```
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import os
+import re
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -42,6 +45,7 @@ from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.repo_utils import try_get_local_file
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -183,6 +187,9 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    enable_modelopt_pruning: bool = False
+    """Enable ModelOpt GradNAS pruning support by inferring per-layer MLP sizes
+    from safetensors weights. Requires gate_proj-style MLP weights."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -476,6 +483,7 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self._maybe_enable_modelopt_pruning()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
         )
@@ -599,6 +607,34 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    def _maybe_enable_modelopt_pruning(self) -> None:
+        if not self.enable_modelopt_pruning:
+            return
+        text_config = self.hf_text_config
+        if getattr(text_config, "layer_intermediate_sizes", None) is not None:
+            logger.info("layer_intermediate_sizes already set; skipping inference.")
+            return
+        num_layers = getattr(text_config, "num_hidden_layers", None)
+        if num_layers is None:
+            raise ValueError(
+                "enable_modelopt_pruning requires num_hidden_layers in the "
+                "model config."
+            )
+        model_dir = _resolve_modelopt_model_dir(self.model, self.revision)
+        if model_dir is None:
+            raise ValueError(
+                "enable_modelopt_pruning requires local safetensors weights. "
+                "Provide a local model path or ensure weights are cached."
+            )
+        sizes = _infer_layer_intermediate_sizes(model_dir, num_layers)
+        text_config.layer_intermediate_sizes = sizes
+        if text_config is not self.hf_config:
+            self.hf_config.layer_intermediate_sizes = sizes
+        logger.info(
+            "Enabled ModelOpt pruning support: %s",
+            _summarize_layer_sizes(sizes),
+        )
 
     @field_validator("tokenizer", "max_model_len", mode="wrap")
     @classmethod
@@ -1878,6 +1914,111 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 def str_dtype_to_torch_dtype(type: str):
     return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
+
+_GATE_PROJ_RE = re.compile(r"model\.layers\.(\d+)\.mlp\.gate_proj\.weight$")
+
+
+def _resolve_modelopt_model_dir(
+    model: str,
+    revision: str | None,
+) -> str | None:
+    if os.path.isdir(model):
+        return model
+    if os.path.isfile(model):
+        return os.path.dirname(model)
+    for name in (
+        "model.safetensors.index.json",
+        "consolidated.safetensors.index.json",
+        "model.safetensors",
+        "consolidated.safetensors",
+    ):
+        path = try_get_local_file(model, name, revision=revision)
+        if path is not None:
+            return str(path.parent)
+    return None
+
+
+def _iter_modelopt_gate_proj_entries(model_dir: str):
+    index_files = (
+        "model.safetensors.index.json",
+        "consolidated.safetensors.index.json",
+    )
+    for index_name in index_files:
+        index_path = os.path.join(model_dir, index_name)
+        if not os.path.isfile(index_path):
+            continue
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+        file_to_keys: dict[str, list[tuple[str, int]]] = {}
+        for key, filename in index.get("weight_map", {}).items():
+            match = _GATE_PROJ_RE.match(key)
+            if not match:
+                continue
+            file_to_keys.setdefault(filename, []).append((key, int(match.group(1))))
+        if file_to_keys:
+            for filename, keys in file_to_keys.items():
+                yield os.path.join(model_dir, filename), keys
+            return
+        break
+
+    files = sorted(f for f in os.listdir(model_dir) if f.endswith(".safetensors"))
+    for filename in files:
+        yield os.path.join(model_dir, filename), None
+
+
+def _infer_layer_intermediate_sizes(model_dir: str, num_layers: int) -> list[int]:
+    from safetensors.torch import safe_open
+
+    layer_sizes: dict[int, int] = {}
+    for path, keys in _iter_modelopt_gate_proj_entries(model_dir):
+        with safe_open(path, framework="pt") as f:
+            if keys is None:
+                keys = list(f.keys())
+                filtered_keys = []
+                for key in keys:
+                    match = _GATE_PROJ_RE.match(key)
+                    if match:
+                        filtered_keys.append((key, int(match.group(1))))
+                keys = filtered_keys
+            for key, layer_idx in keys:
+                shape = f.get_slice(key).get_shape()
+                if len(shape) != 2:
+                    raise ValueError(f"Unexpected shape for {key}: {shape}")
+                intermediate_size = int(shape[0])
+                if (
+                    layer_idx in layer_sizes
+                    and layer_sizes[layer_idx] != intermediate_size
+                ):
+                    raise ValueError(
+                        f"Layer {layer_idx} has inconsistent sizes: "
+                        f"{layer_sizes[layer_idx]} vs {intermediate_size}"
+                    )
+                layer_sizes[layer_idx] = intermediate_size
+
+    if not layer_sizes:
+        raise ValueError(
+            "No gate_proj weights found. Only gate_proj-style MLP "
+            "weights are supported for ModelOpt pruning."
+        )
+
+    sizes = [0] * num_layers
+    missing = []
+    for idx in range(num_layers):
+        if idx not in layer_sizes:
+            missing.append(idx)
+            continue
+        sizes[idx] = layer_sizes[idx]
+    if missing:
+        raise ValueError(f"Missing gate_proj weights for layers: {missing}")
+    return sizes
+
+
+def _summarize_layer_sizes(sizes: list[int]) -> str:
+    return (
+        f"layers={len(sizes)} min={min(sizes)} max={max(sizes)} "
+        f"unique={len(set(sizes))}"
+    )
 
 
 # model_type -> reason

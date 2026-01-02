@@ -48,7 +48,13 @@ from vllm.transformers_utils.config import set_default_rope_theta
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    get_layer_intermediate_size,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -195,7 +201,7 @@ class Qwen3DecoderLayer(nn.Module):
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=get_layer_intermediate_size(config, prefix),
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
