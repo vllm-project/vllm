@@ -944,19 +944,16 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             if self.moe.is_act_and_mul:
                 layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
 
-            # g1_alphas = w13_weight_scale * w13_input_scale
-            # g2_alphas = w2_weight_scale * w2_input_scale
-            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                w13_scale=layer.w13_weight_scale,
-                w13_input_scale=layer.w13_input_scale,
-                w2_scale=layer.w2_weight_scale,
-                w2_input_scale=layer.w2_input_scale,
-            )
-
             # NOTE(rob): these scales do not need to be registered as parameters
             # since they are not used for weight (re)-loading.
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+                g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                    w13_scale=layer.w13_weight_scale,
+                    w13_input_scale=layer.w13_input_scale,
+                    w2_scale=layer.w2_weight_scale,
+                    w2_input_scale=layer.w2_input_scale,
+                )
                 layer.output1_scales_gate_scalar = g1_alphas
                 layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
                 layer.output2_scales_scalar = g2_alphas
