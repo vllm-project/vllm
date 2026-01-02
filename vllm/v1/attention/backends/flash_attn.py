@@ -845,9 +845,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        _maybe_add_cu_seqlens_k(
-            context_kwargs, attn_metadata.cu_seqlens_dcp_context_k
-        )
+        _maybe_add_cu_seqlens_k(context_kwargs, attn_metadata.cu_seqlens_dcp_context_k)
         context_attn_out, context_lse = flash_attn_varlen_func(**context_kwargs)
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
         context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(

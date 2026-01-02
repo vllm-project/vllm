@@ -532,9 +532,7 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        self.cu_seqlens_k = self._make_buffer(
-            self.max_num_reqs + 1, dtype=torch.int32
-        )
+        self.cu_seqlens_k = self._make_buffer(self.max_num_reqs + 1, dtype=torch.int32)
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(

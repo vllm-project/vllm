@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.common import (
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
+
 # NOTE: FlashAttention-MLA is CUDA-only because it depends on vllm.vllm_flash_attn,
 # which is only built for CUDA today. A future refactor could route this through
 # vllm.attention.utils.fa_utils to support ROCm via upstream flash_attn.

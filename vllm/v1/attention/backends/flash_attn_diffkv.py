@@ -13,22 +13,17 @@ from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
 from .flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadata,
+    _maybe_add_cu_seqlens_k,
     cascade_attention,
 )
 
 logger = init_logger(__name__)
-
-
-def _maybe_add_cu_seqlens_k(kwargs, cu_seqlens_k):
-    if cu_seqlens_k is not None and current_platform.is_rocm():
-        kwargs["cu_seqlens_k"] = cu_seqlens_k
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
