@@ -15,7 +15,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor
+from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -60,6 +60,7 @@ class InputProcessor:
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -406,6 +407,24 @@ class InputProcessor:
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
+    def _get_mm_identifier(
+        self,
+        mm_hash: str,
+        lora_request: LoRARequest | None,
+    ) -> str:
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
+        """
+        if (
+            lora_request is None
+            or self.lora_config is None
+            or not self.lora_config.enable_tower_connector_lora
+        ):
+            return mm_hash
+        return f"{lora_request.lora_name}:{mm_hash}"
+
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
@@ -475,11 +494,13 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with set_request_id(request_id):
+            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
@@ -539,7 +560,10 @@ class InputProcessor:
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=decoder_mm_hashes[modality][idx],
+                        identifier=self._get_mm_identifier(
+                            decoder_mm_hashes[modality][idx],
+                            lora_request,
+                        ),
                         mm_position=decoder_mm_positions[modality][idx],
                     )
                 )
@@ -597,7 +621,7 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            max_input_id = max(prompt_ids or [], default=0)
+            max_input_id = max(prompt_ids or (), default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
             # self.model_config.get_vocab_size() is the model’s vocab size.
@@ -620,6 +644,7 @@ class InputProcessor:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
                     model_config,
+                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
