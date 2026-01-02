@@ -129,8 +129,7 @@ def per_token_quant_int8(x):
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
-
-    assert x.is_contiguous()
+    x = x.contiguous()
     _per_token_quant_int8[(M,)](
         x,
         x_q,
