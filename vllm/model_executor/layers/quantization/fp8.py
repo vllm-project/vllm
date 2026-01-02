@@ -954,17 +954,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w2_scale=w2_weight_scale,
                     w2_input_scale=w2_input_scale,
                 )
-                layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
 
+                # NOTE(rob): the following are not set as nn.Parameters
+                # they are not needed for weight loading/re-loading.
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                     layer.output1_scales_gate_scalar = g1_alphas
-                    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
+                    layer.output1_scales_scalar = g1_alphas * (
+                        1.0 / layer.w2_input_scale
+                    )
                     layer.output2_scales_scalar = g2_alphas
-                else:
-                    assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
-                    layer.g1_alphas = g1_alphas
-                    layer.g2_alphas = g2_alphas
 
         elif self.fp8_backend == Fp8MoeBackend.AITER:
             w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
@@ -1237,27 +1236,37 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_shape=self.weight_block_size,
             )
 
-        # All other backends use W8A8 config.
-        g1_alphas = None
-        g2_alphas = None
-        a2_scale = layer.w13_input_scale
+        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+
+        # Flashinfer CUTLASS per-tensor uses single dq scale
+        # (alpha = w_scale * a_scale) and inverse a2 scale.
         if (
             self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
             and not self.block_quant
         ):
-            # CUTLASS uses alpha = weight_s * input_s and a2_scale_inv
-            assert (
-                hasattr(layer, "w2_input_scale_inv")
-                and hasattr(layer, "g1_alphas")
-                and hasattr(layer, "g2_alphas")
+            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                w1_scale,
+                a1_scale,
+                w2_scale,
+                a2_scale,
             )
-            g1_alphas = layer.g1_alphas
-            g2_alphas = layer.g2_alphas
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=(1.0 / a2_scale),
+                g1_alphas=g1_alphas,
+                g2_alphas=g2_alphas,
+            )
 
+        # All other backends use normal config.
         return fp8_w8a8_moe_quant_config(
-            w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
-            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
-            a1_scale=layer.w13_input_scale,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
             g1_alphas=g1_alphas,
