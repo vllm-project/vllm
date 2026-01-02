@@ -15,7 +15,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor
+from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -60,6 +60,7 @@ class InputProcessor:
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -493,11 +494,13 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with set_request_id(request_id):
+            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
@@ -641,6 +644,7 @@ class InputProcessor:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
                     model_config,
+                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
