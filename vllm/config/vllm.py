@@ -444,6 +444,7 @@ class VllmConfig:
 
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
+        model_config.model_arch_config = model_config.get_model_arch_config()
 
         return replace(self, model_config=model_config)
 
