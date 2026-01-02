@@ -17,6 +17,7 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -996,6 +997,8 @@ def wait_for_engine_startup(
                     f"dp lb mode"
                 )
 
+        parallel_factors = parallel_config.compile_factors()
+        parallel_hash = hash_factors(parallel_factors)
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info and config hash.
             # The config hash ensures all DP workers have compatible configs.
@@ -1011,7 +1014,7 @@ def wait_for_engine_startup(
                             "data_parallel_size",
                         )
                     },
-                    parallel_config_hash=parallel_config.compute_hash()
+                    parallel_config_hash=parallel_hash
                     if parallel_config.data_parallel_size > 1
                     else None,
                 )
@@ -1037,7 +1040,7 @@ def wait_for_engine_startup(
             # Validate config hash consistency across DP workers
             if parallel_config.data_parallel_size > 1:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compute_hash()
+                expected_hash = parallel_hash
                 if worker_config_hash != expected_hash:
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
