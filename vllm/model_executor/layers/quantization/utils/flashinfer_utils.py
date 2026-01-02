@@ -103,6 +103,26 @@ def rotate_flashinfer_fp8_moe_weights(
     )
 
 
+def register_scales_for_trtllm_fp8_per_tensor_moe(
+    layer: torch.nn.Module,
+    w13_weight_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> None:
+    """Register necessary scales for FlashInfer TRTLLM FP8 MoE kernel"""
+    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+        w13_scale=w13_weight_scale,
+        w13_input_scale=w13_input_scale,
+        w2_scale=w2_weight_scale,
+        w2_input_scale=w2_input_scale,
+    )
+    layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
+    layer.output1_scales_gate_scalar = g1_alphas
+    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
+    layer.output2_scales_scalar = g2_alphas
+
+
 def apply_flashinfer_per_tensor_scale_fp8(
     layer: torch.nn.Module,
     hidden_states: torch.Tensor,

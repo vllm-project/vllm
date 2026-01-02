@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     make_fp8_moe_alpha_scales_for_fi,
+    register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
@@ -948,16 +949,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             # since they are not used for weight (re)-loading.
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
-                g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                    w13_scale=layer.w13_weight_scale,
+                register_scales_for_trtllm_fp8_per_tensor_moe(
+                    layer=layer,
+                    w13_weight_scale=layer.w13_weight_scale,
                     w13_input_scale=layer.w13_input_scale,
-                    w2_scale=layer.w2_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
                     w2_input_scale=layer.w2_input_scale,
                 )
-                layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
-                layer.output1_scales_gate_scalar = g1_alphas
-                layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
-                layer.output2_scales_scalar = g2_alphas
 
     def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
         """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
