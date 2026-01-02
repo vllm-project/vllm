@@ -522,6 +522,18 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
+            # Auto-calculate num_redundant_experts for EPLB if set to -1
+            ep_size = (
+                self.parallel_config.tensor_parallel_size
+                * self.parallel_config.data_parallel_size
+                * self.parallel_config.prefill_context_parallel_size
+            )
+            self.parallel_config.eplb_config.auto_set_num_redundant_experts(
+                num_logical_experts=self.model_config.get_num_experts(),
+                ep_size=ep_size,
+                enable_eplb=self.parallel_config.enable_eplb,
+            )
+
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:

@@ -400,6 +400,23 @@ class FusedMoE(CustomOp):
             vllm_parallel_config=vllm_config.parallel_config,
         )
 
+        # Auto-calculate num_redundant_experts if it's -1 (auto) and EPLB is enabled
+        # This handles the case where VllmConfig.__post_init__() couldn't determine
+        # the expert count early enough (e.g., model config didn't have expert info yet)
+        if enable_eplb and num_redundant_experts == -1:
+            ep_size = self.moe_parallel_config.ep_size
+            assert ep_size is not None, "ep_size must be set when EPLB is enabled"
+            remainder = num_experts % ep_size
+            num_redundant_experts = (ep_size - remainder) % ep_size
+            logger.info(
+                "Auto-calculated num_redundant_experts=%d in FusedMoE layer "
+                "(num_experts=%d, ep_size=%d). This happens when the expert "
+                "count wasn't available during VllmConfig initialization.",
+                num_redundant_experts,
+                num_experts,
+                ep_size,
+            )
+
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
 
