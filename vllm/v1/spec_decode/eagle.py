@@ -71,7 +71,7 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
-        
+
         if self.method == "ngram-eagle":
             self.num_speculative_tokens = (
                 self.speculative_config.num_speculative_tokens_per_method["eagle"]
