@@ -163,7 +163,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
         ):
-            # FP8 PER TENSOR
+            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
                 self.a1_gscale,  # w13_weight_scale * w13_input_scale
                 self.a2_scale,
@@ -174,8 +174,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
         elif self.quant_dtype == "nvfp4":
-            # NVFP4
-            assert self.w1_scale is not None and self.w2_scale is not None
+            # Ensure w1_scale and w2_scale are not None before calling view
+            assert self.w1_scale is not None and self.w2_scale is not None, (
+                "w1_scale and w2_scale must not be None for FlashInferExperts"
+            )
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
@@ -190,7 +192,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         elif self.use_deepseek_fp8_block_scale:
-            # FP8 BLOCK: input quantization is fused into the kernel
+            # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [
                 self.w1_scale,
                 self.w2_scale,
