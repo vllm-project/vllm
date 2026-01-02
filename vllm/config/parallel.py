@@ -374,7 +374,6 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend=current_platform.dist_backend,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -431,7 +430,11 @@ class ParallelConfig:
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
-        tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
+        tensor = torch.tensor(
+            [has_unfinished],
+            dtype=torch.int32,
+            device=current_platform.dist_communicate_device,
+        )
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
         # aggregated: has_unfinished_seqs=True
@@ -444,7 +447,11 @@ class ParallelConfig:
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
-        tensor = torch.tensor([kv_cache_memory], dtype=torch.int64, device="cpu")
+        tensor = torch.tensor(
+            [kv_cache_memory],
+            dtype=torch.int64,
+            device=current_platform.dist_communicate_device,
+        )
         # we cannot use broadcast for stateless dp group since it depends
         # on global rank
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)

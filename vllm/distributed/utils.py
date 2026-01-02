@@ -30,7 +30,6 @@ from torch.distributed.rendezvous import rendezvous
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -418,49 +417,8 @@ class StatelessProcessGroup:
         )
 
 
-def init_gloo_process_group(
-    prefix_store: PrefixStore,
-    group_rank: int,
-    group_size: int,
-    timeout: timedelta,
-) -> ProcessGroup:
-    """
-    Stateless init ProcessGroup with gloo backend compatible with
-    different torch versions.
-    """
-    with suppress_stdout():
-        if is_torch_equal_or_newer("2.6"):
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-            )
-        else:
-            options = ProcessGroup.Options(backend="gloo")
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-                options,
-            )
-        from torch.distributed.distributed_c10d import ProcessGroupGloo
-
-        backend_class = ProcessGroupGloo(
-            prefix_store, group_rank, group_size, timeout=timeout
-        )
-        backend_type = ProcessGroup.BackendType.GLOO
-        device = torch.device("cpu")
-        if is_torch_equal_or_newer("2.6"):
-            # _set_default_backend is supported in torch >= 2.6
-            pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-    return pg
-
-
 def stateless_init_torch_distributed_process_group(
-    host: str, port: int, rank: int, world_size: int, backend: str
+    host: str, port: int, rank: int, world_size: int
 ) -> ProcessGroup:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -493,8 +451,12 @@ def stateless_init_torch_distributed_process_group(
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
     """
+    from vllm.platforms import current_platform
+
     init_method = get_tcp_uri(host, port)
-    backend = Backend(backend)  # it is basically string
+    backend = Backend(
+        current_platform.dist_communicate_backend
+    )  # it is basically string
     timeout = _get_default_timeout(backend)
 
     store, rank, world_size = next(
@@ -508,25 +470,13 @@ def stateless_init_torch_distributed_process_group(
     # Use a PrefixStore to avoid accidental overrides of keys used by
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
-    try:
-        from vllm.platforms import current_platform
 
-        return current_platform.stateless_init_device_torch_dist_pg(
-            backend=backend,
-            prefix_store=prefix_store,
-            group_rank=group_rank,
-            group_size=group_size,
-            timeout=timeout,
-        )
-    except NotImplementedError:
-        # If platform doesn't implement stateless_init_device_torch_dist_pg, it
-        # will raise a NotImplementedError. In this case, we fall back to gloo.
-        return init_gloo_process_group(
-            prefix_store=prefix_store,
-            group_rank=group_rank,
-            group_size=group_size,
-            timeout=timeout,
-        )
+    return current_platform.stateless_init_device_torch_dist_pg(
+        prefix_store=prefix_store,
+        group_rank=group_rank,
+        group_size=group_size,
+        timeout=timeout,
+    )
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
