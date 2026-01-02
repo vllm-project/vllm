@@ -14,8 +14,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8,
-    convert_fp8_moe_per_tensor_scales_for_fi,
     flashinfer_cutlass_moe_fp8,
+    make_fp8_moe_alpha_scales_for_fi,
     rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31,
 )
@@ -124,7 +124,7 @@ class TestData:
 
         # Convert scales to flashinfer format.
         w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
-            convert_fp8_moe_per_tensor_scales_for_fi(
+            make_fp8_moe_alpha_scales_for_fi(
                 w13_scale=layer.w13_weight_scale,
                 w13_input_scale=layer.w13_input_scale,
                 w2_scale=layer.w2_weight_scale,

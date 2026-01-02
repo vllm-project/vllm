@@ -49,8 +49,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    convert_fp8_moe_per_tensor_scales_for_fi,
     get_flashinfer_moe_backend,
+    make_fp8_moe_alpha_scales_for_fi,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
@@ -734,6 +734,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
 
+        is_flashinfer = self.fp8_backend in [
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+        ]
+        if (
+            is_flashinfer
+            and not self.block_quant
+            and self.quant_config.activation_scheme != "static"
+        ):
+            raise NotImplementedError(
+                "FlashInfer FP8 MoE backend only dynamic block quantization"
+                "or static per tensor activation quantization."
+            )
+
         self.marlin_input_dtype = None
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
@@ -939,17 +953,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 w13_weight_scale = swap_w13_to_w31(w13_weight_scale)
             else:
-                w13_weight_scale, w13_input_scale, w2_weight_scale, w2_input_scale = (
-                    convert_fp8_moe_per_tensor_scales_for_fi(
-                        w13_scale=w13_weight_scale,
-                        w13_input_scale=w13_input_scale,
-                        w2_scale=w2_weight_scale,
-                        w2_input_scale=w2_input_scale,
-                    )
+                assert self.quant_config.activation_scheme == "static"
+                g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                    w13_scale=w13_weight_scale,
+                    w13_input_scale=w13_input_scale,
+                    w2_scale=w2_weight_scale,
+                    w2_input_scale=w2_input_scale,
                 )
+                layer.w2_input_scale = 1.0 / layer.w2_input_scale
 
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+                    layer.output1_scales_gate_scalar = g1_alphas
+                    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale
+                    layer.output2_scales_scalar = g2_alphas
+                else:
+                    assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+                    layer.g1_alphas = g1_alphas
+                    layer.g2_alphas = g2_alphas
+
         elif self.fp8_backend == Fp8MoeBackend.AITER:
             w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
                 w13_weight, w2_weight
@@ -1209,6 +1231,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # TRTLLM does not use Modular Kernel.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return None
+
+        # MARLIN uses mixed precision W8A16 config.
         if self.fp8_backend == Fp8MoeBackend.MARLIN:
             return fp8_w8a16_moe_quant_config(
                 w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
@@ -1216,12 +1243,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_shape=self.weight_block_size,
             )
 
+        # All other backends use W8A8 config.
         return fp8_w8a8_moe_quant_config(
             w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
             w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             block_shape=self.weight_block_size,
+            # FI CUTLASS uses alphas = weight_s * input_s
+            g1_alphas=getattr(layer, "g1_alphas", None),
+            g2_alphas=getattr(layer, "g2_alphas", None),
         )
 
     @property

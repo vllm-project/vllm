@@ -119,6 +119,12 @@ def apply_flashinfer_per_tensor_scale_fp8(
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
+    assert (
+        hasattr(layer, "output1_scales_scalar")
+        and hasattr(layer, "output1_scales_gate_scalar")
+        and hasattr(layer, "output2_scales_scalar")
+    )
+
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
         "FusedMoE flashinfer kernels are only supported for Llama4"
     )
@@ -129,9 +135,9 @@ def apply_flashinfer_per_tensor_scale_fp8(
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
         gemm2_weights=layer.w2_weight,
-        output1_scales_scalar=(layer.w2_input_scale * layer.w13_weight_scale),
-        output1_scales_gate_scalar=layer.w13_weight_scale,
-        output2_scales_scalar=layer.w2_weight_scale,
+        output1_scales_scalar=layer.output1_scales_scalar,
+        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+        output2_scales_scalar=layer.output2_scales_scalar,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
@@ -144,38 +150,16 @@ def apply_flashinfer_per_tensor_scale_fp8(
     )
 
 
-def convert_fp8_moe_per_tensor_scales_for_fi(
+def make_fp8_moe_alpha_scales_for_fi(
     w13_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    On disk, we have an explicit scale for each weight / input:
-        * w13_scale
-        * w13_input_scale
-        * w2_scale
-        * w2_input_scale
+) -> tuple[torch.Tensor, torch.Tensor]:
+    g1_alphas = (w13_scale * w13_input_scale).squeeze()
+    g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
-    Flashinfer kernels instead expect:
-        * output1_scales_gate_scalar = w13_scale * w13_input_scale
-        * output2_scales_scalar = w2_scale * w2_input_scale
-        * w2_input_scale_inv = 1.0 / w2_input_scale
-
-    So, we put:
-        * w13_scale = output1_scales_gate_scalar
-        * w2_scale = output2_scales_scalar
-        * w2_input_scale = w2_input_scale_inv
-
-    NOTE(rob): we should consider updating moe_quant_config to make
-    this more explicit in the future rather than smuggling it
-    through the existing names.
-    """
-    w13_scale = (w13_scale * w13_input_scale).squeeze()
-    w2_scale = (w2_scale * w2_input_scale).squeeze()
-    w2_input_scale = 1.0 / w2_input_scale
-
-    return w13_scale, w13_input_scale, w2_scale, w2_input_scale
+    return g1_alphas, g2_alphas
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(

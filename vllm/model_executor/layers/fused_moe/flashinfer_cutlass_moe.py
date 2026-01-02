@@ -158,19 +158,17 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"
         )
 
-        # Select quantization arguments based on FP8 format/path
+        # Select quantization metadata based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
             and not self.use_deepseek_fp8_block_scale
         ):
-            # FP8 PER TENSOR:
-            #   * scales are computed in process_weights as per below
-            #   * hidden states are quantized
+            # FP8 PER TENSOR
             quant_scales = [
-                self.w1_scale,  # w1_scale = w1_scale * w13_input_scale
-                self.a2_scale,  # a2_scale = 1.0 / a2_input_scale
-                self.w2_scale,  # w2_scale = w2_scale * w2_input_scale
-                self.a1_scale,  # a1_scale = w1_input_scale
+                self.a1_gscale,  # w13_weight_scale * w13_input_scale
+                self.a2_scale,
+                self.a2_gscale,  # w2_weight_scale * w2_input_scale
+                self.a1_scale,
             ]
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
@@ -192,9 +190,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         elif self.use_deepseek_fp8_block_scale:
-            # FP8 BLOCK:
-            #   * hidden_states are bf16
-            #   * dyanmic input quant fused into kernels
+            # FP8 BLOCK: input quantization is fused into the kernel
             quant_scales = [
                 self.w1_scale,
                 self.w2_scale,
