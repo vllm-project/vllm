@@ -202,7 +202,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         # Padding the weight for better performance on ROCm
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
@@ -258,6 +257,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.flashinfer_cutlass_moe_enabled:
                 self.use_inplace = False
                 # Swap halves to arrange as [w3; w1] (kernel expectation)
