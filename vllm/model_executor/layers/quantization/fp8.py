@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     make_fp8_moe_alpha_scales_for_fi,
+    register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
@@ -951,16 +952,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 # they are not needed for weight loading/re-loading.
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
-                    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                        w13_scale=w13_weight_scale,
+                    register_scales_for_trtllm_fp8_per_tensor_moe(
+                        layer=layer,
+                        w13_weight_scale=w13_weight,
                         w13_input_scale=w13_input_scale,
-                        w2_scale=w2_weight_scale,
+                        w2_weight_scale=w2_weight,
                         w2_input_scale=w2_input_scale,
                     )
-                    layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
-                    layer.output1_scales_gate_scalar = g1_alphas
-                    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
-                    layer.output2_scales_scalar = g2_alphas
 
         elif self.fp8_backend == Fp8MoeBackend.AITER:
             w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
