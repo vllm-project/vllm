@@ -183,3 +183,40 @@ llm = LLM(
     mm_processor_kwargs={"max_dynamic_patch": 4},  # Default is 12
 )
 ```
+
+## Selective LoRA with `lora_target_modules`
+
+When `--enable-lora` is configured, vLLM allocates GPU memory for all potential LoRA adapter layers at initialization time, based on the `--max-lora-rank`. This includes layers for self-attention, Feed-Forward Networks (FFN), Mixture-of-Experts (MoE), etc. This allocation happens even if the adapters you subsequently load do not modify all these components (e.g., they lack an FFN part).
+
+This default behavior can lead to a large memory consumption, especially since typical PEFT fine-tuning often only requires adjusting the self-attention layers, leaving the large FFN/MoE parts untouched.
+
+To optimize memory usage, you can use the `--lora-target-modules` command-line parameter to selectively initialize only the required LoRA layers.
+
+For example, with a model like `Qwen3-VL-32B-Instruct` and a `lora_rank=64`, the memory footprint for the initialized LoRA adapter (calculated with bf16) could be:
+
+- Self-attention: 51MiB
+- FFN (router + experts): 2406MiB
+
+By using `--lora-target-modules` to target only the self-attention layers, you can avoid allocating memory for the FFN/MoE LoRA layers, saving over 2.4 GiB of VRAM in this specific example.
+
+You can specify the target modules as a list of strings (matched as suffix or exact) or a regex string (matched anywhere).
+
+**Example: List of modules (suffix matching)**
+
+```bash
+--lora-target-modules q_proj v_proj k_proj o_proj
+```
+
+**Example: Regex**
+
+```bash
+--lora-target-modules '.*\.self_attn\..*'
+```
+
+You can also use `--lora-exclude-modules` to exclude specific modules.
+For example, to exclude the large FFN/MoE layers (which might be named `mlp`, `gate_up_proj`, `down_proj`, or `gate`):
+
+```bash
+--lora-exclude-modules '.*\.mlp\.*' gate_up_proj down_proj gate
+```
+

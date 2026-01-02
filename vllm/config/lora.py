@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING, Any, Literal
 
+import regex as re
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
@@ -60,6 +61,19 @@ class LoRAConfig:
     of multimodal models will be enabled. This is an experimental feature and 
     currently only supports some MM models such as the Qwen VL series. The default 
     is False."""
+    lora_target_modules: str | list[str] | None = None
+    """List of module names or regex expressions of the module names to replace
+    with LoRA. If not specified, all supported modules will be enabled for 
+    possible future LoRA adapters. If you only want to enable self-attention's 
+    q_proj and v_proj layers for LoRA adapters, you can set this to a list of module
+    names like ['q_proj', 'v_proj'], or a regex expression like
+    ['*.self_attn.*(q_proj|v_proj)$']. This helps reduce memory consumption,
+    because FFN/MoE layers is disabled, which often have a large number of parameters. 
+    """
+    lora_exclude_modules: str | list[str] | None = None
+    """List of module names or regex expression of the module names to exclude
+    from LoRA.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -79,6 +93,8 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
+        factors.append(self.lora_target_modules)
+        factors.append(self.lora_exclude_modules)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

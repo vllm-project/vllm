@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from typing import Any, Literal
 
+import regex as re
 import torch
 
 from vllm.config import VllmConfig
@@ -139,6 +140,23 @@ class WorkerLoRAManager:
         except Exception as e:
             # For BadRequestError
             raise e
+
+        if (
+            self.lora_config.lora_target_modules
+            or self.lora_config.lora_exclude_modules
+        ):
+            for module_name in lora.loras:
+                if not self._adapter_manager._check_target_module_exists(
+                    self.lora_config, module_name
+                ):
+                    logger.warning(
+                        "LoRA module '%s' in adapter '%s' is not targeted "
+                        "by the current configuration (lora_target_modules "
+                        "or lora_exclude_modules). These parameters will be "
+                        "ignored, which may cause abnormal model behavior.",
+                        module_name,
+                        lora_request.lora_path,
+                    )
 
         return lora
 
