@@ -954,15 +954,15 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
             # Flashinfer uses the inverse input scale for the activation.
-            layer.w2_input_scale = 1.0 / layer.w2_input_scale
+            layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
 
             # NOTE(rob): these scales do not need to be registered as parameters
             # since they are not used for weight (re)-loading.
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                layer.output1_scales_gate_scalar = g1_alphas
-                layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale
-                layer.output2_scales_scalar = g2_alphas
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+                layer.output1_scales_gate_scalar = g1_alphas
+                layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
+                layer.output2_scales_scalar = g2_alphas
             elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
                 layer.g1_alphas = g1_alphas
                 layer.g2_alphas = g2_alphas
@@ -1022,13 +1022,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             # TRTLLM does not use modular kernels
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            # CUTLASS uses a single dequant alpha = weight_scale * input_scale
-            assert hasattr(layer, "g1_alphas") and hasattr(layer, "g2_alphas")
+            # CUTLASS uses alpha = weight_s * input_s and a2_scale_inv
             return fp8_w8a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
+                a2_scale=layer.w2_input_scale_inv,
                 g1_alphas=layer.g1_alphas,
                 g2_alphas=layer.g2_alphas,
             )

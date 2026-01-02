@@ -954,12 +954,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w2_scale=w2_weight_scale,
                     w2_input_scale=w2_input_scale,
                 )
-                layer.w2_input_scale = 1.0 / layer.w2_input_scale
+                layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
 
                 if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                     layer.output1_scales_gate_scalar = g1_alphas
-                    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale
+                    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
                     layer.output2_scales_scalar = g2_alphas
                 else:
                     assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
@@ -1238,15 +1238,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # All other backends use W8A8 config.
+        g1_alphas = None
+        g2_alphas = None
+        a2_scale = layer.w13_input_scale
+        if (
+            self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and not self.block_quant
+        ):
+            # CUTLASS uses alpha = weight_s * input_s and a2_scale_inv
+            assert (
+                hasattr(layer, "w2_input_scale_inv")
+                and hasattr(layer, "g1_alphas")
+                and hasattr(layer, "g2_alphas")
+            )
+            g1_alphas = layer.g1_alphas
+            g2_alphas = layer.g2_alphas
+
         return fp8_w8a8_moe_quant_config(
             w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
             w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
             a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a2_scale=a2_scale,
             block_shape=self.weight_block_size,
-            # FI CUTLASS uses alphas = weight_s * input_s
-            g1_alphas=getattr(layer, "g1_alphas", None),
-            g2_alphas=getattr(layer, "g2_alphas", None),
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
         )
 
     @property
