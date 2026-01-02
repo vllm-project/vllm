@@ -477,7 +477,7 @@ class ExaoneMoeModel(nn.Module):
         return loaded_params
 
 
-class ExaoneMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
