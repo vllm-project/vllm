@@ -100,7 +100,6 @@ EAGER = [True, False]
         "flashinfer-cudnn",
         "flashinfer-trtllm",
         "flashinfer-cutlass",
-        "flashinfer-trtllm_8x4_sf_layout",
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):

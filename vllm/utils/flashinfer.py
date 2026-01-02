@@ -537,9 +537,8 @@ def flashinfer_scaled_fp4_mm(
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
-    if backend == "trtllm_8x4_sf_layout":
+    if backend == "trtllm" and a.shape[0] <= 32:
         use_8x4_sf_layout = True
-        backend = "trtllm"
     else:
         use_8x4_sf_layout = False
 

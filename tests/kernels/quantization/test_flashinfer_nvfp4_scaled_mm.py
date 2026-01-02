@@ -24,7 +24,13 @@ if not current_platform.has_device_capability(100):
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k
-SHAPES = [(128, 128, 64), (128, 128, 128), (256, 128, 64), (128, 256, 128)]
+SHAPES = [
+    (128, 128, 64),
+    (128, 128, 128),
+    (256, 128, 64),
+    (128, 256, 128),
+    (1, 128, 128),
+]
 PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
 
@@ -68,7 +74,7 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("backend", ["cutlass", "trtllm", "trtllm_8x4_sf_layout"])
+@pytest.mark.parametrize("backend", ["cutlass", "trtllm"])
 @pytest.mark.parametrize("autotune", [False, True])
 @torch.inference_mode()
 def test_flashinfer_nvfp4_gemm(
@@ -97,7 +103,7 @@ def test_flashinfer_nvfp4_gemm(
     ).to(torch.float32)
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
-    if backend == "trtllm_8x4_sf_layout":
+    if backend == "trtllm" and m <= 32:
         a_fp4, a_scale_interleaved = flashinfer_quant_nvfp4_8x4_sf_layout(
             a_dtype, a_global_scale
         )

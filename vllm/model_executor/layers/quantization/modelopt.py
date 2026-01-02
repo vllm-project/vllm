@@ -1084,10 +1084,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             prepare_fp4_layer_for_marlin(layer)
             del layer.alpha
             del layer.input_scale
-        elif (
-            self.backend == "flashinfer-trtllm"
-            or self.backend == "flashinfer-trtllm_8x4_sf_layout"
-        ):
+        elif self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -1134,7 +1131,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
-        if self.backend == "flashinfer-trtllm_8x4_sf_layout":
+        if self.backend == "flashinfer-trtllm" and x.shape[0] <= 32:
             x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(
                 x, layer.input_scale_inv
             )

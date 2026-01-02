@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections.abc import Callable
 
 import torch
@@ -135,10 +136,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
-        if (
-            self.backend == "flashinfer-trtllm"
-            or self.backend == "flashinfer-trtllm_8x4_sf_layout"
-        ):
+        if self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -193,7 +191,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
-        if self.backend == "flashinfer-trtllm_8x4_sf_layout":
+        if self.backend == "flashinfer-trtllm" and math.prod(x.shape[:-1]) <= 32:
             x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(
                 x, layer.input_global_scale
             )
