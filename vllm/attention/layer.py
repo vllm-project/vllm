@@ -357,8 +357,11 @@ class Attention(nn.Module, AttentionLayerBase):
 
         if self.use_output:
             if output_shape is None:
+                # Handle both 2D [num_tokens, hidden] and
+                # 3D [num_tokens, heads, head_dim] query
+                num_tokens = query.shape[0]
                 output_shape = torch.Size(
-                    (*query.shape[:-1], self.num_heads * self.head_size_v)
+                    (num_tokens, self.num_heads * self.head_size_v)
                 )
             output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)

@@ -180,7 +180,19 @@ def get_fp8_moe_backend(
             scope="local",
         )
 
-    if envs.VLLM_USE_DEEP_GEMM and moe_use_deep_gemm and block_quant:
+    # Determine if we should use DeepGEMM (top-level enable switch)
+    # - If explicitly set by user, respect their choice
+    # - If not platform supports DeepGEMM, disable it
+    # This helps avoid warning messages on unsupported platforms.
+    use_deep_gemm = envs.VLLM_USE_DEEP_GEMM
+    if not is_deep_gemm_supported():
+        use_deep_gemm = False
+        logger.info_once(
+            "DeepGEMM is disabled because the platform does not support it.",
+            scope="local",
+        )
+
+    if use_deep_gemm and moe_use_deep_gemm and block_quant:
         if not has_deep_gemm():
             logger.warning_once(
                 "DeepGEMM backend requested but not available.", scope="local"
