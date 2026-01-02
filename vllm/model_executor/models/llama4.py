@@ -24,7 +24,6 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
@@ -55,8 +54,8 @@ from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    dispatch_routing_function,
     extract_layer_index,
-    fast_topk,
     is_pp_missing_parameter,
 )
 
@@ -71,15 +70,7 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if (
-            rocm_aiter_ops.AITER_TOPK_SIGMOID_FOUND
-            and rocm_aiter_ops.is_fused_moe_enabled()
-        ):
-            return torch.ops.vllm.rocm_aiter_topk_sigmoid(gating_output, topk)
-        router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # pseudo-standard is that the router scores are floats
-        router_scores = torch.sigmoid(router_scores.float())
-        return (router_scores, router_indices.to(torch.int32))
+        return dispatch_routing_function()(gating_output, topk)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
