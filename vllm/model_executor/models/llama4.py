@@ -60,13 +60,6 @@ from .utils import (
     is_pp_missing_parameter,
 )
 
-try:
-    from torch.ops.vllm import rocm_aiter_topk_sigmoid  # noqa: F401
-
-    _rocm_aiter_topk_sigmoid_available = True
-except ImportError:
-    _rocm_aiter_topk_sigmoid_available = False
-
 logger = init_logger(__name__)
 
 
@@ -78,7 +71,10 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if _rocm_aiter_topk_sigmoid_available and rocm_aiter_ops.is_fused_moe_enabled():
+        if (
+            rocm_aiter_ops.AITER_TOPK_SIGMOID_FOUND
+            and rocm_aiter_ops.is_fused_moe_enabled()
+        ):
             return torch.ops.vllm.rocm_aiter_topk_sigmoid(gating_output, topk)
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
         # pseudo-standard is that the router scores are floats

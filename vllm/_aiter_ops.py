@@ -7,15 +7,10 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
-<<<<<<< HEAD
 _FP8_DTYPE = current_platform.fp8_dtype()
-=======
-logger = init_logger(__name__)
->>>>>>> 1b6821f1d (Gate aiter's topk_sigmoid usage on it being available)
 
 
 def is_aiter_found() -> bool:
@@ -55,16 +50,18 @@ def if_aiter_supported(func: Callable) -> Callable:
 
     return wrapper
 
+
 def is_aiter_function_found(function_name: str) -> bool:
     """Check if aiter module exists and has the specified function."""
     # First check if module exists
     if IS_AITER_FOUND:
         import aiter
+
         return hasattr(aiter, function_name)
     return False
 
-AITER_TOPK_SIGMOID_FOUND = is_aiter_function_found("topk_sigmoid")
 
+AITER_TOPK_SIGMOID_FOUND = is_aiter_function_found("topk_sigmoid")
 
 
 # Can't use dtypes.fp8 directly inside an op
@@ -766,18 +763,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     return x_fp8, out_bs
 
 
-try:
-    from aiter import topk_sigmoid  # noqa: F401
-
-    _rocm_aiter_topk_sigmoid_available = True
-except ImportError:
-    logger.warning_once(
-        "torch.ops.vllm.rocm_aiter_topk_sigmoid is not available. "
-        "Using generic torch functions. Update aiter for this optimization."
-    )
-    _rocm_aiter_topk_sigmoid_available = False
-
-if _rocm_aiter_topk_sigmoid_available:
+if AITER_TOPK_SIGMOID_FOUND:
 
     def _rocm_aiter_topk_sigmoid_impl(
         gating_output: torch.Tensor, topk: int
@@ -1071,24 +1057,12 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
-<<<<<<< HEAD
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
-=======
-            if _rocm_aiter_topk_sigmoid_available:
-                direct_register_custom_op(
-                    op_name="rocm_aiter_topk_sigmoid",
-                    op_func=_rocm_aiter_topk_sigmoid_impl,
-                    mutates_args=[],
-                    fake_impl=_rocm_aiter_topk_sigmoid_fake,
-                    dispatch_key=current_platform.dispatch_key,
-                )
->>>>>>> 1b6821f1d (Gate aiter's topk_sigmoid usage on it being available)
-
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
@@ -1134,14 +1108,14 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
-			if AITER_TOPK_SIGMOID_FOUND:
-				direct_register_custom_op(
-					op_name="rocm_aiter_topk_sigmoid",
-					op_func=_rocm_aiter_topk_sigmoid_impl,
-					mutates_args=[],
-					fake_impl=_rocm_aiter_topk_sigmoid_fake,
-					dispatch_key=current_platform.dispatch_key,
-				)
+            if AITER_TOPK_SIGMOID_FOUND:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_topk_sigmoid",
+                    op_func=_rocm_aiter_topk_sigmoid_impl,
+                    mutates_args=[],
+                    fake_impl=_rocm_aiter_topk_sigmoid_fake,
+                    dispatch_key=current_platform.dispatch_key,
+                )
 
             _OPS_REGISTERED = True
 
@@ -1501,7 +1475,7 @@ class rocm_aiter_ops:
         assert group_size == 128, "Group size must be 128"
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 
-	@staticmethod
+    @staticmethod
     def topk_sigmoid(
         gating_output: torch.Tensor,
         topk: int,
