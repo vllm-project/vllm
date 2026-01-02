@@ -278,9 +278,6 @@ class MPTModel(nn.Module):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
             if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]

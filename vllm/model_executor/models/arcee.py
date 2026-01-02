@@ -316,10 +316,6 @@ class ArceeModel(nn.Module):
 
                 name = name.replace(weight_name, param_name)
 
-                if name.endswith(".bias") and name not in params_dict:
-                    mapped = True
-                    break
-
                 if is_pp_missing_parameter(name, self):
                     mapped = True
                     break
@@ -332,9 +328,6 @@ class ArceeModel(nn.Module):
                 break
 
             if mapped:
-                continue
-
-            if name.endswith(".bias") and name not in params_dict:
                 continue
 
             if is_pp_missing_parameter(name, self):

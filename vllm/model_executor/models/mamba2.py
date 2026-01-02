@@ -172,9 +172,6 @@ class Mamba2Model(nn.Module):
             if "A_log" in name:
                 name = name.replace("A_log", "A")
 
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
             if is_pp_missing_parameter(name, self):
                 continue
 

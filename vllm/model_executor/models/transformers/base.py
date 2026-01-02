@@ -160,17 +160,11 @@ class Base(
         self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
         """Kwargs to pass to model forward for Eagle3 aux hidden states."""
 
-        if self.quant_config:
-            quant_method_name = self.quant_config.get_name()
-            # Check for unsupported quantization methods.
-            if quant_method_name == "mxfp4":
-                raise NotImplementedError(
-                    "Transformers modeling backend does "
-                    "not support MXFP4 quantization yet."
-                )
-            # Skip loading extra bias for GPTQ models.
-            if "gptq" in quant_method_name:
-                self.ignore_unexpected_suffixes.append(".bias")
+        # Check for unsupported quantization methods.
+        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+            raise NotImplementedError(
+                "Transformers modeling backend does not support MXFP4 quantization yet."
+            )
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         self.text_config._attn_implementation = "vllm"
@@ -485,7 +479,6 @@ class Base(
             skip_prefixes=self.skip_prefixes,
             skip_substrs=self.skip_substrs,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
-            ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

@@ -783,9 +783,6 @@ class HunYuanModel(nn.Module):
                         if cla_factor > 1 and layer_id % cla_factor != 0:
                             continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -809,9 +806,6 @@ class HunYuanModel(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -834,9 +828,6 @@ class HunYuanModel(nn.Module):
 
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 is_expert_weight = False
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping

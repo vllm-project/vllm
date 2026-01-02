@@ -151,6 +151,13 @@ class AutoWeightsLoader:
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
+        # Skip loading extra bias for GPTQ models.
+        quant_config = getattr(module, "quant_config", None)
+        if quant_config and "gptq" in quant_config.get_name():
+            for suffix in [".bias", "_bias"]:
+                if suffix not in self.ignore_unexpected_suffixes:
+                    self.ignore_unexpected_suffixes.append(suffix)
+
     def _groupby_prefix(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],

@@ -1209,8 +1209,6 @@ class OpenPanguModel(nn.Module):
             else:
                 if flag_dict["is_expert_weight"]:
                     continue
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name.endswith("e_score_correction_bias"):
                     name = name.replace(

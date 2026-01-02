@@ -188,10 +188,6 @@ class OpenPanguMTP(nn.Module, SupportsPP):
                 else:
                     name = name_mapped
 
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -214,10 +210,6 @@ class OpenPanguMTP(nn.Module, SupportsPP):
                     )
                     break
                 else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-
                     if (
                         spec_layer != self.model.mtp_start_layer_idx
                         and ".layers" not in name

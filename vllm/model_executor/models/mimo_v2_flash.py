@@ -626,9 +626,6 @@ class MiMoV2Model(nn.Module):
             if stacked_matched:
                 continue
 
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-
             orig_name = name
             mapped_name = maybe_remap_kv_scale_name(name, params_dict)
             name = mapped_name if mapped_name is not None else orig_name

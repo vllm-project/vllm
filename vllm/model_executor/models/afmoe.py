@@ -510,9 +510,6 @@ class AfmoeModel(nn.Module):
                     continue
 
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 if is_pp_missing_parameter(name, self):
                     continue
 
@@ -561,10 +558,6 @@ class AfmoeModel(nn.Module):
                         # We've checked that this is an expert weight
                         # However it's not mapped locally to this rank
                         # So we simply skip it
-                        continue
-
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
                         continue
 
                     # Remapping the name of FP8 kv-scale.

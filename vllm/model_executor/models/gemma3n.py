@@ -1073,9 +1073,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 if "altup_projections" in name:
                     continue
                 name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
@@ -1083,9 +1080,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:

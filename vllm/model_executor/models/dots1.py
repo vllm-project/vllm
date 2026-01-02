@@ -451,8 +451,6 @@ class Dots1Model(nn.Module):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
@@ -480,8 +478,6 @@ class Dots1Model(nn.Module):
                     )
                     break
                 else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue

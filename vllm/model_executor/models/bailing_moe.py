@@ -506,9 +506,6 @@ class BailingMoeModel(nn.Module):
                 if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
                 if name not in params_dict:
                     continue
 
@@ -541,8 +538,6 @@ class BailingMoeModel(nn.Module):
                     )
                     break
                 else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
                     if name not in params_dict:
                         continue
 
