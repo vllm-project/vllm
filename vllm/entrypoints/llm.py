@@ -18,7 +18,6 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
-    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
     ProfilerConfig,
@@ -71,7 +70,12 @@ from vllm.outputs import (
 )
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
+from vllm.sampling_params import (
+    BeamSearchParams,
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -176,10 +180,6 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
-        attention_config: Configuration for attention mechanisms. Can be a
-            dictionary or an AttentionConfig instance. If a dictionary, it will
-            be converted to an AttentionConfig. Allows specifying the attention
-            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -218,7 +218,6 @@ class LLM:
         | StructuredOutputsConfig
         | None = None,
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
-        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -258,28 +257,51 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        def _make_config(value: Any, cls: type[_R]) -> _R:
-            """Convert dict/None/instance to a config instance."""
-            if value is None:
-                return cls()
-            if isinstance(value, dict):
-                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
-            return value
-
-        if isinstance(compilation_config, int):
-            compilation_config_instance = CompilationConfig(
-                mode=CompilationMode(compilation_config)
-            )
+        if compilation_config is not None:
+            if isinstance(compilation_config, int):
+                compilation_config_instance = CompilationConfig(
+                    mode=CompilationMode(compilation_config)
+                )
+            elif isinstance(compilation_config, dict):
+                compilation_config_instance = CompilationConfig(
+                    **{
+                        k: v
+                        for k, v in compilation_config.items()
+                        if is_init_field(CompilationConfig, k)
+                    }
+                )
+            else:
+                compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = _make_config(
-                compilation_config, CompilationConfig
-            )
+            compilation_config_instance = CompilationConfig()
 
-        structured_outputs_instance = _make_config(
-            structured_outputs_config, StructuredOutputsConfig
-        )
-        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
-        attention_config_instance = _make_config(attention_config, AttentionConfig)
+        if structured_outputs_config is not None:
+            if isinstance(structured_outputs_config, dict):
+                structured_outputs_instance = StructuredOutputsConfig(
+                    **{
+                        k: v
+                        for k, v in structured_outputs_config.items()
+                        if is_init_field(StructuredOutputsConfig, k)
+                    }
+                )
+            else:
+                structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
+
+        if profiler_config is not None:
+            if isinstance(profiler_config, dict):
+                profiler_config_instance = ProfilerConfig(
+                    **{
+                        k: v
+                        for k, v in profiler_config.items()
+                        if is_init_field(ProfilerConfig, k)
+                    }
+                )
+            else:
+                profiler_config_instance = profiler_config
+        else:
+            profiler_config_instance = ProfilerConfig()
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
@@ -324,7 +346,6 @@ class LLM:
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
             profiler_config=profiler_config_instance,
-            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -370,6 +391,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
+        structured_outputs: Sequence[StructuredOutputsParams] | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -396,6 +418,12 @@ class LLM:
                 If provided, must be a list of integers matching the length
                 of `prompts`, where each priority value corresponds to the prompt
                 at the same index.
+            structured_outputs: A list of structured output parameters, one for
+                each prompt. If provided, must have the same length as prompts.
+                This is a convenience parameter that creates individual
+                SamplingParams for each prompt with the corresponding
+                structured_outputs setting. Cannot be used together with
+                sampling_params as a list.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -415,7 +443,36 @@ class LLM:
                 "generative model."
             )
 
-        if sampling_params is None:
+        # Handle structured_outputs list parameter
+        if structured_outputs is not None:
+            if isinstance(sampling_params, Sequence):
+                raise ValueError(
+                    "Cannot use both 'structured_outputs' parameter and "
+                    "'sampling_params' as a list. Either pass a list of "
+                    "SamplingParams with individual structured_outputs, or "
+                    "use the structured_outputs parameter with a single "
+                    "SamplingParams."
+                )
+            
+            # Convert prompts to list if needed
+            prompt_list = prompts if isinstance(prompts, Sequence) and not isinstance(prompts, (str, dict)) else [prompts]
+            
+            if len(structured_outputs) != len(prompt_list):
+                raise ValueError(
+                    f"Length of structured_outputs ({len(structured_outputs)}) "
+                    f"must match length of prompts ({len(prompt_list)})"
+                )
+            
+            # Create individual SamplingParams for each prompt
+            base_params = sampling_params if sampling_params is not None else self.get_default_sampling_params()
+            sampling_params_list = []
+            for struct_out in structured_outputs:
+                # Clone the base params and set individual structured_outputs
+                params = base_params.clone()
+                params.structured_outputs = struct_out
+                sampling_params_list.append(params)
+            sampling_params = sampling_params_list
+        elif sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
@@ -1566,6 +1623,40 @@ class LLM:
             prompts = [prompts]  # type: ignore[list-item]
 
         num_requests = len(prompts)
+        
+        # Handle case where structured_outputs is a list in a single SamplingParams
+        if (
+            not isinstance(params, Sequence)
+            and isinstance(params, SamplingParams)
+            and params.structured_outputs is not None
+            and isinstance(params.structured_outputs, (list, tuple))
+            and not isinstance(params.structured_outputs, StructuredOutputsParams)
+        ):
+            # structured_outputs is a list - create individual SamplingParams for each prompt
+            structured_outputs_list = params.structured_outputs
+            
+            if len(structured_outputs_list) != num_requests:
+                raise ValueError(
+                    f"Length of structured_outputs list ({len(structured_outputs_list)}) "
+                    f"must match length of prompts ({num_requests})"
+                )
+            
+            # Clone the base params for each prompt with individual structured_outputs
+            # First, temporarily set structured_outputs to None to avoid cloning the list
+            base_params = params
+            original_structured_outputs = base_params.structured_outputs
+            base_params.structured_outputs = None
+            
+            params_list = []
+            for struct_out in structured_outputs_list:
+                cloned_params = base_params.clone()
+                cloned_params.structured_outputs = struct_out
+                params_list.append(cloned_params)
+            
+            # Restore the original for safety (though we're replacing params anyway)
+            base_params.structured_outputs = original_structured_outputs
+            params = params_list
+        
         if isinstance(params, Sequence) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params must be the same.")
         if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
