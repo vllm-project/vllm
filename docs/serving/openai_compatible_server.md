@@ -507,10 +507,10 @@ The following extra parameters are supported:
 
 The following parameters are vLLM-specific extensions not present in the OpenAI Whisper API:
 
-- `logprobs` (int): Return log probabilities for the top N+1 tokens at each position (N alternatives plus the chosen token, consistent with vLLM's completion API). When set, the response will include a `logprobs` object containing:
-    - `tokens`: List of generated tokens
-    - `token_logprobs`: Log probability of each token
-    - `top_logprobs`: Dictionary of top N+1 tokens and their log probabilities at each position
+- `logprobs` (int): Return log probabilities for generated tokens. When set, the response will include a `logprobs` array matching OpenAI's format (from `openai.types.audio.transcription.Logprob`). Each entry contains:
+    - `token`: The token string
+    - `bytes`: UTF-8 byte encoding of the token
+    - `logprob`: Log probability of the token
 
 **Example usage:**
 
@@ -529,16 +529,13 @@ The following parameters are vLLM-specific extensions not present in the OpenAI 
             model="openai/whisper-large-v3-turbo",
             file=audio_file,
             language="en",
-            extra_body={"logprobs": 5},  # Return top-5 alternatives
+            extra_body={"logprobs": 5},
         )
 
-    # Access logprobs from response
+    # Access logprobs from response (OpenAI-compatible format)
     if transcription.logprobs:
-        for token, logprob in zip(
-            transcription.logprobs["tokens"],
-            transcription.logprobs["token_logprobs"]
-        ):
-            print(f"{token}: {logprob:.4f}")
+        for lp in transcription.logprobs:
+            print(f"{lp['token']}: {lp['logprob']:.4f}")
     ```
 
 ### Translations API

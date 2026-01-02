@@ -137,24 +137,29 @@ async def test_transcription_with_logprobs(mary_had_lamb, model_name):
         assert "text" in out
         assert "Mary had a little lamb" in out["text"]
 
-        # Verify logprobs structure
+        # Verify logprobs structure matches OpenAI format
+        # (list of objects with token, bytes, logprob fields)
         assert "logprobs" in out
         assert out["logprobs"] is not None
         logprobs = out["logprobs"]
 
-        assert "tokens" in logprobs
-        assert "token_logprobs" in logprobs
-        assert "top_logprobs" in logprobs
+        # logprobs should be a list of token objects
+        assert isinstance(logprobs, list)
+        assert len(logprobs) > 0
 
-        # Verify we have tokens and logprobs
-        assert len(logprobs["tokens"]) > 0
-        assert len(logprobs["token_logprobs"]) == len(logprobs["tokens"])
-        assert len(logprobs["top_logprobs"]) == len(logprobs["tokens"])
-
-        # Verify top_logprobs has at most 6 alternatives (5 + 1 for the chosen token)
-        for top_lp in logprobs["top_logprobs"]:
-            if top_lp is not None:
-                assert len(top_lp) <= 6
+        # Each entry should have token, bytes, and logprob fields
+        for lp in logprobs:
+            assert "token" in lp
+            assert "bytes" in lp
+            assert "logprob" in lp
+            # token should be a string
+            assert isinstance(lp["token"], str)
+            # bytes should be a list of integers (UTF-8 encoding)
+            if lp["bytes"] is not None:
+                assert isinstance(lp["bytes"], list)
+            # logprob should be a float or None
+            if lp["logprob"] is not None:
+                assert isinstance(lp["logprob"], float)
 
 
 @pytest.mark.asyncio
@@ -212,12 +217,17 @@ async def test_transcription_verbose_json_with_logprobs(mary_had_lamb, model_nam
         assert "language" in out
         assert "duration" in out
 
-        # Verify logprobs in verbose_json format
+        # Verify logprobs in verbose_json format (OpenAI-compatible list format)
         assert "logprobs" in out
         assert out["logprobs"] is not None
         logprobs = out["logprobs"]
 
-        assert "tokens" in logprobs
-        assert "token_logprobs" in logprobs
-        assert "top_logprobs" in logprobs
-        assert len(logprobs["tokens"]) > 0
+        # logprobs should be a list of token objects
+        assert isinstance(logprobs, list)
+        assert len(logprobs) > 0
+
+        # Each entry should have token, bytes, and logprob fields
+        for lp in logprobs:
+            assert "token" in lp
+            assert "bytes" in lp
+            assert "logprob" in lp

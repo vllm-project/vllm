@@ -20,7 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
-    TranscriptionLogProbs,
+    TranscriptionLogprob,
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
@@ -378,26 +378,36 @@ class OpenAISpeechToText(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
-    ) -> TranscriptionLogProbs:
-        """Create logprobs for transcription API response."""
-        out_token_logprobs: list[float | None] = []
-        out_tokens: list[str] = []
-        out_top_logprobs: list[dict[str, float] | None] = []
+    ) -> list[TranscriptionLogprob]:
+        """Create logprobs for transcription API response.
+
+        Returns a list of TranscriptionLogprob objects matching OpenAI's format
+        from openai.types.audio.transcription.Logprob.
+        """
+        result: list[TranscriptionLogprob] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = self.tokenizer.decode(token_id)
-                out_tokens.append(token)
-                out_token_logprobs.append(None)
-                out_top_logprobs.append(None)
+                result.append(
+                    TranscriptionLogprob(
+                        token=token,
+                        bytes=list(token.encode("utf-8")),
+                        logprob=None,
+                    )
+                )
             else:
                 step_token = step_top_logprobs.get(token_id)
                 if step_token is None:
                     token = self.tokenizer.decode(token_id)
-                    out_tokens.append(token)
-                    out_token_logprobs.append(None)
-                    out_top_logprobs.append(None)
+                    result.append(
+                        TranscriptionLogprob(
+                            token=token,
+                            bytes=list(token.encode("utf-8")),
+                            logprob=None,
+                        )
+                    )
                 else:
                     token = (
                         step_token.decoded_token
@@ -406,27 +416,15 @@ class OpenAISpeechToText(OpenAIServing):
                     )
                     token_logprob = max(step_token.logprob, -9999.0)
 
-                    out_tokens.append(token)
-                    out_token_logprobs.append(token_logprob)
-
-                    # Add top num_output_top_logprobs + 1 logprobs
-                    out_top_logprobs.append(
-                        {
-                            (
-                                top_lp[1].decoded_token
-                                if top_lp[1].decoded_token is not None
-                                else self.tokenizer.decode(top_lp[0])
-                            ): max(top_lp[1].logprob, -9999.0)
-                            for j, top_lp in enumerate(step_top_logprobs.items())
-                            if num_output_top_logprobs >= j
-                        }
+                    result.append(
+                        TranscriptionLogprob(
+                            token=token,
+                            bytes=list(token.encode("utf-8")),
+                            logprob=token_logprob,
+                        )
                     )
 
-        return TranscriptionLogProbs(
-            tokens=out_tokens,
-            token_logprobs=out_token_logprobs,
-            top_logprobs=out_top_logprobs,
-        )
+        return result
 
     async def _create_speech_to_text(
         self,
@@ -565,7 +563,7 @@ class OpenAISpeechToText(OpenAIServing):
 
             # Create logprobs response if requested
             # Use getattr since TranslationRequest doesn't have logprobs
-            logprobs_response: TranscriptionLogProbs | None = None
+            logprobs_response: list[TranscriptionLogprob] | None = None
             req_logprobs = getattr(request, "logprobs", None)
             if (
                 req_logprobs is not None
@@ -678,7 +676,7 @@ class OpenAISpeechToText(OpenAIServing):
                     completion_tokens += len(output.token_ids)
 
                     # Create logprobs for this chunk if requested
-                    chunk_logprobs: TranscriptionLogProbs | None = None
+                    chunk_logprobs: list[TranscriptionLogprob] | None = None
                     if include_logprobs and output.logprobs is not None:
                         assert req_logprobs is not None  # Checked in include_logprobs
                         chunk_logprobs = self._create_transcription_logprobs(

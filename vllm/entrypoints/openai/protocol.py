@@ -1618,7 +1618,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
-    logprobs: "TranscriptionLogProbs | None" = None
+    logprobs: "list[TranscriptionLogprob] | None" = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
 
@@ -2227,25 +2227,28 @@ class TranscriptionUsageAudio(OpenAIBaseModel):
     seconds: int
 
 
-class TranscriptionLogProbs(OpenAIBaseModel):
-    """Log probability information for transcription tokens."""
+class TranscriptionLogprob(OpenAIBaseModel):
+    """Log probability information for a single transcription token.
 
-    tokens: list[str] = Field(default_factory=list)
-    """List of tokens."""
+    Matches OpenAI's Logprob type from openai.types.audio.transcription.
+    """
 
-    token_logprobs: list[float | None] = Field(default_factory=list)
-    """Log probabilities for each token."""
+    token: str | None = None
+    """The token in the transcription."""
 
-    top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
-    """Top log probabilities for each position."""
+    bytes: list[int] | None = None
+    """The bytes of the token."""
+
+    logprob: float | None = None
+    """The log probability of the token."""
 
 
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
     usage: TranscriptionUsageAudio
-    logprobs: TranscriptionLogProbs | None = None
-    """Log probability information for the output tokens."""
+    logprobs: list[TranscriptionLogprob] | None = None
+    """The log probabilities of the tokens in the transcription."""
 
 
 class TranscriptionWord(OpenAIBaseModel):
@@ -2317,8 +2320,8 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
     words: list[TranscriptionWord] | None = None
     """Extracted words and their corresponding timestamps."""
 
-    logprobs: TranscriptionLogProbs | None = None
-    """Log probability information for the output tokens."""
+    logprobs: list[TranscriptionLogprob] | None = None
+    """The log probabilities of the tokens in the transcription."""
 
 
 TranscriptionResponseVariant: TypeAlias = (
