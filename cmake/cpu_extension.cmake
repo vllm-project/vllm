@@ -76,6 +76,7 @@ else()
     find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+    find_isa(${CPUINFO} "POWER8" POWER8_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
@@ -101,16 +102,68 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mavx512f"
         "-mavx512vl"
         "-mavx512bw"
-        "-mavx512dq"
-        "-mavx512bf16"
-        "-mavx512vnni"
-        "-mamx-bf16"
-        "-mamx-tile")
-    list(APPEND CXX_COMPILE_FLAGS_AVX2
-        "-mavx2")
-elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+        "-mavx512dq")
+
+    find_isa(${CPUINFO} "avx512_bf16" AVX512BF16_FOUND)
+    if (AVX512BF16_FOUND OR ENABLE_AVX512BF16)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+            set(ENABLE_AVX512BF16 ON)
+        else()
+            set(ENABLE_AVX512BF16 OFF)
+            message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512BF16 OFF)
+        message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
+    endif()
+
+    find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
+    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+            set(ENABLE_AVX512VNNI ON)
+        else()
+            set(ENABLE_AVX512VNNI OFF)
+            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512VNNI OFF)
+        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
+    endif()
+
+    find_isa(${CPUINFO} "amx_bf16" AMXBF16_FOUND)
+    if (AMXBF16_FOUND OR ENABLE_AMXBF16)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mamx-bf16" "-mamx-tile")
+            set(ENABLE_AMXBF16 ON)
+            add_compile_definitions(-DCPU_CAPABILITY_AMXBF16)
+        else()
+            set(ENABLE_AMXBF16 OFF)
+            message(WARNING "Disable AMX_BF16 ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AMXBF16 OFF)
+        message(WARNING "Disable AMX_BF16 ISA support, no amx_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AMXBF16=1.")
+    endif()
+
+elseif (AVX2_FOUND)
+    list(APPEND CXX_COMPILE_FLAGS "-mavx2")
+    message(WARNING "vLLM CPU backend using AVX2 ISA")
+
+elseif (POWER8_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    if (POWER9_FOUND)
+    if (POWER8_FOUND)
+        message(STATUS "POWER8 detected - using VSX/AltiVec optimizations")
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-maltivec"
+            "-mcpu=power8"
+            "-mtune=power8")
+    elseif (POWER9_FOUND)
         list(APPEND CXX_COMPILE_FLAGS
             "-mvsx"
             "-mcpu=power9"
@@ -148,12 +201,12 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
     endif()
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires X86, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, POWER8+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
 
-# Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+# Build oneDNN for GEMM kernels (only for x86-AVX512/ARM/PowerPC platforms)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER8_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
