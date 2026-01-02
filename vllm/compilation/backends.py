@@ -606,7 +606,7 @@ class VllmBackend:
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())
-            except Exception:
+            except (OSError, IOError):
                 logger.warning("Failed to read file %s", filepath)
                 continue
         code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
@@ -683,8 +683,10 @@ class VllmBackend:
                         indent=2,
                         sort_keys=True,
                     )
-        except Exception:
+        except (OSError, IOError, TypeError, ValueError):
             # Best-effort only; metadata write failures are non-fatal.
+            # OSError/IOError: file system errors
+            # TypeError/ValueError: JSON serialization errors
             logger.warning(
                 (
                     "Could not write compile cache metadata at %s; continuing without "
