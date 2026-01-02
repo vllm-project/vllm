@@ -953,9 +953,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 w2_input_scale=layer.w2_input_scale,
             )
 
-            # Flashinfer uses the inverse input scale for the activation.
-            layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
-
             # NOTE(rob): these scales do not need to be registered as parameters
             # since they are not used for weight (re)-loading.
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
@@ -963,9 +960,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 layer.output1_scales_gate_scalar = g1_alphas
                 layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
                 layer.output2_scales_scalar = g2_alphas
-            elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-                layer.g1_alphas = g1_alphas
-                layer.g2_alphas = g2_alphas
             else:
                 raise ValueError(
                     f"Unknown FlashInfer MoE backend: {self.flashinfer_moe_backend}"
@@ -1021,15 +1015,23 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             # TRTLLM does not use modular kernels
             return None
+
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            # CUTLASS uses alpha = weight_s * input_s and a2_scale_inv
+            # Flashinfer CUTLASS per-tensor uses single dq scale
+            # (alpha = w_scale * a_scale) and inverse a2 scale.
+            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                layer.w13_weight_scale,
+                layer.w13_input_scale,
+                layer.w2_weight_scale,
+                layer.w2_input_scale,
+            )
             return fp8_w8a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale_inv,
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
+                a2_scale=(1.0 / layer.w2_input_scale),
+                g1_alphas=g1_alphas,
+                g2_alphas=g2_alphas,
             )
         else:
             assert self.flashinfer_moe_backend is None
