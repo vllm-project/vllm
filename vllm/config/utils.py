@@ -12,7 +12,7 @@ import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 import regex as re
 import torch
@@ -35,24 +35,6 @@ ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
-@overload
-def config(
-    cls: type[ConfigT],
-    *,
-    config: ConfigDict | None = None,
-    **kwargs: Any,
-) -> type[ConfigT]: ...
-
-
-@overload
-def config(
-    cls: None = None,
-    *,
-    config: ConfigDict | None = None,
-    **kwargs: Any,
-) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
-
-
 @dataclass_transform(field_specifiers=(PydanticField,))
 def config(
     cls: type[ConfigT] | None = None,
@@ -60,6 +42,16 @@ def config(
     config: ConfigDict | None = None,
     **kwargs: Any,
 ) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
+    """Decorator to create a pydantic dataclass with default config. The default config
+    for the dataclass forbids extra fields.
+
+    All config classes in vLLM should use this decorator.
+
+    Args:
+        cls: The class to decorate
+        config: The pydantic ConfigDict to use. If provided, it will be merged with
+            the default config.
+        **kwargs: Additional arguments to pass to pydantic.dataclass."""
     # Extra fields are forbidden by default
     merged_config = ConfigDict(extra="forbid")
     if config is not None:
