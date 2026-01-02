@@ -53,6 +53,42 @@ def fused_add_rms_norm(
     return x, residual
 
 
+def gemma_rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> torch.Tensor:
+    from vllm import _custom_ops as ops
+
+    out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    ops.rms_norm(
+        out,
+        x,
+        weight,
+        variance_epsilon,
+        is_gemma=True,
+    )
+    return out
+
+
+def gemma_fused_add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm import _custom_ops as ops
+
+    ops.fused_add_rms_norm(
+        x,
+        residual,
+        weight,
+        variance_epsilon,
+        is_gemma=True,
+    )
+    return x, residual
+
+
 def poly_norm(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
@@ -310,15 +346,13 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        if not getattr(self, "_is_compiled", False):
-            self.forward_static = torch.compile(  # type: ignore
-                self.forward_static
+        add_residual = residual is not None
+        if add_residual:
+            return gemma_fused_add_rms_norm(
+                x, residual, self.weight.data, self.variance_epsilon
             )
-            self._is_compiled = True
-        return self.forward_native(x, residual)
+        else:
+            return gemma_rms_norm(x, self.weight.data, self.variance_epsilon)
 
 
 @CustomOp.register("rms_norm_gated")
