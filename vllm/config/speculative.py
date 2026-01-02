@@ -38,7 +38,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "ngram-eagle", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -60,6 +60,9 @@ class SpeculativeConfig:
     num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    num_speculative_tokens_per_method: dict[str, int] | None = None
+    """The number of speculative tokens for each method, if provided. Max of
+    the values will be used if `num_speculative_tokens` is not provided."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
@@ -270,6 +273,27 @@ class SpeculativeConfig:
                     "num_speculative_tokens was provided but without speculative model."
                 )
 
+        # set num_speculative_tokens from num_speculative_tokens_per_method
+        # for methods like ngram-eagle
+        if self.num_speculative_tokens_per_method is not None:
+            assert all(
+                v > 0 for v in self.num_speculative_tokens_per_method.values()
+            ), (
+                "All values in num_speculative_tokens_per_method must be "
+                "positive integers."
+            )
+            max_num_speculative_tokens = max(
+                self.num_speculative_tokens_per_method.values()
+            )
+            if self.num_speculative_tokens is None:
+                self.num_speculative_tokens = max_num_speculative_tokens
+            else:
+                assert self.num_speculative_tokens <= max_num_speculative_tokens, (
+                    "num_speculative_tokens should be None or must be"
+                    " less than or equal to the "
+                    "max value in num_speculative_tokens_per_method."
+                )
+
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
         if self.method is None and (
@@ -280,6 +304,9 @@ class SpeculativeConfig:
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
             self.method = "ngram"
+
+        # Initialize ngram and suffix related configuration
+        if self.method in ("ngram", "ngram-eagle"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
@@ -318,147 +345,142 @@ class SpeculativeConfig:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
 
-            if self.model is not None:
-                self.draft_model_config = ModelConfig(
-                    model=self.model,
-                    runner="draft",
-                    tokenizer=self.target_model_config.tokenizer,
-                    tokenizer_mode=self.target_model_config.tokenizer_mode,
-                    trust_remote_code=self.target_model_config.trust_remote_code,
-                    allowed_local_media_path=self.target_model_config.allowed_local_media_path,
-                    allowed_media_domains=self.target_model_config.allowed_media_domains,
-                    dtype=self.target_model_config.dtype,
-                    seed=self.target_model_config.seed,
-                    revision=self.revision,
-                    code_revision=self.code_revision,
-                    tokenizer_revision=self.target_model_config.tokenizer_revision,
-                    spec_target_max_model_len=self.target_model_config.max_model_len,
-                    quantization=self.quantization,
-                    enforce_eager=self.target_model_config.enforce_eager,
-                    max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
-                    config_format=self.target_model_config.config_format,
+        # Initialize draft model config for methods that have draft models
+        if self.method not in ("ngram") and self.model is not None:
+            self.draft_model_config = ModelConfig(
+                model=self.model,
+                runner="draft",
+                tokenizer=self.target_model_config.tokenizer,
+                tokenizer_mode=self.target_model_config.tokenizer_mode,
+                trust_remote_code=self.target_model_config.trust_remote_code,
+                allowed_local_media_path=self.target_model_config.allowed_local_media_path,
+                allowed_media_domains=self.target_model_config.allowed_media_domains,
+                dtype=self.target_model_config.dtype,
+                seed=self.target_model_config.seed,
+                revision=self.revision,
+                code_revision=self.code_revision,
+                tokenizer_revision=self.target_model_config.tokenizer_revision,
+                spec_target_max_model_len=self.target_model_config.max_model_len,
+                quantization=self.quantization,
+                enforce_eager=self.target_model_config.enforce_eager,
+                max_logprobs=self.target_model_config.max_logprobs,
+                hf_overrides=SpeculativeConfig.hf_config_override,
+                config_format=self.target_model_config.config_format,
+            )
+
+            # Automatically detect the method
+            if self.method in ("eagle", "eagle3", "ngram-eagle"):
+                pass
+            # examples:
+            # yuhuili/EAGLE-LLaMA3-Instruct-8B
+            # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
+            # AngelSlim/Qwen3-8B_eagle3
+            elif "eagle-" in self.draft_model_config.model.lower():
+                self.method = "eagle"
+            elif "eagle3" in self.draft_model_config.model.lower():
+                self.method = "eagle3"
+            elif self.draft_model_config.hf_config.model_type == "medusa":
+                self.method = "medusa"
+            elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
+                self.method = "mlp_speculator"
+            elif self.draft_model_config.hf_config.model_type in get_args(
+                MTPModelTypes
+            ):
+                self.method = "mtp"
+                if self.num_speculative_tokens > 1:
+                    logger.warning(
+                        "Enabling num_speculative_tokens > 1 will run"
+                        "multiple times of forward on same MTP layer"
+                        ",which may result in lower acceptance rate"
+                    )
+            elif self.draft_model_config.hf_config.model_type in ("longcat_flash_mtp"):
+                self.method = "longcat_flash_mtp"
+                if self.num_speculative_tokens > 1:
+                    logger.warning(
+                        "LongCat MTP models only have "
+                        "one layer. Might need some code changes "
+                        "to support multiple layers."
+                    )
+            else:
+                self.method = "draft_model"
+                raise NotImplementedError(
+                    "Speculative decoding with draft model is not "
+                    "supported yet. Please consider using other "
+                    "speculative decoding methods such as ngram, medusa, "
+                    "eagle, or mtp."
                 )
 
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+            # Replace hf_config for EAGLE draft_model
+            if self.method in ("eagle", "eagle3", "ngram-eagle"):
+                from vllm.transformers_utils.configs import SpeculatorsConfig
+                from vllm.transformers_utils.configs.eagle import EAGLEConfig
+
+                if isinstance(
+                    self.draft_model_config.hf_config,
+                    (EAGLEConfig, SpeculatorsConfig),
+                ):
                     pass
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif self.draft_model_config.hf_config.model_type == "medusa":
-                    self.method = "medusa"
-                elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
-                    self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
-                ):
-                    self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run"
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
-                elif self.draft_model_config.hf_config.model_type in (
-                    "longcat_flash_mtp"
-                ):
-                    self.method = "longcat_flash_mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                            "LongCat MTP models only have "
-                            "one layer. Might need some code changes "
-                            "to support multiple layers."
-                        )
                 else:
-                    self.method = "draft_model"
-                    raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or mtp."
-                    )
-
-                # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
-                    from vllm.transformers_utils.configs.eagle import EAGLEConfig
-
-                    if isinstance(
+                    eagle_config = EAGLEConfig(
                         self.draft_model_config.hf_config,
-                        (EAGLEConfig, SpeculatorsConfig),
-                    ):
-                        pass
-                    else:
-                        eagle_config = EAGLEConfig(
-                            self.draft_model_config.hf_config,
-                            method=self.method,
-                            model_type="eagle",
-                        )
-                        self.draft_model_config.hf_config = eagle_config
+                        method=self.method,
+                        model_type="eagle",
+                    )
+                    self.draft_model_config.hf_config = eagle_config
 
-                if self.num_speculative_tokens is not None and hasattr(
-                    self.draft_model_config.hf_config, "num_lookahead_tokens"
+            if self.num_speculative_tokens is not None and hasattr(
+                self.draft_model_config.hf_config, "num_lookahead_tokens"
+            ):
+                self.draft_model_config.hf_config.num_lookahead_tokens = (
+                    self.num_speculative_tokens
+                )
+
+            n_predict = getattr(self.draft_model_config.hf_config, "n_predict", None)
+            if n_predict is not None:
+                if self.num_speculative_tokens is None:
+                    # Default to max value defined in draft model config.
+                    self.num_speculative_tokens = n_predict
+                elif (
+                    self.num_speculative_tokens > n_predict
+                    and self.num_speculative_tokens % n_predict != 0
                 ):
-                    self.draft_model_config.hf_config.num_lookahead_tokens = (
-                        self.num_speculative_tokens
+                    # Ensure divisibility for MTP module reuse.
+                    raise ValueError(
+                        f"num_speculative_tokens:{self.num_speculative_tokens}"
+                        f" must be divisible by {n_predict=}"
                     )
 
-                n_predict = getattr(
-                    self.draft_model_config.hf_config, "n_predict", None
+            if self.speculative_token_tree is None:
+                # Generate chain of tokens.
+                self.speculative_token_tree = str(
+                    [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
                 )
-                if n_predict is not None:
-                    if self.num_speculative_tokens is None:
-                        # Default to max value defined in draft model config.
-                        self.num_speculative_tokens = n_predict
-                    elif (
-                        self.num_speculative_tokens > n_predict
-                        and self.num_speculative_tokens % n_predict != 0
-                    ):
-                        # Ensure divisibility for MTP module reuse.
-                        raise ValueError(
-                            f"num_speculative_tokens:{self.num_speculative_tokens}"
-                            f" must be divisible by {n_predict=}"
-                        )
-
-                if self.speculative_token_tree is None:
-                    # Generate chain of tokens.
-                    self.speculative_token_tree = str(
-                        [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
-                    )
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t))
-                    )
-
-                self.draft_tensor_parallel_size = (
-                    SpeculativeConfig._verify_and_get_draft_tp(
-                        self.target_parallel_config,
-                        self.draft_tensor_parallel_size,
-                        self.draft_model_config.hf_config,
-                    )
+            else:
+                # Sort the token tree breadth-first.
+                tree_choices = ast.literal_eval(self.speculative_token_tree)
+                self.speculative_token_tree = str(
+                    sorted(tree_choices, key=lambda t: (len(t), t))
                 )
 
-                self.draft_model_config.max_model_len = (
-                    SpeculativeConfig._maybe_override_draft_max_model_len(
-                        self.max_model_len,
-                        self.draft_model_config.max_model_len,
-                        self.target_model_config.max_model_len,
-                    )
+            self.draft_tensor_parallel_size = (
+                SpeculativeConfig._verify_and_get_draft_tp(
+                    self.target_parallel_config,
+                    self.draft_tensor_parallel_size,
+                    self.draft_model_config.hf_config,
                 )
+            )
 
-                self.draft_parallel_config = (
-                    SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
-                    )
+            self.draft_model_config.max_model_len = (
+                SpeculativeConfig._maybe_override_draft_max_model_len(
+                    self.max_model_len,
+                    self.draft_model_config.max_model_len,
+                    self.target_model_config.max_model_len,
                 )
+            )
+
+            self.draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+                self.target_parallel_config, self.draft_tensor_parallel_size
+            )
         return self
 
     def _validate_suffix_decoding(self):
@@ -496,6 +518,13 @@ class SpeculativeConfig:
                 f"suffix_decoding_min_token_prob="
                 f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
             )
+
+        if self.use_ngram() and not self.disable_padded_drafter_batch:
+            logger.warning(
+                "padded_drafter_batch has to be disabled with ngram. "
+                "Setting it disable_padded_drafter_batch to True."
+            )
+            self.disable_padded_drafter_batch = True
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -600,6 +629,29 @@ class SpeculativeConfig:
                 "n_predict parameter."
             )
 
+        if self.method == "ngram-eagle":
+            assert self.num_speculative_tokens_per_method is not None, (
+                "num_speculative_tokens_per_method must be provided for "
+                "ngram-eagle method."
+            )
+            assert "ngram" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain ngram key for "
+                "ngram-eagle method."
+            )
+            assert "eagle" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain eagle key for "
+                "ngram-eagle method."
+            )
+            ngram_speculative_tokens = self.num_speculative_tokens_per_method["ngram"]
+            eagle_speculative_tokens = self.num_speculative_tokens_per_method["eagle"]
+            if self.num_speculative_tokens != max(
+                ngram_speculative_tokens, eagle_speculative_tokens
+            ):
+                raise ValueError(
+                    "num_speculative_tokens must be the max value in "
+                    "num_speculative_tokens_per_method for ngram-eagle method."
+                )
+
         if self.num_speculative_tokens <= 0:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
@@ -635,7 +687,10 @@ class SpeculativeConfig:
         return self
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "ngram-eagle", "mtp")
+
+    def use_ngram(self) -> bool:
+        return self.method == "ngram" or self.method == "ngram-eagle"
 
     def __repr__(self) -> str:
         method = self.method

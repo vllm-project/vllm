@@ -427,25 +427,34 @@ class GPUModelRunner(
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
+        found_draft = False
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter: (
-                NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
-            )
-            if self.speculative_config.method == "ngram":
-                self.drafter = NgramProposer(self.vllm_config)
-            elif self.speculative_config.method == "suffix":
+            self.drafter_ngram: NgramProposer
+            self.drafter_eagle: EagleProposer
+            self.drafter: SuffixDecodingProposer | MedusaProposer
+            if (
+                self.speculative_config.method == "ngram"
+                or self.speculative_config.method == "ngram-eagle"
+            ):
+                self.drafter_ngram = NgramProposer(self.vllm_config)
+                found_draft = True
+            if self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
-            elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                found_draft = True
+            if self.speculative_config.use_eagle():
+                self.drafter_eagle = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
-                        self.drafter.eagle3_use_aux_hidden_state
+                        self.drafter_eagle.eagle3_use_aux_hidden_state
                     )
-            elif self.speculative_config.method == "medusa":
+                found_draft = True
+            if self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
-            else:
+                found_draft = True
+
+            if not found_draft:
                 raise ValueError(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
@@ -1758,8 +1767,11 @@ class GPUModelRunner(
                 )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                if self.speculative_config.use_eagle():
+                    if (
+                        self.drafter_eagle.attn_layer_names[0]
+                        in kv_cache_group.layer_names
+                    ):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -3404,6 +3416,14 @@ class GPUModelRunner(
 
         self.input_batch.prev_sampled_token_ids = None
 
+        spec_config = self.speculative_config
+        use_padded_batch_for_eagle = (
+            spec_config is not None
+            and spec_config.use_eagle()
+            and not spec_config.use_ngram()  # disable for ngram + eagle hybrid
+            and not spec_config.disable_padded_drafter_batch
+        )
+
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("gpu_model_runner: draft"):
@@ -3413,17 +3433,12 @@ class GPUModelRunner(
                     self.input_batch.sampling_metadata,
                     hidden_states,
                     sample_hidden_states,
+                    use_padded_batch_for_eagle,
                     aux_hidden_states,
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
 
-        spec_config = self.speculative_config
-        use_padded_batch_for_eagle = (
-            spec_config is not None
-            and spec_config.use_eagle()
-            and not spec_config.disable_padded_drafter_batch
-        )
         effective_drafter_max_model_len = self.max_model_len
         if effective_drafter_max_model_len is None:
             effective_drafter_max_model_len = self.model_config.max_model_len
@@ -3441,7 +3456,7 @@ class GPUModelRunner(
         )
         if use_padded_batch_for_eagle:
             assert self.speculative_config is not None
-            assert isinstance(self.drafter, EagleProposer)
+            assert isinstance(self.drafter_eagle, EagleProposer)
             sampled_token_ids = sampler_output.sampled_token_ids
             if input_fits_in_drafter:
                 # EAGLE speculative decoding can use the GPU sampled tokens
@@ -3450,7 +3465,7 @@ class GPUModelRunner(
             elif self.valid_sampled_token_count_event is not None:
                 assert spec_decode_common_attn_metadata is not None
                 next_token_ids, valid_sampled_tokens_count = (
-                    self.drafter.prepare_next_token_ids_padded(
+                    self.drafter_eagle.prepare_next_token_ids_padded(
                         spec_decode_common_attn_metadata,
                         sampled_token_ids,
                         self.requests,
@@ -3584,6 +3599,7 @@ class GPUModelRunner(
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
+        use_padded_batch_for_eagle: bool,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
@@ -3591,16 +3607,18 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-        if spec_config.method == "ngram":
+        if spec_config.method == "ngram" or spec_config.method == "ngram-eagle":
             assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, NgramProposer)
-            draft_token_ids = self.drafter.propose(
+            assert isinstance(self.drafter_ngram, NgramProposer)
+            draft_token_ids = self.drafter_ngram.propose(
                 sampled_token_ids,
                 self.input_batch.req_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs,
             )
+            if spec_config.method == "ngram-eagle":
+                draft_token_ids_ngram = draft_token_ids
         elif spec_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
@@ -3630,10 +3648,12 @@ class GPUModelRunner(
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
-        elif spec_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
 
-            if spec_config.disable_padded_drafter_batch:
+        # use if instead of elif to allow ngram-eagle hybrid method
+        if spec_config.use_eagle():
+            assert isinstance(self.drafter_eagle, EagleProposer)
+
+            if not use_padded_batch_for_eagle:
                 # When padded-batch is disabled, the sampled_token_ids should be
                 # the cpu-side list[list[int]] of valid sampled tokens for each
                 # request, with invalid requests having empty lists.
@@ -3641,7 +3661,7 @@ class GPUModelRunner(
                     "sampled_token_ids should be a python list when"
                     "padded-batch is disabled."
                 )
-                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+                next_token_ids = self.drafter_eagle.prepare_next_token_ids_cpu(
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
@@ -3657,7 +3677,7 @@ class GPUModelRunner(
                     "padded-batch is enabled."
                 )
                 next_token_ids, valid_sampled_tokens_count = (
-                    self.drafter.prepare_next_token_ids_padded(
+                    self.drafter_eagle.prepare_next_token_ids_padded(
                         common_attn_metadata,
                         sampled_token_ids,
                         self.requests,
@@ -3683,12 +3703,14 @@ class GPUModelRunner(
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                if spec_config.disable_padded_drafter_batch:
+                if not use_padded_batch_for_eagle:
                     token_indices_to_sample = None
-                    common_attn_metadata, token_indices = self.drafter.prepare_inputs(
-                        common_attn_metadata,
-                        sampled_token_ids,
-                        spec_decode_metadata.num_draft_tokens,
+                    common_attn_metadata, token_indices = (
+                        self.drafter_eagle.prepare_inputs(
+                            common_attn_metadata,
+                            sampled_token_ids,
+                            spec_decode_metadata.num_draft_tokens,
+                        )
                     )
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)
@@ -3704,7 +3726,7 @@ class GPUModelRunner(
                         common_attn_metadata,
                         token_indices_to_sample,
                         num_rejected_tokens_gpu,
-                    ) = self.drafter.prepare_inputs_padded(
+                    ) = self.drafter_eagle.prepare_inputs_padded(
                         common_attn_metadata,
                         spec_decode_metadata,
                         valid_sampled_tokens_count,
@@ -3729,7 +3751,7 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids = self.drafter_eagle.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -3740,6 +3762,26 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+
+            if spec_config.method == "ngram-eagle":
+                draft_token_ids_eagle = draft_token_ids
+
+        if spec_config.method == "ngram-eagle":
+            assert draft_token_ids_ngram is not None, "ngram proposer failed"
+            assert draft_token_ids_eagle is not None, "eagle proposer failed"
+            # eagle draft is torch but we need list
+            assert isinstance(draft_token_ids_eagle, torch.Tensor)
+            draft_token_ids_eagle = draft_token_ids_eagle.tolist()
+            draft_token_ids = []
+
+            # combine ngram and eagle drafts
+            # prefer ngram drafts when available
+            # choose eagle drafts when ngram drafts are empty
+            for bid in range(len(draft_token_ids_ngram)):
+                if len(draft_token_ids_ngram[bid]):
+                    draft_token_ids.append(draft_token_ids_ngram[bid])
+                else:
+                    draft_token_ids.append(draft_token_ids_eagle[bid])
 
         return draft_token_ids
 
@@ -3785,12 +3827,21 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+
+                drafter_to_load: (
+                    EagleProposer | SuffixDecodingProposer | MedusaProposer | None
+                ) = None
                 if hasattr(self, "drafter"):
+                    drafter_to_load = self.drafter
+                elif hasattr(self, "drafter_eagle"):
+                    drafter_to_load = self.drafter_eagle
+
+                if drafter_to_load:
                     logger.info_once("Loading drafter model...")
-                    self.drafter.load_model(self.model)
+                    drafter_to_load.load_model(self.model)
                     if (
-                        hasattr(self.drafter, "model")
-                        and is_mixture_of_experts(self.drafter.model)
+                        hasattr(drafter_to_load, "model")
+                        and is_mixture_of_experts(drafter_to_load.model)
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
@@ -3816,7 +3867,7 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            self.drafter.model,
+                            drafter_to_load.model,
                             spec_config.draft_model_config,
                             global_expert_load,
                             old_global_expert_indices,
@@ -4426,7 +4477,7 @@ class GPUModelRunner(
                 hidden_states = outputs
 
             if self.speculative_config and self.speculative_config.use_eagle():
-                assert isinstance(self.drafter, EagleProposer)
+                assert isinstance(self.drafter_eagle, EagleProposer)
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
@@ -4448,7 +4499,7 @@ class GPUModelRunner(
                 if self.compilation_config.cudagraph_specialize_lora and activate_lora:
                     use_cudagraphs = False
 
-                self.drafter.dummy_run(
+                self.drafter_eagle.dummy_run(
                     num_tokens,
                     use_cudagraphs=use_cudagraphs,
                     is_graph_capturing=is_graph_capturing,
@@ -5603,10 +5654,10 @@ class GPUModelRunner(
         )
 
         if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
+            assert isinstance(self.drafter_eagle, EagleProposer)
             # validate all draft model layers belong to the same kv cache
             # group
-            self.drafter.validate_same_kv_cache_group(kv_cache_config)
+            self.drafter_eagle.validate_same_kv_cache_group(kv_cache_config)
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()

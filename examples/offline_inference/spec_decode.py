@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 
 from transformers import AutoTokenizer
 
@@ -54,9 +55,14 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "ngram-eagle"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    parser.add_argument(
+        "--num-speculative-tokens-per-method",
+        type=json.loads,
+        default='{"ngram": 2, "eagle": 2}',
+    )
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -119,6 +125,21 @@ def main(args):
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
         }
+    elif args.method == "ngram-eagle":
+        eagle_dir = args.eagle_dir
+        if eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+        args.num_spec_tokens = max(
+            args.num_speculative_tokens_per_method["ngram"],
+            args.num_speculative_tokens_per_method["eagle"],
+        )
+        speculative_config = {
+            "method": "ngram-eagle",
+            "model": eagle_dir,
+            "num_speculative_tokens_per_method": args.num_speculative_tokens_per_method,
+            "prompt_lookup_max": args.prompt_lookup_max,
+            "prompt_lookup_min": args.prompt_lookup_min,
+        }
     elif args.method == "mtp":
         speculative_config = {
             "method": "mtp",
@@ -156,6 +177,7 @@ def main(args):
             print("-" * 50)
             print(f"prompt: {output.prompt}")
             print(f"generated text: {output.outputs[0].text}")
+            print(f"num of generated tokens: {len(output.outputs[0].token_ids)}")
             print("-" * 50)
 
     metrics = llm.get_metrics()
@@ -181,6 +203,10 @@ def main(args):
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:generation_tokens":
+            assert isinstance(metric, Counter)
+            print(f"num generation tokens: {metric.value}")
+            total_tokens_generated = metric.value
 
     print("-" * 50)
     print(f"total_num_output_tokens: {total_num_output_tokens}")
@@ -189,6 +215,14 @@ def main(args):
     print(f"num_accepted_tokens: {num_accepted_tokens}")
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")
+    num_tokens_generated_without_sd = total_tokens_generated - (
+        num_drafts + num_accepted_tokens
+    )
+    seq_normalized_acceptance_length = (total_tokens_generated) / (
+        num_drafts + num_tokens_generated_without_sd
+    )
+    print(f"num_tokens_generated_without_sd: {num_tokens_generated_without_sd}")
+    print(f"seq normalized acceptance length: {seq_normalized_acceptance_length:.2f}")
     print("-" * 50)
 
     # print acceptance at each token position

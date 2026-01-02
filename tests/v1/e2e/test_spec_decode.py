@@ -344,6 +344,18 @@ def test_speculators_model_integration(
             "auto",
             marks=large_gpu_mark(min_gb=40),
         ),  # works on 4x H100
+        pytest.param(
+            (
+                "ngram-eagle",
+                "meta-llama/Llama-3.1-8B-Instruct",
+                "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+                1,
+            ),
+            False,
+            True,
+            "auto",
+            marks=large_gpu_mark(min_gb=40),
+        ),  # works on 4x H100
         (
             (
                 "eagle3",
@@ -397,6 +409,7 @@ def test_speculators_model_integration(
         "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
+        "llama3_ngram_eagle",
         "llama3_eagle3",
         "llama4_eagle",
         "llama4_eagle_mm",
@@ -482,16 +495,29 @@ def test_eagle_correctness(
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
-        spec_llm = LLM(
-            model=model_name,
-            trust_remote_code=True,
-            tensor_parallel_size=tp_size,
-            speculative_config={
+        if method == "ngram-eagle":
+            # Use ngram-eagle specific config
+            speculative_config = {
+                "method": method,
+                "model": spec_model_name,
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
+                "num_speculative_tokens_per_method": {"ngram": 3, "eagle": 3},
+                "max_model_len": max_model_len,
+            }
+        else:
+            speculative_config = {
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
                 "max_model_len": max_model_len,
-            },
+            }
+
+        spec_llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
+            speculative_config=speculative_config,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,

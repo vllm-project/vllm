@@ -71,8 +71,21 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
+
+        if self.method == "ngram-eagle":
+            self.num_speculative_tokens = (
+                self.speculative_config.num_speculative_tokens_per_method["eagle"]
+            )
+        else:
+            self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+
+        logger.info(
+            "EagleProposer: method=%s, num_speculative_tokens=%s",
+            self.method,
+            self.num_speculative_tokens,
+        )
+
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because

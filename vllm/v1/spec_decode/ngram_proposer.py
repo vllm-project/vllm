@@ -6,6 +6,9 @@ import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NgramProposer:
@@ -21,7 +24,13 @@ class NgramProposer:
         # Number of tokens follow the match. If there are less than k
         # tokens follow the match, we will return the maximum amount of
         # tokens until the end.
-        self.k = vllm_config.speculative_config.num_speculative_tokens
+        self.method = vllm_config.speculative_config.method
+        if self.method == "ngram-eagle":
+            self.k = vllm_config.speculative_config.num_speculative_tokens_per_method[
+                "ngram"
+            ]
+        else:
+            self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
@@ -59,6 +68,14 @@ class NgramProposer:
             np.zeros(1024, dtype=np.int32),
             np.zeros((1024, self.max_model_len), dtype=np.int32),
             set(),
+        )
+
+        logger.info(
+            "NgramProposer: min_n=%s, max_n=%s, k=%s, max_model_len=%s",
+            self.min_n,
+            self.max_n,
+            self.k,
+            self.max_model_len,
         )
 
     def batch_propose(
