@@ -296,10 +296,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
-            dynamic_arg_dims = {"hidden_states": 1}
-            self._torch_compile(cls=encoder_cls, dynamic_arg_dims=dynamic_arg_dims)
+            self._decorate_for_torch_compile(
+                cls=encoder_cls, dynamic_arg_dims={"hidden_states": 1}
+            )
 
-    def _get_encoder_cls(self, **kwargs) -> type["PreTrainedModel"]:
+    def _get_encoder_cls(
+        self, modality: str = "image", **kwargs: dict
+    ) -> type["PreTrainedModel"]:
         """
         Get the encoder class from the model.
 
@@ -311,7 +314,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         """
         with torch.device("meta"):
             model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        encoder_cls = type(model.get_encoder("image"))
+        encoder_cls = type(model.get_encoder(modality=modality))
         if type(model) is encoder_cls:
             raise ValueError(
                 "Unable to infer vision encoder class from the model. "
@@ -323,24 +326,24 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         del model
         return encoder_cls
 
-    def _torch_compile(
+    def _decorate_for_torch_compile(
         self,
         cls: type["PreTrainedModel"],
         dynamic_arg_dims: dict[str, int] | None = None,
     ):
         """
         Like
-        [`_torch_compile`][vllm.model_executor.models.transformers.base.Base._torch_compile]
+        [`_decorate_for_torch_compile`][vllm.model_executor.models.transformers.base.Base._decorate_for_torch_compile]
         but with different default `dynamic_arg_dims` for MRoPE models.
         """
         if dynamic_arg_dims is None and self.model_config.uses_mrope:
             # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims = {
-                "input_ids": 1,  # shape: [1, seq_len]
-                "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
-                "position_ids": 2,  # shape: [3, 1, seq_len]
-            }
-        super()._torch_compile(cls=cls, dynamic_arg_dims=dynamic_arg_dims)
+            dynamic_arg_dims = dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=2,  # shape: [3, 1, seq_len]
+            )
+        super()._decorate_for_torch_compile(cls=cls, dynamic_arg_dims=dynamic_arg_dims)
 
     def forward(
         self,

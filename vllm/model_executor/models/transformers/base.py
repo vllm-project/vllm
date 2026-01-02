@@ -184,7 +184,7 @@ class Base(
         )
         # Decorate the language model class to support torch compile
         decoder_cls = self._get_decoder_cls(**from_config_kwargs)
-        self._torch_compile(cls=decoder_cls)
+        self._decorate_for_torch_compile(cls=decoder_cls)
         # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
@@ -237,13 +237,13 @@ class Base(
         del model
         return decoder_cls
 
-    def _torch_compile(
+    def _decorate_for_torch_compile(
         self,
         cls: type[PreTrainedModel],
         dynamic_arg_dims: dict[str, int] | None = None,
     ):
         """
-        Decorate the model's language model class to support torch compile.
+        Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
             cls: The PreTrainedModel class to decorate.
@@ -254,11 +254,11 @@ class Base(
         """
         if dynamic_arg_dims is None:
             # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims: dict[str, int] = {
-                "input_ids": 1,  # shape: [1, seq_len]
-                "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
-                "position_ids": 1,  # shape: [1, seq_len]
-            }
+            dynamic_arg_dims = dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=1,  # shape: [1, seq_len]
+            )
 
         # Decorate the cls for torch compile
         @support_torch_compile(
