@@ -69,6 +69,9 @@ class CommonAttentionMetadata:
     seq_lens: torch.Tensor
     """(batch_size,), the number of computed tokens for each request"""
 
+    cu_seqlens_k: torch.Tensor | None
+    """(batch_size + 1,), cumulative sequence lengths for KV (optional)"""
+
     num_reqs: int
     """Number of requests"""
     # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
@@ -139,6 +142,9 @@ class CommonAttentionMetadata:
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
+            cu_seqlens_k=self.cu_seqlens_k[: num_actual_reqs + 1]
+            if self.cu_seqlens_k is not None
+            else None,
             _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
             if self._seq_lens_cpu is not None
             else None,
@@ -176,6 +182,18 @@ def slice_query_start_locs(
         query_start_loc[request_slice.start : request_slice.stop + 1]
         - query_start_loc[request_slice.start]
     )
+
+
+def seqlens_to_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
+    cu_seqlens = torch.empty(
+        (seqlens.numel() + 1,), dtype=seqlens.dtype, device=seqlens.device
+    )
+    if cu_seqlens.numel() == 1:
+        cu_seqlens[0] = 0
+        return cu_seqlens
+    cu_seqlens[0] = 0
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+    return cu_seqlens
 
 
 def _make_metadata_with_slice(
@@ -243,6 +261,9 @@ def _make_metadata_with_slice(
 
     max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[request_slice]
+    cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens_cpu).to(
+        device=attn_metadata.query_start_loc.device, non_blocking=True
+    )
 
     num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
@@ -262,6 +283,7 @@ def _make_metadata_with_slice(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
+        cu_seqlens_k=cu_seqlens_k,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
@@ -744,11 +766,15 @@ def make_local_attention_virtual_batches(
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
     max_seq_len = int(seq_lens_cpu.max())
+    cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens_cpu).to(
+        device=device, non_blocking=True
+    )
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
+        cu_seqlens_k=cu_seqlens_k,
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -807,6 +833,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         query_start_loc=decode_query_start_loc,
         query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
         seq_lens=common_attn_metadata.seq_lens,
+        cu_seqlens_k=common_attn_metadata.cu_seqlens_k,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
         max_query_len=decode_max_query_len,

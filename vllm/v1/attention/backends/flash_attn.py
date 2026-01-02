@@ -39,6 +39,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
@@ -47,10 +48,16 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
+    seqlens_to_cu_seqlens,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+
+def _maybe_add_cu_seqlens_k(kwargs, cu_seqlens_k):
+    if cu_seqlens_k is not None and current_platform.is_rocm():
+        kwargs["cu_seqlens_k"] = cu_seqlens_k
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -59,6 +66,8 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        if current_platform.is_rocm():
+            return [MultipleOf(128)]
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -173,6 +182,8 @@ class FlashAttentionBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if current_platform.is_rocm() and block_size % 128 != 0:
+            return "ROCm FlashAttention requires KV block size multiple of 128"
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         return None
@@ -193,6 +204,7 @@ class FlashAttentionMetadata:
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
+    cu_seqlens_k: torch.Tensor | None
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -202,10 +214,13 @@ class FlashAttentionMetadata:
     cu_prefix_query_lens: torch.Tensor | None
     prefix_kv_lens: torch.Tensor | None
     suffix_kv_lens: torch.Tensor | None
+    cu_prefix_kv_lens: torch.Tensor | None
+    cu_suffix_kv_lens: torch.Tensor | None
 
     # For GQA DCP
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
+    cu_seqlens_dcp_context_k: torch.Tensor | None = None
 
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
@@ -329,10 +344,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens.to("cpu")
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
+        cu_seqlens_k = common_attn_metadata.cu_seqlens_k
+        if cu_seqlens_k is None:
+            cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens_cpu).to(
+                device=self.device, non_blocking=True
+            )
 
         # the overhead of the aot schedule is not worth it for spec-decode
         aot_schedule = self.aot_schedule and not fast_build
@@ -395,10 +419,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
+        cu_seqlens_dcp_context_k = None
 
         cu_prefix_query_lens = None
         prefix_kv_lens = None
         suffix_kv_lens = None
+        cu_prefix_kv_lens = None
+        cu_suffix_kv_lens = None
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
@@ -411,6 +438,17 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
+            query_kv_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
+            dcp_context_kv_lens_cpu = get_dcp_local_seq_lens(
+                dcp_context_kv_lens_cpu,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+            cu_seqlens_dcp_context_k = seqlens_to_cu_seqlens(
+                dcp_context_kv_lens_cpu
+            ).to(device=self.device, non_blocking=True)
             # After DCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
@@ -435,8 +473,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_kv_lens = torch.tensor(
                 [common_prefix_len], dtype=torch.int32, device=self.device
             )
+            cu_prefix_kv_lens = torch.tensor(
+                [0, common_prefix_len], dtype=torch.int32
+            ).to(device=self.device, non_blocking=True)
             # Use GPU tensor directly - no CPU sync needed
             suffix_kv_lens = seq_lens[:num_reqs] - common_prefix_len
+            suffix_kv_lens_cpu = seq_lens_cpu[:num_reqs] - common_prefix_len
+            cu_suffix_kv_lens = seqlens_to_cu_seqlens(suffix_kv_lens_cpu).to(
+                device=self.device, non_blocking=True
+            )
             prefix_scheduler_metadata = schedule(
                 batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
@@ -479,16 +524,20 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
+            cu_seqlens_k=cu_seqlens_k,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
+            cu_seqlens_dcp_context_k=cu_seqlens_dcp_context_k,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
+            cu_prefix_kv_lens=cu_prefix_kv_lens,
+            cu_suffix_kv_lens=cu_suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
@@ -697,7 +746,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                flash_attn_varlen_func(
+                fa_kwargs = dict(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -720,6 +769,8 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
+                _maybe_add_cu_seqlens_k(fa_kwargs, attn_metadata.cu_seqlens_k)
+                flash_attn_varlen_func(**fa_kwargs)
                 return output
 
         # Cascade attention (rare case).
@@ -733,6 +784,8 @@ class FlashAttentionImpl(AttentionImpl):
             cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
             prefix_kv_lens=attn_metadata.prefix_kv_lens,
             suffix_kv_lens=attn_metadata.suffix_kv_lens,
+            cu_prefix_kv_lens=attn_metadata.cu_prefix_kv_lens,
+            cu_suffix_kv_lens=attn_metadata.cu_suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
             alibi_slopes=self.alibi_slopes,
@@ -770,7 +823,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         query = query.contiguous()
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
-        context_attn_out, context_lse = flash_attn_varlen_func(
+        context_kwargs = dict(
             q=query_across_dcp,
             k=key_cache,
             v=value_cache,
@@ -792,6 +845,10 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
+        _maybe_add_cu_seqlens_k(
+            context_kwargs, attn_metadata.cu_seqlens_dcp_context_k
+        )
+        context_attn_out, context_lse = flash_attn_varlen_func(**context_kwargs)
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
         context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
             context_attn_out,
@@ -980,6 +1037,8 @@ def cascade_attention(
     cu_prefix_query_lens: torch.Tensor,
     prefix_kv_lens: torch.Tensor,
     suffix_kv_lens: torch.Tensor,
+    cu_prefix_kv_lens: torch.Tensor | None,
+    cu_suffix_kv_lens: torch.Tensor | None,
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: torch.Tensor | None,
@@ -1010,7 +1069,7 @@ def cascade_attention(
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process shared prefix.
-    prefix_output, prefix_lse = flash_attn_varlen_func(
+    prefix_kwargs = dict(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -1034,11 +1093,13 @@ def cascade_attention(
         s_aux=s_aux,
         num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
+    _maybe_add_cu_seqlens_k(prefix_kwargs, cu_prefix_kv_lens)
+    prefix_output, prefix_lse = flash_attn_varlen_func(**prefix_kwargs)
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process suffix per query.
-    suffix_output, suffix_lse = flash_attn_varlen_func(
+    suffix_kwargs = dict(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -1059,6 +1120,8 @@ def cascade_attention(
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
         num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
+    _maybe_add_cu_seqlens_k(suffix_kwargs, cu_suffix_kv_lens)
+    suffix_output, suffix_lse = flash_attn_varlen_func(**suffix_kwargs)
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)

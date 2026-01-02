@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    seqlens_to_cu_seqlens,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -677,6 +678,7 @@ class EagleProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
+            cu_seqlens_k=common_attn_metadata.cu_seqlens_k,
             query_start_loc_cpu=query_start_loc_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
@@ -957,6 +959,9 @@ class EagleProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+            cu_seqlens_k=seqlens_to_cu_seqlens(new_seq_lens_cpu).to(
+                device, non_blocking=True
+            ),
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,

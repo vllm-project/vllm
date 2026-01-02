@@ -162,6 +162,54 @@ def test_standard_attention_backend_selection(
     assert backend_path == expected_backend_path
 
 
+def test_flash_attn_block_size_gate(monkeypatch, mock_on_gfx9):
+    import importlib
+
+    import vllm.envs as envs
+
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER", raising=False)
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER_MHA", raising=False)
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", raising=False)
+    monkeypatch.delenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", raising=False)
+    importlib.reload(envs)
+
+    monkeypatch.setattr(
+        "vllm.attention.utils.fa_utils.is_flash_attn_varlen_func_available",
+        lambda: True,
+    )
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    bad_block_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+
+    with pytest.raises(ValueError, match="block size multiple of 128"):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.FLASH_ATTN,
+            attn_selector_config=bad_block_config,
+        )
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None,
+        attn_selector_config=bad_block_config,
+    )
+    assert backend_path != AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    good_block_config = bad_block_config._replace(block_size=128)
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None,
+        attn_selector_config=good_block_config,
+    )
+    assert backend_path == AttentionBackendEnum.FLASH_ATTN.get_path()
+
+
 @pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [

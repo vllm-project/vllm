@@ -13,6 +13,7 @@ from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
 from .flash_attn import (
@@ -23,6 +24,11 @@ from .flash_attn import (
 )
 
 logger = init_logger(__name__)
+
+
+def _maybe_add_cu_seqlens_k(kwargs, cu_seqlens_k):
+    if cu_seqlens_k is not None and current_platform.is_rocm():
+        kwargs["cu_seqlens_k"] = cu_seqlens_k
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
@@ -214,7 +220,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 )
                 return output
             else:
-                flash_attn_varlen_func(
+                fa_kwargs = dict(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -237,6 +243,8 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
+                _maybe_add_cu_seqlens_k(fa_kwargs, attn_metadata.cu_seqlens_k)
+                flash_attn_varlen_func(**fa_kwargs)
                 return output
 
         # Cascade attention (rare case).
@@ -250,6 +258,8 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
             prefix_kv_lens=attn_metadata.prefix_kv_lens,
             suffix_kv_lens=attn_metadata.suffix_kv_lens,
+            cu_prefix_kv_lens=attn_metadata.cu_prefix_kv_lens,
+            cu_suffix_kv_lens=attn_metadata.cu_suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
             alibi_slopes=self.alibi_slopes,

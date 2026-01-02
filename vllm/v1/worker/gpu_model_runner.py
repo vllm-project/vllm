@@ -532,6 +532,9 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.cu_seqlens_k = self._make_buffer(
+            self.max_num_reqs + 1, dtype=torch.int32
+        )
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
@@ -1631,10 +1634,23 @@ class GPUModelRunner(
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        cu_seqlens_k_np = self.cu_seqlens_k.np
+        cu_seqlens_k_np[0] = 0
+        if num_reqs > 0:
+            np.cumsum(
+                self.seq_lens.np[:num_reqs],
+                out=cu_seqlens_k_np[1 : num_reqs + 1],
+            )
+            last_cu_seqlen = cu_seqlens_k_np[num_reqs]
+        else:
+            last_cu_seqlen = 0
+        cu_seqlens_k_np[num_reqs + 1 : num_reqs_padded + 1].fill(last_cu_seqlen)
+        self.cu_seqlens_k.copy_to_gpu(num_reqs_padded + 1)
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
+            cu_seqlens_k=self.cu_seqlens_k.gpu[: num_reqs_padded + 1],
             _seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
             _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
                 :num_reqs_padded

@@ -193,6 +193,9 @@ class RocmPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.utils.fa_utils import (
+            is_flash_attn_varlen_func_available,
+        )
 
         block_size = attn_selector_config.block_size
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
@@ -261,6 +264,18 @@ class RocmPlatform(Platform):
             logger.info("Using Aiter Unified Attention backend.")
             return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+            if not is_flash_attn_varlen_func_available():
+                raise ValueError(
+                    "Flash Attention backend requires flash-attn to be installed."
+                )
+            if block_size is None or block_size % 128 != 0:
+                raise ValueError(
+                    "ROCm FlashAttention requires KV block size multiple of 128."
+                )
+            logger.info("Using Flash Attention backend.")
+            return AttentionBackendEnum.FLASH_ATTN.get_path()
+
         # Handle automatic backend selection based on environment variables
         if selected_backend is None:
             # Priority 1: Check for AITER Unified Attention (must check before MHA)
@@ -289,7 +304,16 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-            # Priority 5: If model is Encoder-only self-attention type
+            # Priority 5: Flash Attention (if available)
+            if (
+                is_flash_attn_varlen_func_available()
+                and block_size is not None
+                and block_size % 128 == 0
+            ):
+                logger.info("Using Flash Attention backend.")
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+            # Priority 6: If model is Encoder-only self-attention type
             if (
                 attn_selector_config.attn_type is not None
                 and attn_selector_config.attn_type == AttentionType.ENCODER_ONLY
