@@ -240,7 +240,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
         self.marlin_input_dtype = None
-        self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
