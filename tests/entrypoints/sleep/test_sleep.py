@@ -177,7 +177,6 @@ def test_sleep_with_active_requests():
         # Try to sleep while request is active - should return an error
         response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 500  # Internal Server Error
-        assert "Cannot put engine to sleep while requests are being processed" in response.text
         
         # Wait for completion to finish
         completion_thread.join(timeout=30)

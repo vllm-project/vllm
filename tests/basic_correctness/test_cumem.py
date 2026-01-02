@@ -359,7 +359,7 @@ def test_sleep_async_with_active_requests():
         # Poll until request is actually running (more reliable than asyncio.sleep)
         max_wait = 5.0  # 5 seconds timeout
         start_time = time.time()
-        while not llm.engine.output_processor.has_unfinished_requests():
+        while not llm.output_processor.has_unfinished_requests():
             if time.time() - start_time > max_wait:
                 raise TimeoutError("Request never started processing")
             await asyncio.sleep(0.01)
