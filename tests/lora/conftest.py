@@ -235,7 +235,7 @@ def qwen3vl_vision_lora_files():
 
 @pytest.fixture(scope="session")
 def blip2_vision_lora_files():
-    return snapshot_download(repo_id="Gital/blip2-opt-2.7b-pokemon-lora")
+    return snapshot_download(repo_id="GGital/blip2-opt-2.7b-pokemon-lora")
 
 
 @pytest.fixture(scope="session")
