@@ -221,7 +221,7 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
-    def _get_decoder_cls(self, **kwargs) -> type[PreTrainedModel]:
+    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
         """
         Get the decoder class from the model.
 
