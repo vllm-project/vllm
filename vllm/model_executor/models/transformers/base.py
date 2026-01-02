@@ -252,6 +252,7 @@ class Base(
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
                 for more details.
         """
+        logger.debug("Decorating `%s` for torch compile", cls.__name__)
         if dynamic_arg_dims is None:
             # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims = dict[str, int](
