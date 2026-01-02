@@ -99,9 +99,9 @@ class RayDistributedExecutor(Executor):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
-        self.ec_producer = (
-            self.vllm_config.ec_transfer_config is not None
-            and self.vllm_config.ec_transfer_config.is_ec_producer
+        self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
+            self.vllm_config.ec_transfer_config is None
+            or not self.vllm_config.ec_transfer_config.is_ec_producer
         )
 
         self.scheduler_output: SchedulerOutput | None = None
@@ -401,7 +401,7 @@ class RayDistributedExecutor(Executor):
                 "after execute_model() returns None."
             )
 
-        if self.ec_producer or not scheduler_output.total_num_scheduled_tokens:
+        if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
             # Model will not execute, call model runner immediately.
             return self._execute_dag(scheduler_output, None, non_block)
 
@@ -413,7 +413,7 @@ class RayDistributedExecutor(Executor):
         self,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         """Execute the model on the Ray workers.
 
         The scheduler output to use should have been provided in
@@ -428,7 +428,7 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None
 
         self.scheduler_output = None
 
@@ -439,7 +439,7 @@ class RayDistributedExecutor(Executor):
         scheduler_output: SchedulerOutput,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)

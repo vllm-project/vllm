@@ -49,4 +49,4 @@ def test_lm_head(
 
         vllm_model.apply_model(check_model)
 
-        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=10)[0][1])
+        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])

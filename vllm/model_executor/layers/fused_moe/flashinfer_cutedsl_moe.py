@@ -156,7 +156,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
             else hidden_states
         )
-
         flashinfer_cutedsl_moe_masked(
             hidden_states=flashinfer_hidden_states,
             input_global_scale=input_global_scale,

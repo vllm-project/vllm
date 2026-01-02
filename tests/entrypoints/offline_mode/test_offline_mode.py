@@ -24,6 +24,16 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
     },
     {
+        "model": "Qwen/Qwen3-0.6B",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.50,
+        "max_model_len": 64,
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 64,
+        "tensor_parallel_size": 1,
+        "tokenizer": "Qwen/Qwen3-4B",
+    },
+    {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.95,

@@ -9,11 +9,13 @@
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
+/vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
+/vllm/tool_parsers @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 /vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
@@ -34,6 +36,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/offloading @ApostaC
+
+# Model runner V2
+/vllm/v1/worker/gpu @WoosukKwon
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
@@ -56,6 +61,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
+/tests/v1/determinism @yewentao256 
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
@@ -141,9 +147,10 @@ mkdocs.yaml @hmellor
 /requirements/kv_connectors.txt @NickLucche
 
 # Pooling models
-/examples/*/pooling/ @noooop
+/examples/pooling @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
+/vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/pooling_params.py @noooop
 /vllm/model_executor/layers/pooler.py @noooop

@@ -124,7 +124,7 @@ class WorkerBase:
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """If this method returns None, sample_tokens should be called immediately after
         to obtain the ModelRunnerOutput.
 
@@ -315,10 +315,12 @@ class WorkerWrapperBase:
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
+        assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def init_device(self):
+        assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
@@ -360,7 +362,7 @@ class WorkerWrapperBase:
         scheduler_output: SchedulerOutput,
         *args,
         **kwargs,
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self._apply_mm_cache(scheduler_output)
 
         assert self.worker is not None

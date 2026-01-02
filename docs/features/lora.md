@@ -4,7 +4,7 @@ This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09
 
 LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vllm.model_executor.models.interfaces.SupportsLoRA].
 
-Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
+Adapters can be efficiently served on a per-request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
 ```python
@@ -274,6 +274,10 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
         ]
     }
     ```
+
+## LoRA Support for Tower and Connector of Multi-Modal Model
+
+Currently, vLLM experimentally supports LoRA for the Tower and Connector components of multi-modal models. To enable this feature, you need to implement the corresponding token helper functions for the tower and connector. For more details on the rationale behind this approach, please refer to [PR 26674](https://github.com/vllm-project/vllm/pull/26674). We welcome contributions to extend LoRA support to additional models' tower and connector.
 
 ## Default LoRA Models For Multimodal Models
 

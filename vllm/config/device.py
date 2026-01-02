@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import Any, Literal
 
@@ -10,6 +9,7 @@ from pydantic import ConfigDict, SkipValidation
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
+from vllm.utils.hashing import safe_hash
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
@@ -45,7 +45,7 @@ class DeviceConfig:
         # the device/platform information will be summarized
         # by torch/vllm automatically.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
