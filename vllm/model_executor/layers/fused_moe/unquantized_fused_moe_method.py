@@ -30,13 +30,13 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    AiterExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    AiterExperts,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -251,9 +251,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight.data, layer.w2_weight.data
                 )
-
-                layer.w13_weight.data = shuffled_w13
-                layer.w2_weight.data = shuffled_w2
+                replace_parameter(layer, "w13_weight", shuffled_w13)
+                replace_parameter(layer, "w2_weight", shuffled_w2)
 
                 self.use_inplace = True
                 self.kernel = mk.FusedMoEModularKernel(
