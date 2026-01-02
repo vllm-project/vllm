@@ -17,7 +17,7 @@
 """Transformers modeling backend base class."""
 
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -241,6 +241,7 @@ class Base(
         self,
         cls: type[PreTrainedModel],
         dynamic_arg_dims: dict[str, int] | None = None,
+        enable_if: Callable[["VllmConfig"], bool] | None = None,
     ):
         """
         Decorate `cls` to indicate to vLLM that it supports torch compile.
@@ -260,12 +261,11 @@ class Base(
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=1,  # shape: [1, seq_len]
             )
+        if enable_if is None:
+            enable_if = can_enable_torch_compile
 
         # Decorate the cls for torch compile
-        @support_torch_compile(
-            dynamic_arg_dims=dynamic_arg_dims,
-            enable_if=can_enable_torch_compile,
-        )
+        @support_torch_compile(dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if)
         class SupportTorchCompileWrapper(cls): ...
 
         # Patch the class in its module

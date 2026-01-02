@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import torch
@@ -26,6 +26,7 @@ from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -290,14 +291,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         # Decorate the vision encoder model class to support torch compile if needed
-        if vllm_config.compilation_config.compile_mm_encoder:
+        if should_torch_compile_mm_vit(vllm_config):
             encoder_cls = self._get_encoder_cls(
                 config=self.config,
                 dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
             self._decorate_for_torch_compile(
-                cls=encoder_cls, dynamic_arg_dims={"hidden_states": 1}
+                cls=encoder_cls,
+                dynamic_arg_dims={"hidden_states": 1},
+                enable_if=should_torch_compile_mm_vit,
             )
 
     def _get_encoder_cls(
@@ -330,6 +333,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         self,
         cls: type["PreTrainedModel"],
         dynamic_arg_dims: dict[str, int] | None = None,
+        enable_if: Callable[["VllmConfig"], bool] | None = None,
     ):
         """
         Like
@@ -343,7 +347,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=2,  # shape: [3, 1, seq_len]
             )
-        super()._decorate_for_torch_compile(cls=cls, dynamic_arg_dims=dynamic_arg_dims)
+        super()._decorate_for_torch_compile(
+            cls=cls, dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if
+        )
 
     def forward(
         self,
