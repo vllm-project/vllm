@@ -13,9 +13,10 @@ def register_speculator(name):
 
 
 @register_speculator("eagle3")
-def update_eagle3(config_dict: dict, vllm_config: dict) -> None:
+def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
     """
-    Apply Eagle-3 specific configuration transformations.
+    Apply Eagle-3 specific configuration transformations to the `dict` used to
+    construct the Transformers PreTrainedConfig.
 
     Eagle-3 specific fields:
     - draft_vocab_size: Size of the draft model's vocabulary
@@ -27,12 +28,14 @@ def update_eagle3(config_dict: dict, vllm_config: dict) -> None:
         predictions. This is the standard field used in Eagle3 checkpoints.
     """
 
-    vllm_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
+    pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
-        vllm_config["target_hidden_size"] = config_dict["target_hidden_size"]
-    vllm_config["norm_before_residual"] = config_dict.get("norm_before_residual", True)
-    vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]
+        pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
+    pre_trained_config["norm_before_residual"] = config_dict.get(
+        "norm_before_residual", True
+    )
+    pre_trained_config["architectures"] = ["Eagle3LlamaForCausalLM"]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
-        vllm_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
+        pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
             "eagle_aux_hidden_state_layer_ids"
         ]
