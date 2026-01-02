@@ -72,7 +72,40 @@ else()
 endif()
 
 #
-# Update cmake's `CMAKE_PREFIX_PATH` with torch location.
+# POWER8/ppc64le CPU-only build path: Skip CUDA/GPU entirely
+# For CPU builds, we get torch paths without importing torch (avoids NumPy ABI issues)
+# The Caffe2Config.cmake must be patched to disable CUDA (set if(1) to if(0) at line 77)
+#
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    message(STATUS "CPU-only build requested, skipping GPU configuration")
+
+    # Get torch site-packages path without importing torch (avoids NumPy ABI issues)
+    execute_process(
+        COMMAND ${VLLM_PYTHON_EXECUTABLE} -c "import site; import os; sp = [p for p in site.getsitepackages() if 'site-packages' in p]; print(os.path.join(sp[0], 'torch') if sp else '')"
+        OUTPUT_VARIABLE TORCH_ROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE TORCH_PATH_RESULT)
+
+    if(NOT TORCH_PATH_RESULT EQUAL 0 OR NOT EXISTS "${TORCH_ROOT}")
+        message(FATAL_ERROR "Failed to find torch installation. TORCH_ROOT=${TORCH_ROOT}")
+    endif()
+
+    message(STATUS "Found torch at: ${TORCH_ROOT}")
+
+    # Set Torch_DIR for find_package
+    set(Torch_DIR "${TORCH_ROOT}/share/cmake/Torch")
+    message(STATUS "Using Torch cmake dir: ${Torch_DIR}")
+
+    # Now use find_package(Torch) - requires CUDA disabled in Caffe2Config.cmake
+    find_package(Torch REQUIRED)
+    message(STATUS "Torch version: ${Torch_VERSION}")
+
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    return()
+endif()
+
+#
+# Update cmake's `CMAKE_PREFIX_PATH` with torch location (GPU builds only)
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
