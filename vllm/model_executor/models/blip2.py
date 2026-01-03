@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal, TypeAlias
 
@@ -716,9 +715,11 @@ class Blip2ForConditionalGeneration(
     ) -> int:
         if num_image_tokens <= 0:
             return 0
-
-        num_images = max(1, math.ceil(num_image_tokens / self.config.num_query_tokens))
-
+        assert num_image_tokens % self.config.num_query_tokens == 0, (
+            "The number of image_tokens must be a multiple of "
+            "the number of query_tokens."
+        )
+        num_images = num_image_tokens / self.config.num_query_tokens
         return num_images * self._vision_tokens_per_image
 
     def get_num_mm_connector_tokens(
@@ -727,8 +728,9 @@ class Blip2ForConditionalGeneration(
     ) -> int:
         if num_vision_tokens <= 0:
             return 0
-        num_images = max(
-            1, math.ceil(num_vision_tokens / self._vision_tokens_per_image)
+        assert num_vision_tokens % self._vision_tokens_per_image == 0, (
+            "The number of vision tokens must be a multiple of "
+            "the number of tokens per image."
         )
-
+        num_images = num_vision_tokens / self._vision_tokens_per_image
         return num_images * self.config.num_query_tokens
