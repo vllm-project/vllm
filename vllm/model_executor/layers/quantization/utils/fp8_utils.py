@@ -15,10 +15,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    group_broadcast,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
 )
@@ -463,21 +460,6 @@ def input_to_float8(
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
-def block_quant_to_tensor_quant(
-    x_q_block: torch.Tensor,
-    x_s: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """This function converts block-wise quantization to tensor-wise
-    quantization. The inputs are block-wise quantization tensor `x_q_block`,
-    block-wise quantization scale and the block size.
-    The outputs are tensor-wise quantization tensor and tensor-wise
-    quantization scale. Note only float8 is supported for now.
-    """
-    x_dq_block = group_broadcast(x_q_block, x_s)
-    x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
-    return x_q_tensor, scale
-
-
 @triton.jit
 def _per_token_group_quant_fp8(
     # Pointers to inputs and output
@@ -625,8 +607,9 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     M, N = input.size()
     N_2 = N // 2
 
+    fp8_dtype = current_platform.fp8_dtype()
     if output is None:
-        output = torch.empty((M, N_2), dtype=torch.float8_e4m3fn, device=input.device)
+        output = torch.empty((M, N_2), dtype=fp8_dtype, device=input.device)
 
     output_scales = torch.empty(
         ((N_2 // GROUP_SIZE), M), dtype=torch.float32, device=input.device
@@ -637,9 +620,12 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     assert M % BLOCK_M == 0
     assert N_2 % BLOCK_N == 0
 
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    # Using the default value (240.0) from pytorch will cause accuracy
+    # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm
+    # platforms that use the torch.float8_e4m3fnuz dtype.
+    finfo = torch.finfo(fp8_dtype)
+    fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
+    fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
 
     # Force even division so we can avoid edgecases within the kernel.
     assert M % BLOCK_M == 0

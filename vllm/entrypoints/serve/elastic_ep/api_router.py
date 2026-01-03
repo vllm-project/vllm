@@ -43,7 +43,7 @@ async def scale_elastic_ep(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
 
     new_data_parallel_size = body.get("new_data_parallel_size")
     drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes

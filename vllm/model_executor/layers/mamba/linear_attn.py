@@ -79,6 +79,28 @@ class MiniMaxText01RMSNormTP(CustomOp):
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
 
+    @staticmethod
+    def forward_qk(
+        q_norm: "MiniMaxText01RMSNormTP",
+        k_norm: "MiniMaxText01RMSNormTP",
+        q: torch.Tensor,
+        k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        orig_dtype = q.dtype
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        q_var = q.pow(2).mean(dim=-1, keepdim=True)
+        k_var = k.pow(2).mean(dim=-1, keepdim=True)
+        if q_norm.tp_world > 1:
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+        q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
+        k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
+        q = q.to(orig_dtype)
+        k = k.to(orig_dtype)
+        return q, k
+
 
 class MiniMaxText01LinearKernel:
     @staticmethod

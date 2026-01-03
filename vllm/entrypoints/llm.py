@@ -642,7 +642,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 

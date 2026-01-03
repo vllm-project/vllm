@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from tests.models.language.pooling_mteb_test.mteb_utils import (
+from tests.models.language.pooling_mteb_test.mteb_score_utils import (
     MTEB_RERANK_LANGS,
     MTEB_RERANK_TASKS,
     MTEB_RERANK_TOL,

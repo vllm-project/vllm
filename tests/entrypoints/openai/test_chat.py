@@ -28,7 +28,7 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files):  # noqa: F811
+def server(zephyr_lora_files):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

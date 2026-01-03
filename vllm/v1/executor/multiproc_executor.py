@@ -695,7 +695,7 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe = kwargs.pop("death_pipe", None)
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
         shutdown_event = threading.Event()
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
