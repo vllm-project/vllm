@@ -111,7 +111,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -931,10 +931,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
     ),
-    # Disable aiter ops unless specifically enabled.
+    # Enable AITER ops by default on ROCm for optimized performance.
     # Acts as a parent switch to enable the rest of the other operations.
+    # Set VLLM_ROCM_USE_AITER=0 to disable.
     "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
