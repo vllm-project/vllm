@@ -186,6 +186,11 @@ def make_alpha_scales_for_fi(
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Make dq alpha scales for FlashInfer Fp8 Per-Tensor kernels.
+    Since FlashInfer uses static quantization, the single
+    dq scale is precomputed to avoid the runtime multiply.
+    """
     g1_alphas = (w13_scale * w13_input_scale).squeeze()
     g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
@@ -228,50 +233,6 @@ def select_cutlass_fp8_gemm_impl(
         out_dtype=out_dtype,
         quant_config=quant_config,
         use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-    )
-
-
-def flashinfer_cutlass_moe_fp8(
-    hidden_states: torch.Tensor,
-    layer: torch.nn.Module,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    use_deepseek_fp8_block_scale: bool = False,
-    moe: FusedMoEConfig | None = None,
-) -> torch.Tensor:
-    quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
-    assert quant_config is not None
-
-    # Construct modular kernel with block-scale support when requested.
-    fused_experts = mk.FusedMoEModularKernel(
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
-        ),
-        select_cutlass_fp8_gemm_impl(
-            moe=moe,
-            quant_config=quant_config,
-            out_dtype=hidden_states.dtype,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
-        ),
-        moe_parallel_config=layer.moe_parallel_config,
-    )
-
-    return fused_experts(
-        hidden_states,
-        layer.w13_weight,
-        layer.w2_weight,
-        topk_weights,
-        topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
 

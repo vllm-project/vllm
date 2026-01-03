@@ -223,6 +223,18 @@ def make_fp8_moe_quant_config(
     a2_scale: torch.Tensor | None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
+    """
+    Create FusedMoEQuantConfig for the specifed FP8 Backend.
+    The FusedMoEQuantConfig holds the scales that are used
+    at runtime by the Modular Kernel abstraction.
+
+    Note that certain kernels (e.g. Flashinfer CUTLASS) need
+    special Quant configs to handle non-standard inputs to
+    their kernel interfaces.
+
+    In a future PR, we will have this function should be
+    a method of the modular kernel itself.
+    """
     # TRTLLM does not use Modular Kernel abstraction yet.
     if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         return None
