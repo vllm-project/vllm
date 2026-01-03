@@ -78,14 +78,16 @@ class GrpcRequestManager:
             # Use processor.process_inputs() with pre-tokenized input
             prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids}
 
-            engine_request = self.async_llm.processor.process_inputs(
+            engine_request = self.async_llm.input_processor.process_inputs(
                 request_id=request_id,
                 prompt=prompt,
                 params=sampling_params,
                 arrival_time=arrival_time,
             )
 
-            collector = RequestOutputCollector(output_kind=sampling_params.output_kind)
+            collector = RequestOutputCollector(
+                output_kind=sampling_params.output_kind, request_id=request_id
+            )
             self.rid_to_collector[request_id] = collector
 
             # Submit to AsyncLLM - it will call add_request internally
