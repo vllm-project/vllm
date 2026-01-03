@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -192,7 +193,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if self.vllm_config.cache_config.mamba_cache_mode == "all":
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
@@ -209,7 +210,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )[:, 0]
 
         if num_prefills > 0:
             query_start_loc_p = (
@@ -230,7 +235,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 compute_causal_conv1d_metadata(query_start_loc_p)
             )
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert num_computed_tokens is not None
                 num_computed_tokens_p = num_computed_tokens[
                     num_reqs - num_prefills : num_reqs
@@ -249,7 +254,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
                     block_idx_last_scheduled_token, non_blocking=True
                 )
