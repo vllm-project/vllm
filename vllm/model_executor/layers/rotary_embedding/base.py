@@ -257,7 +257,6 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Use PyTorch native implementation for CPU to ensure correctness
-        # The CPU C++ kernel may have inconsistencies with the native impl
         return self.forward_native(positions, query, key)
 
     def extra_repr(self) -> str:
