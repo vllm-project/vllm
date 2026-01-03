@@ -135,11 +135,19 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
+    import math
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
-        and ((n >= 16 and n <= 128) and k == 2880 and (m == 640 or m == 128))
+        and (
+            n >= 16
+            and n <= 128
+            and k > 512
+            and math.ceil(k / 512) * math.ceil(m / 16) < get_cu_count()
+        )
+        # k == 2880 and (m == 640 or m == 128))
     )
     if use_skinny_reduce_counting:
         cu_count = get_cu_count()

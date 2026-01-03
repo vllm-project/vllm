@@ -1256,6 +1256,7 @@ int mindiv(int N, int div1, int div2) {
   }
   for (int i = 12; i >= 0; i--)
     if (rnds[0] == rnds[i]) return (div2 - i);
+  return 0;
 }
 
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
@@ -1448,16 +1449,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
   uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
   uint32_t m = (m0 + m1) % Mmod;
-  uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+  const uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
-  uint32_t k_rnd =
-      K / (kFit * kfitsPerRdc) + ((K % (kFit * kfitsPerRdc)) ? 1 : 0);
+  const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
 
   scalar8 sum4[N / NTILE / GrpsShrB][1];
   bigType bigB_[YTILE / GrpsShrB][UNRL];
   const uint32_t bLoader = (threadIdx.y % GrpsShrB);
   uint32_t kBase = 0;
   if (k_str >= K) return;
+  if (m >= Mmod) return;
 
   bool noreloada = false;
   constexpr bool FAST_UNSAFE_RDC_INIT = false;
@@ -1497,8 +1498,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       bigB_[y][k2].h8 = (loadnt(
           (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
   }
-
-  if (m < Mmod) {
+  {
   #else
   while (m < Mmod) {
   #endif
@@ -1531,7 +1531,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifndef WVSPLITKRC_1KPASS
     for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
   #else
-    uint32_t k1 = k_str;
+    const uint32_t k1 = k_str;
     {
   #endif
   #ifndef WVSPLITKRC_1KPASS
@@ -1555,20 +1555,22 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     #pragma unroll
         for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
   #else
-        int k = 0;
+        const unsigned int k = 0;
         {
   #endif
-
           unsigned int kOff = k + (thrd * A_CHUNK);
           unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
-          constexpr int unrl = N / sprdN;
-          const unsigned int k_in = kOffcp + (unrl * (threadIdx.y % sprdN)) * K;
-          const unsigned int k_ot =
-              kOff + (unrl * (threadIdx.y % sprdN)) * kFitPdd;
-          for (unsigned int n = 0; n < unrl; n++)
+          const unsigned int k_in = kOffcp + ((threadIdx.y % sprdN)) * K;
+          const unsigned int k_ot = kOff + ((threadIdx.y % sprdN)) * kFitPdd;
+          for (unsigned int n = 0; n < N / 2; n += sprdN) {
             __builtin_amdgcn_global_load_lds((int*)(&A[k_in + n * K]),
                                              (int*)(&s[(k_ot + n * kFitPdd)]),
                                              16, 0, 0);
+            if (((threadIdx.y % sprdN)) + n + N / 2 >= actlN) continue;
+            __builtin_amdgcn_global_load_lds(
+                (int*)(&A[k_in + (n + N / 2) * K]),
+                (int*)(&s[(k_ot + (n + N / 2) * kFitPdd)]), 16, 0, 0);
+          }
 
           // Stage loaded B[] to LDS for MFMA swizzling...
           for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -1793,14 +1795,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
     }
 
+  #ifndef WVSPLITKRC_1KPASS
     m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
     m = (m0 + m1) % Mmod;
     k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
     k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
-  #ifndef WVSPLITKRC_1KPASS
     if (k_str >= K) break;
-  #endif
     kBase = 0;
+  #endif
   }
 }
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
