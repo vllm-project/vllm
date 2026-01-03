@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -29,8 +29,6 @@ class ExtractHiddenStatesProposer:
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
@@ -40,14 +38,6 @@ class ExtractHiddenStatesProposer:
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
-        )
-
-        # Persistent buffers for model inputs
-        self.input_ids = torch.zeros(
-            self.max_num_tokens, dtype=torch.int32, device=device
-        )
-        self.positions = torch.zeros(
-            self.max_num_tokens, dtype=torch.int64, device=device
         )
 
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -106,60 +96,51 @@ class ExtractHiddenStatesProposer:
         """
         # Call the ExtractHiddenStatesModel model to cache hidden states
         # This triggers the KV cache storage and KV connector API
-        if self.model is not None and isinstance(target_hidden_states, list):
-            # target_hidden_states is a list of tensors (one per layer)
-            # Stack them to create the input for ExtractHiddenStatesModel
-            # Shape: [num_tokens, num_layers * hidden_size]
-            stacked_hidden_states = torch.cat(target_hidden_states, dim=-1)
-            num_tokens = stacked_hidden_states.shape[0]
+        assert self.model is not None and isinstance(target_hidden_states, list)
 
-            # Copy hidden states to buffer
-            self.hidden_states[:num_tokens] = stacked_hidden_states
+        # target_hidden_states is a list of tensors (one per layer)
+        # Stack them to create the input for ExtractHiddenStatesModel
+        # Shape: [num_tokens, num_layers * hidden_size]
+        stacked_hidden_states = torch.cat(target_hidden_states, dim=-1)
+        num_tokens = stacked_hidden_states.shape[0]
 
-            # Prepare dummy input_ids and positions
-            self.input_ids[:num_tokens] = 0  # Dummy token IDs
-            self.positions[:num_tokens] = torch.arange(num_tokens, device=self.device)
+        # Copy hidden states to buffer
+        self.hidden_states[:num_tokens] = stacked_hidden_states
 
-            # Build attention metadata for drafting
-            if self.attn_metadata_builder is None:
-                self.attn_metadata_builder = self._get_attention_metadata_builder()
+        # Build attention metadata for drafting
+        if self.attn_metadata_builder is None:
+            self.attn_metadata_builder = self._get_attention_metadata_builder()
 
-            attn_metadata = self.attn_metadata_builder.build_for_drafting(
-                common_attn_metadata=common_attn_metadata, draft_index=0
-            )
+        attn_metadata = self.attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0
+        )
 
-            # Build per-layer attention metadata
-            per_layer_attn_metadata = {}
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
+        # Build per-layer attention metadata
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
 
-            # Call model with proper forward context
-            with (
-                set_forward_context(
-                    per_layer_attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens,  # No DP coordination in eager mode
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,  # Eager-only execution
-                    slot_mapping=self._get_slot_mapping(
-                        num_tokens, common_attn_metadata.slot_mapping
-                    ),
+        # Call model with proper forward context
+        with (
+            set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                slot_mapping=self._get_slot_mapping(
+                    num_tokens, common_attn_metadata.slot_mapping
                 ),
-                (
-                    KVConnectorModelRunnerMixin._get_kv_connector_output(
-                        scheduler_output
-                    )
-                    if has_kv_transfer_group()
-                    else nullcontext()
-                ) as kv_connecter_output,
-            ):
-                # Forward pass: caches hidden states in KV cache
-                # Output is ignored - we only care about the KV cache side effects
-                self.model(
-                    input_ids=self.input_ids[:num_tokens],
-                    positions=self.positions[:num_tokens],
-                    hidden_states=self.hidden_states[:num_tokens],
-                )
+            ),
+            (
+                KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+                if has_kv_transfer_group()
+                else nullcontext()
+            ) as kv_connecter_output,
+        ):
+            # Forward pass: caches hidden states in KV cache
+            # Output is ignored - we only care about the KV cache side effects
+            self.model(
+                hidden_states=self.hidden_states[:num_tokens],
+            )
 
         # Return the sampled tokens as "draft" tokens
         # This ensures they will always verify (match) since they're identical
