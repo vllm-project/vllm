@@ -113,6 +113,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -214,6 +217,11 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 )
                 return output
             else:
+                sliding_window_size = (
+                    list(self.sliding_window)
+                    if self.sliding_window is not None
+                    else None
+                )
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -226,7 +234,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                     softmax_scale=self.scale,
                     causal=attn_metadata.causal,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
+                    window_size=sliding_window_size,
                     block_table=block_table,
                     softcap=self.logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,
@@ -258,7 +266,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             max_num_splits=attn_metadata.max_num_splits,
-            fa_version=self.vllm_flash_attn_version or 0,
+            fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
             q_descale=layer._q_scale,

@@ -603,6 +603,9 @@ class FlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -701,6 +704,11 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
+                sliding_window_size = (
+                    list(self.sliding_window)
+                    if self.sliding_window is not None
+                    else None
+                )
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
@@ -713,13 +721,11 @@ class FlashAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     causal=attn_metadata.causal,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None,
+                    window_size=sliding_window_size,
                     block_table=block_table,
                     softcap=self.logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version or 0,
+                    fa_version=self.vllm_flash_attn_version,
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
@@ -747,7 +753,7 @@ class FlashAttentionImpl(AttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             max_num_splits=attn_metadata.max_num_splits,
-            fa_version=self.vllm_flash_attn_version or 0,
+            fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
             q_descale=layer._q_scale,
@@ -770,6 +776,10 @@ class FlashAttentionImpl(AttentionImpl):
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
+
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
@@ -795,7 +805,7 @@ class FlashAttentionImpl(AttentionImpl):
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
             scheduler_metadata=attn_metadata.scheduler_metadata,
-            fa_version=self.vllm_flash_attn_version or 0,
+            fa_version=self.vllm_flash_attn_version,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
@@ -826,7 +836,7 @@ class FlashAttentionImpl(AttentionImpl):
             else None,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
-            fa_version=self.vllm_flash_attn_version or 0,
+            fa_version=self.vllm_flash_attn_version,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
@@ -860,6 +870,10 @@ class FlashAttentionImpl(AttentionImpl):
             attn_metadata: Encoder attention metadata
             layer: The attention layer
         """
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
+
         # For encoder attention, process FP8 quantization if needed
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError(
@@ -894,7 +908,7 @@ class FlashAttentionImpl(AttentionImpl):
             if self.sliding_window is not None
             else None,
             softcap=self.logits_soft_cap,
-            fa_version=self.vllm_flash_attn_version or 0,
+            fa_version=self.vllm_flash_attn_version,
             q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
