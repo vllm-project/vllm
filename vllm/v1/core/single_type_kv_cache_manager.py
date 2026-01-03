@@ -802,10 +802,6 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return computed_blocks
 
-    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        # TODO: merge https://github.com/vllm-project/vllm/pull/28047 first
-        return num_computed_tokens - 1
-
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         super().remove_skipped_blocks(request_id, num_computed_tokens)
