@@ -829,7 +829,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
-            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
