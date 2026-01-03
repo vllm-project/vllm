@@ -88,6 +88,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -1386,6 +1387,20 @@ class DeepseekV2ForCausalLM(
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    # Map HuggingFace/PEFT checkpoint names to vLLM's internal module names.
+    # Attention modules are wrapped in mla_attn in vLLM's DeepseekV2 impl.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".self_attn.kv_a_proj_with_mqa": ".self_attn.mla_attn.kv_a_proj_with_mqa",
+            ".self_attn.kv_b_proj": ".self_attn.mla_attn.kv_b_proj",
+            ".self_attn.o_proj": ".self_attn.mla_attn.o_proj",
+            ".self_attn.q_a_proj": ".self_attn.mla_attn.q_a_proj",
+            ".self_attn.q_b_proj": ".self_attn.mla_attn.q_b_proj",
+            ".self_attn.kv_a_layernorm": ".self_attn.mla_attn.kv_a_layernorm",
+        }
+    )
+
     model_cls = DeepseekV2Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
