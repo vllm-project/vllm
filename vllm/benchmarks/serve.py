@@ -11,7 +11,7 @@ On the client side, run:
         --backend <backend or endpoint type. Default 'openai'> \
         --label <benchmark result label. Default using backend> \
         --model <your_model. Optional, defaults to first model from server> \
-        --dataset-name <dataset_name. Default 'random'> \
+        --dataset-name <dataset_name. Required> \
         --input-len <general input length. Optional, maps to dataset-specific args> \
         --output-len <general output length. Optional, maps to dataset-specific args> \
         --request-rate <request_rate. Default inf> \
@@ -999,6 +999,10 @@ def save_to_pytorch_benchmark_format(
 
 def add_cli_args(parser: argparse.ArgumentParser):
     add_dataset_parser(parser)
+    # Override the default dataset-name to None (required) for vllm bench serve
+    # to avoid silent behavior differences from the deprecated benchmark_serving.py
+    # which defaulted to 'sharegpt'. See issue #24684.
+    parser.set_defaults(dataset_name=None)
     parser.add_argument(
         "--label",
         type=str,
