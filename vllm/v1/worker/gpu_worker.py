@@ -179,22 +179,20 @@ class Worker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        device = self.device_config.device
-        if isinstance(device, torch.device) and device.type == "cuda":
+        if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            parallel_config = self.parallel_config
             if (
-                self.parallel_config.data_parallel_size > 1
-                and self.parallel_config.data_parallel_size_local > 0
-                and self.parallel_config.distributed_executor_backend
-                not in ["ray", "external_launcher"]
-                and self.vllm_config.parallel_config.data_parallel_backend != "ray"
-                and self.vllm_config.parallel_config.nnodes_within_dp == 1
+                parallel_config.distributed_executor_backend
+                not in ("ray", "external_launcher")
+                and parallel_config.data_parallel_backend != "ray"
+                and parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
                 if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_rank
+                    dp_local_rank = self.parallel_config.data_parallel_index
 
                 tp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
@@ -387,6 +385,19 @@ class Worker(WorkerBase):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Update max_model_len after auto-fit to GPU memory.
+
+        This is called when max_model_len=-1 is used and the engine
+        automatically determines the maximum context length that fits
+        in GPU memory. Workers need to update their cached max_model_len
+        to match the engine's decision.
+        """
+        self.model_config.max_model_len = max_model_len
+        if self.model_runner is not None:
+            self.model_runner.max_model_len = max_model_len
+        logger.debug("Updated max_model_len to %d", max_model_len)
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
@@ -562,7 +573,7 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -611,7 +622,9 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, (ModelRunnerOutput, NoneType)):
+            if isinstance(
+                output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
+            ):
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -634,7 +647,12 @@ class Worker(WorkerBase):
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
-            raise RuntimeError("Profiling is not enabled.")
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+            )
         if is_start:
             self.profiler.start()
         else:
