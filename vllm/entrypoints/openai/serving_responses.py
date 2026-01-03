@@ -1056,6 +1056,11 @@ class OpenAIServingResponses(OpenAIServing):
                 # parsing the tool call output.
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
+                elif isinstance(
+                        response_msg,
+                        dict) and response_msg.get("type") == "function_call":
+                    prev_outputs.append(
+                        ResponseFunctionToolCall(**response_msg))
         return messages
 
     async def _run_background_request_stream(
