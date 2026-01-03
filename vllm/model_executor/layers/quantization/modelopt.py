@@ -736,7 +736,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         # TRT LLM not supported with all2all yet.
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
         return super().maybe_make_prepare_finalize(routing_tables)
 

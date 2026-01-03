@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -18,11 +17,9 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 logger = init_logger(__name__)
 
@@ -325,7 +322,7 @@ def prepare_fp8_moe_layer_for_fi(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Convert Fp8 MoE weights to flashinfer kernel format"""
 
-    assert hasattr(layer.moe, "is_act_and_mul")
+    assert hasattr(layer.moe_config, "is_act_and_mul")
     assert hasattr(layer, "weight_block_size")
     block_quant = layer.weight_block_size is not None
 
@@ -335,11 +332,11 @@ def prepare_fp8_moe_layer_for_fi(
         w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
             w13,
             w2,
-            layer.moe.is_act_and_mul,
+            layer.moe_config.is_act_and_mul,
         )
 
     # FI kernels require W31 layout rather than W13.
-    if layer.moe.is_act_and_mul:
+    if layer.moe_config.is_act_and_mul:
         w13 = swap_w13_to_w31(w13)
         if block_quant:
             w13_scale = swap_w13_to_w31(w13_scale)
