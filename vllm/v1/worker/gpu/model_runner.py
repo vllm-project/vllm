@@ -25,7 +25,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
 )
-from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_barrier
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -43,6 +42,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
+    get_num_sampled_and_rejected,
     post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
@@ -52,12 +52,10 @@ from vllm.v1.worker.gpu.sample.metadata import (
     SamplingMetadata,
     expand_sampling_metadata,
 )
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
-from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
-    get_num_rejected,
-    rejection_sample,
-)
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -99,9 +97,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-
-        self.dp_size = self.parallel_config.data_parallel_size
-        self.dp_rank = self.parallel_config.data_parallel_rank
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -270,7 +265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
-        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
+        dp_size = self.parallel_config.data_parallel_size
+        num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(
@@ -314,7 +310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._dummy_sampler_run(sample_hidden_states)
         if self.do_spec_decode:
             num_tokens_across_dp = make_num_tokens_across_dp(
-                self.dp_size, self.max_num_tokens
+                self.parallel_config.data_parallel_size, self.max_num_tokens
             )
             self.speculator.run_model(
                 self.max_num_tokens,
@@ -621,16 +617,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(logits, sampling_metadata)
 
-        # Get the number of sampled tokens.
-        prefill_len = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
-        is_chunked_prefilling = input_batch.seq_lens < prefill_len
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            # 0 if chunked-prefilling, 1 if not.
-            num_sampled = (~is_chunked_prefilling).int()
-            num_rejected = torch.zeros_like(num_sampled)
+            num_sampled = torch.ones(
+                input_batch.num_reqs, dtype=torch.int32, device=self.device
+            )
         else:
-            # Draft tokens for spec decoding.
+            # Rejection sampling for spec decoding.
             input_ids = input_batch.input_ids[input_batch.logits_indices]
             sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
@@ -638,13 +631,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.cu_num_logits,
                 self.num_speculative_steps,
             )
-            num_sampled *= ~is_chunked_prefilling
-            num_rejected = get_num_rejected(
-                input_batch.cu_num_logits,
-                num_sampled,
-            )
             sampler_output.sampled_token_ids = sampled_tokens
-            # TODO(woosuk): Support logprobs with spec decoding.
+
+        # Get the number of sampled and rejected tokens.
+        # For chunked prefills, num_sampled and num_rejected are both 0.
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
         return sampler_output, num_sampled, num_rejected
 
     def compute_prompt_logprobs(
@@ -808,7 +805,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: SchedulerOutput,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if self.dp_size == 1:
+        dp_size = self.parallel_config.data_parallel_size
+        if dp_size == 1:
             # No DP. Only consider CUDA graphs.
             if total_num_scheduled_tokens == 0:
                 # Special case: no tokens to run.
@@ -836,11 +834,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_size_before_dp = -1
 
         assert cudagraph_size_before_dp is not None
+        dp_rank = self.parallel_config.data_parallel_rank
         num_tokens_across_dp, cudagraph_size_across_dp = get_batch_metadata_across_dp(
             total_num_scheduled_tokens,
             cudagraph_size_before_dp,
-            self.dp_size,
-            self.dp_rank,
+            dp_size,
+            dp_rank,
         )
         if all(cudagraph_size_across_dp >= 0):
             # If all ranks can use CUDA graph, pad to the maximum number of tokens
@@ -851,7 +850,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If any of the ranks cannot use CUDA graph, use eager mode for all ranks.
             # No padding is needed except for ranks that have no tokens to run.
             num_tokens_across_dp = torch.clamp(num_tokens_across_dp, min=1)
-            num_tokens_after_padding = num_tokens_across_dp[self.dp_rank]
+            num_tokens_after_padding = num_tokens_across_dp[dp_rank]
             cudagraph_mode = CUDAGraphMode.NONE
         return cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp
 
@@ -969,11 +968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Only for compatibility with the existing model runner and scheduler.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
-            logprobs=None,
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore
-            pooler_output=[],
-            kv_connector_output=None,
-            num_nans_in_logits=None,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

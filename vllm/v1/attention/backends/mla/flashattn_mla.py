@@ -6,7 +6,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
@@ -106,13 +105,14 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             FlashAttnMLAMetadata,
-            supports_dcp_with_varlen=True,
+            supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = get_flash_attn_version() == 3
@@ -131,7 +131,9 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            self.max_num_splits = (
+                vllm_config.attention_config.flash_attn_max_num_splits_for_cuda_graph
+            )
 
         if vllm_is_batch_invariant():
             self.max_num_splits = 1
@@ -167,8 +169,8 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
@@ -176,7 +178,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_cpu.max().item()
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0
@@ -191,7 +192,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             max_num_splits = 1
 
         scheduler_metadata = self._schedule_decode(
-            num_reqs=seq_lens_cpu.numel(),
+            num_reqs=seq_lens_device.shape[0],
             cu_query_lens=query_start_loc_device,
             max_query_len=max_query_len,
             seqlens=seq_lens_device,

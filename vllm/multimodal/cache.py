@@ -25,7 +25,6 @@ from .inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     NestedTensors,
@@ -90,7 +89,6 @@ MultiModalCacheValue: TypeAlias = (
     | MultiModalProcessorCacheItemMetadata
     | MultiModalKwargsItems
     | MultiModalKwargsItem
-    | MultiModalKwargs
     | Mapping[str, NestedTensors]
 )
 
@@ -108,12 +106,7 @@ class MultiModalCache:
         # These are not subclasses of dict
         if isinstance(
             leaf,
-            (
-                MultiModalKwargs,
-                MultiModalKwargsItems,
-                MultiModalKwargsItem,
-                MultiModalFieldElem,
-            ),
+            (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem),
         ):
             return cls.get_item_size(leaf.data)  # type: ignore
 

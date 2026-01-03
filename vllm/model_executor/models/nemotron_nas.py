@@ -118,11 +118,9 @@ class DeciLMAttention(LlamaAttention):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -171,10 +169,13 @@ class DeciLMDecoderLayer(nn.Module):
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         if not self._is_no_op_ffn:
-            ffn_mult = block_config.ffn.ffn_mult
-            intermediate_size = _ffn_mult_to_intermediate_size(
-                ffn_mult, config.hidden_size
-            )
+            if hasattr(block_config.ffn, "ffn_mult"):
+                ffn_mult = block_config.ffn.ffn_mult
+                intermediate_size = _ffn_mult_to_intermediate_size(
+                    ffn_mult, config.hidden_size
+                )
+            else:
+                intermediate_size = block_config.ffn.intermediate_size
 
             self.mlp = LlamaMLP(
                 hidden_size=self.hidden_size,

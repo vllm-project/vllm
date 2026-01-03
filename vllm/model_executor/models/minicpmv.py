@@ -139,7 +139,7 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
     image_embeds: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "ns", "hs"),
+        TensorShape("bn", "ns", "hs", dynamic_dims={"ns"}),
     ]
 
 
@@ -1002,8 +1002,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
     """
-
-    merge_by_field_config = True
 
     supports_encoder_tp_data = True
 

@@ -1007,10 +1007,17 @@ class GroupCoordinator:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(
-                hidden_states, router_logits, is_sequence_parallel
+            return self.device_communicator.dispatch(  # type: ignore[call-arg]
+                hidden_states,
+                router_logits,
+                is_sequence_parallel,
+                extra_tensors,
             )
         else:
             return hidden_states, router_logits
@@ -1108,7 +1115,11 @@ _EP: GroupCoordinator | None = None
 
 
 def get_ep_group() -> GroupCoordinator:
-    assert _EP is not None, "expert parallel group is not initialized"
+    assert _EP is not None, (
+        "expert parallel group is not initialized. "
+        "EP group is only created for MoE models with num_experts > 0. "
+        "This function should only be called for MoE models."
+    )
     return _EP
 
 
@@ -1169,17 +1180,13 @@ def init_distributed_environment(
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.nnodes > 1:
-        parallel_config = config.parallel_config
-        ip = parallel_config.master_addr
-        rank = parallel_config.data_parallel_rank * world_size + rank
-        world_size = parallel_config.world_size_across_dp
-        port = parallel_config.master_port
-        distributed_init_method = get_distributed_init_method(ip, port)
-    elif (
+    if (
         config is not None
-        and config.parallel_config.data_parallel_size > 1
         and config.parallel_config.distributed_executor_backend != "external_launcher"
+        and (
+            config.parallel_config.nnodes > 1
+            or config.parallel_config.data_parallel_size > 1
+        )
     ):
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
@@ -1187,15 +1194,22 @@ def init_distributed_environment(
         rank = parallel_config.data_parallel_rank * world_size + rank
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
-        ip = parallel_config.data_parallel_master_ip
-        port = parallel_config.get_next_dp_init_port()
-        distributed_init_method = get_distributed_init_method(ip, port)
-        logger.debug(
-            "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
-            world_size,
-            rank,
-            distributed_init_method,
-        )
+
+        # Use appropriate IP and port based on configuration
+        if parallel_config.nnodes > 1:
+            ip = parallel_config.master_addr
+            port = parallel_config.master_port
+            distributed_init_method = get_distributed_init_method(ip, port)
+        else:
+            ip = parallel_config.data_parallel_master_ip
+            port = parallel_config.get_next_dp_init_port()
+            distributed_init_method = get_distributed_init_method(ip, port)
+            logger.debug(
+                "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
+                world_size,
+                rank,
+                distributed_init_method,
+            )
     if not torch.distributed.is_initialized():
         logger.info(
             "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1390,20 +1404,23 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = (
-        all_ranks.transpose(1, 2)
-        .reshape(
-            -1,
-            data_parallel_size
-            * prefill_context_model_parallel_size
-            * tensor_model_parallel_size,
+    # Don't create EP group for dense models.
+    if config is None or config.model_config is None or config.model_config.is_moe:
+        group_ranks = (
+            all_ranks.transpose(1, 2)
+            .reshape(
+                -1,
+                data_parallel_size
+                * prefill_context_model_parallel_size
+                * tensor_model_parallel_size,
+            )
+            .unbind(0)
         )
-        .unbind(0)
-    )
-    group_ranks = [x.tolist() for x in group_ranks]
-    _EP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="ep"
-    )
+        group_ranks = [x.tolist() for x in group_ranks]
+        _EP = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="ep"
+        )
+    # If no EP group needed, _EP remains None
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
@@ -1415,7 +1432,7 @@ def initialize_model_parallel(
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
-        _EP.rank_in_group,
+        _EP.rank_in_group if _EP is not None else "N/A",
     )
 
 
@@ -1583,6 +1600,8 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Reset environment variable cache
+    envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 

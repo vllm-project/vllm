@@ -48,7 +48,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -118,7 +118,7 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     output_lengths = (
         ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
     )
-    return feat_lengths, output_lengths
+    return output_lengths
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -192,6 +192,7 @@ class Qwen3_VisionBlock(nn.Module):
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -205,6 +206,7 @@ class Qwen3_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen3_VisionMLP(
@@ -299,8 +301,8 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -321,7 +323,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
 
-        # vit pos embeding, TODO: spatial_patch_size vs patch_size
+        # vit pos embedding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
             self.pos_embed = nn.Embedding(self.num_grid_per_side**2, self.hidden_size)
         else:
@@ -333,9 +335,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.blocks = nn.ModuleList(
@@ -347,6 +349,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                     act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
                     norm_layer=norm_layer,
                     quant_config=quant_config,
+                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(vision_config.depth)
@@ -375,6 +378,12 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                     for layer_idx in range(len(self.deepstack_visual_indexes))
                 ]
             )
+
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
@@ -494,7 +503,10 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
@@ -739,6 +751,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(mm_kwargs)
             tok_kwargs = dict(tok_kwargs)
             if Version(TRANSFORMERS_VERSION) < Version("4.58.0"):
+                # Extract audio_sample_rate before restructuring
+                audio_sample_rate = mm_kwargs.pop("audio_sample_rate", None)
+
                 # move truncation to audio_kwargs level to avoid conflict
                 # with tok_kwargs
                 mm_kwargs["audio_kwargs"] = {
@@ -747,6 +762,28 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 mm_kwargs["text_kwargs"] = {
                     "truncation": tok_kwargs.pop("truncation", False)
                 }
+
+                # Validate and conditionally pass audio_sample_rate
+                # WhisperFeatureExtractor has a fixed sampling rate, and vLLM's
+                # audio loader already resamples audio to the target rate.
+                # Only pass the value if it matches to avoid unexpected behavior.
+                if audio_sample_rate is not None:
+                    expected_sr = feature_extractor.sampling_rate
+                    if audio_sample_rate != expected_sr:
+                        logger.warning(
+                            "[%s] audio_sample_rate mismatch: user provided %dHz "
+                            "but model expects %dHz. Ignoring user value. "
+                            "vLLM's audio loader already resampled to %dHz.",
+                            self.__class__.__name__,
+                            audio_sample_rate,
+                            expected_sr,
+                            expected_sr,
+                        )
+                    else:
+                        # Sample rate matches, safe to pass
+                        mm_kwargs["audio_kwargs"]["audio_sample_rate"] = (
+                            audio_sample_rate
+                        )
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -909,13 +946,11 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         if audio_feature_lengths is None and feature_attention_mask is None:
             audio_output_lengths = []
         elif audio_feature_lengths is not None:
-            _, audio_output_lens = _get_feat_extract_output_lengths(
-                audio_feature_lengths
-            )
+            audio_output_lens = _get_feat_extract_output_lengths(audio_feature_lengths)
             audio_output_lengths = audio_output_lens.tolist()
         elif feature_attention_mask is not None:
             assert isinstance(feature_attention_mask, torch.Tensor)
-            _, audio_output_lens = _get_feat_extract_output_lengths(
+            audio_output_lens = _get_feat_extract_output_lengths(
                 feature_attention_mask.sum(-1)
             )
             audio_output_lengths = audio_output_lens.tolist()
@@ -1099,18 +1134,16 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         audio_input: Qwen2_5OmniAudioFeatureInputs,
         audio_hashes: list[str] | None = None,
         cached_audio_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
 
-        audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
-            audio_feature_lengths
-        )
+        audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
         audio_outputs = self.audio_tower(
             input_features.to(self.audio_tower.dtype),
             feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
+            aftercnn_lens=audio_output_lengths,
         )
         audio_features = audio_outputs.last_hidden_state
         return audio_features.split(audio_output_lengths.tolist())
@@ -1128,8 +1161,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1187,17 +1218,12 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         self.audio_tower = Qwen3OmniMoeAudioEncoder(thinker_config.audio_config)
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend
-            if multimodal_config is not None
-            else None
-        )
         self.visual = Qwen3Omni_VisionTransformer(
             vision_config=thinker_config.vision_config,
             norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
-            attn_backend_override=attn_backend_override,
+            multimodal_config=multimodal_config,
         )
         self.quant_config = quant_config
 
@@ -1574,7 +1600,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     + st_idx
                 )
                 st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
-                _, audio_len = _get_feat_extract_output_lengths(
+                audio_len = _get_feat_extract_output_lengths(
                     audio_feature_lengths[audio_idx]
                 )
                 llm_pos_ids = (
@@ -1695,7 +1721,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 llm_pos_ids_list.append(bos_block)
                 llm_pos_ids_list.append(bos_block)
                 st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
-                _, audio_len = _get_feat_extract_output_lengths(
+                audio_len = _get_feat_extract_output_lengths(
                     audio_feature_lengths[audio_idx]
                 )
                 audio_llm_pos_ids = (
