@@ -786,6 +786,9 @@ class FlashAttentionImpl(AttentionImpl):
 
         query = query.contiguous()
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        sliding_window_size = (
+            list(self.sliding_window) if self.sliding_window is not None else None
+        )
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query_across_dcp,
             k=key_cache,
@@ -798,9 +801,7 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=False,
             alibi_slopes=self.alibi_slopes,
-            window_size=list(self.sliding_window)
-            if self.sliding_window is not None
-            else None,
+            window_size=sliding_window_size,
             block_table=block_table,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
@@ -831,9 +832,7 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
-            window_size=list(self.sliding_window)
-            if self.sliding_window is not None
-            else None,
+            window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
             fa_version=self.vllm_flash_attn_version,
@@ -892,6 +891,9 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # Call flash attention directly on Q, K, V tensors
+        sliding_window_size = (
+            list(self.sliding_window) if self.sliding_window is not None else None
+        )
         flash_attn_varlen_func(
             q=query,
             k=key,
@@ -904,9 +906,7 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=False,  # Encoder attention is bidirectional
             alibi_slopes=self.alibi_slopes,
-            window_size=list(self.sliding_window)
-            if self.sliding_window is not None
-            else None,
+            window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
             q_descale=layer._q_scale.expand(descale_shape),
