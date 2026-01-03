@@ -7,6 +7,10 @@ Compile vLLM protobuf definitions into Python code.
 This script uses grpcio-tools to generate *_pb2.py, *_pb2_grpc.py, and
 *_pb2.pyi (type stubs) files from the vllm_engine.proto definition.
 
+NOTE: Proto compilation happens automatically during package build (via setup.py).
+This script is provided for developers who want to regenerate protos manually,
+e.g., after modifying vllm_engine.proto.
+
 Usage:
     python vllm/grpc/compile_protos.py
 
