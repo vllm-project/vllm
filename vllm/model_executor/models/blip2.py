@@ -716,8 +716,8 @@ class Blip2ForConditionalGeneration(
         if num_image_tokens <= 0:
             return 0
         assert num_image_tokens % self.config.num_query_tokens == 0, (
-            "The number of image_tokens must be a multiple of "
-            "the number of query_tokens."
+            "The number of image tokens must be a multiple of "
+            "the number of query tokens."
         )
         num_images = num_image_tokens / self.config.num_query_tokens
         return num_images * self._vision_tokens_per_image
