@@ -425,7 +425,7 @@ _MULTIMODAL_MODELS = {
         "Tarsier2ForConditionalGeneration",
     ),
     "T5Gemma2ForConditionalGeneration": (
-        "google/t5gemma-2-270m-270m",
+        "t5gemma2",
         "T5Gemma2ForConditionalGeneration",
     ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
