@@ -66,8 +66,11 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
             chunk.usage.prompt_tokens + chunk.usage.completion_tokens
         )
         if not finished:
-            tokens_received += 1
             assert chunk.choices[0].text
+            # Count actual tokens from logprobs since multiple tokens
+            # can be batched into a single chunk
+            assert chunk.choices[0].logprobs and chunk.choices[0].logprobs.tokens
+            tokens_received += len(chunk.choices[0].logprobs.tokens)
 
             if chunk.choices[0].finish_reason is not None:
                 finished = True
