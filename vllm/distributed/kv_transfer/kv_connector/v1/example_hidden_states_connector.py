@@ -31,13 +31,14 @@ logger = init_logger(__name__)
 def reshape_hidden_states_from_kv_cache(
     kv: torch.Tensor, num_hidden_states: int
 ) -> torch.Tensor:
-    # kv shape: [2, batch_size, hidden_size / head_size * num_hidden_states / 2, head_size]
+    # kv shape: [2, batch_size, num_heads, head_size]
     kv = kv.flatten(2)
-    # kv shape: [2, batch_size, hidden_size * num_hidden_states / 2]
+    # kv shape: [2, batch_size, num_heads * head_size]
 
     hidden_states = torch.cat([kv[0], kv[1]], dim=1)
     # hidden_states shape: [batch_size, hidden_size * num_hidden_states]
 
+    assert hidden_states.shape[1] % num_hidden_states == 0
     split_size = hidden_states.shape[1] // num_hidden_states
     hidden_states = hidden_states.split(split_size, dim=1)
 
