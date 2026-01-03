@@ -50,7 +50,9 @@ def collect_mm_processor_stats(
         "hashing_time": [],
         "cache_lookup_time": [],
         "prompt_update_time": [],
-        "total_time": [],
+        "preprocessor_total_time": [],
+        "encoder_forward_time": [],
+        "num_encoder_calls": [],
     }
 
     for stats_dict in all_stats.values():
@@ -64,7 +66,16 @@ def collect_mm_processor_stats(
         stats_by_stage["prompt_update_time"].append(
             stats_dict.get("prompt_update_time", 0.0)
         )
-        stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
+        stats_by_stage["preprocessor_total_time"].append(
+            stats_dict.get("preprocessor_total_time", 0.0)
+        )
+
+        stats_by_stage["encoder_forward_time"].append(
+            stats_dict.get("encoder_forward_time", 0.0)
+        )
+        stats_by_stage["num_encoder_calls"].append(
+            stats_dict.get("num_encoder_calls", 0)
+        )
 
     return stats_by_stage
 
@@ -113,6 +124,12 @@ def validate_args(args):
         args.lora_path = None
     if not hasattr(args, "max_loras"):
         args.max_loras = None
+
+    if args.dataset_name == "hf" and not args.dataset_path:
+        raise ValueError(
+            "--dataset-path is required when using --dataset-name hf. "
+            "Specify a HuggingFace dataset like 'yale-nlp/MMVU'."
+        )
 
 
 def benchmark_multimodal_processor(
@@ -248,7 +265,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         "--dataset-name",
         type=str,
         default="random-mm",
-        choices=["random-mm", "random-rerank"],
+        choices=["random-mm", "hf"],
         help="Name of the dataset to benchmark on. Defaults to 'random-mm'.",
     )
     parser.add_argument(
@@ -265,6 +282,34 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
 
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
+
+    # HuggingFace dataset arguments
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Path to the dataset file or HuggingFace dataset name "
+        "(e.g., 'yale-nlp/MMVU', 'lmarena-ai/VisionArena-Chat').",
+    )
+    parser.add_argument(
+        "--hf-subset",
+        type=str,
+        default=None,
+        help="Subset of the HuggingFace dataset (optional).",
+    )
+    parser.add_argument(
+        "--hf-split",
+        type=str,
+        default=None,
+        help="Split of the HuggingFace dataset (e.g., 'train', 'test', 'validation').",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. "
+        "Overrides the default output lengths from the dataset.",
+    )
 
     parser.add_argument(
         "--output-json",
@@ -341,6 +386,35 @@ def main(args: argparse.Namespace) -> None:
 
         e2el_df = pd.DataFrame(e2el_data)
         print(e2el_df.to_string(index=False))
+
+    if "encoder_stats" in result and result["encoder_stats"] is not None:
+        encoder_stats = result["encoder_stats"]
+        print("\nEncoder Forward Pass Latency (ms):")
+        print(f"  Encoder Type: {encoder_stats['encoder_type']}")
+        print(
+            f"  Warmup: {encoder_stats['num_warmup']}, "
+            f"Iterations: {encoder_stats['num_iterations']}"
+        )
+
+        selected_percentiles = [
+            float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
+        ]
+
+        encoder_data = []
+        for entry in encoder_stats["results"]:
+            row = {
+                "Batch": entry["batch_size"],
+                "Image Size": entry["image_size"],
+                "Mean": f"{entry['mean']:.2f}",
+                "Median": f"{entry['median']:.2f}",
+                "Std": f"{entry['std']:.2f}",
+            }
+            for p in selected_percentiles:
+                row[f"P{p}"] = f"{entry.get(f'p{p}', 0.0):.2f}"
+            encoder_data.append(row)
+
+        encoder_df = pd.DataFrame(encoder_data)
+        print(encoder_df.to_string(index=False))
 
     if args.output_json:
         result["config"] = {

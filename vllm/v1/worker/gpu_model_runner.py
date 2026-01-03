@@ -4,11 +4,13 @@
 import functools
 import gc
 import itertools
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
+from dataclasses import dataclass
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
@@ -524,6 +526,10 @@ class GPUModelRunner(
 
         # Cache the device properties.
         self._init_device_properties()
+
+        # Encoder timing registry for observability
+        self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self._encoder_timing_lock = threading.Lock()
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
@@ -2194,6 +2200,13 @@ class GPUModelRunner(
         if not mm_kwargs:
             return []
 
+        request_ids = scheduler_output.scheduled_encoder_inputs.keys()
+        should_time = (
+            self.observability_config
+            and self.observability_config.enable_mm_processor_stats
+            and request_ids
+        )
+
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
         # we process it separately to preserve item order.
@@ -2308,7 +2321,29 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
+
+                if should_time:
+                    torch.cuda.synchronize()
+                    start_time = time.perf_counter()
+
                 curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+
+                if should_time:
+                    torch.cuda.synchronize()
+                    elapsed = time.perf_counter() - start_time
+
+                    per_request_time = elapsed / max(len(request_ids), 1)
+
+                    with self._encoder_timing_lock:
+                        for req_id in request_ids:
+                            if req_id not in self.encoder_timing_registry:
+                                self.encoder_timing_registry[req_id] = (
+                                    EncoderTimingStats()
+                                )
+
+                            stats = self.encoder_timing_registry[req_id]
+                            stats.encoder_forward_time += per_request_time
+                            stats.num_encoder_calls += 1
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -5691,3 +5726,35 @@ class GPUModelRunner(
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        """
+        Get encoder timing stats for all requests and clear the registry.
+
+        Returns:
+            Dictionary mapping request_id to stats dict.
+        """
+        with self._encoder_timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
+
+
+@dataclass
+class EncoderTimingStats:
+    """Per-request timing statistics for encoder forward pass."""
+
+    encoder_forward_time: float = 0.0
+    """Time spent in vision encoder forward pass (seconds)."""
+
+    num_encoder_calls: int = 0
+    """Number of times encoder was called for this request."""
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "encoder_forward_time": self.encoder_forward_time,
+            "num_encoder_calls": self.num_encoder_calls,
+        }
