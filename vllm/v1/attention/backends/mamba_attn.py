@@ -289,13 +289,24 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def update_block_table(
         self,
+        common_metadata: CommonAttentionMetadata,
         metadata: M,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
         new_metadata = copy.copy(metadata)
-        prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
-        state_indices_t = blk_table if prefix_caching else blk_table[:, 0]
+        prefix_caching_all_mode = (
+            self.vllm_config.cache_config.mamba_cache_mode == "all"
+        )
+        state_indices_t = (
+            blk_table
+            if prefix_caching_all_mode
+            else mamba_get_block_table_tensor(
+                common_metadata,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )[:, 0]
+        )
         num_reqs = blk_table.shape[0]
 
         # For CUDA graphs, copy to persistent buffer
