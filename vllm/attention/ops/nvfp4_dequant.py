@@ -234,42 +234,51 @@ def gathered_dequantize_nvfp4_kv_cache(
         - New block table mapping to the linear indices [num_seqs, max_blocks]
     """
     # 1. Compact the block table to find only valid physical indices
-    # This avoids allocating a massive rectangular buffer (e.g. 32GB spike)
-    # when most entries are -1.
-    flat_table = block_table.flatten()
-    valid_mask = flat_table >= 0
-    active_indices = flat_table[valid_mask].to(torch.int32)
-    num_active = active_indices.numel()
+    # NOTE: Boolean masking [valid_mask] breaks CUDA graph capture.
+    # In graph mode, we must avoid data-dependent shapes.
+    # We use the full block_table and let the CUDA kernel skip the -1s.
+    # This also implements the "linear dequant trick" by avoiding
+    # the 30GB memory spike of materializing the full physical cache.
 
-    # Handle edge case: no active tokens
-    if num_active == 0:
-        num_heads = packed_cache.shape[2]
-        block_size = packed_cache.shape[1]
-        empty_cache = torch.empty(
-            0,
-            block_size,
-            num_heads,
-            head_size,
-            dtype=output_dtype,
-            device=packed_cache.device,
-        )
-        return empty_cache, block_table
+    num_seqs = block_table.size(0)
+    max_blocks = block_table.size(1)
+    num_active = num_seqs * max_blocks
 
-    # 2. Build the new block table mapping
-    new_block_table = torch.full_like(block_table, -1)
-    new_block_table.flatten()[valid_mask] = torch.arange(
+    # Build the new block table mapping to the linear output indices.
+    # For a linear output buffer, [seq_idx, block_idx] maps to seq_idx * max_blocks + block_idx
+    new_block_table = torch.arange(
         num_active, device=block_table.device, dtype=block_table.dtype
-    )
+    ).view(num_seqs, max_blocks)
 
-    # 3. Use the optimized CUDA gather-dequant kernel
+    # Preserve the -1s from the original block table so attention knows where to stop
+    new_block_table = torch.where(block_table >= 0, new_block_table, -1)
+
+    # 2. Use the optimized CUDA gather-dequant kernel
     try:
         import vllm_nvfp4
     except ImportError:
         # Fallback to eager gather + triton dequant if CUDA extension missing
-        # This will be slow and might hang in CUDA graphs, but provides a functional path
-        gathered = packed_cache[
-            active_indices.long()
-        ]  # [N_active, block_size, heads, packed_phs]
+        # NOTE: This fallback still uses boolean masking and will break graphs.
+        flat_table = block_table.flatten()
+        valid_mask = flat_table >= 0
+        active_indices = flat_table[valid_mask].to(torch.int32)
+
+        if active_indices.numel() == 0:
+            num_heads = packed_cache.shape[2]
+            block_size = packed_cache.shape[1]
+            return (
+                torch.empty(
+                    0,
+                    block_size,
+                    num_heads,
+                    head_size,
+                    dtype=output_dtype,
+                    device=packed_cache.device,
+                ),
+                block_table,
+            )
+
+        gathered = packed_cache[active_indices.long()]
         return (
             dequantize_nvfp4_kv_cache(gathered, head_size, output_dtype),
             new_block_table,
@@ -282,10 +291,10 @@ def gathered_dequantize_nvfp4_kv_cache(
     # to reuse the existing kernel which writes to [0...N-1]
     dequantized = vllm_nvfp4.dequant_gather(
         packed_cache,
-        active_indices.unsqueeze(0),  # Shape [1, num_active]
+        block_table.to(torch.int32),
         head_size,
         block_size,
-        num_active,
+        max_blocks,
         strides,
         output_dtype,
     )

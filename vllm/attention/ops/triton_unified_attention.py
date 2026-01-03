@@ -1047,36 +1047,28 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
+    # Define head_size and block_size before NVFP4 block uses them
+    head_size = q.shape[2]
+    block_size = v.shape[1]
+
     # Integrate vllm_nvfp4 optimized dequantization
     if use_nvfp4:
         try:
-            import vllm_nvfp4
+            from .nvfp4_dequant import gathered_dequantize_nvfp4_kv_cache
 
-            # 1. Dequantize paged NVFP4 cache to FP16/BF16 paged cache
-            # This produces temporary caches with the same block structure.
-            k_paged = vllm_nvfp4.dequant_paged(
-                k,
-                block_table,
-                head_size,
-                block_size,
-                block_table.shape[1],
-                k.stride(),
-                use_half=(q.dtype in (torch.float16, torch.bfloat16)),
+            # 1. Linear Dequantization Trick: Dequantize ONLY active blocks
+            # into a temporary linear buffer. This avoids the massive OOM spike.
+            k_linear, new_block_table = gathered_dequantize_nvfp4_kv_cache(
+                k, block_table, head_size, q.dtype
             )
-            v_paged = vllm_nvfp4.dequant_paged(
-                v,
-                block_table,
-                head_size,
-                block_size,
-                block_table.shape[1],
-                v.stride(),
-                use_half=(q.dtype in (torch.float16, torch.bfloat16)),
+            v_linear, _ = gathered_dequantize_nvfp4_kv_cache(
+                v, block_table, head_size, q.dtype
             )
 
-            # 2. Redirect K, V and disable NVFP4 on-the-fly mode
-            # We keep the original block_table.
-            k = k_paged
-            v = v_paged
+            # 2. Redirect K, V and block_table to the linearized buffers
+            k = k_linear
+            v = v_linear
+            block_table = new_block_table
             use_nvfp4 = False
 
         except (ImportError, RuntimeError) as e:
