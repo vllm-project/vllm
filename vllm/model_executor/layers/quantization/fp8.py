@@ -28,14 +28,13 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
-    fp8_w8a8_moe_quant_config,
-    fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
+    make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -50,7 +49,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
     apply_fi_trtllm_fp8_per_tensor_moe,
     select_cutlass_fp8_gemm_impl,
 )
@@ -640,12 +638,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             with_lora_support=self.moe.is_lora_enabled,
         )
 
-        self.marlin_input_dtype = None
-        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             if self.block_quant and self.weight_block_size != [128, 128]:
                 raise NotImplementedError(
                     "FlashInfer CUTLASS FP8 MoE backend only supports block "
@@ -671,7 +664,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         dynamic_per_token = (
             not self.block_quant and self.quant_config.activation_scheme != "static"
         )
-        if self.flashinfer_moe_backend is not None and dynamic_per_token:
+        if dynamic_per_token and self.fp8_backend in [
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+        ]:
             raise NotImplementedError(
                 "FlashInfer FP8 MoE backend does not support dynamic per token "
                 "activation quantization."
@@ -809,20 +805,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        w13_input_scale: torch.Tensor | None,
-        w2_input_scale: torch.Tensor | None,
     ) -> None:
-        # NOTE(rob): this is currently not a pure function because of
-        # flashinfer nonsense. Fix it.
+        # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
-            layer=layer,
-            w13=w13,
-            w2=w2,
-            w13_scale=w13_scale,
-            w2_scale=w2_scale,
-            marlin_input_dtype=self.marlin_input_dtype,
+            self.fp8_backend, layer, w13, w2, w13_scale, w2_scale
         )
+
         # Replace parameters with updated versions. Note that this helper
         # function ensures the replacement is compatible with RL weight reloads.
         replace_parameter(layer, "w13_weight", w13)
@@ -884,19 +872,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(
-            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
-        )
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if (
-            self.fp8_backend == Fp8MoeBackend.AITER
-            or self.fp8_backend == Fp8MoeBackend.MARLIN
-            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        ):
+        if self.fp8_backend in [
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+        ]:
             return None
         return super().maybe_make_prepare_finalize(routing_tables)
 
@@ -946,7 +932,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         elif self.moe.is_lora_enabled:
             return TritonExperts(quant_config=self.moe_quant_config)
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             # Select GEMM experts with block-scale when weights are block-quantized
             experts = select_cutlass_fp8_gemm_impl(
                 self.moe,
@@ -970,46 +956,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        # TRTLLM does not use Modular Kernel.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-
-        # MARLIN uses mixed precision W8A16 config.
-        if self.fp8_backend == Fp8MoeBackend.MARLIN:
-            return fp8_w8a16_moe_quant_config(
-                w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
-                w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
-                block_shape=self.weight_block_size,
-            )
-
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
 
-        # Flashinfer CUTLASS per-tensor uses single dq scale
-        # (alpha = w_scale * a_scale) and inverse a2 scale.
-        if (
-            self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
-            and not self.block_quant
-        ):
-            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                w1_scale,
-                a1_scale,
-                w2_scale,
-                a2_scale,
-            )
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a1_scale,
-                a2_scale=(1.0 / a2_scale),
-                g1_alphas=g1_alphas,
-                g2_alphas=g2_alphas,
-            )
-
-        # All other backends use normal config.
-        return fp8_w8a8_moe_quant_config(
+        return make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
@@ -1070,9 +1023,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     routed_scaling=layer.routed_scaling_factor,
                 )
             else:
-                assert (
-                    not layer.renormalize and layer.custom_routing_function is not None
-                )
                 result = apply_fi_trtllm_fp8_per_tensor_moe(
                     layer=layer,
                     hidden_states=x,
@@ -1122,7 +1072,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
-        assert self.flashinfer_moe_backend is None
 
     def create_weights(
         self,
@@ -1237,7 +1186,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, None, None)
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

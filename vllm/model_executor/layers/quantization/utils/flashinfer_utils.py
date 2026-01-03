@@ -112,18 +112,19 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
 def register_scales_for_fi_trtllm_fp8_per_tensor_moe(
     layer: torch.nn.Module,
     w13_weight_scale: torch.Tensor,
-    w13_input_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
-    w2_input_scale: torch.Tensor,
 ) -> None:
     """Register necessary scales for FlashInfer TRTLLM FP8 MoE kernel"""
-    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+    assert hasattr(layer, "w13_input_scale")
+    assert hasattr(layer, "w2_input_scale")
+
+    g1_alphas, g2_alphas = make_alpha_scales_for_fi(
         w13_scale=w13_weight_scale,
-        w13_input_scale=w13_input_scale,
+        w13_input_scale=layer.w13_input_scale,
         w2_scale=w2_weight_scale,
-        w2_input_scale=w2_input_scale,
+        w2_input_scale=layer.w2_input_scale,
     )
-    layer.w2_input_scale_inv = 1.0 / w2_input_scale
+    layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
     layer.output1_scales_gate_scalar = g1_alphas
     layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
     layer.output2_scales_scalar = g2_alphas
@@ -145,15 +146,18 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
+    # Added to the layer by: register_scales_for_fi_trtllm_fp8_per_tensor_moe
     assert (
         hasattr(layer, "output1_scales_scalar")
         and hasattr(layer, "output1_scales_gate_scalar")
         and hasattr(layer, "output2_scales_scalar")
     )
 
-    assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
-        "FusedMoE flashinfer kernels are only supported for Llama4"
+    is_llama4 = (
+        layer.custom_routing_function == Llama4MoE.custom_routing_function
+        and not layer.renormalize
     )
+    assert is_llama4, "FusedMoE flashinfer kernels are only supported for Llama4"
     return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
@@ -161,9 +165,9 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
         gemm2_weights=layer.w2_weight,
-        output1_scales_scalar=layer.output1_scales_scalar,  # w13 weight scale
-        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,  # w13_weight_scale
-        output2_scales_scalar=layer.output2_scales_scalar,  # w2_weight_scale
+        output1_scales_scalar=layer.output1_scales_scalar,
+        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+        output2_scales_scalar=layer.output2_scales_scalar,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
@@ -176,7 +180,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def make_fp8_moe_alpha_scales_for_fi(
+def make_alpha_scales_for_fi(
     w13_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
     w2_scale: torch.Tensor,
@@ -309,7 +313,7 @@ def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> 
     return backend in backends_supporting_global_sf
 
 
-def align_moe_fp8_weights_for_fi(
+def align_fp8_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
@@ -350,19 +354,24 @@ def align_moe_fp8_weights_for_fi(
     return padded_w13, padded_w2, padded_intermediate
 
 
-def prepare_moe_fp8_layer_for_fi(
+def prepare_fp8_moe_layer_for_fi(
     fp8_backend: "Fp8MoeBackend",
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
-    block_quant: bool,
+    w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Convert Fp8 MoE weights to flashinfer kernel format"""
+
     assert hasattr(layer.moe, "is_act_and_mul")
+    assert hasattr(layer, "weight_block_size")
+    block_quant = layer.weight_block_size is not None
+
     # Some FI MoE kernels require internal alignment of 16
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
-        w13, w2, new_intermediate = align_moe_fp8_weights_for_fi(
+        w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
             w13,
             w2,
             layer.moe.is_act_and_mul,
@@ -374,11 +383,11 @@ def prepare_moe_fp8_layer_for_fi(
         if block_quant:
             w13_scale = swap_w13_to_w31(w13_scale)
 
-    if not block_quant:
-        # TODO(rob): this function is a hack that renames the scaling
-        # factors in the Module. This is a hack we should clean up.
-        if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
-            register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer)
+    # FI TRT-LLM FP8 per-tensor MoE kernel requires weight shuffle
+    # and registration of alpha scales. Note that we do not register
+    # as nn.Parameters since they are not needed for weight-reloading.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and not block_quant:
+        rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
+        register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer, w13_scale, w2_scale)
 
     return w13, w2, w13_scale, new_intermediate

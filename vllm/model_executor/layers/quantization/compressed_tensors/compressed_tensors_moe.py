@@ -895,13 +895,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            self.fp8_backend,
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            get_marlin_input_dtype(prefix=""),
+            self.fp8_backend, layer, w13, w2, w13_scale, w2_scale
         )
 
         # Replace parameters with updated versions. Note that this helper

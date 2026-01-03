@@ -15,6 +15,8 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    fp8_w8a8_moe_quant_config,
+    fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp8,
@@ -34,13 +36,14 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
-    prepare_moe_fp8_layer_for_fi,
+    make_alpha_scales_for_fi,
+    prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
+    prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
@@ -174,7 +177,6 @@ def convert_to_fp8_moe_kernel_format(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    marlin_input_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
@@ -194,21 +196,14 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
-        # TODO(rob): remove need to pass around marlin_input_dtype.
-        workspace, w13, w2, w13_scale, w2_scale = prepare_moe_fp8_layer_for_marlin(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            marlin_input_dtype,
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
+            layer, w13, w2, w13_scale, w2_scale
         )
-        layer.workspace = workspace
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13, w2, w13_scale, w2_scale = prepare_moe_fp8_layer_for_fi(
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
             fp8_backend,
             layer,
             w13,
@@ -217,10 +212,56 @@ def convert_to_fp8_moe_kernel_format(
             block_quant,
         )
 
-        if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and not block_quant:
-            pass
-
     return w13, w2, w13_scale, w2_scale
+
+
+def make_fp8_moe_quant_config(
+    fp8_backend: Fp8MoeBackend,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    a1_scale: torch.Tensor | None,
+    a2_scale: torch.Tensor | None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    # TRTLLM does not use Modular Kernel abstraction yet.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+        return None
+
+    # MARLIN is mixed precision W8A16 config.
+    if fp8_backend == Fp8MoeBackend.MARLIN:
+        return fp8_w8a16_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            block_shape=block_shape,
+        )
+
+    # Flashinfer CUTLASS per-tensor uses single dq scale
+    # (alpha = w_scale * a_scale) and inverse a2 scale.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS and block_shape is None:
+        assert a1_scale is not None and a2_scale is not None
+        g1_alphas, g2_alphas = make_alpha_scales_for_fi(
+            w1_scale,
+            a1_scale,
+            w2_scale,
+            a2_scale,
+        )
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=(1.0 / a2_scale),
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+        )
+
+    # All other backends use normal config.
+    return fp8_w8a8_moe_quant_config(
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+    )
 
 
 def make_fp8_moe_kernel(

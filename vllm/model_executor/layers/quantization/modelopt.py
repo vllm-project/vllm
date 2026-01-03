@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
@@ -28,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
+    make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -900,35 +900,18 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            # TRTLLM does not use modular kernels
-            return None
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
 
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            # Flashinfer CUTLASS per-tensor uses single dq scale
-            # (alpha = w_scale * a_scale) and inverse a2 scale.
-            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                layer.w13_weight_scale,
-                layer.w13_input_scale,
-                layer.w2_weight_scale,
-                layer.w2_input_scale,
-            )
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=(1.0 / layer.w2_input_scale),
-                g1_alphas=g1_alphas,
-                g2_alphas=g2_alphas,
-            )
-        else:
-            assert self.flashinfer_moe_backend is None
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
-            )
+        return make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+        )
 
     def apply(
         self,
