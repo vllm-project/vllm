@@ -77,6 +77,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin,
     KVConnectorOutput,
@@ -261,6 +262,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
             kernel_block_sizes=[self.cache_config.block_size],
+            max_num_blocks_per_req=[
+                cdiv(self.max_model_len, self.block_size * get_total_cp_world_size())
+            ],
         )
 
         # Cached torch/numpy tensor
@@ -1845,6 +1849,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ],
                 kernel_block_sizes=[
                     kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+                ],
+                max_num_blocks_per_req=[
+                    cdiv(
+                        self.max_model_len,
+                        kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+                        * get_total_cp_world_size(),
+                    )
                 ],
             )
         # Verify dtype compatibility between block_table_cpu and input_batch
