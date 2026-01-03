@@ -70,8 +70,14 @@ class AttentionSpec(KVCacheSpec):
 
     def __post_init__(self):
         if self.page_size_bytes is None:
-          self.page_size_bytes = 2 * self.block_size * self.num_kv_heads * self.head_size \
+            page_size_bytes = (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * self.head_size
                 * get_dtype_size(self.dtype)
+            )
+            object.__setattr__(self, "page_size_bytes", page_size_bytes)
 
 
 @dataclass(frozen=True)
