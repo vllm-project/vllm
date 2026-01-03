@@ -22,9 +22,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferAllGatherMoEPrepareAndFinalize,
-)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -140,7 +137,15 @@ def select_fp8_moe_backend(
             scope="local",
         )
 
-    if envs.VLLM_USE_DEEP_GEMM and moe_use_deep_gemm and block_quant:
+    use_deep_gemm = envs.VLLM_USE_DEEP_GEMM
+    if not is_deep_gemm_supported():
+        use_deep_gemm = False
+        logger.info_once(
+            "DeepGEMM is disabled because the platform does not support it.",
+            scope="local",
+        )
+
+    if use_deep_gemm and moe_use_deep_gemm and block_quant:
         if not has_deep_gemm():
             logger.warning_once(
                 "DeepGEMM backend requested but not available.", scope="local"
@@ -232,14 +237,11 @@ def make_fp8_moe_kernel(
     use_inplace = True
     if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         kernel = mk.FusedMoEModularKernel(
-            # TODO(rob): we can use the generic MoEPrepareAndFinalizeNoEP
-            # with the changes to defer input quantization
-            FlashInferAllGatherMoEPrepareAndFinalize(
-                use_dp=(moe_config.dp_size > 1),
-                use_deepseek_fp8_block_scale=moe_quant_config.is_block_quantized,
+            MoEPrepareAndFinalizeNoEP(
+                defer_input_quant=moe_quant_config.is_block_quantized
             ),
             FlashInferExperts(
-                out_dtype=torch.get_default_dtype(),
+                out_dtype=layer.orig_dtype,
                 quant_config=moe_quant_config,
                 ep_rank=moe_config.ep_rank,
                 ep_size=moe_config.ep_size,
