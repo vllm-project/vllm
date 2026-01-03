@@ -42,27 +42,31 @@ logger = init_logger(__name__)
 
 
 def reshape_hidden_states_for_kv_cache(
-    hidden_states: torch.Tensor, head_size: int
+    hidden_states: torch.Tensor, num_heads: int, head_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reshape hidden states into key and value tensors for KV cache.
 
     Args:
-        hidden_states: shape [batch_size, hidden_size * num_hidden_states]
+        hidden_states: shape [batch_size, 2 * num_heads * head_size ]
+            where num_heads = (original_num_heads // 2) * num_hidden_layers
             e.g. hidden_states = torch.cat([h_1, h_2, ..., h_n], dim=1)
+        num_heads: Number of attention heads
         head_size: Size of each attention head
 
     Returns:
-        key, value: each of shape [batch_size, num_kv_heads, head_size]
+        key, value: each of shape [batch_size, num_heads, head_size]
     """
+
     batch_size = hidden_states.shape[0]
     # Split into two equal parts for key and value
     split_size = hidden_states.shape[1] // 2
+
     key, value = torch.split(hidden_states, [split_size, split_size], dim=1)
     # key/value shape: [batch_size, hidden_size * num_hidden_states / 2]
 
     # Reshape to attention head format
-    key = key.view(batch_size, -1, head_size)
-    value = value.view(batch_size, -1, head_size)
+    key = key.view(batch_size, num_heads, head_size)
+    value = value.view(batch_size, num_heads, head_size)
     return key, value
 
 
@@ -191,17 +195,18 @@ class CacheOnlyAttentionImpl(AttentionImpl):
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(f"Unsupported attention type: {attn_type}")
+        if sliding_window is not None:
+            raise NotImplementedError("Sliding window is not supported")
         if alibi_slopes is not None:
             raise NotImplementedError("ALiBi slopes not supported")
         if logits_soft_cap is not None:
             raise NotImplementedError("Logits soft cap not supported")
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing not supported")
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if is_quantized_kv_cache(kv_cache_dtype):
             raise NotImplementedError("Quantized KV cache not supported")
 
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.num_queries_per_kv = 1
 
     def forward(
         self,
@@ -349,7 +354,9 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
         # Reshape hidden states into key/value format
-        key, value = reshape_hidden_states_for_kv_cache(hidden_states, self.head_size)
+        key, value = reshape_hidden_states_for_kv_cache(
+            hidden_states, self.num_heads, self.head_size
+        )
 
         # Cache the KV states (with optional KV transfer)
         cache_only_attention_with_kv_transfer(None, key, value, output, self.layer_name)
@@ -418,10 +425,15 @@ class ExtractHiddenStatesModel(nn.Module):
         self.head_size = self.config.head_dim
         cache_config = vllm_config.cache_config
 
-        assert self.hidden_size % self.head_size == 0
+        # todo(fynn): loosen this constraint
+        # Currently because we store data in both k and v caches
+        # We need self.hidden_size // self.head_size to be even
+        assert self.hidden_size % (self.head_size * 2) == 0, (
+            "hidden_size // head_size must be even"
+        )
 
         self.num_kv_heads = (
-            self.hidden_size // self.head_size
+            self.hidden_size // (self.head_size * 2)
         ) * self.num_hidden_states
 
         # Create a single cache-only attention layer
