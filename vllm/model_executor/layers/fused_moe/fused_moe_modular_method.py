@@ -49,7 +49,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
-                getattr(moe_layer, "shared_experts_stream", None),
                 moe_parallel_config=moe_layer.moe_parallel_config,
             ),
         )
