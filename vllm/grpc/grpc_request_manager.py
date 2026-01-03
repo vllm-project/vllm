@@ -107,8 +107,8 @@ class GrpcRequestManager:
                     await self.async_llm.abort([request_id])
                     raise  # Re-raise to let gRPC server handle cleanup
 
-        except Exception as e:
-            logger.error("Error in generate for %s: %s", request_id, e)
+        except Exception:
+            logger.exception("Error in generate for %s", request_id)
             raise
         finally:
             # Cleanup
@@ -149,7 +149,7 @@ class GrpcRequestManager:
             await self.async_llm.engine_core.add_request_async(request)
 
         except Exception as e:
-            logger.error("Error submitting request %s: %s", request.request_id, e)
+            logger.exception("Error submitting request %s", request.request_id)
             # Put error in collector
             collector.put(e)
 
@@ -183,8 +183,8 @@ class GrpcRequestManager:
             logger.info("Request %s aborted.", request_id)
             return True
 
-        except Exception as e:
-            logger.error("Error aborting request %s: %s", request_id, e)
+        except Exception:
+            logger.exception("Error aborting request %s", request_id)
             self.rid_to_collector.pop(request_id, None)
             return False
 
@@ -203,7 +203,7 @@ class GrpcRequestManager:
             return True, "Healthy"
 
         except Exception as e:
-            logger.error("Health check error: %s", e)
+            logger.exception("Health check error")
             return False, f"Error: {e}"
 
     def get_model_config(self) -> dict:

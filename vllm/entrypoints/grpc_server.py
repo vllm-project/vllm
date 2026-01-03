@@ -126,7 +126,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     yield self._complete_response(request_id, output)
 
         except Exception as e:
-            logger.error("Error in Generate for %s: %s", request_id, e)
+            logger.exception("Error in Generate for %s", request_id)
             yield self._error_response(
                 request_id,
                 str(e),
