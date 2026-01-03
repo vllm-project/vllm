@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -45,7 +46,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -352,6 +353,8 @@ class SpeculativeConfig:
                 self.model = "ngram"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "extract_hidden_states":
+                self.model = "extract_hidden_states"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -394,6 +397,34 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "extract_hidden_states":
+            from vllm.transformers_utils.configs.extract_hidden_states import (
+                ExtractHiddenStatesConfig,
+            )
+
+            # ExtractHiddenStatesModel is instantiated manually in load_model()
+            # We just need to store the target model config for KV cache shape info
+            self.model = "extract_hidden_states"
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+
+            if hasattr(self.draft_model_config, "hf_config"):
+                hf_config = self.draft_model_config.hf_config.to_dict()
+            elif (
+                isinstance(self.draft_model_config, dict)
+                and "hf_config" in self.draft_model_config
+            ):
+                hf_config = self.draft_model_config["hf_config"]
+            else:
+                hf_config = {}
+            print("Calling ExtractHiddenStatesConfig.__init__", hf_config)
+
+            self.draft_model_config = copy.copy(self.target_model_config)
+            self.draft_model_config.hf_config = ExtractHiddenStatesConfig(
+                self.draft_model_config.hf_config, **hf_config
+            )
+            self.draft_parallel_config = self.target_parallel_config
+
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -782,8 +813,15 @@ class SpeculativeConfig:
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
+    def uses_extract_hidden_states(self) -> bool:
+        return self.method == "extract_hidden_states"
+
     def __repr__(self) -> str:
         method = self.method
-        model = None if method in ("ngram", "suffix") else self.draft_model_config.model
+        model = (
+            None
+            if method in ("ngram", "suffix", "extract_hidden_states")
+            else self.draft_model_config.model
+        )
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
