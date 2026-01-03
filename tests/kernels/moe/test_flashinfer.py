@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8,
+    apply_fi_trtllm_fp8_per_tensor_moe,
     flashinfer_cutlass_moe_fp8,
     register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_flashinfer_fp8_moe_weights,
@@ -198,7 +198,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
-        flashinfer_output = apply_flashinfer_per_tensor_scale_fp8(
+        flashinfer_output = apply_fi_trtllm_fp8_per_tensor_moe(
             layer=td.layer,
             hidden_states=td.hidden_states,
             router_logits=score,

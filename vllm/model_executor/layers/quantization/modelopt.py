@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
-    apply_flashinfer_per_tensor_scale_fp8,
+    apply_fi_trtllm_fp8_per_tensor_moe,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     select_cutlass_fp8_gemm_impl,
@@ -947,7 +947,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"Expected 'silu' activation but got {layer.activation}"
             )
             assert not layer.renormalize
-            return apply_flashinfer_per_tensor_scale_fp8(
+            return apply_fi_trtllm_fp8_per_tensor_moe(
                 layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,

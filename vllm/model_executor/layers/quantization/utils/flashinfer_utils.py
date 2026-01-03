@@ -63,9 +63,10 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     )
 
 
-def rotate_flashinfer_fp8_moe_weights(
+def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor
 ):
+    """Shuffle weights for for FI TRT-LLM Format"""
     from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
 
     epilogue_tile_m = 128
@@ -108,7 +109,7 @@ def rotate_flashinfer_fp8_moe_weights(
     )
 
 
-def register_scales_for_trtllm_fp8_per_tensor_moe(
+def register_scales_for_fi_trtllm_fp8_per_tensor_moe(
     layer: torch.nn.Module,
     w13_weight_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
@@ -128,7 +129,7 @@ def register_scales_for_trtllm_fp8_per_tensor_moe(
     layer.output2_scales_scalar = g2_alphas
 
 
-def apply_flashinfer_per_tensor_scale_fp8(
+def apply_fi_trtllm_fp8_per_tensor_moe(
     layer: torch.nn.Module,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -153,7 +154,7 @@ def apply_flashinfer_per_tensor_scale_fp8(
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
         "FusedMoE flashinfer kernels are only supported for Llama4"
     )
-    return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
+    return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
         hidden_states=hidden_states,
@@ -377,7 +378,7 @@ def prepare_moe_fp8_layer_for_fi(
         # TODO(rob): this function is a hack that renames the scaling
         # factors in the Module. This is a hack we should clean up.
         if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            rotate_flashinfer_fp8_moe_weights(w13, w2)
-        register_moe_scaling_factors(layer)
+            rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
+            register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer)
 
     return w13, w2, w13_scale, new_intermediate

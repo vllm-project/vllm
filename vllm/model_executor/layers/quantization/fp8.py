@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
-    apply_flashinfer_per_tensor_scale_fp8,
+    apply_fi_trtllm_fp8_per_tensor_moe,
     select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1073,7 +1073,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert (
                     not layer.renormalize and layer.custom_routing_function is not None
                 )
-                result = apply_flashinfer_per_tensor_scale_fp8(
+                result = apply_fi_trtllm_fp8_per_tensor_moe(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
