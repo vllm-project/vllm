@@ -196,6 +196,12 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             hf_text_config.max_position_embeddings = max_trained_positions
             hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
 
+            # Update the cached derived_max_model_len to enforce the limit
+            model_config.model_arch_config.derived_max_model_len_and_key = (
+                float(max_trained_positions),
+                "max_position_embeddings",
+            )
+
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
             encoder_config = deepcopy(model_config.encoder_config)
