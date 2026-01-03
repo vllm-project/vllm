@@ -24,6 +24,10 @@ from vllm.v1.attention.backends.fa_utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
@@ -528,6 +532,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        return (
+            self.vllm_flash_attn_version == 3
+            and quant_key == kFp8StaticTensorSym
+        )
 
     def __init__(
         self,
