@@ -10,7 +10,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
@@ -20,11 +21,15 @@ from vllm.v1.attention.backends.rocm_attn import (
 
 logger = init_logger(__name__)
 
+if current_platform.is_rocm():
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if rocm_aiter_ops.is_enabled():
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
-
-    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -104,6 +109,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -143,6 +149,70 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         key_cache, value_cache = kv_cache.unbind(0)
+
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+
+        if (
+            positions is not None
+            and query.shape[0] <= 256
+            and rocm_aiter_ops.is_enabled()
+        ):
+            assert self.kv_sharing_target_layer_name is None
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            is_neox = self.rotary_emb.is_neox_style
+            cos, sin = cos_sin_cache.chunk(2, dim=-1)
+            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(current_platform.fp8_dtype())
+                value_cache = value_cache.view(current_platform.fp8_dtype())
+            query, key, key_cache, value_cache, output = (
+                fused_qk_rope_reshape_and_cache(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    layer._v_scale,
+                    is_neox,
+                    flash_layout=True,
+                    apply_scale=is_fp8_kv_cache,
+                    offs=None,
+                    q_out=query,
+                    k_out=key,
+                    output_zeros=True,
+                    zeros_out=output,
+                )
+            )
+        else:
+            if positions is not None:
+                if current_platform.is_rocm():
+                    query, key = self.rotary_emb.forward_cuda(positions, query, key)
+                else:
+                    query, key = self.rotary_emb(positions, query, key)
+            if (
+                self.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
+            ):
+                # Reshape the input keys and values and store them in the cache.
+                # Skip this if sharing KV cache with an earlier attention layer.
+                ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -185,25 +255,3 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         )
 
         return output
-
-    def do_kv_cache_update(
-        self,
-        layer: AttentionLayer,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ):
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        # Reshape the input keys and values and store them in the cache.
-        ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
