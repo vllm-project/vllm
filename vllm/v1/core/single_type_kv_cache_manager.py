@@ -1029,6 +1029,7 @@ class SinkFullAttentionManager(FullAttentionManager):
     def __init__(
         self,
         kv_cache_spec: SinkFullAttentionSpec,
+        cache_config: CacheConfig,
         block_pool: BlockPool,
         enable_caching: bool,
         kv_cache_group_id: int,
@@ -1037,6 +1038,7 @@ class SinkFullAttentionManager(FullAttentionManager):
     ):
         super().__init__(
             kv_cache_spec,
+            cache_config,
             block_pool,
             enable_caching,
             kv_cache_group_id,
