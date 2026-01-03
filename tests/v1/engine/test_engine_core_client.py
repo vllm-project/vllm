@@ -133,6 +133,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     parallel_config = SimpleNamespace(
         data_parallel_size=1,
         data_parallel_rank=0,
+        data_parallel_index=0,
         data_parallel_size_local=1,
         data_parallel_rank_local=None,
         data_parallel_hybrid_lb=False,
