@@ -38,6 +38,7 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
@@ -388,7 +389,8 @@ async def serve_grpc(args: argparse.Namespace):
     Args:
         args: Parsed command line arguments
     """
-    logger.info("Initializing vLLM gRPC server...")
+    logger.info("vLLM gRPC server version %s", VLLM_VERSION)
+    logger.info("args: %s", args)
 
     # Create engine args
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -405,10 +407,6 @@ async def serve_grpc(args: argparse.Namespace):
         enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats_server,
     )
-
-    logger.info("Model: %s", vllm_config.model_config.model)
-    logger.info("Max model len: %s", vllm_config.model_config.max_model_len)
-    logger.info("Vocab size: %s", vllm_config.model_config.get_vocab_size())
 
     # Create request manager
     request_manager = GrpcRequestManager(async_llm)
