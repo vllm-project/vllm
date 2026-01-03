@@ -12,15 +12,9 @@ from typing import ClassVar
 
 import torch
 import torch.nn as nn
-from triton import cdiv
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.kv_transfer import (
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-    is_v1_kv_transfer_group,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     get_attention_context,
@@ -124,51 +118,13 @@ class CacheOnlyAttentionBackend(AttentionBackend):
 
 
 class CacheOnlyAttentionMetadata:
-    """Metadata for cache-only attention operations."""
-
-    def __init__(
-        self,
-        causal: bool,
-        num_actual_tokens: int,
-        max_query_len: int,
-        query_start_loc: torch.Tensor,
-        max_seq_len: int,
-        seq_lens: torch.Tensor,
-        block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        use_cascade: bool,
-        common_prefix_len: int,
-        cu_prefix_query_lens: torch.Tensor | None,
-        prefix_kv_lens: torch.Tensor | None,
-        suffix_kv_lens: torch.Tensor | None,
-        num_reqs: int,
-        num_input_tokens: int = 0,
-    ):
-        self.causal = causal
-        self.num_actual_tokens = num_actual_tokens
-        self.max_query_len = max_query_len
-        self.query_start_loc = query_start_loc
-        self.max_seq_len = max_seq_len
-        self.seq_lens = seq_lens
-        self.block_table = block_table
+    def __init__(self, slot_mapping: torch.Tensor):
         self.slot_mapping = slot_mapping
-        self.use_cascade = use_cascade
-        self.common_prefix_len = common_prefix_len
-        self.cu_prefix_query_lens = cu_prefix_query_lens
-        self.prefix_kv_lens = prefix_kv_lens
-        self.suffix_kv_lens = suffix_kv_lens
-        self.num_reqs = num_reqs
-        self.num_input_tokens = num_input_tokens
-
-        assert self.use_cascade is False, "Cascade not supported"
-        assert self.common_prefix_len == 0, "Common prefix not supported"
 
 
 class CacheOnlyAttentionMetadataBuilder(
     AttentionMetadataBuilder[CacheOnlyAttentionMetadata]
 ):
-    """Builder for cache-only attention metadata."""
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -189,38 +145,21 @@ class CacheOnlyAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CacheOnlyAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
-        max_query_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.max_seq_len
-        query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
-        block_table_tensor = common_attn_metadata.block_table_tensor
-        slot_mapping = common_attn_metadata.slot_mapping
-
         use_cascade = common_prefix_len > 0
         if use_cascade:
-            raise NotImplementedError("Cascade attention not supported")
+            raise NotImplementedError(
+                "Cascade attention not supported by CacheOnlyAttention"
+            )
+        causal = common_attn_metadata.causal
+        if not causal:
+            raise NotImplementedError(
+                "Non-causal attention not supported by CacheOnlyAttention"
+            )
 
+        slot_mapping = common_attn_metadata.slot_mapping
         return CacheOnlyAttentionMetadata(
-            causal=common_attn_metadata.causal,
-            num_actual_tokens=num_actual_tokens,
-            max_query_len=max_query_len,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-            num_reqs=num_reqs,
         )
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class CacheOnlyAttentionImpl(AttentionImpl):
@@ -298,7 +237,6 @@ class CacheOnlyAttentionImpl(AttentionImpl):
             # Profiling run
             return output.fill_(0)
 
-        assert attn_metadata.causal, "Non-causal attention not supported"
         assert self.attn_type == AttentionType.DECODER
 
         # Cache the key/value states
@@ -393,29 +331,22 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         """Cache hidden states as KV pairs without computing attention.
 
         Args:
             hidden_states: shape [num_tokens, hidden_size * num_hidden_states]
-            output_shape: Optional output shape
 
         Returns:
             Dummy output tensor (not used)
         """
-        output_dtype = hidden_states.dtype
-        if output_shape is None:
-            num_tokens = hidden_states.shape[0]
-            output_shape = torch.Size((num_tokens, self.num_heads * self.head_size))
-
         output = torch.empty(
-            output_shape, dtype=output_dtype, device=hidden_states.device
+            hidden_states.shape[0],  # num_tokens
+            self.num_heads,
+            self.head_size,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
-        output = output.view(-1, self.num_heads, self.head_size)
 
         # Reshape hidden states into key/value format
         key, value = reshape_hidden_states_for_kv_cache(hidden_states, self.head_size)
@@ -423,7 +354,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # Cache the KV states (with optional KV transfer)
         cache_only_attention_with_kv_transfer(None, key, value, output, self.layer_name)
 
-        return output.view(-1, output_shape[-1])
+        return output
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -510,19 +441,13 @@ class ExtractHiddenStatesModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process and cache hidden states.
 
         Args:
-            input_ids: Input token IDs (not used)
-            positions: Token positions (not used)
             hidden_states: Hidden states from target model
                           shape: [num_tokens, hidden_size * num_hidden_states]
-            inputs_embeds: Input embeddings (not used)
 
         Returns:
             Tuple of (dummy_output, dummy_output) - both unused
