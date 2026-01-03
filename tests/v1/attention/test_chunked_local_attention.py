@@ -1,13 +1,119 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.attention.layers.chunked_local_attention import (
+    create_chunked_local_attention_backend,
+)
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
+
+
+def create_mock_underlying_backend(device: torch.device):
+    """Create a mock underlying attention backend for testing."""
+
+    class MockMetadata:
+        """Minimal metadata that captures what was passed to build()."""
+
+        pass
+
+    class MockUnderlyingBuilder(AttentionMetadataBuilder[MockMetadata]):
+        def __init__(
+            self,
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+        ):
+            self.kv_cache_spec = kv_cache_spec
+            self.layer_names = layer_names
+            self.vllm_config = vllm_config
+            self.device = device
+            # Capture what was passed to build for verification
+            self.last_common_attn_metadata = None
+
+        def build(
+            self,
+            common_prefix_len: int,
+            common_attn_metadata: CommonAttentionMetadata,
+            fast_build: bool = False,
+        ) -> MockMetadata:
+            # Capture the metadata for test verification
+            self.last_common_attn_metadata = common_attn_metadata
+            return MockMetadata()
+
+        def update_block_table(self, metadata, blk_table, slot_mapping):
+            return metadata
+
+    class MockUnderlyingBackend:
+        @classmethod
+        def get_builder_cls(cls):
+            return MockUnderlyingBuilder
+
+    return MockUnderlyingBackend
+
+
+def build_chunked_local_attention(
+    batch_spec: BatchSpec,
+    attn_chunk_size: int,
+    block_size: int,
+    device: torch.device,
+    arange_block_indices: bool = True,
+) -> CommonAttentionMetadata:
+    """Build chunked local attention metadata using the real builder."""
+    # Create the backend
+    mock_backend = create_mock_underlying_backend(device)
+    chunked_backend = create_chunked_local_attention_backend(
+        mock_backend, attn_chunk_size, block_size
+    )
+
+    # Create mock kv_cache_spec
+    mock_kv_cache_spec = MagicMock()
+    mock_kv_cache_spec.block_size = block_size
+
+    # Create vllm_config with enough capacity
+    vllm_config = create_vllm_config(
+        max_num_seqs=len(batch_spec.query_lens),
+        max_num_batched_tokens=max(
+            sum(batch_spec.query_lens), len(batch_spec.query_lens)
+        ),
+        block_size=block_size,
+    )
+
+    # Create the builder
+    builder_cls = chunked_backend.get_builder_cls()
+    builder = builder_cls(
+        kv_cache_spec=mock_kv_cache_spec,
+        layer_names=["layer0"],
+        vllm_config=vllm_config,
+        device=device,
+    )
+
+    # Create common attention metadata
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size,
+        device,
+        arange_block_indices=arange_block_indices,
+    )
+
+    # Build and return the result
+    builder.build(0, common_attn_metadata)
+
+    # The underlying builder's last_common_attn_metadata has the virtual batches
+    return builder.last_common_attn_metadata
 
 
 @dataclass
@@ -159,26 +265,21 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     expected_k_seqlens = test_data.expected_k_seqlens
     expected_local_block_table = test_data.expected_local_block_table
 
-    # Create common attention metadata
-    common_attn_metadata = create_common_attn_metadata(
+    # Call the builder
+    result = build_chunked_local_attention(
         batch_spec,
+        attn_chunk_size,
         block_size,
         device,
-        # Use torch.arange instead of torch.randint so we can assert on
-        # block table tensor values. The block table will have shape
-        # (num_batches, cdiv(max_seq_len, block_size)) and the values will be
-        # arranged from 0 to cdiv(max_seq_len, block_size)-1
         arange_block_indices=True,
     )
 
-    # Call the function
-    result, _ = make_local_attention_virtual_batches(
-        attn_chunk_size, common_attn_metadata, block_size
-    )
+    # Get actual count (trim padding - find first zero in k_seqlens)
+    actual_count = len(expected_k_seqlens)
 
-    # Convert to numpy for easier comparison
-    actual_q_seqlens = np.diff(result.query_start_loc_cpu.numpy())
-    actual_k_seqlens = result.seq_lens_cpu.numpy()
+    # Convert to numpy for comparison (use GPU tensors, then transfer to CPU)
+    actual_q_seqlens = np.diff(result.query_start_loc.cpu().numpy())[:actual_count]
+    actual_k_seqlens = result.seq_lens.cpu().numpy()[:actual_count]
 
     # Check that all query lengths are less than or equal to attn_chunk_size
     assert all(q_len <= attn_chunk_size for q_len in actual_q_seqlens)
@@ -196,6 +297,8 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     )
 
     print(f"Expected block table:\n{expected_block_table_tensor}")
-    print(f"Actual block table:\n{result.block_table_tensor}")
+    print(f"Actual block table:\n{result.block_table_tensor[:actual_count]}")
 
-    torch.testing.assert_close(result.block_table_tensor, expected_block_table_tensor)
+    torch.testing.assert_close(
+        result.block_table_tensor[:actual_count], expected_block_table_tensor
+    )
