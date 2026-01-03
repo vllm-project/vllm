@@ -1021,9 +1021,8 @@ def test_hf_processor_init_kwargs(
         DummyProcessor,  # type: ignore[arg-type]
         **inference_kwargs,
     )
-
-    for k, v in expected_kwargs.items():
-        assert getattr(processor, k) == v
+    assert processor.a == expected_kwargs["a"]
+    assert processor.b == expected_kwargs["b"]
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
