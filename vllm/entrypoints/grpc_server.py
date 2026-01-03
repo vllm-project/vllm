@@ -402,7 +402,7 @@ async def serve_grpc(args: argparse.Namespace):
     async_llm = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=UsageContext.OPENAI_API_SERVER,
-        enable_log_requests=not args.disable_log_requests_server,
+        enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats_server,
     )
 
@@ -491,11 +491,6 @@ def main():
         type=int,
         default=50051,
         help="Port to bind gRPC server to",
-    )
-    parser.add_argument(
-        "--disable-log-requests-server",
-        action="store_true",
-        help="Disable request logging on server side",
     )
     parser.add_argument(
         "--disable-log-stats-server",
