@@ -880,28 +880,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        return None
-        # if (
-        #     self.fp8_backend == Fp8MoeBackend.AITER
-        #     or self.fp8_backend == Fp8MoeBackend.MARLIN
-        #     or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        # ):
-        #     return None
-        # elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-        #     if self.block_quant:
-        #         assert self.weight_block_size == [128, 128], (
-        #             f"Only support weight_block_size == [128, 128], "
-        #             f"got {self.weight_block_size}"
-        #         )
-        #     # Wire block-scale flag through prepare/finalize when using CUTLASS
-        #     prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-        #         self.moe,
-        #         use_deepseek_fp8_block_scale=self.block_quant,
-        #     )
-        #     logger.debug_once("%s", prepare_finalize.__class__.__name__)
-        #     return prepare_finalize
-        # else:
-        #     return super().maybe_make_prepare_finalize(routing_tables)
+        if (
+            self.fp8_backend == Fp8MoeBackend.AITER
+            or self.fp8_backend == Fp8MoeBackend.MARLIN
+            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            return None
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
