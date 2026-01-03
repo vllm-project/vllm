@@ -668,6 +668,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
                     "activation function, but got {layer.activation}."
                 )
+        dynamic_per_token = (
+            not self.block_quant and self.quant_config.activation_scheme != "static"
+        )
+        if self.flashinfer_moe_backend is not None and dynamic_per_token:
+            raise NotImplementedError(
+                "FlashInfer FP8 MoE backend does not support dynamic per token "
+                "activation quantization."
+            )
 
         self.kernel: mk.FusedMoEModularKernel | None = None
 
@@ -801,6 +809,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
     ) -> None:
         # NOTE(rob): this is currently not a pure function because of
         # flashinfer nonsense. Fix it.
@@ -874,7 +884,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -958,21 +970,50 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # TRTLLM does not use Modular Kernel.
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
 
-        elif self.fp8_backend == Fp8MoeBackend.MARLIN:
+        # MARLIN uses mixed precision W8A16 config.
+        if self.fp8_backend == Fp8MoeBackend.MARLIN:
             return fp8_w8a16_moe_quant_config(
                 w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
                 w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
                 block_shape=self.weight_block_size,
             )
 
+        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+
+        # Flashinfer CUTLASS per-tensor uses single dq scale
+        # (alpha = w_scale * a_scale) and inverse a2 scale.
+        if (
+            self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and not self.block_quant
+        ):
+            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                w1_scale,
+                a1_scale,
+                w2_scale,
+                a2_scale,
+            )
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=(1.0 / a2_scale),
+                g1_alphas=g1_alphas,
+                g2_alphas=g2_alphas,
+            )
+
+        # All other backends use normal config.
         return fp8_w8a8_moe_quant_config(
-            w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
-            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
             block_shape=self.weight_block_size,
         )
 
@@ -1196,7 +1237,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, None, None)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

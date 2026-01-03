@@ -900,26 +900,35 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            # TRTLLM does not use modular kernels
             return None
 
-        # TODO(rob): this is a very strange hack for FlashInferExperts.
-        # We should not be using the g1_alphas and g2_alphas here. They
-        # are currently overloaded (intended for nvfp4 to smuggle these)
-        # into the kernel.
-        # NOTE(rob): this is probably why the mixtral model was
-        # failing when running with FI through Fp8.py.
-        return fp8_w8a8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
-            w2_scale=layer.w2_weight_scale,
-            g2_alphas=layer.output2_scales_scalar.squeeze(),
-            a1_scale=layer.w13_input_scale,
-            a1_gscale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            a2_gscale=layer.w2_input_scale_inv,
-            per_act_token_quant=False,
-        )
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # Flashinfer CUTLASS per-tensor uses single dq scale
+            # (alpha = w_scale * a_scale) and inverse a2 scale.
+            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                layer.w13_weight_scale,
+                layer.w13_input_scale,
+                layer.w2_weight_scale,
+                layer.w2_input_scale,
+            )
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=(1.0 / layer.w2_input_scale),
+                g1_alphas=g1_alphas,
+                g2_alphas=g2_alphas,
+            )
+        else:
+            assert self.flashinfer_moe_backend is None
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+            )
 
     def apply(
         self,
