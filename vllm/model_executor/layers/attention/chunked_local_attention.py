@@ -301,9 +301,7 @@ def create_chunked_local_attention_backend(
 
             # Get max_blocks_per_seq from actual block_table shape
             max_blocks_per_seq = block_table.shape[1]
-
-            # Limit pages_per_vb to actual block table width
-            pages_per_vb = min(self._pages_per_virtual_batch, max_blocks_per_seq)
+            pages_per_vb = self._pages_per_virtual_batch
 
             # Zero buffers before kernel to clear stale data from previous
             # calls (kernel uses masked writes, stale data may remain)
@@ -328,14 +326,13 @@ def create_chunked_local_attention_backend(
                 MAX_VIRTUAL_BATCHES=max_vb_per_req,
             )
 
-            # Sync to ensure kernel completes before reading from buffers
-            torch.cuda.synchronize()
-
             # Pad cu_virtual_seqlens_q for FULL CG (must be monotonic)
             total_tokens = int(query_start_loc_cpu[-1])
             self._cu_virtual_seqlens_q[num_vb_ub + 1 :].fill_(total_tokens)
 
             # Use dynamically sized tensors (sliced to actual virtual batch count)
+            # NOTE: We pass the GPU tensor for query_start_loc_cpu since
+            # FlashAttention doesn't use it. This avoids a CPU<>GPU sync.
             cm = CommonAttentionMetadata(
                 query_start_loc=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
                 query_start_loc_cpu=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
@@ -360,27 +357,11 @@ def create_chunked_local_attention_backend(
             metadata._virtual_batch_block_indices = self._virtual_batch_block_indices[
                 :num_vb_ub, :pages_per_vb
             ].clone()
-            print(
-                f"[DEBUG build] batch_size={batch_size}, "
-                f"num_vb_ub={num_vb_ub}, max_vb_per_req={max_vb_per_req}, "
-                f"block_table.shape={block_table.shape}, "
-                f"pages_per_vb={pages_per_vb}",
-                flush=True,
-            )
             return metadata
 
         def update_block_table(
             self, metadata, blk_table: torch.Tensor, slot_mapping: torch.Tensor
         ):
-            # Debug logging
-            bm = metadata._virtual_batch_to_batch_mapping
-            bi = metadata._virtual_batch_block_indices
-            print(
-                f"[DEBUG update_block_table] blk_table.shape={blk_table.shape}"
-                f", batch_mapping.shape={bm.shape}, batch_mapping.max()="
-                f"{bm.max().item()}, block_indices.shape={bi.shape}",
-                flush=True,
-            )
             # Use cloned indices stored on metadata (stable across builders)
             new_block_table = blk_table[
                 metadata._virtual_batch_to_batch_mapping.unsqueeze(1),
