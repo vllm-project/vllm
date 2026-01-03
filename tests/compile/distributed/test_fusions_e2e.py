@@ -203,7 +203,7 @@ def test_attn_quant(
 
     # Disable, compile cache to make sure custom passes run.
     # Otherwise, we can't verify fusion happened through the logs.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
@@ -552,7 +552,7 @@ def test_rms_group_quant(
 
     # Disable, compile cache to make sure custom passes run.
     # Otherwise, we can't verify fusion happened through the logs.
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_COMPILE_CACHE", "0")
 
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.

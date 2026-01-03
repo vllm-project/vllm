@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
-    VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_ENABLE_COMPILE_CACHE: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -274,8 +274,8 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
-def disable_compile_cache() -> bool:
-    return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+def enable_compile_cache() -> bool:
+    return bool(int(os.getenv("VLLM_ENABLE_COMPILE_CACHE", "1")))
 
 
 def use_aot_compile() -> bool:
@@ -285,9 +285,7 @@ def use_aot_compile() -> bool:
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
-        "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
-        else "0"
+        "1" if is_torch_equal_or_newer("2.10.0.dev") and enable_compile_cache() else "0"
     )
 
     return (
@@ -1047,7 +1045,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
-    "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
+    "VLLM_ENABLE_COMPILE_CACHE": enable_compile_cache,
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`

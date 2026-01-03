@@ -119,8 +119,8 @@ class TorchAOConfig(QuantizationConfig):
         # TODO: remove after the torch dependency is updated to 2.8
         if is_torch_equal_or_newer(
                 "2.7.0") and not is_torch_equal_or_newer("2.8.0.dev"):
-            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-            logger.info("Using TorchAO: Setting VLLM_DISABLE_COMPILE_CACHE=1")
+            os.environ["VLLM_ENABLE_COMPILE_CACHE"] = "0"
+            logger.info("Using TorchAO: Setting VLLM_ENABLE_COMPILE_CACHE=0")
         """
         super().__init__()
         self.torchao_config = torchao_config
