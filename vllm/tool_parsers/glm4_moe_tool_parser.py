@@ -101,7 +101,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 tc_detail = self.func_detail_regex.search(match)
                 tc_name = tc_detail.group(1)
                 tc_args = tc_detail.group(2)
-                pairs = self.func_arg_regex.findall(tc_args)
+                pairs = self.func_arg_regex.findall(tc_args or "")
                 arg_dct = {}
                 for key, value in pairs:
                     arg_key = key.strip()
