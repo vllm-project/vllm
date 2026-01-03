@@ -166,7 +166,7 @@ def get_all_max_shared_mem():
             ]
             for i in range(device_torch_lib.device_count())
         ]
-    except BaseException:
+    except (RuntimeError, AttributeError, TypeError, KeyError):
         return [-1]
 
 
@@ -190,5 +190,5 @@ def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
         device_shared_mem_list = get_all_max_shared_mem()
         max_shared_memory = device_shared_mem_list[tensor_idx]
         return max_shared_memory >= Backend.get_shared_memory(arch)
-    except Exception:
+    except (IndexError, TypeError):
         return False
