@@ -85,6 +85,8 @@ class GrpcRequestManager:
                 arrival_time=arrival_time,
             )
 
+            self.async_llm.input_processor.assign_request_id(engine_request)
+
             collector = RequestOutputCollector(
                 output_kind=sampling_params.output_kind, request_id=request_id
             )
