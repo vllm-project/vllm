@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
 )
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -369,13 +369,10 @@ class Plamo3Model(nn.Module):
         return hidden_states
 
 
-class Plamo3ForCausalLM(nn.Module, SupportsPP):
+class Plamo3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
