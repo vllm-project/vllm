@@ -315,6 +315,7 @@ def create_sampling_params_from_proto(
         if proto_params.HasField("truncate_prompt_tokens")
         else None,
         structured_outputs=structured_outputs,
-        detokenize=False,
-        output_kind=RequestOutputKind.DELTA if stream else RequestOutputKind.CUMULATIVE,
+        # detokenize must be True if stop strings are used (SamplingParams validation)
+        detokenize=bool(stop),
+        output_kind=RequestOutputKind.DELTA if stream else RequestOutputKind.FINAL_ONLY,
     )
