@@ -42,7 +42,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import GiB, MemorySnapshot, memory_profiling
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -239,6 +239,9 @@ class Worker(WorkerBase):
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            msg = f"worker init memory snapshot: {self.init_snapshot!r}"
+            logger.info(msg)
+            logger.info("worker requested memory: %sGiB", GiB(self.requested_memory))
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
@@ -293,7 +296,6 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        GiB = lambda b: b / GiB_bytes
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -467,7 +469,6 @@ class Worker(WorkerBase):
             # CUDAGraph memory size and may not utilize all gpu memory.
             # Users may want fine-grained control to specify kv cache
             # memory size.
-            GiB = lambda b: round(b / GiB_bytes, 2)
 
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
