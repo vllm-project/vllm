@@ -455,6 +455,11 @@ class GPUModelRunner(
         self.num_spec_tokens = 0
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
+            draft_config = self.speculative_config.draft_model_config
+            if draft_config is not None and draft_config.max_model_len is not None:
+                self.effective_drafter_max_model_len = draft_config.max_model_len
+            else:
+                self.effective_drafter_max_model_len = self.max_model_len
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -654,6 +659,13 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
+
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len = max_model_len
+        if self.speculative_config:
+            draft_config = self.speculative_config.draft_model_config
+            if draft_config is None or draft_config.max_model_len is None:
+                self.effective_drafter_max_model_len = self.max_model_len
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -3421,15 +3433,9 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
-            effective_drafter_max_model_len = self.max_model_len
-            if effective_drafter_max_model_len is None:
-                effective_drafter_max_model_len = self.model_config.max_model_len
-            draft_config = spec_config.draft_model_config
-            if draft_config is not None and draft_config.max_model_len is not None:
-                effective_drafter_max_model_len = draft_config.max_model_len
             input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                <= effective_drafter_max_model_len
+                <= self.effective_drafter_max_model_len
             )
             if spec_config.use_eagle() and not spec_config.disable_padded_drafter_batch:
                 # EAGLE speculative decoding can use the GPU sampled tokens
