@@ -80,7 +80,7 @@ class FrontendArgs:
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
-        "debug", "info", "warning", "error", "critical", "trace"
+        "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
