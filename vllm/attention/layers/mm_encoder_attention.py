@@ -134,6 +134,7 @@ class MMEncoderAttention(CustomOp):
             k=key,
             v=value,
             cu_seqlens=cu_seqlens,
+            softmax_scale=self.scale,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
@@ -172,6 +173,7 @@ class MMEncoderAttention(CustomOp):
             batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
             fa_version=self._fa_version,
+            softmax_scale=self.scale,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
