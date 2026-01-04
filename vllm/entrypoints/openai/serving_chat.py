@@ -180,7 +180,6 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             renderer = self.engine_client.renderer
-            tokenizer = renderer.tokenizer
 
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
@@ -196,7 +195,7 @@ class OpenAIServingChat(OpenAIServing):
             # 3. Tokenizer initialization for chat
             await self._preprocess_chat(
                 dummy_request,
-                tokenizer,
+                renderer,
                 dummy_request.messages,
                 chat_template=self.chat_template,
                 chat_template_content_format=self.chat_template_content_format,
