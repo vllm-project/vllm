@@ -318,8 +318,16 @@ def prepare_fp8_moe_layer_for_fi(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     is_trtllm: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Convert Fp8 MoE weights to flashinfer kernel format"""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert Fp8 MoE weights to flashinfer kernel format
+
+    Note that for trtllm we update the model state dict
+    with the scale format needed for these kernels.
+
+    Note that for per-tensor, we update the layer's
+    intermediate size if the weights needed padding.
+    """
 
     assert hasattr(layer.moe_config, "is_act_and_mul")
     assert hasattr(layer, "weight_block_size")
@@ -333,6 +341,7 @@ def prepare_fp8_moe_layer_for_fi(
             w2,
             layer.moe_config.is_act_and_mul,
         )
+        layer.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
     if layer.moe_config.is_act_and_mul:
@@ -347,4 +356,4 @@ def prepare_fp8_moe_layer_for_fi(
         rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
         register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer, w13_scale, w2_scale)
 
-    return w13, w2, w13_scale, new_intermediate
+    return w13, w2, w13_scale

@@ -203,7 +203,7 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
+        w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
             layer,
             w13,
             w2,
