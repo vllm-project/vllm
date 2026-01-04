@@ -63,14 +63,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 DEFAULT_FINAL_IMAGE_SIZE = (2048, 1648)
 
 
-VIT_TIMM_DIM_BY_NAME: dict[str, tuple[int, int, int, int, int]] = {
-    "vit_small_patch16_224": (384, 12, 6, 1536, 224),
-    "vit_base_patch16_224": (768, 12, 12, 3072, 224),
-    "vit_large_patch16_224": (1024, 24, 16, 4096, 224),
-    "vit_huge_patch16_224": (1280, 32, 16, 5120, 224),
-}
-
-
 class BartScaledWordEmbedding(VocabParallelEmbedding):
     """
     This module overrides VocabParallelEmbedding's
@@ -244,6 +236,126 @@ class MBartDecoderLayer(BartDecoderLayer):
         hidden_states = residual + hidden_states
 
         return hidden_states
+
+
+class MBartDecoderNoPos(nn.Module):
+    """
+    Transformer decoder consisting of *config.decoder_layers* layers.
+    Each layer is a [`BartDecoderLayer`]
+    Args:
+        config: BartConfig
+        embed_tokens (nn.Embedding): output embedding
+    """
+
+    def __init__(
+        self,
+        config: BartConfig,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        lora_config: LoRAConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.cache_config = cache_config
+        self.quant_config = quant_config
+        self.lora_config = lora_config
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
+
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
+
+        if embed_tokens is not None:
+            self.embed_tokens.weight = embed_tokens.weight
+
+        self.layers = nn.ModuleList(
+            [
+                MBartDecoderLayer(
+                    config,
+                    cache_config,
+                    quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.decoder_layers)
+            ]
+        )
+
+        self.layernorm_embedding = nn.LayerNorm(config.d_model)
+        self.layer_norm = nn.LayerNorm(config.d_model)
+
+    def forward(
+        self,
+        decoder_input_ids: torch.Tensor,
+        *,
+        encoder_hidden_states: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        r"""
+        Args:
+            decoder_input_ids
+                Indices of *decoder* input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you
+                provide it.
+            encoder_hidden_states:
+                Tensor of encoder output embeddings
+        Returns:
+            Decoder output torch.Tensor
+        """
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(decoder_input_ids)
+
+        hidden_states = self.layernorm_embedding(inputs_embeds)
+
+        # decoder layers
+
+        for decoder_layer in self.layers:
+            hidden_states = decoder_layer(
+                decoder_hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+            )
+
+        hidden_states = self.layer_norm(hidden_states)
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
+            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if name.startswith("embed_positions"):
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class NemotronParsePixelInputs(TensorSchema):
@@ -690,126 +802,6 @@ class RadioWithNeck(nn.Module):
                     default_weight_loader(param, w)
 
         self.model_encoder.load_weights(model_encoder_weights)
-
-
-class MBartDecoderNoPos(nn.Module):
-    """
-    Transformer decoder consisting of *config.decoder_layers* layers.
-    Each layer is a [`BartDecoderLayer`]
-    Args:
-        config: BartConfig
-        embed_tokens (nn.Embedding): output embedding
-    """
-
-    def __init__(
-        self,
-        config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        lora_config: LoRAConfig | None = None,
-        embed_tokens: nn.Embedding | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.lora_config = lora_config
-        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
-
-        self.embed_tokens = BartScaledWordEmbedding(
-            config.vocab_size, config.d_model, embed_scale=embed_scale
-        )
-
-        if embed_tokens is not None:
-            self.embed_tokens.weight = embed_tokens.weight
-
-        self.layers = nn.ModuleList(
-            [
-                MBartDecoderLayer(
-                    config,
-                    cache_config,
-                    quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                )
-                for layer_idx in range(config.decoder_layers)
-            ]
-        )
-
-        self.layernorm_embedding = nn.LayerNorm(config.d_model)
-        self.layer_norm = nn.LayerNorm(config.d_model)
-
-    def forward(
-        self,
-        decoder_input_ids: torch.Tensor,
-        *,
-        encoder_hidden_states: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        r"""
-        Args:
-            decoder_input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            encoder_hidden_states:
-                Tensor of encoder output embeddings
-        Returns:
-            Decoder output torch.Tensor
-        """
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(decoder_input_ids)
-
-        hidden_states = self.layernorm_embedding(inputs_embeds)
-
-        # decoder layers
-
-        for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
-                decoder_hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-            )
-
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
-            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if name.startswith("embed_positions"):
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 @MULTIMODAL_REGISTRY.register_processor(
