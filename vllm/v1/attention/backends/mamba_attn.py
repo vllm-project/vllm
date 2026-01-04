@@ -300,19 +300,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         slot_mapping: torch.Tensor,
     ) -> M:
         new_metadata = copy.copy(metadata)
-        prefix_caching_all_mode = (
-            self.vllm_config.cache_config.mamba_cache_mode == "all"
+        state_indices_t = mamba_get_block_table_tensor(
+            blk_table,
+            metadata.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
         )
-        state_indices_t = (
-            blk_table
-            if prefix_caching_all_mode
-            else mamba_get_block_table_tensor(
-                blk_table,
-                metadata.seq_lens,
-                self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
-            )[:, 0]
-        )
+        if self.vllm_config.cache_config.mamba_cache_mode in ("all", "none"):
+            # Only needs the block that saves the running state
+            state_indices_t = state_indices_t[:, 0]
+
         num_reqs = blk_table.shape[0]
 
         # For CUDA graphs, copy to persistent buffer
