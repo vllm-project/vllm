@@ -549,16 +549,63 @@ class LoRAModelManager:
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
+
+        if not model.loras:
+            raise ValueError(
+                "No layers in the model have LoRA applied. "
+                "It may be caused by incorrect target modules (--lora-target-modules), "
+                "or all modules are excluded (--lora-exclude-modules). "
+                "Please check your settings."
+            )
+
         return model
 
     def _match_target_modules(self, module_name: str):
-        return any(
+        is_supported = any(
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module), module_name
             )
             or target_module == module_name
             for target_module in self.supported_lora_modules
         )
+        if not is_supported:
+            return False
+        return self._check_target_module_exists(self.lora_config, module_name)
+
+    def _check_target_module_exists(self, config: LoRAConfig, key: str) -> bool:
+        """Check if the module name matches target_modules and not exclude_modules."""
+
+        def match_any(patterns: list[str] | str, key: str) -> bool:
+            if isinstance(patterns, str):
+                patterns = [patterns]
+            for p in patterns:
+                # Suffix match
+                if key == p or key.endswith(f".{p}"):
+                    return True
+                # Regex match
+                try:
+                    if re.search(p, key):
+                        return True
+                except re.error:
+                    pass
+            return False
+
+        if config.lora_exclude_modules and match_any(config.lora_exclude_modules, key):
+            logger.debug(
+                "Skipping module %s because it is excluded by lora_exclude_modules.",
+                key,
+            )
+            return False
+
+        if config.lora_target_modules:
+            if not match_any(config.lora_target_modules, key):
+                logger.debug(
+                    "Skipping module %s because it is not in lora_target_modules.", key
+                )
+                return False
+            return True
+
+        return True
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
