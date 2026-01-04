@@ -24,10 +24,8 @@ def cdiv_fn(x, y):
 
 @triton.jit
 def apply_softcap(S, x):
-    Sdiv = S / x
-    p1 = tl.exp(Sdiv)
-    p2 = tl.exp(-Sdiv)
-    return x * (p1 - p2) / (p1 + p2)
+    # Use robust tanh to avoid overflow in exp
+    return x * tl.math.tanh(S / x)
 
 
 @triton.jit
@@ -150,13 +148,17 @@ def kernel_unified_attention_2d(
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
-    USE_FP8: tl.constexpr,  # bool
+    USE_NVFP4_TC: tl.constexpr,  # bool - Use FP8 Tensor Cores
+    USE_FP8: tl.constexpr,  # bool - use fp8 output
     USE_NVFP4: tl.constexpr,  # bool - NVFP4 KV cache mode
+    NUM_SCALES: tl.constexpr,  # int
+    DATA_BYTES: tl.constexpr,  # int
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
+    hg_idx = tl.program_id(2)
 
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
@@ -173,29 +175,32 @@ def kernel_unified_attention_2d(
 
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
-
-    NUM_SCALES: tl.constexpr = HEAD_SIZE // 16
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
-    query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
+    # In HG mode, we compute BLOCK_M heads for a single query token index.
+    # Each row in Q/acc corresponds to one head in the group.
+    q_head = kv_head_idx * num_queries_per_kv + hg_idx * BLOCK_M + offs_m
+    head_mask = q_head < (kv_head_idx * num_queries_per_kv + num_queries_per_kv)
+
+    # Simplified query pos for HG mode: one query token index per program block
+    query_pos = q_block_local_idx * BLOCK_Q
     query_offset_0 = cur_batch_in_all_start_index + query_pos
-    query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
+
     query_offset = (
-        query_offset_0[:, None] * query_stride_0
-        + query_offset_1[:, None] * query_stride_1
+        query_offset_0 * query_stride_0
+        + q_head[:, None] * query_stride_1
         + offs_d[None, :]
     )
 
     dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     Q = tl.load(
         query_ptr + query_offset,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+        mask=dim_mask[None, :] & query_mask_0 & head_mask[:, None],
         other=0.0,
     )
 
@@ -203,15 +208,23 @@ def kernel_unified_attention_2d(
 
     if not USE_SINKS:
         M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+        L = tl.zeros([BLOCK_M], dtype=tl.float32)
     else:
         M = tl.load(
-            sink_ptr + query_offset_1,
-            mask=query_mask_1,
+            sink_ptr + q_head,
+            mask=head_mask,
             other=float("-inf"),
         ).to(dtype=tl.float32)
+        L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
 
-    L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+    # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+
+    # Hoist conversion to reduce layout pressure in the compiler.
+    if USE_NVFP4_TC:
+        Q_fp8 = Q.to(tl.float8e4nv)
+        # Triton 3.6.0 requires lhs_scale shape [M, K//32] for dot_scaled
+        Q_scale = tl.full((BLOCK_M, HEAD_SIZE_PADDED // 32), 127, dtype=tl.uint8)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -221,24 +234,18 @@ def kernel_unified_attention_2d(
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
-        alibi_slope = tl.load(
-            alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
-        )
+        alibi_slope = tl.load(alibi_slopes_ptr + q_head, mask=head_mask, other=0.0)
 
     # query-query attention bias
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = (
-            qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
-        )  # shape: [BLOCK_M]
+            qq_bias_ptr + query_pos * qq_bias_stride_0
+        )  # shape: [BLOCK_M] scalar token index
 
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
-    )
+    # In HG mode, BLOCK_Q is small (usually 1), so this is just context_len + query_pos + 1
+    max_seq_prefix_len = context_len + query_pos + 1
 
     if USE_MM_PREFIX:
         # image bidirectional attention ranges require a full range
@@ -255,25 +262,11 @@ def kernel_unified_attention_2d(
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
     # ---- Sliding-window tile pruning --------------------
-    # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
-    # TODO(Isotr0py): sliding window pruning with image bidirectional mask
     if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
-        # Query rows covered by this Q-block
-        qpos_lo = q_block_local_idx * BLOCK_Q
-        qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
-            cur_batch_query_len - 1,
-        )
-        # For sliding window, each query position q can only attend to
-        # keys in the range [q_abs - SLIDING_WINDOW + 1, q_abs]
-        # where q_abs = context_len + q
-        # The union of allowed key positions for this Q-block is:
-        # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
-        last_allowed_key = context_len + qpos_hi
-        # Convert to tile indices and clamp
+        first_allowed_key = context_len + query_pos - SLIDING_WINDOW + 1
+        last_allowed_key = context_len + query_pos
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
@@ -300,109 +293,124 @@ def kernel_unified_attention_2d(
             + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
         )
 
-        # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
+        if not USE_NVFP4:
+            # K : (HEAD_SIZE, TILE_SIZE)
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+        else:
+            K_load = None
 
         # FP8/NVFP4 dequantization with native tensor core optimization
-        if K_load.dtype.is_fp8():
-            # FP8 native tensor core path: keep K in FP8 for H100 acceleration
-            # Scale is applied after tl.dot to leverage FP8 tensor cores (3958 TFLOPS)
-            K = K_load  # Keep in FP8 format
+        if not USE_NVFP4 and K_load.dtype.is_fp8():
+            K = K_load
         elif USE_NVFP4:
-            # PERFORMANCE OPTIMIZED FP8 TENSOR CORE PATH
-            # We dequantize to FP8 (E4M3fn) instead of BF16 to use H100 hardware matmul.
-            # Shard by physical blocks and heads.
             k_packed_data_offset = (
                 physical_block_idx[None, :] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
                 + (offs_d[:, None] // 2) * stride_k_cache_3
                 + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
             )
-            K_data = tl.load(
+            K_u8 = tl.load(
                 key_cache_ptr + k_packed_data_offset,
                 mask=dim_mask[:, None] & tile_mask[None, :],
                 other=0,
-            )
+            ).to(tl.uint8)
 
-            K_nibble = tl.where((offs_d[:, None] % 2) == 0, K_data & 0xF, K_data >> 4)
-            K = nvfp4_to_fp8_e4m3(K_nibble)  # Dequantize directly to FP8 registers
+            K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
+            K = nvfp4_to_fp8_e4m3(K_nibble)
 
-            # Scales are applied after matmul for FP8 path to maximize TFLOPS.
-            # Load only 8 scales per token (one per 16 dimensions).
-            offs_s = tl.arange(0, NUM_SCALES)
-            k_scale_offset = (
-                physical_block_idx[None, :] * stride_k_cache_0
+            # Load K scales (u8). Triton 3.6.0 requires scales per 32 elements for dot_scaled.
+            # We take the maximum of two 16-element blocks for superior quality.
+            K_NUM_SCALES: tl.constexpr = NUM_SCALES // 2
+            offs_s0 = tl.arange(0, K_NUM_SCALES) * 2
+            offs_s1 = offs_s0 + 1
+
+            k_scale_base = (
+                physical_block_idx[:, None] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
-                + (HEAD_SIZE // 2 + offs_s)[:, None] * stride_k_cache_3
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_k_cache_1
+                + DATA_BYTES * stride_k_cache_3
             )
-            K_scale_u8 = tl.load(
-                key_cache_ptr + k_scale_offset, mask=tile_mask[None, :], other=127
+            k_scale_mask = tl.broadcast_to(
+                tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
-            K_scale_blocks = tl.math.exp2(K_scale_u8.to(tl.float32) - 127.0)
-            # K is now FP8. Dot product will happen using FP8 Tensor Cores.
+
+            s0 = tl.load(
+                key_cache_ptr + k_scale_base + offs_s0[None, :] * stride_k_cache_3,
+                mask=k_scale_mask,
+                other=127,
+            ).to(tl.uint8)
+            s1 = tl.load(
+                key_cache_ptr + k_scale_base + offs_s1[None, :] * stride_k_cache_3,
+                mask=k_scale_mask,
+                other=127,
+            ).to(tl.uint8)
+            K_scale_u8 = tl.maximum(s0, s1)
+
+            if USE_NVFP4_TC:
+                # Triton 3.6.0 requires rhs_scale [N, K // 32] = [32, 4]
+                # Our K_scale_u8 is already [TILE_SIZE, K_NUM_SCALES]
+                K_scale_reduced = K_scale_u8
+            else:
+                K_scale_reduced = K_scale_u8
         else:
             K = K_load
 
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
+        if not USE_NVFP4:
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0.0,
+            )
+        else:
+            V_load = None
 
         # FP8/NVFP4 dequantization for V
-        if V_load.dtype.is_fp8():
-            # FP8: keep V in FP8 format for native tensor cores
+        if not USE_NVFP4 and V_load.dtype.is_fp8():
             V = V_load
         elif USE_NVFP4:
-            # PERFORMANCE OPTIMIZED FP8 TENSOR CORE PATH for V
             v_packed_data_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
                 + (offs_d[None, :] // 2) * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
-            V_data = tl.load(
+            V_u8 = tl.load(
                 value_cache_ptr + v_packed_data_offset,
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0,
-            )
+            ).to(tl.uint8)
 
-            V_nibble = tl.where((offs_d[None, :] % 2) == 0, V_data & 0xF, V_data >> 4)
+            V_nibble = tl.where((offs_d[None, :] & 1) == 0, V_u8 & 0xF, V_u8 >> 4)
             V = nvfp4_to_fp8_e4m3(V_nibble)
 
-            # Load and pre-compute exp2 for 8 scales per token-head.
+            # Load V scales (u8), stored after DATA_BYTES (HEAD_SIZE // 2)
             offs_s = tl.arange(0, NUM_SCALES)
-            v_scale_offset = (
+            v_scale_off = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
-                + (HEAD_SIZE // 2 + offs_s)[None, :] * stride_v_cache_3
+                + (DATA_BYTES + offs_s)[None, :] * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
+            v_scale_mask = tl.broadcast_to(tile_mask[:, None], (TILE_SIZE, NUM_SCALES))
             V_scale_u8 = tl.load(
-                value_cache_ptr + v_scale_offset, mask=tile_mask[:, None], other=127
-            )
-            V_scale_blocks = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0)
-            # V is now FP8. Matmul with P will use FP8 hardware.
+                value_cache_ptr + v_scale_off, mask=v_scale_mask, other=127
+            ).to(tl.uint8)
         else:
             V = V_load
 
         # Compute attention mask: causal by default (key <= query)
-        query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
+        query_abs_pos = context_len + query_pos
+        seq_mask = seq_offset <= query_abs_pos
 
         # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
         if SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
-        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -419,9 +427,7 @@ def kernel_unified_attention_2d(
                     & is_valid
                 )
                 k_in_range = (
-                    (seq_offset[None, :] >= range_start)
-                    & (seq_offset[None, :] <= range_end)
-                    & is_valid
+                    (seq_offset >= range_start) & (seq_offset <= range_end) & is_valid
                 )
                 seq_mask |= q_in_range & k_in_range
 
@@ -429,22 +435,18 @@ def kernel_unified_attention_2d(
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
         # PERFORMANCE OPTIMIZED MATMUL PATHS
-        if USE_NVFP4:
-            # PERFORMANCE NOTE: We dequantize NVFP4 to FP8 and apply scales in F32
-            # then cast back to FP8 to use the 3.9 PFLOPS H100 Tensor Cores.
-            # K_scale_blocks is loaded as (NUM_SCALES, TILE_SIZE)
-            # K is (HEAD_SIZE, TILE_SIZE)
-            K_scale_rep = tl.reshape(
-                tl.broadcast_to(
-                    K_scale_blocks[:, None, :], (NUM_SCALES, 16, TILE_SIZE)
-                ),
-                (HEAD_SIZE, TILE_SIZE),
+        if USE_NVFP4 and USE_NVFP4_TC:
+            S += scale * tl.dot_scaled(
+                Q_fp8,
+                Q_scale,
+                "e4m3",
+                K,
+                K_scale_reduced,
+                "e4m3",
             )
-            # Apply scales to K and convert back to FP8 for matmul
-            K_scaled = (K.to(tl.float32) * K_scale_rep).to(tl.float8e4nv)
-            S += scale * tl.dot(Q.to(tl.float8e4nv), K_scaled)
+        elif USE_NVFP4:
+            S += scale * tl.dot(Q.to(tl.bfloat16), K.to(tl.bfloat16)).to(tl.float32)
         elif K.dtype.is_fp8():
-            # FP8 native tensor core: apply k_scale after matmul for H100 acceleration
             S += scale * tl.load(k_scale) * tl.dot(Q.to(tl.float32), K.to(tl.float32))
         else:
             S += scale * tl.dot(Q, K)
@@ -453,67 +455,46 @@ def kernel_unified_attention_2d(
             S = apply_softcap(S, softcap)
 
         S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
+            query_mask_0 & head_mask[:, None] & seq_mask[None, :], S, float("-inf")
         )
 
         if USE_ALIBI_SLOPES:
-            S += alibi_slope[:, None] * (seq_offset - context_len)
+            S += alibi_slope[:, None] * (seq_offset - context_len)[None, :]
 
         if USE_QQ_BIAS:
-            # compute key positions relative to query section
-            key_rel_pos = seq_offset - context_len  # shape: [BLOCK_SIZE]
-            # load bias only for keys that correspond to queries
-            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
+            key_rel_pos = seq_offset - context_len
+            is_query_key = (key_rel_pos >= 0) & (key_rel_pos < qq_bias_stride_0)
             qq_bias = tl.load(
                 qq_bias_row_ptrs + key_rel_pos[None, :],
-                mask=is_query_key[None, :],  # avoid OOB for context keys
+                mask=is_query_key[None, :],
                 other=0.0,
             )
             S += qq_bias
 
-        # compute running maximum
-        # m_j : (BLOCK_M,)
         m_j = tl.maximum(M, tl.max(S, axis=1))
-
-        # For sliding window there's a chance the max is -inf due to masking of
-        # the entire row. In this case we need to set m_j 0 to avoid NaN
         m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
-
-        # P : (BLOCK_M, TILE_SIZE)
         P = tl.exp(S - m_j[:, None])
-
-        # l_j : (BLOCK_M,)
         l_j = tl.sum(P, axis=1)
-
-        # alpha : (BLOCK_M, )
         alpha = tl.exp(M - m_j)
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         acc = acc * alpha[:, None]
-
-        # update constants
         L = L * alpha + l_j
         M = m_j
 
         if SLIDING_WINDOW:
-            qpos_lo = q_block_local_idx * BLOCK_Q
             V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+                (context_len + query_pos - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
         if USE_NVFP4:
-            # PERFORMANCE NOTE: We applyscales to V and convert to FP8
-            # to use a single large tl.dot and leverage Sm90 Tensor Cores.
+            V_scale_v = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0).to(tl.bfloat16)
             V_scale_full = tl.reshape(
-                tl.broadcast_to(
-                    V_scale_blocks[:, :, None], (TILE_SIZE, NUM_SCALES, 16)
-                ),
-                (TILE_SIZE, HEAD_SIZE),
+                tl.broadcast_to(V_scale_v[:, :, None], (TILE_SIZE, NUM_SCALES, 16)),
+                (TILE_SIZE, HEAD_SIZE_PADDED),
             )
-            V_scaled = (V.to(tl.float32) * V_scale_full).to(tl.float8e4nv)
-            acc += tl.dot(P.to(tl.float8e4nv), V_scaled)
+            V_deq = V.to(tl.bfloat16) * V_scale_full
+            acc += tl.dot(P.to(tl.bfloat16), V_deq).to(tl.float32)
         else:
-            # acc : (BLOCK_M, HEAD_SIZE_PADDED)
             acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
@@ -523,15 +504,15 @@ def kernel_unified_attention_2d(
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (
-        query_offset_0[:, None] * output_stride_0
-        + query_offset_1[:, None] * output_stride_1
+        query_offset_0 * output_stride_0
+        + q_head[:, None] * output_stride_1
         + offs_d[None, :]
     )
 
     tl.store(
         output_ptr + output_offset,
         acc,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+        mask=dim_mask[None, :] & query_mask_0 & head_mask[:, None],
     )
 
 
@@ -581,14 +562,23 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+    USE_NVFP4_TC: tl.constexpr,  # bool
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
+    USE_FP8: tl.constexpr,  # bool - use fp8 output
     USE_NVFP4: tl.constexpr,  # bool - NVFP4 KV cache mode
+    NUM_SCALES: tl.constexpr,  # int
+    DATA_BYTES: tl.constexpr,  # int
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
-    segm_idx = tl.program_id(2)
+    # Pack (segm_idx, hg_idx) into pid(2) to overcome Triton's 3-axis limit.
+    # HG is calculated as (num_queries_per_kv + BLOCK_M - 1) // BLOCK_M
+    HG = (num_queries_per_kv + BLOCK_M - 1) // BLOCK_M
+    pid2 = tl.program_id(2)
+    segm_idx = pid2 // HG
+    hg_idx = pid2 % HG
 
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
@@ -609,6 +599,8 @@ def kernel_unified_attention_3d(
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
+    # NVFP4 constants (Define once at top level to avoid constexpr reassignment in loops)
+
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
     tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
@@ -616,28 +608,31 @@ def kernel_unified_attention_3d(
     if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
         return
 
-    NUM_SCALES: tl.constexpr = HEAD_SIZE // 16
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
-    query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
+    # In HG mode, we compute BLOCK_M heads for a single query token index.
+    q_head = kv_head_idx * num_queries_per_kv + hg_idx * BLOCK_M + offs_m
+    head_mask = q_head < (kv_head_idx * num_queries_per_kv + num_queries_per_kv)
+
+    # Simplified query pos for HG mode: one query token index per program block
+    query_pos = q_block_local_idx * BLOCK_Q
     query_offset_0 = cur_batch_in_all_start_index + query_pos
-    query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
+
     query_offset = (
-        query_offset_0[:, None] * query_stride_0
-        + query_offset_1[:, None] * query_stride_1
+        query_offset_0 * query_stride_0
+        + q_head[:, None] * query_stride_1
         + offs_d[None, :]
     )
 
     dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     Q = tl.load(
         query_ptr + query_offset,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+        mask=dim_mask[None, :] & query_mask_0 & head_mask[:, None],
         other=0.0,
     )
 
@@ -646,41 +641,42 @@ def kernel_unified_attention_3d(
     if USE_SINKS:
         if segm_idx == 0:
             M = tl.load(
-                sink_ptr + query_offset_1,
-                mask=query_mask_1,
+                sink_ptr + q_head,
+                mask=head_mask,
                 other=float("-inf"),
             ).to(dtype=tl.float32)
+            L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
         else:
             M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+            L = tl.zeros([BLOCK_M], dtype=tl.float32)
     else:
         M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+        L = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+    # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+
+    # Hoist conversion to reduce layout pressure in the compiler.
+    if USE_NVFP4_TC:
+        Q_fp8 = Q.to(tl.float8e4nv)
+        # Triton 3.6.0 requires lhs_scale shape [M, K//32] for dot_scaled
+        Q_scale = tl.full((BLOCK_M, HEAD_SIZE_PADDED // 32), 127, dtype=tl.uint8)
 
     # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
-        alibi_slope = tl.load(
-            alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
-        )
+        alibi_slope = tl.load(alibi_slopes_ptr + q_head, mask=head_mask, other=0.0)
 
     # query-query attention bias
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = (
-            qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
-        )  # shape: [BLOCK_M]
+            qq_bias_ptr + query_pos * qq_bias_stride_0
+        )  # shape: [BLOCK_M] scalar token index
 
     # compute the length of the longest sequence prefix spanned by any
-    # query token in the current q_block (q_block_local_idx)
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
-    )
+    max_seq_prefix_len = context_len + query_pos + 1
 
     # adjust for potential padding in the last q_block by considering the
     # actual sequence length
@@ -694,7 +690,7 @@ def kernel_unified_attention_3d(
     # iterate through tiles within current segment
     for j in range(
         segm_idx * tiles_per_segment,
-        min((segm_idx + 1) * tiles_per_segment, num_tiles),
+        tl.minimum((segm_idx + 1) * tiles_per_segment, num_tiles),
     ):
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
@@ -713,123 +709,120 @@ def kernel_unified_attention_3d(
         k_offset = (
             physical_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
+            + (offs_d[:, None]) * stride_k_cache_3
             + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
         )
 
-        # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
-
-        # FP8/NVFP4 dequantization with native tensor core optimization
-        if K_load.dtype.is_fp8():
-            # FP8 native tensor core path: keep K in FP8 for H100 acceleration
-            K = K_load  # Keep in FP8 format
+        if not USE_NVFP4:
+            # K : (HEAD_SIZE, TILE_SIZE)
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+            K = K_load[:HEAD_SIZE, :] if HEAD_SIZE_PADDED > HEAD_SIZE else K_load
         elif USE_NVFP4:
-            # NVFP4 E2M1 dequantization: unpack nibbles and apply LUT
-            # Data indexing fix: use offs_d // 2 because 2 elements per byte
             k_packed_data_offset = (
                 physical_block_idx[None, :] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
                 + (offs_d[:, None] // 2) * stride_k_cache_3
                 + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
             )
-            K_data = tl.load(
+            K_u8 = tl.load(
                 key_cache_ptr + k_packed_data_offset,
                 mask=dim_mask[:, None] & tile_mask[None, :],
                 other=0,
-            )
-            K_nibble = tl.where((offs_d[:, None] % 2) == 0, K_data & 0xF, K_data >> 4)
-            K_unscaled = nvfp4_to_fp8_e4m3(K_nibble)
+            ).to(tl.uint8)
 
-            # Load scales (1 scale per 16 elements, stored after packed data)
-            offs_s = tl.arange(0, NUM_SCALES)
-            k_scale_offset = (
-                physical_block_idx[None, :] * stride_k_cache_0
+            K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
+            K = nvfp4_to_fp8_e4m3(K_nibble)
+
+            # Load K scales (u8). Triton 3.6.0 requires scales per 32 elements for dot_scaled.
+            # We take the maximum of two 16-element blocks for superior quality.
+            K_NUM_SCALES: tl.constexpr = NUM_SCALES // 2
+            offs_s0 = tl.arange(0, K_NUM_SCALES) * 2
+            offs_s1 = offs_s0 + 1
+
+            k_scale_base = (
+                physical_block_idx[:, None] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
-                + (HEAD_SIZE // 2 + offs_s)[:, None] * stride_k_cache_3
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_k_cache_1
+                + DATA_BYTES * stride_k_cache_3
             )
-            K_scale_u8 = tl.load(
-                key_cache_ptr + k_scale_offset, mask=tile_mask[None, :], other=0
+            k_scale_mask = tl.broadcast_to(
+                tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
-            K_scale_blocks = tl.math.exp2(K_scale_u8.to(tl.float32) - 127.0)
-            K_scale_rep = tl.reshape(
-                tl.broadcast_to(
-                    K_scale_blocks[:, None, :], (NUM_SCALES, 16, TILE_SIZE)
-                ),
-                (HEAD_SIZE, TILE_SIZE),
-            )
-            # Apply scales to K (if padded, truncated below by mask)
-            K = (K_unscaled.to(tl.float32) * K_scale_rep).to(Q.dtype)
-        else:
-            K = K_load[:HEAD_SIZE, :] if HEAD_SIZE_PADDED > HEAD_SIZE else K_load
 
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
+            s0 = tl.load(
+                key_cache_ptr + k_scale_base + offs_s0[None, :] * stride_k_cache_3,
+                mask=k_scale_mask,
+                other=127,
+            ).to(tl.uint8)
+            s1 = tl.load(
+                key_cache_ptr + k_scale_base + offs_s1[None, :] * stride_k_cache_3,
+                mask=k_scale_mask,
+                other=127,
+            ).to(tl.uint8)
+            K_scale_u8 = tl.maximum(s0, s1)
+
+            if USE_NVFP4_TC:
+                # Triton 3.6.0 requires rhs_scale [N, K // 32]
+                K_scale_reduced = K_scale_u8
+            else:
+                K_scale_reduced = K_scale_u8
+
+        if not USE_NVFP4:
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0.0,
+            )
+        else:
+            V_load = None
 
         # FP8/NVFP4 dequantization for V
-        if V_load.dtype.is_fp8():
-            # FP8: keep V in FP8 format for native tensor cores
+        if not USE_NVFP4 and V_load.dtype.is_fp8():
             V = V_load
         elif USE_NVFP4:
-            # NVFP4 E2M1 dequantization for V
-            # Data indexing fix: use offs_d // 2
             v_packed_data_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
                 + (offs_d[None, :] // 2) * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
-            V_data = tl.load(
+            V_u8 = tl.load(
                 value_cache_ptr + v_packed_data_offset,
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0,
-            )
-            V_nibble = tl.where((offs_d[None, :] % 2) == 0, V_data & 0xF, V_data >> 4)
-            V_unscaled = nvfp4_to_fp8_e4m3(V_nibble)
+            ).to(tl.uint8)
 
-            # Load scales (1 scale per 16 elements)
+            V_nibble = tl.where((offs_d[None, :] & 1) == 0, V_u8 & 0xF, V_u8 >> 4)
+            V = nvfp4_to_fp8_e4m3(V_nibble)
+
+            # Load V scales (u8), stored after DATA_BYTES (HEAD_SIZE // 2)
             offs_s = tl.arange(0, NUM_SCALES)
-            v_scale_offset = (
+            v_scale_off = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
-                + (HEAD_SIZE // 2 + offs_s)[None, :] * stride_v_cache_3
+                + (DATA_BYTES + offs_s)[None, :] * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
+            v_scale_mask = tl.broadcast_to(tile_mask[:, None], (TILE_SIZE, NUM_SCALES))
             V_scale_u8 = tl.load(
-                value_cache_ptr + v_scale_offset, mask=tile_mask[:, None], other=0
-            )
-            V_scale_blocks = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0)
-            V_scale_rep = tl.reshape(
-                tl.broadcast_to(
-                    V_scale_blocks[:, :, None], (TILE_SIZE, NUM_SCALES, 16)
-                ),
-                (TILE_SIZE, HEAD_SIZE),
-            )
-            # Apply scales to V
-            V = (V_unscaled.to(tl.float32) * V_scale_rep).to(Q.dtype)
+                value_cache_ptr + v_scale_off, mask=v_scale_mask, other=127
+            ).to(tl.uint8)
         else:
             V = V_load[:, :HEAD_SIZE] if HEAD_SIZE_PADDED > HEAD_SIZE else V_load
 
         # Compute attention mask: causal by default (key <= query)
-        query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
+        query_abs_pos = context_len + query_pos
+        seq_mask = seq_offset <= query_abs_pos
 
         # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
         if SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
-        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -846,16 +839,26 @@ def kernel_unified_attention_3d(
                     & is_valid
                 )
                 k_in_range = (
-                    (seq_offset[None, :] >= range_start)
-                    & (seq_offset[None, :] <= range_end)
-                    & is_valid
+                    (seq_offset >= range_start) & (seq_offset <= range_end) & is_valid
                 )
                 seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        # FP8 native tensor core: apply k_scale after matmul for H100 acceleration
-        if K.dtype.is_fp8():
+
+        # PERFORMANCE OPTIMIZED MATMUL PATHS (3D)
+        if USE_NVFP4 and USE_NVFP4_TC:
+            S += scale * tl.dot_scaled(
+                Q_fp8,
+                Q_scale,
+                "e4m3",
+                K,
+                K_scale_reduced,
+                "e4m3",
+            )
+        elif USE_NVFP4:
+            S += scale * tl.dot(Q.to(tl.bfloat16), K.to(tl.bfloat16)).to(tl.float32)
+        elif K.dtype.is_fp8():
             S += scale * tl.load(k_scale) * tl.dot(Q.to(tl.float32), K.to(tl.float32))
         else:
             S += scale * tl.dot(Q, K)
@@ -864,76 +867,67 @@ def kernel_unified_attention_3d(
             S = apply_softcap(S, softcap)
 
         S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
+            head_mask[:, None] & query_mask_0 & seq_mask[None, :], S, float("-inf")
         )
 
         if USE_ALIBI_SLOPES:
-            S += alibi_slope[:, None] * (seq_offset - context_len)
+            S += alibi_slope[:, None] * (seq_offset - context_len)[None, :]
 
         if USE_QQ_BIAS:
-            # compute key positions relative to query section
-            key_rel_pos = seq_offset - context_len  # shape: [BLOCK_SIZE]
-            # load bias only for keys that correspond to queries
-            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
+            key_rel_pos = seq_offset - context_len
+            is_query_key = (key_rel_pos >= 0) & (key_rel_pos < qq_bias_stride_0)
             qq_bias = tl.load(
                 qq_bias_row_ptrs + key_rel_pos[None, :],
-                mask=is_query_key[None, :],  # avoid OOB for context keys
+                mask=is_query_key[None, :],
                 other=0.0,
             )
             S += qq_bias
 
-        # compute running maximum
-        # m_j : (BLOCK_M,)
         m_j = tl.maximum(M, tl.max(S, axis=1))
-
-        # For sliding window there's a chance the max is -inf due to masking of
-        # the entire row. In this case we need to set m_j 0 to avoid NaN
         m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
-
-        # P : (BLOCK_M, TILE_SIZE,)
         P = tl.exp(S - m_j[:, None])
-
-        # l_j : (BLOCK_M,)
         l_j = tl.sum(P, axis=1)
-
-        # alpha : (BLOCK_M, )
         alpha = tl.exp(M - m_j)
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         acc = acc * alpha[:, None]
-
-        # update constants
         L = L * alpha + l_j
         M = m_j
 
         if SLIDING_WINDOW:
-            qpos_lo = q_block_local_idx * BLOCK_Q
             V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+                (context_len + query_pos - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        if USE_NVFP4:
+            V_scale_v = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0).to(tl.bfloat16)
+            V_scale_full = tl.reshape(
+                tl.broadcast_to(V_scale_v[:, :, None], (TILE_SIZE, NUM_SCALES, 16)),
+                (TILE_SIZE, HEAD_SIZE_PADDED),
+            )
+            V_deq = V.to(tl.bfloat16) * V_scale_full
+            acc += tl.dot(P.to(tl.bfloat16), V_deq).to(tl.float32)
+        else:
+            acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
-        query_offset_0[:, None].to(tl.int64)
+        query_offset_0.to(tl.int64)
         * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        + q_head[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
         + segm_idx * HEAD_SIZE_PADDED
         + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
     )
     tl.store(
         segm_output_ptr + segm_output_offset,
         acc,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+        mask=dim_mask[None, :] & query_mask_0 & head_mask[:, None],
     )
     segm_offset = (
         query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-        + query_offset_1 * NUM_SEGMENTS_PER_SEQ
+        + q_head * NUM_SEGMENTS_PER_SEQ
         + segm_idx
     )
-    tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
-    tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & query_mask_1)
+    tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & head_mask)
+    tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & head_mask)
 
 
 @triton.jit
@@ -1055,7 +1049,7 @@ def _get_tile_size(
     # Default behavior
     if is_prefill:
         return 32
-    return 16 if element_size >= 2 else 32
+    return 32 if element_size == 1 else 16  # elements_size == 1 for fp8/nvfp4
 
 
 def unified_attention(
@@ -1148,10 +1142,21 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    # Keep BLOCK_M bounded; large BLOCK_M triggers Triton FP8 dot_scaled layout crash on SM90.
+    # We use HG (head-groups) to cover all query heads with small BLOCK_M.
+    BLOCK_M = 16 if num_queries_per_kv <= 16 else 32
+    HG = (num_queries_per_kv + BLOCK_M - 1) // BLOCK_M
+    BLOCK_Q = (
+        1  # One query token index per program block for stable decode-heavy workloads
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    head_size_padded = triton.next_power_of_2(head_size)
+    num_scales = head_size_padded // 16
+    data_bytes = head_size_padded // 2
+
+    # Enable FP8 dot_scaled only in safe M regime.
+    # (On your Triton build, BLOCK_M=128 triggers convert_layout crash.)
+    use_nvfp4_tc = bool(use_nvfp4) and (BLOCK_M <= 32)
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -1167,18 +1172,25 @@ def unified_attention(
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
-    TILE_SIZE_PREFILL = _get_tile_size(
-        head_size,
-        sliding_window_val,
-        q.element_size(),
-        is_prefill=True,
-    )
-    TILE_SIZE_DECODE = _get_tile_size(
-        head_size,
-        sliding_window_val,
-        q.element_size(),
-        is_prefill=False,
-    )
+    # Tile sizes for prefill and decode. Gemma3 models use optimized values.
+    # Note: tile size must be at least 32 for fp8 (element_size == 1).
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    if use_nvfp4:
+        TILE_SIZE_PREFILL = 32
+        TILE_SIZE_DECODE = 32
+    else:
+        TILE_SIZE_PREFILL = _get_tile_size(
+            head_size,
+            sliding_window_val,
+            q.element_size(),
+            is_prefill=True,
+        )
+        TILE_SIZE_DECODE = _get_tile_size(
+            head_size,
+            sliding_window_val,
+            q.element_size(),
+            is_prefill=False,
+        )
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
@@ -1197,6 +1209,7 @@ def unified_attention(
             (
                 total_num_q_blocks,
                 num_kv_heads,
+                HG,
             )
         ](
             output_ptr=out,
@@ -1245,12 +1258,15 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            USE_NVFP4_TC=use_nvfp4_tc,
             USE_FP8=output_scale is not None,
             USE_NVFP4=use_nvfp4,
+            NUM_SCALES=num_scales,
+            DATA_BYTES=data_bytes,
         )
     else:
         kernel_unified_attention_3d[
-            (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+            (total_num_q_blocks, num_kv_heads, num_par_softmax_segments * HG)
         ](
             segm_output_ptr=softmax_segm_output,
             segm_max_ptr=softmax_segm_max,
@@ -1298,7 +1314,11 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            USE_NVFP4_TC=use_nvfp4_tc,
             USE_NVFP4=use_nvfp4,
+            USE_FP8=output_scale is not None,
+            NUM_SCALES=num_scales,
+            DATA_BYTES=data_bytes,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
