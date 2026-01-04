@@ -181,25 +181,29 @@ def _validate_truncation_size(
     max_model_len: int,
     truncate_prompt_tokens: int | None,
     tokenization_kwargs: dict[str, Any] | None = None,
-) -> int | None:
-    if truncate_prompt_tokens is not None:
-        if truncate_prompt_tokens <= -1:
-            truncate_prompt_tokens = max_model_len
+) -> int:
+    """
+    Normalize and enforce truncation settings.
 
-        if truncate_prompt_tokens > max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size."
-            )
+    - Always enables truncation and sets `max_length`.
+    - Defaults to `max_model_len + 1` when caller did not specify a value.
+    - Negative values map to `max_model_len`.
+    - Raises if user-specified value exceeds `max_model_len`.
+    """
+    if truncate_prompt_tokens is None:
+        truncate_prompt_tokens = max_model_len + 1
+    elif truncate_prompt_tokens <= -1:
+        truncate_prompt_tokens = max_model_len
+    elif truncate_prompt_tokens > max_model_len:
+        raise ValueError(
+            f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+            f"is greater than max_model_len ({max_model_len})."
+            f" Please, select a smaller truncation size."
+        )
 
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-    else:
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = False
+    if tokenization_kwargs is not None:
+        tokenization_kwargs["truncation"] = True
+        tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
     return truncate_prompt_tokens
 

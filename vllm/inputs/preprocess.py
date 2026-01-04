@@ -215,7 +215,7 @@ class InputPreprocessor:
     def _get_tokenization_kw(
         self,
         overrides: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         kwargs = dict[str, Any]()
 
         if self.model_config.is_encoder_decoder:
@@ -227,7 +227,11 @@ class InputPreprocessor:
         if overrides:
             kwargs.update(overrides)
 
-        return kwargs
+        kwargs, has_user_truncation = apply_default_truncation(
+            kwargs, self.model_config
+        )
+
+        return kwargs, has_user_truncation
 
     def _tokenize_prompt(
         self,
@@ -239,10 +243,8 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer()
-        tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
-
-        tokenization_kwargs, has_user_truncation = apply_default_truncation(
-            tokenization_kwargs, self.model_config
+        tokenization_kwargs, has_user_truncation = self._get_tokenization_kw(
+            tokenization_kwargs
         )
 
         encoder_config = self.model_config.encoder_config

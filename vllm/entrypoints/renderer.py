@@ -13,6 +13,7 @@ from pydantic import Field
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
@@ -41,15 +42,12 @@ class RenderConfig:
     needs_detokenization: bool | None = False
     """If True, detokenize IDs back to text for inclusion in outputs."""
 
-    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int | None:
+    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int:
         """Validate and normalize `truncate_prompt_tokens` parameter."""
         truncate_prompt_tokens = self.truncate_prompt_tokens
-        if truncate_prompt_tokens is None or truncate_prompt_tokens == 0:
-            return truncate_prompt_tokens
-
-        if truncate_prompt_tokens < 0:
-            truncate_prompt_tokens = model_config.max_model_len
-
+        truncate_prompt_tokens = _validate_truncation_size(
+            model_config.max_model_len, truncate_prompt_tokens
+        )
         max_length = self.max_length
         if max_length is not None and truncate_prompt_tokens > max_length:  # type: ignore[operator]
             raise ValueError(
@@ -329,15 +327,12 @@ class CompletionRenderer(BaseRenderer):
             text = text.lower()
 
         # Tokenize texts
-        if truncate_prompt_tokens is None:
-            encoded = await async_tokenizer(text, add_special_tokens=add_special_tokens)
-        else:
-            encoded = await async_tokenizer(
-                text,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=truncate_prompt_tokens,
-            )
+        tokenization_kwargs = {"add_special_tokens": add_special_tokens}
+        truncate_prompt_tokens = _validate_truncation_size(
+            self.model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
+        )
+
+        encoded = await async_tokenizer(text, **tokenization_kwargs)
 
         return self._create_tokens_prompt(
             encoded.input_ids, max_length, cache_salt, text
@@ -352,6 +347,9 @@ class CompletionRenderer(BaseRenderer):
         needs_detokenization: bool | None = False,
     ) -> TokensPrompt:
         """Optionally detokenize token IDs and build a tokens prompt."""
+        truncate_prompt_tokens = _validate_truncation_size(
+            self.model_config.max_model_len, truncate_prompt_tokens
+        )
         token_ids = self._maybe_apply_truncation(token_ids, truncate_prompt_tokens)
 
         prompt = None

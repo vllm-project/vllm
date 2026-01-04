@@ -93,7 +93,6 @@ from vllm.inputs.parse import (
     get_prompt_components,
     is_explicit_encoder_decoder_prompt,
 )
-from vllm.inputs.preprocess import apply_default_truncation
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -954,30 +953,13 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
-        # When explicitly set to 0 or False, honor the caller and skip truncation
-        disable_truncation = (
-            truncate_prompt_tokens == 0 or truncate_prompt_tokens is False
-        )
 
         tokenizer_kwargs: dict[str, bool | int] = {
-            "add_special_tokens": add_special_tokens,
+            "add_special_tokens": add_special_tokens
         }
-
-        if disable_truncation:
-            tokenizer_kwargs["truncation"] = False
-        elif truncate_prompt_tokens is None:
-            # Default path applies a safety cap to avoid runaway tokenization on huge
-            # prompts; reuse the shared truncation helper so the default stays aligned
-            # with InputPreprocessor._tokenize_prompt.
-            tokenizer_kwargs, _ = apply_default_truncation(
-                tokenizer_kwargs, self.model_config
-            )
-        elif truncate_prompt_tokens < 0:
-            tokenizer_kwargs["truncation"] = True
-            tokenizer_kwargs["max_length"] = self.max_model_len
-        else:
-            tokenizer_kwargs["truncation"] = True
-            tokenizer_kwargs["max_length"] = truncate_prompt_tokens
+        truncate_prompt_tokens = _validate_truncation_size(
+            self.max_model_len, truncate_prompt_tokens, tokenizer_kwargs
+        )
 
         encoded = await async_tokenizer(prompt, **tokenizer_kwargs)
 
