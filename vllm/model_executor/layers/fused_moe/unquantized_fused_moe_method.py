@@ -204,16 +204,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         # Padding the weight for better performance on ROCm
-        layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
-        layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
+        layer.w13_weight.data.copy_(self._maybe_pad_weight(layer.w13_weight.data))
+        layer.w2_weight.data.copy_(self._maybe_pad_weight(layer.w2_weight.data))
 
         if self.rocm_aiter_moe_enabled:
             shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
-            layer.w13_weight.data = shuffled_w13
-            layer.w2_weight.data = shuffled_w2
+            layer.w13_weight.data.copy_(shuffled_w13)
+            layer.w2_weight.data.copy_(shuffled_w2)
 
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
