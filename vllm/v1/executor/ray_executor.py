@@ -265,6 +265,7 @@ class RayDistributedExecutor(Executor):
         rerank_mapping = {
             item.created_rank: item.adjusted_rank for item in sorted_worker_metadata
         }
+        logger.debug("rerank_mapping: %s", rerank_mapping)
         self.collective_rpc("adjust_rank", args=(rerank_mapping,))
 
         # Get the set of GPU IDs used on each node.
