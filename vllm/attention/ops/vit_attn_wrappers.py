@@ -67,11 +67,11 @@ def flash_attn_maxseqlen_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
     fa_version: int | None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
