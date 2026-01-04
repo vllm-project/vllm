@@ -198,9 +198,11 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
             flashinfer_moe_backend == "latency"
             and not current_platform.is_device_capability_family(100)
         ):
+            # TRTLLM MOE backend only supports SM100/SM103 (B100/B200),
+            # NOT SM120/SM121 (GB10 DGX Spark). Fall back to CUTLASS.
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
-                "SM100 and later, using CUTLASS backend instead",
+                "SM100/SM103, using CUTLASS backend instead",
                 scope="local",
             )
             return FlashinferMoeBackend.CUTLASS
