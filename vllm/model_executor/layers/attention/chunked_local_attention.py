@@ -266,6 +266,11 @@ def create_chunked_local_attention_backend(
                 device=device,
             )
 
+            # Pinned memory buffer for async GPU->CPU copy of cu_virtual_seqlens_q
+            self._cu_virtual_seqlens_q_cpu = torch.zeros(
+                num_vb_ub + 1, dtype=torch.int32, pin_memory=True
+            )
+
         @classmethod
         def get_cudagraph_support(
             cls: type["AttentionMetadataBuilder"],
@@ -330,12 +335,38 @@ def create_chunked_local_attention_backend(
             total_tokens = int(query_start_loc_cpu[-1])
             self._cu_virtual_seqlens_q[num_vb_ub + 1 :].fill_(total_tokens)
 
+            # Compute query_start_loc_cpu for virtual batches.
+            # We handle two cases differently to avoid CPU<>GPU sync:
+            #
+            # 1. Uniform single token decode case (max_q_len == 1):
+            #    Each request has exactly 1 query token, which means each request
+            #    produces exactly 1 virtual batch. Therefore num_vb == batch_size
+            #    and cu_virtual_seqlens = [0, 1, 2, ..., batch_size], which is
+            #    identical to the input query_start_loc_cpu. We can reuse it.
+            #
+            # 2. Spec-decode / Prefill case (max_q_len > 1):
+            #    Requests have varying query lengths and may span multiple chunks,
+            #    so we don't know the virtual batch boundaries without running the
+            #    Triton kernel. We use a non-blocking copy from GPU to pinned CPU
+            #    memory so backends like FlashAttn (which don't use query_start_loc_cpu)
+            #    can continue building metadata asynchronously.
+            max_q_len = common_attn_metadata.max_query_len
+            if max_q_len == 1:
+                # Uniform single token decode: reuse input cu_seqlens directly
+                cu_virtual_seqlens_q_cpu = query_start_loc_cpu
+            else:
+                # Spec-decode / Prefill: async copy to pinned memory
+                self._cu_virtual_seqlens_q_cpu[: num_vb_ub + 1].copy_(
+                    self._cu_virtual_seqlens_q[: num_vb_ub + 1], non_blocking=True
+                )
+                cu_virtual_seqlens_q_cpu = self._cu_virtual_seqlens_q_cpu[
+                    : num_vb_ub + 1
+                ]
+
             # Use dynamically sized tensors (sliced to actual virtual batch count)
-            # NOTE: We pass the GPU tensor for query_start_loc_cpu since
-            # FlashAttention doesn't use it. This avoids a CPU<>GPU sync.
             cm = CommonAttentionMetadata(
                 query_start_loc=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
-                query_start_loc_cpu=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
+                query_start_loc_cpu=cu_virtual_seqlens_q_cpu,
                 seq_lens=self._virtual_seqlens[:num_vb_ub],
                 num_reqs=num_vb_ub,
                 num_actual_tokens=common_attn_metadata.num_actual_tokens,
