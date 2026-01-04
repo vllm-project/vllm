@@ -1249,7 +1249,8 @@ def get_dcp_local_seq_lens(
 
 
 def mamba_get_block_table_tensor(
-    common_attn_metadata: CommonAttentionMetadata,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
     kv_cache_spec: MambaSpec,
     mamba_cache_mode: str,
 ) -> torch.Tensor:
@@ -1268,18 +1269,17 @@ def mamba_get_block_table_tensor(
                1 + num_speculative_blocks of each request.
     """
     if mamba_cache_mode in ("all", "none"):
-        return common_attn_metadata.block_table_tensor
+        return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
-        block_table_tensor = common_attn_metadata.block_table_tensor
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
         start_indices = torch.clamp(
-            (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size,
+            (seq_lens - 1) // kv_cache_spec.block_size,
             min=0,
         )
         offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks, device=block_table_tensor.device
+            1 + kv_cache_spec.num_speculative_blocks, device=block_table.device
         )
         indices_to_gather = start_indices.unsqueeze(1) + offsets
-        return torch.gather(block_table_tensor, 1, indices_to_gather)
+        return torch.gather(block_table, 1, indices_to_gather)

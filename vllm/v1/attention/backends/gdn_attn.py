@@ -150,7 +150,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         block_table_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata,
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )

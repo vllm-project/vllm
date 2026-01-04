@@ -59,7 +59,8 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         seq_lens = common_attn_metadata.seq_lens
 
         state_indices_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata,
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )[:, 0]

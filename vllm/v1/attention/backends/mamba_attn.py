@@ -211,7 +211,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         else:
             # Always return just a single block per each request:
             state_indices_tensor = mamba_get_block_table_tensor(
-                common_attn_metadata,
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )[:, 0]
@@ -302,7 +303,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             blk_table
             if prefix_caching_all_mode
             else mamba_get_block_table_tensor(
-                common_metadata,
+                blk_table,
+                common_metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )[:, 0]
