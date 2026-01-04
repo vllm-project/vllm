@@ -11,46 +11,49 @@ from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .cutlass import CutlassScaledMMLinearKernel
+from .ScaledMMLinearKernel import (
+    Int8ScaledMMLinearLayerConfig,
+)
 
 
-class TritonScaledMMLinearKernel(ScaledMMLinearKernel):
+class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
     @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
         if current_platform.is_cuda_alike():
             return True, None
-        return False, "Requires ROCm or CUDA."
+        return False, "ROCm or CUDA"
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "Only symmetric input is supported."
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = getattr(layer, self.w_q_name)
+        w_q, _, i_s, _, _ = self._get_layer_params(layer)
+        w_q_name, _, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
+
         replace_parameter(
             layer,
-            self.w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False),
+            w_q_name,
+            torch.nn.Parameter(w_q.t().data, requires_grad=False),
         )
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
-            input_scale = getattr(layer, self.i_s_name)
+            assert i_s is not None
             replace_parameter(
                 layer,
-                self.i_s_name,
-                torch.nn.Parameter(input_scale.max(), requires_grad=False),
+                i_s_name,
+                torch.nn.Parameter(i_s.max(), requires_grad=False),
             )
-            setattr(layer, self.i_zp_name, None)
+            setattr(layer, i_zp_name, None)
         else:
-            setattr(layer, self.i_s_name, None)
-            setattr(layer, self.i_zp_name, None)
+            setattr(layer, i_s_name, None)
+            setattr(layer, i_zp_name, None)
 
-        setattr(layer, self.azp_adj_name, None)
+        setattr(layer, azp_adj_name, None)
 
     def apply_weights(
         self,
@@ -58,7 +61,7 @@ class TritonScaledMMLinearKernel(ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
+        w_q, w_s, i_s, i_zp, _ = self._get_layer_params(layer)
 
         x_q, x_s, x_zp = ops.scaled_int8_quant(
             x.contiguous(), i_s, i_zp, symmetric=True

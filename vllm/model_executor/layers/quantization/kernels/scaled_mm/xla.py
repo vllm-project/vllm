@@ -12,23 +12,21 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+)
 
 
-class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
+class XLAScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
+    def is_platform_supported(cls) -> tuple[bool, str | None]:
         if not current_platform.is_tpu():
-            return False, "Requires TPU."
+            return False, "TPU"
         return True, None
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_tpu():
-            return False, "ScaledMMXLA requires running on TPU."
-
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if c.is_static_input_scheme:
             return False, "ScaledMMXLA requires dynamic activation scales."
 
@@ -43,9 +41,10 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
-        weight = getattr(layer, self.w_q_name)
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
+        weight = getattr(layer, w_q_name)
         replace_parameter(
-            layer, self.w_q_name, torch.nn.Parameter(weight.data, requires_grad=False)
+            layer, w_q_name, torch.nn.Parameter(weight.data, requires_grad=False)
         )
 
         # WEIGHT SCALE
@@ -53,7 +52,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # If we have a fused module (QKV, MLP) with per tensor scales (thus N
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, self.w_s_name)
+        weight_scale = getattr(layer, w_s_name)
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
 
@@ -61,14 +60,14 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         weight_scale = weight_scale.squeeze(-1)
         replace_parameter(
             layer,
-            self.w_s_name,
+            w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False),
         )
 
         # Only support symmetric dynamic activation quantization.
-        setattr(layer, self.i_s_name, None)
-        setattr(layer, self.i_zp_name, None)
-        setattr(layer, self.azp_adj_name, None)
+        setattr(layer, i_s_name, None)
+        setattr(layer, i_zp_name, None)
+        setattr(layer, azp_adj_name, None)
 
         # Filter warning for cond usage in apply_weights. It is okay
         # to specialize the graph since bias is not dynamic.
@@ -89,7 +88,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, _, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _, _, _ = self._get_layer_params(layer)
 
         # Required to register custom ops.
         import torch_xla.experimental.custom_kernel  # noqa: F401
