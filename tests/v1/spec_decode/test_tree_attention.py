@@ -14,7 +14,11 @@ from tests.v1.attention.utils import (
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.config import ParallelConfig, SpeculativeConfig
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata,
+    seqlens_to_cu_seqlens,
+)
 
 if not is_flash_attn_varlen_func_available():
     pytest.skip(
@@ -84,10 +88,14 @@ def forward_attention(
         )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     builder = builder_cls(kv_cache_spec, [], vllm_config, q.device)
+    cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens.cpu()).to(
+        device=seq_lens.device, non_blocking=True
+    )
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
+        cu_seqlens_k=cu_seqlens_k,
         _seq_lens_cpu=seq_lens.cpu(),
         _num_computed_tokens_cpu=context_lens.cpu(),
         num_reqs=batch_size,
@@ -131,6 +139,12 @@ def forward_attention(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason=(
+        "ROCm FlashAttention has known BF16 numerical divergence vs tree attention"
+    ),
+)
 def test_tree_attn_correctness() -> None:
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -166,7 +180,7 @@ def test_tree_attn_correctness() -> None:
 
     dim_per_head = 128
     num_kv_heads = 2
-    block_size = 32
+    block_size = 128 if current_platform.is_rocm() else 32
     max_sequence_length = 8192
     randomize_blocks = True
     for batch_size in [1, 16, 32]:

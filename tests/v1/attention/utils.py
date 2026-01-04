@@ -23,6 +23,7 @@ from vllm.config.model import ModelDType
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    seqlens_to_cu_seqlens,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -69,6 +70,9 @@ def create_common_attn_metadata(
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
+    cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens_cpu).to(
+        device=device, non_blocking=True
+    )
 
     # Create computed tokens (context length for each sequence)
     context_lens = [
@@ -106,6 +110,7 @@ def create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
+        cu_seqlens_k=cu_seqlens_k,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,

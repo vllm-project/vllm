@@ -12,6 +12,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    seqlens_to_cu_seqlens,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -157,6 +158,9 @@ def build_attn_metadata(
     seq_lens = seq_lens[:num_reqs]
     seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_np.max())
+    cu_seqlens_k = seqlens_to_cu_seqlens(seq_lens_cpu).to(
+        device=seq_lens.device, non_blocking=True
+    )
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -168,6 +172,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
+            cu_seqlens_k=cu_seqlens_k,
             _seq_lens_cpu=seq_lens_cpu,
             max_seq_len=max_seq_len,
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
