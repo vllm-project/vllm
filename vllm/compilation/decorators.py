@@ -316,7 +316,7 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(mod, type, *args, **kwargs):
         def mark_dynamic(arg, dims):
             if type == DynamicShapesType.UNBACKED:
-                if is_torch_equal_or_newer("2.10.0.dev"):
+                if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
                         torch._dynamo.decorators.mark_unbacked(
                             arg, dim, hint_override=arg.size()[dim]
@@ -356,7 +356,7 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        if is_torch_equal_or_newer("2.10.0.dev"):
+                        if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
                                 torch._dynamo.decorators.mark_unbacked(
                                     arg, dim, hint_override=arg.size()[dim]
@@ -496,9 +496,9 @@ def _support_torch_compile(
             fx_config_patches["backed_size_oblivious"] = True
 
         # Prepare inductor config patches
-        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        # assume_32bit_indexing is only available in torch 2.10.0+
         inductor_config_patches = {}
-        if is_torch_equal_or_newer("2.10.0.dev"):
+        if is_torch_equal_or_newer("2.10.0"):
             inductor_config_patches["assume_32bit_indexing"] = True
 
         with (
