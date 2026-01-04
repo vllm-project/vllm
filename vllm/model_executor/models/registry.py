@@ -429,6 +429,10 @@ _MULTIMODAL_MODELS = {
     "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
+    "NemotronParseForConditionalGeneration": (
+        "nemotron_parse",
+        "NemotronParseForConditionalGeneration",
+    ),
 }
 
 _SPECULATIVE_DECODING_MODELS = {
