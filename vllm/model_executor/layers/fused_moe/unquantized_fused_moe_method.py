@@ -116,9 +116,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "Sonic MoE disabled because FlashInfer CUTLASS MoE is enabled."
                 )
             elif self.moe.has_bias:
-                logger.debug_once(
-                    "Sonic MoE disabled because MoE biases are enabled."
-                )
+                logger.debug_once("Sonic MoE disabled because MoE biases are enabled.")
             elif self.moe.moe_parallel_config.use_ep:
                 logger.debug_once(
                     "Sonic MoE disabled because expert parallelism is enabled."
