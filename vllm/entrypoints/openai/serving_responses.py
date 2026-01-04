@@ -666,9 +666,7 @@ class OpenAIServingResponses(OpenAIServing):
                 input_messages = context.input_messages
                 output_messages = context.output_messages
 
-            # TODO: Calculate usage.
-            # assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = context.num_tool_output_tokens
         else:
             assert isinstance(context, SimpleContext)
             # Use final_output which has accumulated text/token_ids/logprobs
