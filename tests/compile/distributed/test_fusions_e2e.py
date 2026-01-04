@@ -113,6 +113,17 @@ if current_platform.is_cuda():
                 async_tp=96,  # MLP is MoE, half the fusions of dense
             ),
         ),
+        ModelBackendTestCase(
+            model_name="openai/gpt-oss-20b",
+            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            backend=AttentionBackendEnum.FLASHINFER,
+            matches=Matches(
+                attention_fusion=0,
+                allreduce_fusion=49,
+                sequence_parallel=49,
+                async_tp=48,
+            ),
+        ),
     ]
 
 elif current_platform.is_rocm():
@@ -277,6 +288,14 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
 
     if "fp4" in model_name.lower() and not is_blackwell():
         pytest.skip("NVFP4 quant requires Blackwell")
+
+    if "gpt-oss" in model_name:
+        if is_blackwell():
+            monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+        else:
+            pytest.skip(
+                "Currently only Blackwell has completed fusion supports for GPT-OSS"
+            )
 
     if backend == AttentionBackendEnum.FLASHINFER and not is_blackwell():
         # FlashInfer attn fusion requires Blackwell
