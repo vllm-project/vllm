@@ -220,13 +220,9 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
-
-        # TODO smor - will be adjusted once checkpoint is corrected
-        # Currently they accidently defined 2 MTP layers instead of 1
-        assert self.num_mtp_layers == 2, (
+        assert self.num_mtp_layers == 1, (
             "Only one MTP layer is supported for NemotronH-MTP"
         )
-        self.num_mtp_layers = 1
 
         self.pattern_str = config.mtp_hybrid_override_pattern
         self.pattern_len = len(self.pattern_str)
@@ -410,6 +406,11 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+            if get_tensor_model_parallel_rank() == 0:
+                if "mtp" in name and "mixer.v_proj" in name:
+                    print(f"SMOR name and loaded weight: {name} {loaded_weight}")
+                    
             # Only process MTP weights - skip all non-MTP weights
             if (
                 not name.startswith("mtp.")
