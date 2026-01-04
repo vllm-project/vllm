@@ -207,8 +207,8 @@ def convert_to_fp8_moe_kernel_format(
             layer,
             w13,
             w2,
-            w13,
-            block_quant,
+            w13_scale,
+            w2_scale,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
 
