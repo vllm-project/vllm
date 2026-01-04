@@ -81,12 +81,14 @@ def test_sonic_moe_experts_init():
 
 @requires_cuda
 def test_is_valid_sonic_moe_basic():
-    M, K, N = 128, 512, 1024
+    M, K, two_n = 128, 512, 1024
     num_experts, top_k = 8, 2
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    w1 = torch.randn(num_experts, K, N, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(num_experts, N, K, dtype=torch.float16, device="cuda")
+    w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
+    w2 = torch.randn(
+        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
+    )
 
     result = is_valid_sonic_moe(hidden_states, w1, w2, num_experts, top_k)
     assert isinstance(result, bool)
@@ -94,12 +96,14 @@ def test_is_valid_sonic_moe_basic():
 
 @requires_cuda
 def test_is_valid_sonic_moe_large_topk():
-    M, K, N = 128, 512, 1024
+    M, K, two_n = 128, 512, 1024
     num_experts, top_k = 8, 32
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    w1 = torch.randn(num_experts, K, N, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(num_experts, N, K, dtype=torch.float16, device="cuda")
+    w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
+    w2 = torch.randn(
+        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
+    )
 
     result = is_valid_sonic_moe(hidden_states, w1, w2, num_experts, top_k)
     # Should be False because top_k > 16, or False because not supported
@@ -112,12 +116,14 @@ def test_sonic_moe_forward_unsupported():
     if is_sonic_moe_supported():
         pytest.skip("Sonic MoE is supported on this system")
 
-    M, K, N = 128, 512, 1024
+    M, K, two_n = 128, 512, 1024
     num_experts, top_k = 8, 2
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    w1 = torch.randn(num_experts, K, N, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(num_experts, N, K, dtype=torch.float16, device="cuda")
+    w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
+    w2 = torch.randn(
+        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
+    )
     topk_weights = torch.randn(M, top_k, dtype=torch.float16, device="cuda")
     topk_ids = torch.randint(0, num_experts, (M, top_k), device="cuda")
 
@@ -217,6 +223,71 @@ def test_sonic_moe_vs_triton(
         topk_ids=topk_ids,
         inplace=False,
         activation="silu",
+        global_num_experts=num_experts,
+    )
+
+    diff = calc_diff(out_sonic, out_triton)
+    assert diff < 0.01, f"Diff exceeded 1%: {diff}"
+
+
+@pytest.mark.skipif(
+    not is_sonic_moe_supported(),
+    reason="Requires sonicmoe + Hopper GPU",
+)
+def test_sonic_moe_apply_router_weight_on_input():
+    """Compare Sonic MoE against Triton with apply_router_weight_on_input."""
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoEP,
+    )
+    from vllm.utils.deep_gemm import calc_diff
+
+    m, n, k = 128, 1024, 256
+    topk = 1
+    num_experts = 8
+    dtype = torch.float16
+
+    hidden_states = torch.randn(m, k, device="cuda", dtype=dtype) / 10
+    w1 = torch.randn(num_experts, n, k, device="cuda", dtype=dtype) / 10
+    w2 = torch.randn(num_experts, k, n // 2, device="cuda", dtype=dtype) / 10
+
+    topk_ids = torch.randint(0, num_experts, (m, topk), device="cuda")
+    topk_weights = torch.rand(m, topk, device="cuda", dtype=dtype) + 0.1
+
+    triton_kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG),
+    )
+    out_triton = triton_kernel(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=False,
+        activation="silu",
+        apply_router_weight_on_input=True,
+        global_num_experts=num_experts,
+    )
+
+    w1_sonic = permute_weights_for_sonic(w1)
+    sonic_kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        SonicMoeExperts(out_dtype=dtype, weights_prepermuted=True),
+    )
+    out_sonic = sonic_kernel(
+        hidden_states=hidden_states,
+        w1=w1_sonic,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=False,
+        activation="silu",
+        apply_router_weight_on_input=True,
         global_num_experts=num_experts,
     )
 

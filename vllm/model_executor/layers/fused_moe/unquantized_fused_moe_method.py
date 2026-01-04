@@ -97,13 +97,31 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def is_monolithic(self) -> bool:
         return self._is_monolithic
 
+        sonic_supported = is_sonic_moe_supported()
+        sonic_requested = envs.VLLM_USE_SONIC_MOE
         self.sonic_moe_enabled = (
-            is_sonic_moe_supported()
-            and envs.VLLM_USE_SONIC_MOE
+            sonic_supported
+            and sonic_requested
             and current_platform.has_device_capability(90)
+            and not self.moe.has_bias
+            and not self.moe.moe_parallel_config.use_ep
+            and not self.flashinfer_cutlass_moe_enabled
         )
         if self.sonic_moe_enabled:
             logger.info_once("Enabling Sonic MoE for UnquantizedFusedMoEMethod")
+        elif sonic_requested and sonic_supported:
+            if self.flashinfer_cutlass_moe_enabled:
+                logger.debug_once(
+                    "Sonic MoE disabled because FlashInfer CUTLASS MoE is enabled."
+                )
+            elif self.moe.has_bias:
+                logger.debug_once(
+                    "Sonic MoE disabled because MoE biases are enabled."
+                )
+            elif self.moe.moe_parallel_config.use_ep:
+                logger.debug_once(
+                    "Sonic MoE disabled because expert parallelism is enabled."
+                )
 
     @property
     def supports_eplb(self) -> bool:

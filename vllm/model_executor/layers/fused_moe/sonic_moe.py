@@ -82,6 +82,27 @@ def is_valid_sonic_moe(
         logger.debug("Sonic MoE: weights not contiguous")
         return False
 
+    if w1.dim() != 3 or w2.dim() != 3:
+        logger.debug("Sonic MoE: expected 3D weights")
+        return False
+
+    if w1.size(0) != num_experts or w2.size(0) != num_experts:
+        logger.debug("Sonic MoE: num_experts mismatch")
+        return False
+
+    if w1.size(2) != hidden_states.size(1):
+        logger.debug("Sonic MoE: w1 K dimension mismatch")
+        return False
+
+    two_n = w1.size(1)
+    if two_n % 2 != 0:
+        logger.debug("Sonic MoE: w1 second dim must be even (2N)")
+        return False
+
+    if w2.size(1) != hidden_states.size(1) or w2.size(2) != two_n // 2:
+        logger.debug("Sonic MoE: w2 shape mismatch")
+        return False
+
     if top_k > 16:
         logger.debug("Sonic MoE: top_k > 16 not optimized")
         return False
@@ -229,8 +250,22 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ) from e
 
         M, K = hidden_states.shape
-        num_experts, _, N = w1_sonic.shape
+        num_experts, two_n, k_from_w1 = w1_sonic.shape
         topk = topk_ids.shape[1]
+        if k_from_w1 != K:
+            raise ValueError(
+                f"Sonic MoE expects w1 last dim {K}, got {k_from_w1}"
+            )
+        if two_n % 2 != 0:
+            raise ValueError(
+                f"Sonic MoE expects w1 second dim to be even, got {two_n}"
+            )
+        n = two_n // 2
+        if w2_sonic.size(1) != K or w2_sonic.size(2) != n:
+            raise ValueError(
+                "Sonic MoE expects w2 shape (E, K, N) with "
+                f"K={K} and N={n}, got {tuple(w2_sonic.shape)}"
+            )
 
         # TODO(https://github.com/vllm-project/vllm/issues/31578): use router logits
         selected_experts = topk_ids.flatten()
@@ -244,8 +279,8 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         x_gather_idx = sorted_scattered_idxs // topk
         s_reverse_scatter_idx = sorted_scattered_idxs
 
-        z = workspace13[: M * topk, :N].view(M * topk, N)
-        y1 = workspace2[: M * topk, : N // 2].view(M * topk, N // 2)
+        z = workspace13[: M * topk, :two_n].view(M * topk, two_n)
+        y1 = workspace2[: M * topk, :n].view(M * topk, n)
         y2 = workspace13[: M * topk, :K].view(M * topk, K)
 
         act_type = ActivationType.SWIGLU
@@ -276,7 +311,18 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
             stream_id=0,
         )
 
-        topk_scores = topk_weights.flatten()[sorted_scattered_idxs]
+        # apply_router_weight_on_input only supported for topk=1
+        # (consistent with MoEPrepareAndFinalizeNoEP)
+        if apply_router_weight_on_input:
+            if topk != 1:
+                raise ValueError(
+                    "apply_router_weight_on_input is only supported for topk=1"
+                )
+            topk_scores = torch.ones_like(topk_weights).flatten()[
+                sorted_scattered_idxs
+            ]
+        else:
+            topk_scores = topk_weights.flatten()[sorted_scattered_idxs]
         _router_forward(
             y2=y2,
             o=output,
