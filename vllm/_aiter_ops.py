@@ -288,7 +288,17 @@ def _check_aiter_mla_fp8_support() -> bool:
             _AITER_MLA_SUPPORTS_FP8 = (
                 "q_scale" in sig.parameters and "kv_scale" in sig.parameters
             )
-        except Exception:
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            AttributeError,
+            ValueError,
+            TypeError,
+        ):
+            # ImportError/ModuleNotFoundError: aiter.mla module not available
+            # AttributeError: mla_decode_fwd doesn't exist
+            # ValueError: mla_decode_fwd has no signature (e.g., built-in)
+            # TypeError: mla_decode_fwd is not a callable
             _AITER_MLA_SUPPORTS_FP8 = False
     return _AITER_MLA_SUPPORTS_FP8
 
