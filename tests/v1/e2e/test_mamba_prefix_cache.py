@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing as mp
 import os
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -169,6 +171,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         num_new_computed_tokens: int = 0,
         new_computed_blocks: KVCacheBlocks | None = None,
         num_lookahead_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
     ):
@@ -179,6 +182,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             num_new_computed_tokens,
             new_computed_blocks,
             num_lookahead_tokens,
+            num_external_computed_tokens,
             delay_cache_blocks,
             num_encoder_tokens,
         )
@@ -384,39 +388,56 @@ def get_fake_process_mamba_fn(
     return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
 
 
-def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    num_generated_tokens = 8000
-    num_prompt_tokens = 500
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
-    with open(f"{os.path.dirname(__file__)}/input.txt") as file:
-        full_prompt = file.read()
-    fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
-    monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
-    fake_sample_fn = get_fake_sample_fn()
-    monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
-    engine = LLM(
-        model=MODEL,
-        block_size=BLOCK_SIZE,
-        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
-        seed=42,
-    )
-    global prompt_token_ids
-    prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-    print(f"Token IDs length: {len(prompt_token_ids)}")
+def run_ref_mamba_state_in_subprocess() -> None:
+    ctx = mp.get_context("spawn")
+    proc = ctx.Process(target=_run_ref_mamba_state_worker)
+    proc.start()
+    proc.join(timeout=600)
+    if proc.exitcode != 0:
+        raise RuntimeError(f"Ref mamba state process exited with code {proc.exitcode}.")
 
-    outputs = engine.generate(
-        [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
-        sampling_params,
-    )
-    print(f"Generated text: {outputs[0].outputs[0].token_ids}")
-    print(
-        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"  # noqa: E501
-    )
-    print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
-    # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
-    # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
-    torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
+
+def _run_ref_mamba_state_worker():
+    try:
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        num_generated_tokens = 8000
+        num_prompt_tokens = 500
+        sampling_params = SamplingParams(
+            temperature=0.0, max_tokens=num_generated_tokens
+        )
+        with open(f"{os.path.dirname(__file__)}/input.txt") as file:
+            full_prompt = file.read()
+        fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
+        GPUModelRunner.execute_model = fake_execute_model_fn
+        fake_sample_fn = get_fake_sample_fn()
+        GPUModelRunner._sample = fake_sample_fn
+        engine = LLM(
+            model=MODEL,
+            block_size=BLOCK_SIZE,
+            hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+            seed=42,
+        )
+        global prompt_token_ids
+        prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
+        print(f"Token IDs length: {len(prompt_token_ids)}")
+
+        _outputs = engine.generate(
+            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
+            sampling_params,
+        )
+        print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
+        # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
+        # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
+        # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
+        cpu_state_ref = {
+            key: tuple(tensor.detach().cpu() for tensor in tensors)
+            for key, tensors in mamba_kv_cache_dict.items()
+        }
+        torch.save(cpu_state_ref, "mamba_kv_cache_dict_ref.pth")
+        mamba_kv_cache_dict.clear()
+    except Exception:
+        traceback.print_exc()
+        raise
 
 
 def check_mamba_state_equal(
@@ -430,6 +451,8 @@ def check_mamba_state_equal(
         # mamba state new is a subset of mamba state ref
         for i, (ref, new) in enumerate(zip(mamba_state_ref[key], mamba_state_new[key])):
             print("check_mamba_state_equal: ", ref.shape, new.shape)
+            if ref.device != new.device:
+                new = new.to(ref.device)
             new = new[: ref.shape[0]]
             print("check_mamba_state_equal after convert: ", ref.shape, new.shape)
             if not torch.allclose(ref, new, atol=atol, rtol=rtol):
@@ -495,6 +518,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
+    run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     with open(f"{os.path.dirname(__file__)}/input.txt") as file:
         full_prompt = file.read()
@@ -742,7 +766,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
     # print(f"Token IDs: {token_ids}")
     print(f"Token IDs length: {len(prompt_token_ids)}")
-    mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
+    # mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
     for test_case_name, test_config in tests.items():
         print(f"Running test case: {test_case_name}")
         num_generated_tokens = test_config.num_generated_tokens
@@ -767,10 +791,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         global step_actions
         step_actions = test_config.step_actions
         print("step actions: ", step_actions)
-        print(
-            f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"  # noqa: E501
-        )
-
         _ = engine.generate(
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
@@ -782,15 +802,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             for action in test_config.step_actions
             if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
         ]
+        mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
-
-
-def test_check_mamba_state_equal():
-    mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
-    mamba_state_new = torch.load("mamba_kv_cache_dict_new.pth")
-    check_mamba_state_equal(
-        mamba_state_ref,
-        mamba_state_new,
-        keys_to_check=list(mamba_state_ref.keys()),
-    )
