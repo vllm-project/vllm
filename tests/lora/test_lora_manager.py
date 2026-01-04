@@ -24,7 +24,7 @@ from vllm.lora.model_manager import (
     LRUCacheLoRAModelManager,
 )
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, reset_lora_id_counter
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.platforms import current_platform
 
@@ -416,6 +416,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
+    reset_lora_id_counter()
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -530,6 +531,7 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
+    reset_lora_id_counter()
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE

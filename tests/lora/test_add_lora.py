@@ -21,7 +21,7 @@ DEFAULT_MAX_LORAS = 4 * 3
 
 def get_lora_requests(lora_path) -> list[LoRARequest]:
     lora_requests: list[LoRARequest] = [
-        LoRARequest(lora_name=f"{i}", lora_int_id=i, lora_path=lora_path)
+        LoRARequest(lora_name=f"{i}", lora_path=lora_path)
         for i in range(1, DEFAULT_MAX_LORAS + 1)
     ]
     return lora_requests

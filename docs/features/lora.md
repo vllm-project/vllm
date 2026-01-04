@@ -197,7 +197,6 @@ Alternatively, follow these example steps to implement your own plugin:
                 lora_request = LoRARequest(
                     lora_name=lora_name,
                     lora_path=local_path,
-                    lora_int_id=abs(hash(lora_name)),
                 )
                 return lora_request
         ```

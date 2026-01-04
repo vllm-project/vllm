@@ -30,17 +30,17 @@ def create_test_prompts(
         (
             "my name is",
             SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
-            LoRARequest("lora-test-1", 1, lora_path),
+            LoRARequest(lora_name="lora-test-1", lora_path=lora_path),
         ),
         (
             "The capital of USA is",
             SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
-            LoRARequest("lora-test-2", 1, lora_path),
+            LoRARequest(lora_name="lora-test-2", lora_path=lora_path),
         ),
         (
             "The capital of France is",
             SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
-            LoRARequest("lora-test-3", 1, lora_path),
+            LoRARequest(lora_name="lora-test-3", lora_path=lora_path),
         ),
     ]
 

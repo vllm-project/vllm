@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
 
@@ -60,7 +59,6 @@ class OpenAIServingModels:
 
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
-        self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers():
@@ -142,10 +140,7 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
-            unique_id = self.lora_id_counter.inc(1)
-            lora_request = LoRARequest(
-                lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
-            )
+            lora_request = LoRARequest(lora_name=lora_name, lora_path=lora_path)
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
 
@@ -246,7 +241,6 @@ class OpenAIServingModels:
                 return self.lora_requests[lora_name]
 
             base_model_name = self.model_config.model
-            unique_id = self.lora_id_counter.inc(1)
             found_adapter = False
 
             # Try to resolve using available resolvers
@@ -255,7 +249,6 @@ class OpenAIServingModels:
 
                 if lora_request is not None:
                     found_adapter = True
-                    lora_request.lora_int_id = unique_id
 
                     try:
                         await self.engine_client.add_lora(lora_request)
