@@ -110,13 +110,21 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
     def __getitem__(self, index: int | slice):
         """Extracts logprobs of a given position or slice"""
         if isinstance(index, int):
+            # Support negative indices similar to list semantics.
+            n = len(self.start_indices)
+            if index < 0:
+                index += n
+            if index < 0 or index >= n:
+                raise IndexError("FlatLogprobs index out of range")
+            start = self.start_indices[index]
+            end = self.end_indices[index]
             return {
                 self.token_ids[i]: Logprob(
                     logprob=self.logprobs[i],
                     rank=self.ranks[i],
                     decoded_token=self.decoded_tokens[i],
                 )
-                for i in range(self.start_indices[index], self.end_indices[index])
+                for i in range(start, end)
             }
         elif isinstance(index, slice):
             min_index = self.start_indices[index][0]
