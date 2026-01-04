@@ -1,12 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
 import os
 import subprocess
-import pandas as pd
 from dataclasses import dataclass
-import argparse
+
 from vllm.v1.spec_decode.dynamic.online_profiling_server import (
+    kill_server,
+    setup_server,
     start_server,
-    kill_server, 
-    setup_server)
+)
 
 
 @dataclass
@@ -14,16 +17,20 @@ class Dataset:
     name: str
     config: list
 
+
 NGRAM_FMT = "min-{min}-max-{max}-k-{k}"
 EAGLE_FMT = "k-{k}"
 
+
 def run_command(command):
     try:
-        result = subprocess.run(f"bash -c '{command}'", 
-                                shell=True, 
-                                check=True, 
-                                capture_output=True, 
-                                text=True)
+        result = subprocess.run(
+            f"bash -c '{command}'",
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         print("Output:")
         print(result.stdout)
     except subprocess.CalledProcessError as e:
@@ -32,13 +39,12 @@ def run_command(command):
 
 
 def run_benchmarks(args):
-
     # setup server
     setup_server()
 
-    port=9001
-    all_sampling_profile=[
-        {'temperature': 0, 'topp': 1}, # greedy
+    port = 9001
+    all_sampling_profile = [
+        {"temperature": 0, "topp": 1},  # greedy
     ]
 
     # `num_batches` decides how many batches are sent for each concurrency.
@@ -50,12 +56,16 @@ def run_benchmarks(args):
     MTBENCH_CONFIG = [{"num_batches": 20}]
 
     all_bench_dataset = [
-        Dataset(name = "philschmid/mt-bench", config = MTBENCH_CONFIG),
+        Dataset(name="philschmid/mt-bench", config=MTBENCH_CONFIG),
     ]
 
-    assert (all(len(ds.config) > 0 for ds in all_bench_dataset)), "Each dataset must have at least one config"
+    assert all(len(ds.config) > 0 for ds in all_bench_dataset), (
+        "Each dataset must have at least one config"
+    )
 
-    all_ngram_params = [{"min": 2, "max": 5, "k": k} for k in args.num_speculative_tokens_list]
+    all_ngram_params = [
+        {"min": 2, "max": 5, "k": k} for k in args.num_speculative_tokens_list
+    ]
     all_eagle_params = args.num_speculative_tokens_list
 
     # ablation
@@ -66,32 +76,38 @@ def run_benchmarks(args):
         all_spec_config = []
         if spec_method == "ngram":
             for ngram_params in all_ngram_params:
-                all_spec_config.append({
-                    "method": "ngram",
-                    "num_speculative_tokens": ngram_params['k'],
-                    "prompt_lookup_max": ngram_params['max'],
-                    "prompt_lookup_min": ngram_params['min'],
-                })
+                all_spec_config.append(
+                    {
+                        "method": "ngram",
+                        "num_speculative_tokens": ngram_params["k"],
+                        "prompt_lookup_max": ngram_params["max"],
+                        "prompt_lookup_min": ngram_params["min"],
+                    }
+                )
         elif spec_method == "eagle":
             for eagle_k in all_eagle_params:
-                all_spec_config.append({
-                    "method": "eagle",
-                    "model": args.draft_dir,
-                    "num_speculative_tokens": eagle_k,
-                    "draft_tensor_parallel_size": tp,
-                })
+                all_spec_config.append(
+                    {
+                        "method": "eagle",
+                        "model": args.draft_dir,
+                        "num_speculative_tokens": eagle_k,
+                        "draft_tensor_parallel_size": tp,
+                    }
+                )
         else:
             # vanilla case
             all_spec_config.append(None)
 
         for spec_config in all_spec_config:
             # start server
-            server_process = start_server(port=port, 
-                                            target_model_dir=args.model_dir, 
-                                            spec_config=spec_config, 
-                                            tp=tp, 
-                                            max_vllm_bs=args.max_vllm_batch_size, 
-                                            dry_run=args.dry_run)
+            server_process = start_server(
+                port=port,
+                target_model_dir=args.model_dir,
+                spec_config=spec_config,
+                tp=tp,
+                max_vllm_bs=args.max_vllm_batch_size,
+                dry_run=args.dry_run,
+            )
 
             # start client
             for bench_concurrency in args.batch_size_list:
@@ -99,31 +115,35 @@ def run_benchmarks(args):
                     bench_dataset = bench_dataset_object.name
                     for bench_config in bench_dataset_object.config:
                         for sampling_profile in all_sampling_profile:
-                            bench_temperature = sampling_profile['temperature']
-                            bench_topp = sampling_profile['topp']
+                            bench_temperature = sampling_profile["temperature"]
+                            bench_topp = sampling_profile["topp"]
 
                             spec_config_str = "vanilla"
                             if spec_method == "ngram":
                                 spec_config_str = NGRAM_FMT.format(
-                                    min=spec_config['prompt_lookup_min'],
-                                    max=spec_config['prompt_lookup_max'],
-                                    k=spec_config['num_speculative_tokens']
+                                    min=spec_config["prompt_lookup_min"],
+                                    max=spec_config["prompt_lookup_max"],
+                                    k=spec_config["num_speculative_tokens"],
                                 )
                             elif spec_method == "eagle":
                                 spec_config_str = EAGLE_FMT.format(
-                                    k=spec_config['num_speculative_tokens']
+                                    k=spec_config["num_speculative_tokens"]
                                 )
 
                             # dataset specific config
                             if "philschmid/mt-bench" in bench_dataset:
-                                bench_config_str = f"mt_bench"
-                                num_prompts = bench_config["num_batches"] * bench_concurrency
-                                bench_vllm_serve_config = f'--dataset-name hf --dataset-path {bench_dataset} --num-prompts {num_prompts}'
+                                bench_config_str = "mt_bench"
+                                num_prompts = (
+                                    bench_config["num_batches"] * bench_concurrency
+                                )
+                                bench_vllm_serve_config = f"--dataset-name hf --dataset-path {bench_dataset} --num-prompts {num_prompts}"  # noqa E501
 
-                            print(f"Number of prompts in {bench_dataset}: {num_prompts}")
+                            print(
+                                f"Number of prompts in {bench_dataset}: {num_prompts}"
+                            )
 
                             # create dir if not exists
-                            result_dir = f"{args.result_dir}/tp-{tp}_temp-{bench_temperature}_top_p-{bench_topp}/{bench_dataset}/{spec_method}/"
+                            result_dir = f"{args.result_dir}/tp-{tp}_temp-{bench_temperature}_top_p-{bench_topp}/{bench_dataset}/{spec_method}/"  # noqa E501
                             if not os.path.exists(result_dir):
                                 os.makedirs(result_dir)
 
@@ -168,15 +188,27 @@ time python3 vllm/v1/spec_decode/online_profiling_client.py \
 """
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="Run in dry run mode. If set, commands will be printed but not executed.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run in dry run mode. If set, commands will be printed but not executed.",
+    )
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--draft-dir", type=str, default=None)
     # parser.add_argument("--method-list", nargs='*', type=str, default=["vanilla", "eagle"])
     parser.add_argument("--method", type=str, default="vanilla")
-    parser.add_argument("--num-speculative-tokens-list", nargs='*', type=int, default=[1, 3, 5])
-    parser.add_argument("--batch-size-list", nargs='*', type=int, default=[1, 4, 16, 64, 256])
-    parser.add_argument("--max-vllm-batch-size", type=int, help="Max vllm server batch size (max concurrency)")
-    parser.add_argument("--tp-list", nargs='*', type=int, default=[1])
+    parser.add_argument(
+        "--num-speculative-tokens-list", nargs="*", type=int, default=[1, 3, 5]
+    )
+    parser.add_argument(
+        "--batch-size-list", nargs="*", type=int, default=[1, 4, 16, 64, 256]
+    )
+    parser.add_argument(
+        "--max-vllm-batch-size",
+        type=int,
+        help="Max vllm server batch size (max concurrency)",
+    )
+    parser.add_argument("--tp-list", nargs="*", type=int, default=[1])
     parser.add_argument("--result-dir", type=str, default="./log/dynamic_sd")
     parser.add_argument("--extra-log-arg", type=str, default="")
     args = parser.parse_args()
@@ -186,12 +218,14 @@ if __name__ == "__main__":
     # assert 0 < len(args.method_list) <= 2
     # if len(args.method_list) == 2:
     #     assert "vanilla" in args.method_list, "If two methods are specified, one must be vanilla"
-    assert args.method in ["vanilla", "ngram", "eagle", "eagle3"], \
+    assert args.method in ["vanilla", "ngram", "eagle", "eagle3"], (
         "invalid method specified"
+    )
 
     # assert 1 in args.batch_size_list, "batch_size must contain 1"
     # assert 1 in args.num_speculative_tokens_list, "num_speculative_tokens must contain 1"
-    assert args.max_vllm_batch_size == max(args.batch_size_list), \
+    assert args.max_vllm_batch_size == max(args.batch_size_list), (
         "max_vllm_batch_size must be equal to max of batch_size"
+    )
 
     run_benchmarks(args)

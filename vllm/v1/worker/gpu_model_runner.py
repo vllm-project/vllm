@@ -145,11 +145,11 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dynamic import DynamicSpeculativeDecodingManager
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.spec_decode.dynamic import DynamicSpeculativeDecodingManager
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -460,9 +460,10 @@ class GPUModelRunner(
             # setup Dynamic Speculative Decoding
             if self.speculative_config.dynamic_config:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
-                    self.speculative_config.dynamic_config, 
+                    self.speculative_config.dynamic_config,
                     self.vllm_config.scheduler_config.max_num_seqs,
-                    self.vllm_config.speculative_config.num_speculative_tokens)
+                    self.vllm_config.speculative_config.num_speculative_tokens,
+                )
             else:
                 self.dynamic_sd_manager = None
 
@@ -3598,19 +3599,21 @@ class GPUModelRunner(
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[list[int]] | torch.Tensor:
-        
         optimal_num_speculative_tokens = None
         if self.dynamic_sd_manager:
             batch_size = self.input_batch.num_reqs
-            optimal_num_speculative_tokens = self.dynamic_sd_manager.\
-                get_optimal_num_speculative_tokens(
+            optimal_num_speculative_tokens = (
+                self.dynamic_sd_manager.get_optimal_num_speculative_tokens(
                     self.input_batch.num_reqs
                 )
-            
+            )
+
             # REMOVE
-            print(f"Batch size: {batch_size}, "
-                  f"Optimal num speculative tokens: {optimal_num_speculative_tokens}")
-            
+            print(
+                f"Batch size: {batch_size}, "
+                f"Optimal num speculative tokens: {optimal_num_speculative_tokens}"
+            )
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None

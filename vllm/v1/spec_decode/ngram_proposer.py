@@ -5,9 +5,7 @@ import os
 import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
-from typing import Optional
 from vllm.config import VllmConfig
-from vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
 
 
 class NgramProposer:
@@ -23,7 +21,7 @@ class NgramProposer:
         # Number of tokens follow the match. If there are less than k
         # tokens follow the match, we will return the maximum amount of
         # tokens until the end.
-        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
@@ -133,7 +131,7 @@ class NgramProposer:
 
     def propose(
         self,
-        optimal_num_speculative_tokens: Optional[int],
+        optimal_num_speculative_tokens: int | None,
         sampled_token_ids: list[list[int]],
         req_ids: list[str],
         num_tokens_no_spec: np.ndarray,

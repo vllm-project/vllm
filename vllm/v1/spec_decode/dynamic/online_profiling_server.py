@@ -1,24 +1,29 @@
-import os
-import subprocess
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import time
+import os
 import shutil
 import signal
+import subprocess
+import time
 
 """
 Utility functions to manage the vLLM server for online profiling.
 Main functions are setup_server(), start_server(), and kill_server().
 """
 
+
 def wait_for_server(port: int) -> bool:
-    timeout = 1200 # 20 mins
+    timeout = 1200  # 20 mins
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            subprocess.run(["curl", "-X", "POST", f"localhost:{port}/v1/completions"], check=True)
+            subprocess.run(
+                ["curl", "-X", "POST", f"localhost:{port}/v1/completions"], check=True
+            )
             return True
         except subprocess.CalledProcessError:
-            time.sleep(10) # wait for 10 seconds before retrying
+            time.sleep(10)  # wait for 10 seconds before retrying
     return False
 
 
@@ -41,7 +46,7 @@ def kill_gpu_processes(port: int):
         if "python3" in line and filename not in line:
             pid = line.split()[1]
             pids_to_kill.append(pid)
-    
+
     # Kill other processes
     for pid in pids_to_kill:
         subprocess.run(["kill", "-9", pid])
@@ -50,15 +55,20 @@ def kill_gpu_processes(port: int):
 
     # subprocess.run(["rm", "-rf", "~/.config/vllm"])
 
+
 def wait_for_gpu_memory_to_clear():
     # Wait until all GPUs have memory usage < 1000 MB
     if shutil.which("nvidia-smi"):
         while True:
             # Get GPU memory usage for all GPUs
-            memory_usage = subprocess.check_output(["nvidia-smi", 
-                                                    "--query-gpu=memory.used", 
-                                                    "--format=csv,noheader,nounits"], 
-                                                    text=True)
+            memory_usage = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+            )
             # Split the output into individual GPU memory usage values
             gpu_memory_usage = [int(x) for x in memory_usage.strip().split("\n")]
             # Check if any GPU has memory usage >= 1000 MB
@@ -67,15 +77,14 @@ def wait_for_gpu_memory_to_clear():
             time.sleep(1)
     elif shutil.which("amd-smi"):
         while True:
-            memory_usage = subprocess.check_output(["amd-smi", 
-                                                    "metric", 
-                                                    "-g", 
-                                                    "0"], 
-                                                    text=True)
+            memory_usage = subprocess.check_output(
+                ["amd-smi", "metric", "-g", "0"], text=True
+            )
             used_vram = int(memory_usage.split("USED_VRAM")[1].split()[0])
             if used_vram < 1000:
                 break
             time.sleep(1)
+
 
 def setup_server():
     # install dependencies
@@ -86,13 +95,14 @@ def setup_server():
             subprocess.run(["apt-get", "install", "-y", dep])
 
 
-def start_server(port: int,
-                 target_model_dir: str, 
-                 spec_config: dict | None, 
-                 tp: int, 
-                 max_vllm_bs: int,
-                 dry_run: bool = False) -> subprocess.Popen | None:
-    
+def start_server(
+    port: int,
+    target_model_dir: str,
+    spec_config: dict | None,
+    tp: int,
+    max_vllm_bs: int,
+    dry_run: bool = False,
+) -> subprocess.Popen | None:
     # NOTE: no Prompt Caching, but enabled chunked prefill
     server_command = f"""VLLM_USE_V1=1 vllm serve {target_model_dir} \
                     --disable-log-requests --port {port} \
@@ -104,13 +114,17 @@ def start_server(port: int,
 
     if spec_config:
         speculative_config_json_serialized = json.dumps(spec_config).replace('"', '\\"')
-        server_command += f'--speculative_config "{speculative_config_json_serialized}" '
-    
+        server_command += (
+            f'--speculative_config "{speculative_config_json_serialized}" '
+        )
+
     print(f"Server command: {server_command}")
 
     # start vllm server
     if not dry_run:
-        server_process = subprocess.Popen(server_command, shell=True, preexec_fn=os.setsid)
+        server_process = subprocess.Popen(
+            server_command, shell=True, preexec_fn=os.setsid
+        )
 
         if wait_for_server(port):
             print("vllm server is up and running.")
@@ -128,8 +142,8 @@ def start_server(port: int,
 #         server_process.kill()
 #     kill_gpu_processes(port)
 
-def kill_server(port, server_process):
 
+def kill_server(port, server_process):
     # REMOVE
     # print(f"Killing server on port {port}...")
 

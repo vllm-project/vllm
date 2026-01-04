@@ -48,14 +48,16 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
 ]
 
+
 @dataclass
 class DynamicSpeculativeConfig:
     # """A mapping from batch size to optimal number of drafts to use for that
     # batch size. This is used to dynamically adjust the number of drafts used
     # based on the current batch size."""
     # optimal_num_speculative_tokens: dict[int, int] = None
-    
+
     """Whether the statistics are updated online or not during inference."""
+
     is_online: bool = False
 
     """ 
@@ -82,7 +84,7 @@ class DynamicSpeculativeConfig:
 
     """Acceptance rate per position on an offline dataset."""
     acceptance_rate_per_pos: list[float] = None
-    
+
 
 @config
 @dataclass
@@ -156,7 +158,7 @@ class SpeculativeConfig:
 
     # dynamic speculative decoding control
     """Configuration for dynamic speculative decoding, if provided."""
-    dynamic_config: Optional[DynamicSpeculativeConfig] = None
+    dynamic_config: DynamicSpeculativeConfig | None = None
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
