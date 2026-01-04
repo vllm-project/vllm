@@ -351,3 +351,58 @@ export PATH="${CUDA_HOME}/bin:$PATH"
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](https://github.com/vllm-project/vllm/pull/6759).
 - To address a memory overhead issue in older NCCL versions (see [bug](https://github.com/NVIDIA/nccl/issues/1234)), vLLM versions `>= 0.4.3, <= 0.10.1.1` would set the environment variable `NCCL_CUMEM_ENABLE=0`. External processes connecting to vLLM also needed to set this variable to prevent hangs or crashes. Since the underlying NCCL bug was fixed in NCCL 2.22.3, this override was removed in newer vLLM versions to allow for NCCL performance optimizations.
 - In some PCIe machines (e.g. machines without NVLink), if you see an error like `transport/shm.cc:590 NCCL WARN Cuda failure 217 'peer access is not supported between these two devices'`, it's likely caused by a driver bug. See [this issue](https://github.com/NVIDIA/nccl/issues/1838) for more details. In that case, you can try to set `NCCL_CUMEM_HOST_ENABLE=0` to disable the feature, or upgrade your driver to the latest version.
+
+## Repetitive Output (Hallucination)
+
+Some models, particularly multimodal models like Qwen3-VL, may occasionally get stuck outputting the same token repeatedly. This is often a sign of model hallucination and wastes compute resources while producing unusable output.
+
+### Symptoms
+
+- The model outputs the same token or pattern repeatedly (e.g., `"the the the the..."` or `"......"`)
+- Generation takes much longer than expected
+- Output length reaches `max_tokens` with repetitive content
+
+### Solution
+
+Use the `max_consecutive_repeats` parameter in `SamplingParams` to automatically stop generation when repetitive patterns are detected:
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(model="your-model")
+
+# Stop if 4 or more consecutive identical tokens are detected
+sampling_params = SamplingParams(
+    max_tokens=1000,
+    max_consecutive_repeats=4,  # Typical values: 3-5
+)
+
+outputs = llm.generate(["Your prompt here"], sampling_params)
+
+# Check if generation stopped due to repetition
+for output in outputs:
+    for completion in output.outputs:
+        if completion.finish_reason == "repetition":
+            print("Generation stopped due to repetitive output")
+```
+
+When using the OpenAI-compatible API, pass this parameter via `extra_body`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="token")
+
+response = client.chat.completions.create(
+    model="your-model",
+    messages=[{"role": "user", "content": "Your prompt"}],
+    extra_body={"max_consecutive_repeats": 4},
+)
+
+# finish_reason will be "repetition" if detection triggered
+print(response.choices[0].finish_reason)
+```
+
+### Performance Note
+
+The repetition detection is optimized with an O(1) fast path - it only performs the full check when the last two tokens are identical. This means there is minimal performance impact in the common case where no repetition is occurring.

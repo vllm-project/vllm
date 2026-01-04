@@ -608,9 +608,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     prompt_logprobs: int | None = None
+    max_consecutive_repeats: int = Field(
+        default=0,
+        description=(
+            "Stop generation if N consecutive identical tokens are detected. "
+            "Set to 0 to disable. Typical values: 3-5. "
+            "This helps detect repetitive output patterns (hallucination)."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
-    # --8<-- [end:chat-completion-sampling-params]
+    # Hallucination detection parameter
 
     # --8<-- [start:chat-completion-extra-params]
     echo: bool = Field(
@@ -878,6 +886,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            max_consecutive_repeats=self.max_consecutive_repeats,
         )
 
     @model_validator(mode="before")
@@ -1090,6 +1099,14 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    max_consecutive_repeats: int = Field(
+        default=0,
+        description=(
+            "Stop generation if N consecutive identical tokens are detected. "
+            "Set to 0 to disable. Typical values: 3-5. "
+            "This helps detect repetitive output patterns (hallucination)."
+        ),
+    )
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -1319,6 +1336,7 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            max_consecutive_repeats=self.max_consecutive_repeats,
         )
 
     @model_validator(mode="before")

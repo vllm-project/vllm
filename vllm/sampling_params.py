@@ -244,6 +244,12 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    # Hallucination detection parameters
+    max_consecutive_repeats: int = 0
+    """Stop generation if N consecutive identical tokens are detected.
+    Set to 0 to disable. Typical values: 3-5.
+    This helps detect repetitive output patterns (hallucination)."""
+
     skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
@@ -277,6 +283,7 @@ class SamplingParams(
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
+        max_consecutive_repeats: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -318,6 +325,7 @@ class SamplingParams(
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             skip_clone=skip_clone,
+            max_consecutive_repeats=max_consecutive_repeats,
         )
 
     def __post_init__(self) -> None:
