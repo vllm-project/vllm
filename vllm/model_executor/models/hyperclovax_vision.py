@@ -16,9 +16,12 @@ from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
+from transformers.models.qwen2_audio import Qwen2AudioEncoder
+from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -41,9 +44,11 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .qwen2_5_vl import Qwen2_5_VisionTransformer
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
@@ -53,6 +58,30 @@ from .vision import get_vision_encoder_info
 EOT = "<|endofturn|>"
 IMAGE_TOKEN: str = "<|dummy3|>"
 VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
+
+# V2 (32B Think model) uses different tokens - retrieved from config at runtime
+# These are placeholder tokens for the V2 model
+V2_IMAGE_TOKEN: str = "<|IMAGE_PAD|>"
+V2_VIDEO_TOKEN: str = "<|VIDEO_PAD|>"
+V2_AUDIO_TOKEN: str = "<|AUDIO|>"
+
+
+class AudioProjectorMLP(nn.Module):
+    """Audio projector MLP with fc1/fc2 naming to match HF checkpoint.
+
+    Structure matches VLM_Mlp from HF:
+    - fc1: (input_size, input_size) - keeps hidden dim same as input
+    - fc2: (input_size, output_size) - projects to LLM hidden size
+    """
+
+    def __init__(self, input_size: int, output_size: int):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, input_size)  # 1280 -> 1280
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(input_size, output_size)  # 1280 -> 4096
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
 
 
 # Based on combine_frames_into_images in
@@ -1162,3 +1191,919 @@ def anyres_postprocessing(
         new_image_features.append(image_feature)
 
     return new_image_features
+
+
+# =============================================================================
+# HyperCLOVAX V2 (32B Think Model) Support
+# Uses Qwen2.5 Vision Transformer instead of CLIP/SigLIP
+# =============================================================================
+
+
+class HCXVisionV2ImagePixelInputs(TensorSchema):
+    """
+    V2 Image inputs using Qwen2.5-VL style grid_thw format.
+
+    Dimensions:
+        - np: Number of patches
+        - ni: Number of images
+        - cps: Number of channels * patch_size * patch_size
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
+
+
+class HCXVisionV2ImageEmbeddingInputs(TensorSchema):
+    """
+    V2 Image embedding inputs.
+
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size
+        - ni: Number of images
+    """
+
+    type: Literal["image_embeds"] = "image_embeds"
+    image_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
+
+
+HCXVisionV2ImageInputs = HCXVisionV2ImagePixelInputs | HCXVisionV2ImageEmbeddingInputs
+
+
+class HCXVisionV2VideoPixelInputs(TensorSchema):
+    """
+    V2 Video inputs using Qwen2.5-VL style grid_thw format.
+
+    Dimensions:
+        - np: Number of patches
+        - nv: Number of videos
+        - ctps: Number of channels * temporal_patch_size * patch_size * patch_size
+    """
+
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("np", "ctps")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
+
+
+class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
+    """
+    V2 Video embedding inputs.
+
+    Dimensions:
+        - nf: Number of video features
+        - hs: Hidden size
+        - nv: Number of videos
+    """
+
+    type: Literal["video_embeds"] = "video_embeds"
+    video_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
+
+
+HCXVisionV2VideoInputs = HCXVisionV2VideoPixelInputs | HCXVisionV2VideoEmbeddingInputs
+
+
+class HCXVisionV2AudioFeatureInputs(TensorSchema):
+    """
+    V2 Audio inputs using Qwen2AudioEncoder.
+
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins (128)
+    """
+
+    type: Literal["audio_features"] = "audio_features"
+    input_features: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "nmb", 3000),
+    ]
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", 3000),
+    ]
+
+
+class HCXVisionV2AudioEmbeddingInputs(TensorSchema):
+    """
+    V2 Audio embedding inputs.
+
+    Dimensions:
+        - naf: Number of audio features
+        - hs: Hidden size
+    """
+
+    type: Literal["audio_embeds"] = "audio_embeds"
+    audio_embeds: Annotated[
+        list[torch.Tensor],
+        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
+    ]
+
+
+HCXVisionV2AudioInputs = HCXVisionV2AudioFeatureInputs | HCXVisionV2AudioEmbeddingInputs
+
+
+# From Qwen2AudioEncoder._get_feat_extract_output_lengths
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
+    """Calculate output lengths for audio features."""
+    feat_lengths = (input_lengths - 1) // 2 + 1
+    output_lengths = (feat_lengths - 2) // 2 + 1
+    return feat_lengths, output_lengths
+
+
+class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
+    """Processing info for HyperCLOVAX V2 (32B Think model and Omni model)."""
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        # Check if audio is supported (Omni model has audio_config)
+        hf_config = self.get_hf_config()
+        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+            return {"image": None, "video": None, "audio": None}
+        return {"image": None, "video": None}
+
+    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+        """Get WhisperFeatureExtractor for audio processing.
+
+        Since the HF processor (HCXVisionV2Processor) doesn't support audio,
+        we create a WhisperFeatureExtractor directly from the audio_config.
+        """
+        hf_config = self.get_hf_config()
+        audio_config = getattr(hf_config, "audio_config", None)
+        if audio_config is None:
+            raise ValueError(
+                "This model does not have audio_config. "
+                "Audio processing is not supported."
+            )
+
+        # Create WhisperFeatureExtractor with params from audio_config
+        return WhisperFeatureExtractor(
+            feature_size=audio_config.num_mel_bins,
+            sampling_rate=16000,  # Standard for Whisper
+            hop_length=160,
+            chunk_length=30,
+            n_fft=400,
+            padding_value=0.0,
+        )
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        spatial_merge_size = vision_config.spatial_merge_size
+
+        grid_h = image_height // patch_size
+        grid_w = image_width // patch_size
+
+        return (grid_h * grid_w) // (spatial_merge_size**2)
+
+    def get_num_video_tokens(
+        self,
+        *,
+        video_width: int,
+        video_height: int,
+        num_frames: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        spatial_merge_size = vision_config.spatial_merge_size
+
+        grid_t = num_frames // temporal_patch_size
+        grid_h = video_height // patch_size
+        grid_w = video_width // patch_size
+
+        return (grid_t * grid_h * grid_w) // (spatial_merge_size**2)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        # Use a reasonable default size
+        size = getattr(vision_config, "image_size", 448)
+        return ImageSize(width=size, height=size)
+
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+        )
+
+
+class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2ProcessingInfo]):
+    """Dummy inputs builder for HyperCLOVAX V2 memory profiling."""
+
+    def get_dummy_text(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> str:
+        # Use actual token strings directly - these will be tokenized by HF processor
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
+
+        # Use the token strings that HF processor expects
+        return (
+            V2_IMAGE_TOKEN * num_images
+            + V2_VIDEO_TOKEN * num_videos
+            + V2_AUDIO_TOKEN * num_audios
+        )
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
+
+        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_num_frames = 16  # Default for video
+
+        # Calculate audio length from feature extractor if available
+        hf_config = self.info.get_hf_config()
+        if hasattr(hf_config, "audio_config") and hf_config.audio_config is not None:
+            feature_extractor = self.info.get_feature_extractor()
+            target_audio_len = (
+                feature_extractor.chunk_length * feature_extractor.sampling_rate
+            )
+        else:
+            target_audio_len = 480000  # Default ~30 seconds at 16kHz
+
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
+        result: MultiModalDataDict = {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,  # type: ignore
+            ),
+            "video": self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=target_num_frames,
+                num_videos=num_videos,
+                overrides=video_overrides,  # type: ignore
+            ),
+        }
+
+        # Add audio if supported
+        if num_audios > 0:
+            result["audio"] = self._get_dummy_audios(
+                length=target_audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,  # type: ignore
+            )
+
+        return result
+
+
+class HCXVisionV2MultiModalProcessor(
+    BaseMultiModalProcessor[HCXVisionV2ProcessingInfo]
+):
+    """Multimodal processor for HyperCLOVAX V2 (32B Think and Omni models)."""
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        images = mm_data.get("images") if mm_data else None
+        videos = mm_data.get("videos") if mm_data else None
+        audios = mm_data.get("audios") if mm_data else None
+
+        # Check if audio is supported (Omni model)
+        hf_config = self.info.get_hf_config()
+        has_audio = (
+            hasattr(hf_config, "audio_config") and hf_config.audio_config is not None
+        )
+
+        # Build data dict for HF processor (images/videos only)
+        # The HF processor (HCXVisionV2Processor) doesn't support audio
+        data: dict[str, object] = dict(
+            text=prompt,
+            images=images,
+            videos=videos,
+        )
+
+        processed_outputs = self.info.ctx.call_hf_processor(
+            hf_processor=self.info.get_hf_processor(**mm_kwargs),
+            data=data,
+        )
+
+        # Process audio separately using WhisperFeatureExtractor
+        # since HF processor doesn't support audio
+        if has_audio and audios:
+            audio_list = list(audios) if not isinstance(audios, list) else audios
+            if audio_list:
+                feature_extractor = self.info.get_feature_extractor()
+                audio_features = feature_extractor(
+                    audio_list,
+                    sampling_rate=feature_extractor.sampling_rate,
+                    return_tensors="pt",
+                    return_attention_mask=True,
+                    padding="max_length",
+                )
+                # Merge audio features into processed outputs
+                processed_outputs["input_features"] = audio_features["input_features"]
+                if "attention_mask" in audio_features:
+                    processed_outputs["feature_attention_mask"] = audio_features[
+                        "attention_mask"
+                    ]
+
+        return processed_outputs
+
+    # NOTE: We don't override _hf_processor_applies_updates here.
+    # The default behavior returns True when processing actual image data,
+    # meaning the HF processor already handles image token expansion.
+    # This is consistent with Qwen2-VL's approach.
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_config = self.info.get_hf_config()
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        # Get token IDs from tokenizer vocab using HF processor's token strings
+        # This is the same approach as Qwen2-VL
+        placeholder = {
+            "image": vocab.get(hf_processor.image_token, hf_config.image_token_id),
+            "video": vocab.get(hf_processor.video_token, hf_config.video_token_id),
+        }
+
+        # Add audio placeholder if audio is supported
+        audio_token = getattr(hf_processor, "audio_token", None)
+        if audio_token is not None:
+            audio_token_id = vocab.get(
+                audio_token, getattr(hf_config, "audio_token_id", None)
+            )
+            if audio_token_id is not None:
+                placeholder["audio"] = audio_token_id
+
+        merge_size = hf_config.vision_config.spatial_merge_size
+
+        def get_replacement_v2_vision(item_idx: int, modality: str):
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+
+            num_tokens = int(grid_thw.prod()) // (merge_size**2)
+            return [placeholder[modality]] * num_tokens
+
+        def get_replacement_v2_audio(item_idx: int):
+            out_item = out_mm_kwargs["audio"][item_idx]
+            feature_attention_mask = out_item.get("feature_attention_mask")
+
+            if feature_attention_mask is not None:
+                assert isinstance(feature_attention_mask.data, torch.Tensor)
+                _, audio_output_lens = _get_feat_extract_output_lengths(
+                    feature_attention_mask.data.sum(-1)
+                )
+                num_tokens = int(audio_output_lens.item())
+            else:
+                # Fallback: use audio_embeds shape
+                audio_embeds = out_item.get("audio_embeds")
+                if audio_embeds is not None:
+                    num_tokens = audio_embeds.data.shape[0]
+                else:
+                    num_tokens = 0
+
+            return [placeholder["audio"]] * num_tokens
+
+        updates: list[PromptUpdate] = [
+            PromptReplacement(
+                modality=modality,
+                target=[placeholder[modality]],
+                replacement=partial(get_replacement_v2_vision, modality=modality),
+            )
+            for modality in ("image", "video")
+        ]
+
+        # Add audio prompt replacement if supported AND audio data was processed
+        if "audio" in placeholder and "audio" in out_mm_kwargs:
+            updates.append(
+                PromptReplacement(
+                    modality="audio",
+                    target=[placeholder["audio"]],
+                    replacement=get_replacement_v2_audio,
+                )
+            )
+
+        return updates
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        # Get spatial merge size from config for calculating grid sizes
+        hf_config = self.info.get_hf_config()
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        # Calculate grid sizes for flat_from_sizes (Qwen2.5-VL style)
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        if isinstance(image_grid_thw, torch.Tensor):
+            image_pixel_grid_sizes = image_grid_thw.prod(-1)
+            image_embed_grid_sizes = (
+                image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+            )
+        else:
+            image_pixel_grid_sizes = torch.empty(0)
+            image_embed_grid_sizes = torch.empty(0)
+
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+        if isinstance(video_grid_thw, torch.Tensor):
+            video_pixel_grid_sizes = video_grid_thw.prod(-1)
+            video_embed_grid_sizes = (
+                video_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+            )
+        else:
+            video_pixel_grid_sizes = torch.empty(0)
+            video_embed_grid_sizes = torch.empty(0)
+
+        fields = dict(
+            # pixel_values is concatenated patches, use flat_from_sizes
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_pixel_grid_sizes
+            ),
+            image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_embed_grid_sizes
+            ),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            # video pixel_values is also concatenated patches
+            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_pixel_grid_sizes
+            ),
+            video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_embed_grid_sizes
+            ),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        )
+
+        # Add audio fields if present
+        if "input_features" in hf_inputs or "audio_embeds" in hf_inputs:
+            fields["input_features"] = MultiModalFieldConfig.batched("audio")
+            fields["feature_attention_mask"] = MultiModalFieldConfig.batched("audio")
+            fields["audio_embeds"] = MultiModalFieldConfig.batched("audio")
+
+        return fields
+
+
+def _build_hcxvision_v2_hf_info(
+    ctx: InputProcessingContext,
+) -> HCXVisionV2ProcessingInfo:
+    return HCXVisionV2ProcessingInfo(ctx)
+
+
+def _build_hcxvision_v2_hf_processor(
+    info: HCXVisionV2ProcessingInfo,
+    dummy_inputs: BaseDummyInputsBuilder[HCXVisionV2ProcessingInfo],
+    *,
+    cache: BaseMultiModalProcessorCache | None = None,
+) -> BaseMultiModalProcessor:
+    return HCXVisionV2MultiModalProcessor(
+        info,
+        dummy_inputs,  # type: ignore
+        cache=cache,
+    )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    _build_hcxvision_v2_hf_processor,
+    info=_build_hcxvision_v2_hf_info,
+    dummy_inputs=HCXVisionV2DummyInputsBuilder,
+)
+class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """
+    HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
+
+    Supports:
+    - HyperCLOVAX-SEED-Think-32B: Vision + Text
+    - HyperCLOVAX-SEED-Omni-8B: Vision + Audio + Text
+
+    Uses Qwen2.5 Vision Transformer as the vision encoder. For Omni models,
+    also uses Qwen2AudioEncoder for audio processing.
+    """
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv": ["qkv"],  # For vision tower
+    }
+
+    # Weight mapping for loading HuggingFace checkpoints
+    # NOTE: Order matters! Ignores (None) should come before renames to prevent
+    # partial matches (e.g., "audio_model" matching "discrete_audio_model")
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.": "",  # Remove model. prefix if present
+            "vision_model.": "visual.",  # HF uses vision_model, we use visual
+        },
+        orig_to_new_substr={
+            # Ignore modules not implemented in vLLM
+            # (must come before audio_model rename to avoid partial match!)
+            "discrete_audio_model": None,  # CosyvoiceEncoder
+            "discrete_vision_model": None,  # TextAlignedTokenizer
+            "video_audio_compressor": None,  # MambaMia compressor
+            # HF uses audio_model, vLLM uses audio_tower
+            "audio_model": "audio_tower",
+        },
+    )
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        **kwargs: Any | None,
+    ) -> None:
+        super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+
+        # Text config
+        text_config = config.text_config
+        if text_config.model_type in ["gpt2", "hyperclovax", "llama"]:
+            text_config._attn_implementation = "sdpa"
+        if text_config.model_type != "hyperclovax":
+            text_config.logits_scaling = 1.0
+
+        # Vision config
+        vision_config = config.vision_config
+
+        self.config = config
+        self.vision_config = vision_config
+        self.text_config = text_config
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+
+        # Initialize Qwen2.5 Vision Transformer
+        self.visual = Qwen2_5_VisionTransformer(
+            vision_config=vision_config,
+            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
+            prefix=maybe_prefix(prefix, "visual"),
+        )
+
+        # Linear projector (vision_hidden_size -> text_hidden_size)
+        # For V2 model: mm_projector_type is "linear"
+        vision_hidden_size = vision_config.hidden_size
+        text_hidden_size = text_config.hidden_size
+
+        # Check if out_hidden_size is defined (Qwen2.5-VL style)
+        # The merger in Qwen2.5 VisionTransformer handles projection to out_hidden_size
+        if hasattr(vision_config, "out_hidden_size"):
+            out_hidden = vision_config.out_hidden_size
+        else:
+            out_hidden = vision_hidden_size
+
+        # Always create Linear projector since HF checkpoint has mm_projector weights
+        self.mm_projector = nn.Linear(out_hidden, text_hidden_size)
+
+        # Audio tower (for Omni models)
+        audio_config = getattr(config, "audio_config", None)
+        self.audio_config = audio_config
+        if audio_config is not None:
+            self.audio_tower = Qwen2AudioEncoder(audio_config)
+            # Audio projector based on config
+            audio_hidden_size = audio_config.d_model
+            audio_projector_type = getattr(config, "audio_projector_type", "linear")
+            if audio_projector_type == "mlp":
+                # Use AudioProjectorMLP with fc1/fc2 naming to match HF checkpoint
+                self.audio_projector = AudioProjectorMLP(
+                    audio_hidden_size, text_hidden_size
+                )
+            else:
+                self.audio_projector = nn.Linear(audio_hidden_size, text_hidden_size)
+        else:
+            self.audio_tower = None
+            self.audio_projector = None
+
+        # Language model
+        self.lm_head_vocab_size = getattr(
+            text_config, "padded_vocab_size", text_config.vocab_size
+        )
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return V2_IMAGE_TOKEN
+        if modality.startswith("video"):
+            return V2_VIDEO_TOKEN
+        if modality.startswith("audio"):
+            return V2_AUDIO_TOKEN
+
+        raise ValueError("Only image, video, or audio modality is supported")
+
+    def _parse_and_validate_image_input(
+        self,
+        **kwargs: object,
+    ) -> HCXVisionV2ImageInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            return HCXVisionV2ImagePixelInputs(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+
+        if image_embeds is not None:
+            return HCXVisionV2ImageEmbeddingInputs(
+                image_embeds=image_embeds,
+                image_grid_thw=image_grid_thw,
+            )
+
+        return None
+
+    def _parse_and_validate_video_input(
+        self,
+        **kwargs: object,
+    ) -> HCXVisionV2VideoInputs | None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+
+        if pixel_values_videos is None and video_embeds is None:
+            return None
+
+        if pixel_values_videos is not None:
+            return HCXVisionV2VideoPixelInputs(
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
+
+        if video_embeds is not None:
+            return HCXVisionV2VideoEmbeddingInputs(
+                video_embeds=video_embeds,
+                video_grid_thw=video_grid_thw,
+            )
+
+        return None
+
+    def _parse_and_validate_audio_input(
+        self,
+        **kwargs: object,
+    ) -> HCXVisionV2AudioInputs | None:
+        input_features = kwargs.pop("input_features", None)
+        audio_embeds = kwargs.pop("audio_embeds", None)
+        feature_attention_mask = kwargs.pop("feature_attention_mask", None)
+
+        if input_features is None and audio_embeds is None:
+            return None
+
+        if audio_embeds is not None:
+            return HCXVisionV2AudioEmbeddingInputs(
+                audio_embeds=audio_embeds,
+            )
+
+        if input_features is not None:
+            return HCXVisionV2AudioFeatureInputs(
+                input_features=input_features,
+                feature_attention_mask=feature_attention_mask,
+            )
+
+        return None
+
+    def _process_image_input(
+        self,
+        image_input: HCXVisionV2ImageInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Process images through Qwen2.5 ViT and projector."""
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"]
+            with set_forward_context(None, self.vllm_config):
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+
+        # Apply projector
+        image_embeds = self.mm_projector(image_embeds)
+
+        # Split concatenated embeddings for each image
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return image_embeds.split(sizes)
+
+    def _process_video_input(
+        self,
+        video_input: HCXVisionV2VideoInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Process videos through Qwen2.5 ViT and projector."""
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values_videos = video_input["pixel_values_videos"]
+            with set_forward_context(None, self.vllm_config):
+                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+
+        # Apply projector
+        video_embeds = self.mm_projector(video_embeds)
+
+        # Split concatenated embeddings for each video
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return video_embeds.split(sizes)
+
+    def _process_audio_input(
+        self,
+        audio_input: HCXVisionV2AudioInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Process audio through Qwen2AudioEncoder and projector."""
+        if self.audio_tower is None or self.audio_projector is None:
+            raise RuntimeError(
+                "Audio processing requested but audio tower not initialized. "
+                "This model may not support audio input."
+            )
+
+        if audio_input["type"] == "audio_embeds":
+            audio_embeds = audio_input["audio_embeds"]
+            return tuple(audio_embeds)
+
+        input_features = audio_input["input_features"]
+        feature_attention_mask = audio_input["feature_attention_mask"]
+
+        # Calculate audio feature lengths
+        audio_feat_lengths, audio_output_lengths = (
+            self.audio_tower._get_feat_extract_output_lengths(
+                feature_attention_mask.sum(-1)
+            )
+        )
+
+        batch_size, _, max_mel_seq_len = input_features.shape
+        max_seq_len = (max_mel_seq_len - 2) // 2 + 1
+
+        # Create attention mask for audio encoder
+        seq_range = (
+            torch.arange(
+                0,
+                max_seq_len,
+                dtype=audio_feat_lengths.dtype,
+                device=audio_feat_lengths.device,
+            )
+            .unsqueeze(0)
+            .expand(batch_size, max_seq_len)
+        )
+        lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
+            batch_size, max_seq_len
+        )
+        padding_mask = seq_range >= lengths_expand
+
+        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
+            batch_size, 1, max_seq_len, max_seq_len
+        )
+        audio_attention_mask = audio_attention_mask_.to(
+            dtype=self.audio_tower.conv1.weight.dtype,
+            device=self.audio_tower.conv1.weight.device,
+        )
+        audio_attention_mask[audio_attention_mask_] = float("-inf")
+
+        # Forward through audio encoder
+        audio_outputs = self.audio_tower(
+            input_features, attention_mask=audio_attention_mask
+        )
+        selected_audio_feature = audio_outputs.last_hidden_state
+
+        # Apply audio projector
+        audio_features = self.audio_projector(selected_audio_feature)
+
+        # Mask and split audio features
+        num_audios, max_audio_tokens, embed_dim = audio_features.shape
+        audio_output_lengths = audio_output_lengths.unsqueeze(1)
+        audio_features_mask = (
+            torch.arange(max_audio_tokens)
+            .expand(num_audios, max_audio_tokens)
+            .to(audio_output_lengths.device)
+            < audio_output_lengths
+        )
+        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
+
+        # Split to tuple of embeddings for individual audio input
+        return torch.split(
+            masked_audio_features, audio_output_lengths.flatten().tolist()
+        )
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        for input_key in kwargs:
+            if (
+                input_key in ("pixel_values", "image_embeds")
+                and "image" not in modalities
+            ):
+                modalities["image"] = self._parse_and_validate_image_input(**kwargs)
+            if (
+                input_key in ("pixel_values_videos", "video_embeds")
+                and "video" not in modalities
+            ):
+                modalities["video"] = self._parse_and_validate_video_input(**kwargs)
+            if (
+                input_key in ("input_features", "audio_embeds")
+                and "audio" not in modalities
+            ):
+                modalities["audio"] = self._parse_and_validate_audio_input(**kwargs)
+
+        return modalities
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def embed_multimodal(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return []
+
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        for modality in modalities:
+            if modality == "image":
+                image_input = modalities["image"]
+                if image_input is not None:
+                    image_embeddings = self._process_image_input(image_input)
+                    multimodal_embeddings += tuple(image_embeddings)
+            if modality == "video":
+                video_input = modalities["video"]
+                if video_input is not None:
+                    video_embeddings = self._process_video_input(video_input)
+                    multimodal_embeddings += tuple(video_embeddings)
+            if modality == "audio":
+                audio_input = modalities["audio"]
+                if audio_input is not None:
+                    audio_embeddings = self._process_audio_input(audio_input)
+                    multimodal_embeddings += tuple(audio_embeddings)
+
+        return multimodal_embeddings
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        hidden_states = self.language_model.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
+
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
