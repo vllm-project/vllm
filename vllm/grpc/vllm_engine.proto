@@ -1,0 +1,218 @@
+syntax = "proto3";
+
+package vllm.grpc.engine;
+
+// Service definition for vLLM engine communication
+// This protocol is designed for efficient binary communication between
+// the Rust router and vLLM Python engine (AsyncLLM).
+service VllmEngine {
+  // Submit a generation request (supports streaming)
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+
+  // Submit an embedding request
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Abort a running request
+  rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // Get model information
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+
+  // Get server information
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+}
+
+// =====================
+// Common Types
+// =====================
+
+// Sampling parameters for text generation
+message SamplingParams {
+  float temperature = 1;
+  float top_p = 2;
+  int32 top_k = 3;
+  float min_p = 4;
+  float frequency_penalty = 5;
+  float presence_penalty = 6;
+  float repetition_penalty = 7;
+
+  optional int32 max_tokens = 8;
+  int32 min_tokens = 9;
+
+  repeated string stop = 10;
+  repeated uint32 stop_token_ids = 11;
+
+  bool skip_special_tokens = 12;
+  bool spaces_between_special_tokens = 13;
+  bool ignore_eos = 14;
+
+  int32 n = 15;  // Number of parallel samples
+
+  // Logprobs configuration
+  optional int32 logprobs = 22;  // Number of log probabilities per output token (-1 for all)
+  optional int32 prompt_logprobs = 23;  // Number of log probabilities per prompt token (-1 for all)
+
+  // Additional vLLM fields
+  optional int32 seed = 24;  // Random seed for reproducibility
+  bool include_stop_str_in_output = 25;  // Whether to include stop strings in output
+  map<int32, float> logit_bias = 26;  // Token ID to bias mapping (-100 to 100)
+  optional int32 truncate_prompt_tokens = 27;  // Prompt truncation (-1 for model max)
+
+  // Structured outputs (one of) - matches vLLM's StructuredOutputsParams
+  oneof constraint {
+    string json_schema = 16;  // JSON schema for structured output
+    string regex = 17;  // Regex pattern
+    string grammar = 18;  // Grammar/EBNF for structured output
+    string structural_tag = 19;  // Structural tag (e.g., Harmony models)
+    bool json_object = 20;  // Force JSON object output
+    ChoiceConstraint choice = 21;  // List of allowed choices
+  }
+}
+
+// Choice constraint for structured outputs
+message ChoiceConstraint {
+  repeated string choices = 1;
+}
+
+// Pre-tokenized input from Rust router
+message TokenizedInput {
+  string original_text = 1;  // For reference/debugging
+  repeated uint32 input_ids = 2;  // Actual token IDs to process
+}
+
+// =====================
+// Generate Request
+// =====================
+
+message GenerateRequest {
+  string request_id = 1;
+
+  // Pre-tokenized input (required)
+  TokenizedInput tokenized = 2;
+
+  // Generation parameters (includes logprobs config)
+  SamplingParams sampling_params = 3;
+
+  // Streaming
+  bool stream = 4;
+}
+
+// =====================
+// Generate Response
+// =====================
+
+message GenerateResponse {
+  string request_id = 1;
+
+  oneof response {
+    GenerateStreamChunk chunk = 2;     // For streaming
+    GenerateComplete complete = 3;      // For final/non-streaming
+    GenerateError error = 4;            // For errors
+  }
+}
+
+message GenerateStreamChunk {
+  repeated uint32 token_ids = 1;       // Incremental tokens
+  int32 prompt_tokens = 2;
+  int32 completion_tokens = 3;
+  int32 cached_tokens = 4;
+
+  // Logprobs support (TODO: implement in Phase 4)
+  // OutputLogProbs output_logprobs = 5;
+  // InputLogProbs input_logprobs = 6;  // Only in first chunk
+}
+
+message GenerateComplete {
+  repeated uint32 output_ids = 1;      // All output tokens
+  string finish_reason = 2;            // "stop", "length", "abort"
+  int32 prompt_tokens = 3;
+  int32 completion_tokens = 4;
+  int32 cached_tokens = 5;
+
+  // Logprobs support (TODO: implement in Phase 4)
+  // OutputLogProbs output_logprobs = 6;
+  // InputLogProbs input_logprobs = 7;
+}
+
+message GenerateError {
+  string message = 1;
+  string http_status_code = 2;
+  string details = 3;
+}
+
+// =====================
+// Embedding Request
+// =====================
+
+message EmbedRequest {
+  string request_id = 1;
+  TokenizedInput tokenized = 2;
+}
+
+message EmbedResponse {
+  string request_id = 1;
+
+  oneof response {
+    EmbedComplete complete = 2;
+    EmbedError error = 3;
+  }
+}
+
+message EmbedComplete {
+  repeated float embedding = 1;
+  int32 prompt_tokens = 2;
+  int32 embedding_dim = 3;
+}
+
+message EmbedError {
+  string message = 1;
+  string code = 2;
+}
+
+// =====================
+// Management Operations
+// =====================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message AbortRequest {
+  string request_id = 1;
+  string reason = 2;
+}
+
+message AbortResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// =====================
+// Model and Server Info
+// =====================
+
+message GetModelInfoRequest {}
+
+message GetModelInfoResponse {
+  string model_path = 1;
+  bool is_generation = 2;
+  int32 max_context_length = 3;
+  int32 vocab_size = 4;
+  bool supports_vision = 5;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  int32 active_requests = 1;
+  bool is_paused = 2;
+  double last_receive_timestamp = 3;
+  double uptime_seconds = 4;
+  string server_type = 5;  // "vllm-grpc"
+}
