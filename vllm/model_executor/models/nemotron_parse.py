@@ -554,8 +554,7 @@ class NemotronParseDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        # TODO amitz-nv: Check the order here (was originally: width, height)
-        target_height, target_width = self.info.get_hf_config().image_size
+        target_width, target_height = self.info.get_hf_config().image_size
 
         return {
             "image": self._get_dummy_images(
