@@ -212,19 +212,23 @@ class EngineCore:
         start = time.time()
 
         env_mem_str = os.environ.get("VLLM_KVC_MEM_GB")
-        GiB = 1024 ** 3
+        GiB = 1024**3
+
+        profile_start = time.time()
 
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         num_devices = len(kv_cache_specs)
         if env_mem_str is not None:
-            # available_gpu_memory = [int(float(env_mem_str) * (1024 ** 3))]  # Convert GB to Bytes
-            # logger.info(f"available_gpu_memory (from env): {available_gpu_memory} Bytes")
             parts = [p.strip() for p in env_mem_str.split(",") if p.strip()]
             try:
                 vals_gib = [float(p) for p in parts]
             except ValueError:
-                logger.error(f"VLLM_KVC_MEM_GB malformed: {env_mem_str!r}. Expected floats or comma-separated floats (GiB).")
+                logger.error(
+                    "VLLM_KVC_MEM_GB malformed: %r. Expected floats or "
+                    "comma-separated floats (GiB).",
+                    env_mem_str,
+                )
                 raise
 
             if len(vals_gib) == 1 and num_devices > 1:
@@ -233,20 +237,28 @@ class EngineCore:
                 logger.error(
                     "VLLM_KVC_MEM_GB count mismatch: got %d value(s) for %d device(s). "
                     "Provide one value (replicated) or one per visible device. env=%r",
-                    len(vals_gib), num_devices, env_mem_str,
+                    len(vals_gib),
+                    num_devices,
+                    env_mem_str,
                 )
                 raise AssertionError("VLLM_KVC_MEM_GB count mismatch")
 
             available_gpu_memory = []
             for i, gib in enumerate(vals_gib):
                 if gib < 1.0:
-                    logger.error("VLLM_KVC_MEM_GB[%d]=%.3f GiB is too small; must be >= 1 GiB.", i, gib)
+                    logger.error(
+                        "VLLM_KVC_MEM_GB[%d]=%.3f GiB is too small; must be >= 1 GiB.",
+                        i,
+                        gib,
+                    )
                     raise AssertionError("VLLM_KVC_MEM_GB too small")
                 available_gpu_memory.append(int(gib * GiB))
 
-            logger.info("available_gpu_memory (from env, per device): %s Bytes", available_gpu_memory)
+            logger.info(
+                "available_gpu_memory (from env, per device): %s Bytes",
+                available_gpu_memory,
+            )
         else:
-
             has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
             if has_kv_cache:
                 if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
@@ -255,15 +267,37 @@ class EngineCore:
                     self.available_gpu_memory_for_kv_cache = (
                         ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
                     )
-                    available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
-                        kv_cache_specs
+                    available_gpu_memory = [
+                        self.available_gpu_memory_for_kv_cache
+                    ] * len(kv_cache_specs)
+                else:
+                    # Profiles the peak memory usage of the model to determine how
+                    # much memory can be allocated for kv cache.
+                    available_gpu_memory = (
+                        self.model_executor.determine_available_memory()
+                    )
+                    self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+                    logger.info(
+                        "available_gpu_memory (profiled): %s Bytes, "
+                        "profiling memory takes: %.1fs",
+                        available_gpu_memory,
+                        time.time() - profile_start,
                     )
             else:
                 # Attention free models don't need memory for kv cache
                 available_gpu_memory = [0] * len(kv_cache_specs)
-                logger.info(f"available_gpu_memory (profiled): {available_gpu_memory} Bytes, profiling memory takes: {(time.time() - profile_start):.1f}s")
+                logger.info(
+                    "available_gpu_memory (profiled): %s Bytes, "
+                    "profiling memory takes: %.1fs",
+                    available_gpu_memory,
+                    time.time() - profile_start,
+                )
 
-            logger.info(f"kv_cache_specs is {kv_cache_specs}, available_gpu_memory is {available_gpu_memory}")
+            logger.info(
+                "kv_cache_specs is %s, available_gpu_memory is %s",
+                kv_cache_specs,
+                available_gpu_memory,
+            )
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
         kv_cache_configs = get_kv_cache_configs(

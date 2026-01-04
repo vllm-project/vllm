@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -15,6 +16,7 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.sequence import RequestMetrics
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -28,8 +30,6 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
-from vllm.sequence import RequestMetrics
-import time
 
 
 class RequestOutputCollector:
@@ -284,9 +284,9 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
-        metrics = None
-        if finished:
-            metrics: RequestMetrics = self._convert_stats_to_metrics()
+        metrics: RequestMetrics | None = None
+        if finished and self.stats is not None:
+            metrics = self._convert_stats_to_metrics()
 
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -302,11 +302,10 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
-            metrics=metrics
+            metrics=metrics,
         )
 
     def _convert_stats_to_metrics(self) -> RequestMetrics:
-        
         queued_time = self.stats.scheduled_ts - self.stats.queued_ts
 
         # Prefill interval is from first SCHEDULED to first NEW_TOKEN
@@ -320,8 +319,8 @@ class RequestState:
             last_token_time=0,
             first_scheduled_time=self.stats.arrival_time + queued_time,
             time_in_queue=queued_time,
-            first_token_time=self.stats.arrival_time+queued_time+prefill_time,
-            finished_time=time.time()
+            first_token_time=self.stats.arrival_time + queued_time + prefill_time,
+            finished_time=time.time(),
         )
         return metrics
 
