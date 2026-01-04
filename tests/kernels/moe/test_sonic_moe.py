@@ -86,9 +86,7 @@ def test_is_valid_sonic_moe_basic():
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
     w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(
-        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
-    )
+    w2 = torch.randn(num_experts, K, two_n // 2, dtype=torch.float16, device="cuda")
 
     result = is_valid_sonic_moe(hidden_states, w1, w2, num_experts, top_k)
     assert isinstance(result, bool)
@@ -101,9 +99,7 @@ def test_is_valid_sonic_moe_large_topk():
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
     w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(
-        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
-    )
+    w2 = torch.randn(num_experts, K, two_n // 2, dtype=torch.float16, device="cuda")
 
     result = is_valid_sonic_moe(hidden_states, w1, w2, num_experts, top_k)
     # Should be False because top_k > 16, or False because not supported
@@ -121,9 +117,7 @@ def test_sonic_moe_forward_unsupported():
 
     hidden_states = torch.randn(M, K, dtype=torch.float16, device="cuda")
     w1 = torch.randn(num_experts, two_n, K, dtype=torch.float16, device="cuda")
-    w2 = torch.randn(
-        num_experts, K, two_n // 2, dtype=torch.float16, device="cuda"
-    )
+    w2 = torch.randn(num_experts, K, two_n // 2, dtype=torch.float16, device="cuda")
     topk_weights = torch.randn(M, top_k, dtype=torch.float16, device="cuda")
     topk_ids = torch.randint(0, num_experts, (M, top_k), device="cuda")
 

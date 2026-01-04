@@ -253,13 +253,9 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts, two_n, k_from_w1 = w1_sonic.shape
         topk = topk_ids.shape[1]
         if k_from_w1 != K:
-            raise ValueError(
-                f"Sonic MoE expects w1 last dim {K}, got {k_from_w1}"
-            )
+            raise ValueError(f"Sonic MoE expects w1 last dim {K}, got {k_from_w1}")
         if two_n % 2 != 0:
-            raise ValueError(
-                f"Sonic MoE expects w1 second dim to be even, got {two_n}"
-            )
+            raise ValueError(f"Sonic MoE expects w1 second dim to be even, got {two_n}")
         n = two_n // 2
         if w2_sonic.size(1) != K or w2_sonic.size(2) != n:
             raise ValueError(
