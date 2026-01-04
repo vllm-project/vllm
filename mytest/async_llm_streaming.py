@@ -68,7 +68,7 @@ async def main():
 
     # Create AsyncLLM engine with simple configuration
     engine_args = AsyncEngineArgs(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+        model="/root/autodl-tmp/llm/qwen2.5_0.5b",#本地目录
         enforce_eager=True,  # Faster startup for examples
     )
     engine = AsyncLLM.from_engine_args(engine_args)
