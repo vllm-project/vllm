@@ -265,6 +265,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora = self._load_adapter(lora_request)
 
             # Remove the existing adapter if it exists
+            # Use case for LoRA inplace
             self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
