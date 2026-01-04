@@ -1,8 +1,5 @@
 {
     "state-spaces/mamba-130m-hf": {
-        "architectures": [
-            "MambaForCausalLM"
-        ],
         "model_type": "mamba",
         "text_model_type": "mamba",
         "hidden_size": 768,
@@ -14,12 +11,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "architecture": "MambaForCausalLM"
     },
     "mistralai/Mamba-Codestral-7B-v0.1": {
-        "architectures": [
-            "Mamba2ForCausalLM"
-        ],
         "model_type": "mamba",
         "text_model_type": "mamba",
         "hidden_size": 4096,
@@ -31,12 +26,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Mamba2ForCausalLM"
     },
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
-        "architectures": [
-            "Terratorch"
-        ],
         "model_type": "timm_wrapper",
         "text_model_type": "timm_wrapper",
         "hidden_size": 0,
@@ -48,12 +41,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "architecture": "Terratorch"
     },
     "tiiuae/falcon-mamba-7b-instruct": {
-        "architectures": [
-            "FalconMambaForCausalLM"
-        ],
         "model_type": "falcon_mamba",
         "text_model_type": "falcon_mamba",
         "hidden_size": 4096,
@@ -65,12 +56,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "FalconMambaForCausalLM"
     },
     "Zyphra/Zamba2-7B-instruct": {
-        "architectures": [
-            "Zamba2ForCausalLM"
-        ],
         "model_type": "zamba2",
         "text_model_type": "zamba2",
         "hidden_size": 3584,
@@ -82,12 +71,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Zamba2ForCausalLM"
     },
     "mosaicml/mpt-7b": {
-        "architectures": [
-            "MPTForCausalLM"
-        ],
         "model_type": "mpt",
         "text_model_type": "mpt",
         "hidden_size": 4096,
@@ -99,12 +86,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "MPTForCausalLM"
     },
     "databricks/dbrx-instruct": {
-        "architectures": [
-            "DbrxForCausalLM"
-        ],
         "model_type": "dbrx",
         "text_model_type": "dbrx",
         "hidden_size": 6144,
@@ -116,12 +101,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "DbrxForCausalLM"
     },
     "tiiuae/falcon-7b": {
-        "architectures": [
-            "FalconForCausalLM"
-        ],
         "model_type": "falcon",
         "text_model_type": "falcon",
         "hidden_size": 4544,
@@ -133,12 +116,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "FalconForCausalLM"
     },
     "tiiuae/falcon-40b": {
-        "architectures": [
-            "FalconForCausalLM"
-        ],
         "model_type": "falcon",
         "text_model_type": "falcon",
         "hidden_size": 8192,
@@ -150,12 +131,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "FalconForCausalLM"
     },
     "luccafong/deepseek_mtp_main_random": {
-        "architectures": [
-            "DeepseekV3ForCausalLM"
-        ],
         "model_type": "deepseek_v3",
         "text_model_type": "deepseek_v3",
         "hidden_size": 2560,
@@ -167,12 +146,10 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "DeepseekV3ForCausalLM"
     },
     "luccafong/deepseek_mtp_draft_random": {
-        "architectures": [
-            "DeepseekV3ForCausalLM"
-        ],
         "model_type": "deepseek_v3",
         "text_model_type": "deepseek_v3",
         "hidden_size": 2560,
@@ -184,12 +161,10 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "DeepseekV3ForCausalLM"
     },
     "Qwen/Qwen3-Next-80B-A3B-Instruct": {
-        "architectures": [
-            "Qwen3NextForCausalLM"
-        ],
         "model_type": "qwen3_next",
         "text_model_type": "qwen3_next",
         "hidden_size": 2048,
@@ -201,12 +176,10 @@
         "num_experts": 512,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Qwen3NextForCausalLM"
     },
     "tiny-random/qwen3-next-moe": {
-        "architectures": [
-            "Qwen3NextForCausalLM"
-        ],
         "model_type": "qwen3_next",
         "text_model_type": "qwen3_next",
         "hidden_size": 8,
@@ -218,12 +191,10 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Qwen3NextForCausalLM"
     },
     "zai-org/GLM-4.5": {
-        "architectures": [
-            "Glm4MoeForCausalLM"
-        ],
         "model_type": "glm4_moe",
         "text_model_type": "glm4_moe",
         "hidden_size": 5120,
@@ -235,12 +206,10 @@
         "num_experts": 160,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Glm4MoeForCausalLM"
     },
     "baidu/ERNIE-4.5-21B-A3B-PT": {
-        "architectures": [
-            "Ernie4_5_MoeForCausalLM"
-        ],
         "model_type": "ernie4_5_moe",
         "text_model_type": "ernie4_5_moe",
         "hidden_size": 2560,
@@ -252,12 +221,10 @@
         "num_experts": 64,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Ernie4_5_MoeForCausalLM"
     },
     "lmsys/gpt-oss-20b-bf16": {
-        "architectures": [
-            "GptOssForCausalLM"
-        ],
         "model_type": "gpt_oss",
         "text_model_type": "gpt_oss",
         "hidden_size": 2880,
@@ -269,12 +236,10 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "GptOssForCausalLM"
     },
     "deepseek-ai/DeepSeek-V3.2-Exp": {
-        "architectures": [
-            "DeepseekV32ForCausalLM"
-        ],
         "model_type": "deepseek_v32",
         "text_model_type": "deepseek_v32",
         "hidden_size": 7168,
@@ -286,12 +251,10 @@
         "num_experts": 256,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "DeepseekV32ForCausalLM"
     },
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
-        "architectures": [
-            "Llama4ForConditionalGeneration"
-        ],
         "model_type": "llama4",
         "text_model_type": "llama4_text",
         "hidden_size": 5120,
@@ -303,12 +266,10 @@
         "num_experts": 16,
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "Llama4ForConditionalGeneration"
     },
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
-        "architectures": [
-            "DeciLMForCausalLM"
-        ],
         "model_type": "nemotron-nas",
         "text_model_type": "nemotron-nas",
         "hidden_size": 8192,
@@ -320,12 +281,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "DeciLMForCausalLM"
     },
     "XiaomiMiMo/MiMo-7B-RL": {
-        "architectures": [
-            "MiMoForCausalLM"
-        ],
         "model_type": "mimo",
         "text_model_type": "mimo",
         "hidden_size": 4096,
@@ -337,12 +296,10 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "architecture": "MiMoForCausalLM"
     },
     "meituan-longcat/LongCat-Flash-Chat": {
-        "architectures": [
-            "LongcatFlashForCausalLM"
-        ],
         "model_type": "longcat_flash",
         "text_model_type": "longcat_flash",
         "hidden_size": 6144,
@@ -354,6 +311,7 @@
         "num_experts": 512,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "architecture": "LongcatFlashForCausalLM"
     }
 }

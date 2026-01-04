@@ -939,17 +939,15 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: str | list[str],
+        architecture: str | None,
         model_config: ModelConfig,
     ) -> tuple[_ModelInfo, str]:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            raise ValueError("No model architectures are specified")
+        if not architecture:
+            raise ValueError("No model architecture is specified")
 
         # Require transformers impl
         if model_config.model_impl == "transformers":
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
@@ -960,48 +958,42 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (after resolving convert_type)
         if (
-            all(arch not in self.models for arch in architectures)
+            architecture not in self.models
             and model_config.model_impl == "auto"
             and getattr(model_config, "convert_type", "none") == "none"
         ):
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
 
-        for arch in architectures:
-            normalized_arch = self._normalize_arch(arch, model_config)
-            model_info = self._try_inspect_model_cls(normalized_arch)
-            if model_info is not None:
-                return (model_info, arch)
+        normalized_arch = self._normalize_arch(architecture, model_config)
+        model_info = self._try_inspect_model_cls(normalized_arch)
+        if model_info is not None:
+            return (model_info, architecture)
 
         # Fallback to transformers impl (before resolving runner_type)
-        if (
-            all(arch not in self.models for arch in architectures)
-            and model_config.model_impl == "auto"
-        ):
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+        if architecture not in self.models and model_config.model_impl == "auto":
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
 
-        return self._raise_for_unsupported(architectures)
+        return self._raise_for_unsupported([architecture])
 
     def resolve_model_cls(
         self,
-        architectures: str | list[str],
+        architecture: str | None,
         model_config: ModelConfig,
     ) -> tuple[type[nn.Module], str]:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            raise ValueError("No model architectures are specified")
+        if not architecture:
+            raise ValueError("No model architecture is specified")
 
         # Require transformers impl
         if model_config.model_impl == "transformers":
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
@@ -1014,34 +1006,30 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (after resolving convert_type)
         if (
-            all(arch not in self.models for arch in architectures)
+            architecture not in self.models
             and model_config.model_impl == "auto"
             and getattr(model_config, "convert_type", "none") == "none"
         ):
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
 
-        for arch in architectures:
-            normalized_arch = self._normalize_arch(arch, model_config)
-            model_cls = self._try_load_model_cls(normalized_arch)
-            if model_cls is not None:
-                return (model_cls, arch)
+        normalized_arch = self._normalize_arch(architecture, model_config)
+        model_cls = self._try_load_model_cls(normalized_arch)
+        if model_cls is not None:
+            return (model_cls, architecture)
 
         # Fallback to transformers impl (before resolving runner_type)
-        if (
-            all(arch not in self.models for arch in architectures)
-            and model_config.model_impl == "auto"
-        ):
-            arch = self._try_resolve_transformers(architectures[0], model_config)
+        if architecture not in self.models and model_config.model_impl == "auto":
+            arch = self._try_resolve_transformers(architecture, model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
 
-        return self._raise_for_unsupported(architectures)
+        return self._raise_for_unsupported([architecture])
 
     def is_text_generation_model(
         self,

@@ -489,14 +489,14 @@ class ModelConfig:
         )
         self.model_arch_config = self.get_model_arch_config()
 
-        architectures = self.architectures
+        architecture = self.model_arch_config.architecture
         registry = self.registry
-        is_generative_model = registry.is_text_generation_model(architectures, self)
-        is_pooling_model = registry.is_pooling_model(architectures, self)
+        is_generative_model = registry.is_text_generation_model(architecture, self)
+        is_pooling_model = registry.is_pooling_model(architecture, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(architecture, self.runner)
         self.convert_type = self._get_convert_type(
-            architectures, self.runner_type, self.convert
+            architecture, self.runner_type, self.convert
         )
 
         if self.runner_type == "generate" and not is_generative_model:
@@ -516,9 +516,12 @@ class ModelConfig:
 
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
-        model_info, arch = registry.inspect_model_cls(architectures, self)
+        model_info, arch = registry.inspect_model_cls(architecture, self)
         self._model_info = model_info
         self._architecture = arch
+        assert architecture == arch, (
+            f"vllm inspected {arch=}, and is different from config {architecture=}"
+        )
         logger.info("Resolved architecture: %s", arch)
 
         # Init pooler config if needed
@@ -660,7 +663,7 @@ class ModelConfig:
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
-        if defaults := try_match_architecture_defaults(self.architectures[0]):
+        if defaults := try_match_architecture_defaults(self.architecture):
             _, (runner, task) = defaults
         # User specified value take precedence
         if self.runner != "auto":
@@ -686,10 +689,6 @@ class ModelConfig:
     @property
     def registry(self):
         return me_models.ModelRegistry
-
-    @property
-    def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures
 
     @property
     def architecture(self) -> str:
@@ -748,7 +747,7 @@ class ModelConfig:
 
     def _get_default_runner_type(
         self,
-        architectures: list[str],
+        architecture: str,
     ) -> RunnerType:
         registry = self.registry
 
@@ -756,29 +755,28 @@ class ModelConfig:
         if get_pooling_config(self.model, self.revision):
             return "pooling"
 
-        for arch in architectures:
-            if arch in registry.get_supported_archs():
-                if registry.is_pooling_model(architectures, self):
-                    return "pooling"
-                if registry.is_text_generation_model(architectures, self):
-                    return "generate"
+        if architecture in registry.get_supported_archs():
+            if registry.is_pooling_model(architecture, self):
+                return "pooling"
+            if registry.is_text_generation_model(architecture, self):
+                return "generate"
 
-            match = try_match_architecture_defaults(arch)
-            if match:
-                _, (runner_type, _) = match
-                return runner_type
+        match = try_match_architecture_defaults(architecture)
+        if match:
+            _, (runner_type, _) = match
+            return runner_type
 
         return "generate"
 
     def _get_runner_type(
         self,
-        architectures: list[str],
+        architecture: str,
         runner: RunnerOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        runner_type = self._get_default_runner_type(architecture)
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -792,26 +790,25 @@ class ModelConfig:
 
     def _get_default_convert_type(
         self,
-        architectures: list[str],
+        architecture: str,
         runner_type: RunnerType,
     ) -> ConvertType:
         registry = self.registry
 
-        for arch in architectures:
-            if arch in registry.get_supported_archs():
-                if runner_type == "generate" and registry.is_text_generation_model(
-                    architectures, self
-                ):
-                    return "none"
-                if runner_type == "pooling" and registry.is_pooling_model(
-                    architectures, self
-                ):
-                    return "none"
+        if architecture in registry.get_supported_archs():
+            if runner_type == "generate" and registry.is_text_generation_model(
+                architecture, self
+            ):
+                return "none"
+            if runner_type == "pooling" and registry.is_pooling_model(
+                architecture, self
+            ):
+                return "none"
 
-            match = try_match_architecture_defaults(arch, runner_type=runner_type)
-            if match:
-                _, (_, convert_type) = match
-                return convert_type
+        match = try_match_architecture_defaults(architecture, runner_type=runner_type)
+        if match:
+            _, (_, convert_type) = match
+            return convert_type
 
         # This is to handle Sentence Transformers models that use *ForCausalLM
         # and also multi-modal pooling models which are not defined as
@@ -823,7 +820,7 @@ class ModelConfig:
 
     def _get_convert_type(
         self,
-        architectures: list[str],
+        architecture: str,
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
@@ -837,7 +834,7 @@ class ModelConfig:
         if convert != "auto":
             return convert
 
-        convert_type = self._get_default_convert_type(architectures, runner_type)
+        convert_type = self._get_default_convert_type(architecture, runner_type)
 
         # Don't log the most common case
         if convert_type != "none":
@@ -1037,7 +1034,7 @@ class ModelConfig:
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
-            self.architectures, self
+            self.architecture, self
         ):
             raise NotImplementedError(
                 "Pipeline parallelism is not supported for this model. "
@@ -1347,7 +1344,7 @@ class ModelConfig:
 
         return (
             getattr(cfg, "alibi", False)  # Falcon
-            or "BloomForCausalLM" in self.architectures  # Bloom
+            or self.architecture == "BloomForCausalLM"  # Bloom
             or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
             or (
                 hasattr(cfg, "attn_config")  # MPT
