@@ -516,12 +516,8 @@ class VllmConfig:
 
         if kv_offloading_backend == "native":
             self.kv_transfer_config.kv_connector = "OffloadingConnector"
-            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
-
-            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
-            # done after the model's KV cache is initialized
             self.kv_transfer_config.kv_connector_extra_config.update(
-                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+                {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
