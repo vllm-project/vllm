@@ -136,6 +136,7 @@ class HFConfigParser(ConfigParserBase):
             model,
             revision=revision,
             code_revision=code_revision,
+            trust_remote_code=trust_remote_code,
             token=_get_hf_token(),
             **kwargs,
         )
@@ -157,6 +158,7 @@ class HFConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
+                trust_remote_code=trust_remote_code,
                 token=_get_hf_token(),
                 **kwargs,
             )
