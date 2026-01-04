@@ -123,16 +123,21 @@ class ECExampleConnector(ECConnectorBase):
     def has_caches(
         self,
         request: "Request",
-    ) -> list[bool]:
+        index: int | None = None,
+    ) -> bool | list[bool]:
         """
         Check if cache exist externally for each mm_data of request
 
         Args:
             request (Request): the request object.
+            index(int | None): The index of mm data to check.
 
         Returns:
             List of bool indicate that ith mm_data exist in cache or not
         """
+        if index is not None:
+            return self._found_match_for_mm_data(request.mm_features[index].identifier)
+
         result = []
         for feature in request.mm_features:
             result.append(self._found_match_for_mm_data(feature.identifier))
