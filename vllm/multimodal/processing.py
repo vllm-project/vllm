@@ -1500,15 +1500,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> MultiModalPromptUpdates:
+        # Filter out embedding modalities - they don't need prompt updates
+        # This prevents KeyError in model's _get_prompt_updates when accessing
+        # out_mm_kwargs[modality] for embeddings (HF processor doesn't produce
+        # output for embedding modalities)
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if mm_config.enable_mm_embeds:
+            filtered_mm_items = MultiModalDataItems({
+                k: v for k, v in mm_items.items()
+                if not isinstance(v, (EmbeddingItems, DictEmbeddingItems))
+            })
+        else:
+            filtered_mm_items = mm_items
+
         unbound_prompt_updates = self._get_prompt_updates(
-            mm_items=mm_items,
+            mm_items=filtered_mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             out_mm_kwargs=out_mm_kwargs,
         )
 
         mm_prompt_updates = self._bind_and_group_updates(
             unbound_prompt_updates,
-            mm_items.get_all_counts(),
+            filtered_mm_items.get_all_counts(),
         )
 
         for modality, prompt_updates in mm_prompt_updates.items():
@@ -2186,9 +2199,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_item_counts: Mapping[str, int],
+        mm_items: MultiModalDataItems | None = None,
     ) -> None:
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_placeholders.get(modality, [])
+
+            # Skip validation for embedding modalities when enable_mm_embeds=True
+            # Embeddings don't require prompt placeholders (they're passthrough data)
+            if mm_config.enable_mm_embeds and mm_items is not None:
+                if modality in mm_items:
+                    modality_items = mm_items[modality]
+                    if isinstance(modality_items, (EmbeddingItems, DictEmbeddingItems)):
+                        continue
 
             if len(placeholders) != item_count:
                 raise RuntimeError(
@@ -2232,13 +2256,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts, mm_items=mm_items)
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts, mm_items=mm_items)
 
         return prompt_ids, mm_placeholders
 

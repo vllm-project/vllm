@@ -76,16 +76,12 @@ def start_server():
     print(f"Model: {MODEL}")
     print(f"Port: {PORT}")
     
-    # Use a clean HuggingFace cache to avoid corrupted cache issues
+    # Use existing environment (including default HuggingFace cache)
     import os
     env = os.environ.copy()
-    clean_cache_dir = "/tmp/hf_cache_clean"
-    os.makedirs(clean_cache_dir, exist_ok=True)
-    env["HF_HOME"] = clean_cache_dir
-    print(f"Using HuggingFace cache: {clean_cache_dir}")
     
     cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", MODEL,
         "--enable-mm-embeds",
         "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
