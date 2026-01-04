@@ -723,7 +723,6 @@ pillow==10.4.0
     #   perceptron
     #   scikit-image
     #   segmentation-models-pytorch
-    #   sentence-transformers
     #   torchgeo
     #   torchvision
 platformdirs==4.3.6
@@ -1023,7 +1022,7 @@ segmentation-models-pytorch==0.4.0
     # via
     #   terratorch
     #   torchgeo
-sentence-transformers==3.2.1
+sentence-transformers==5.2.0
     # via
     #   -r requirements/test.in
     #   mteb
@@ -1263,6 +1262,7 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   sentence-transformers
     #   sqlalchemy
     #   torch
     #   torchgeo
