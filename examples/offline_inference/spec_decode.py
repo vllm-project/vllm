@@ -192,16 +192,18 @@ def main(args):
     print("-" * 50)
 
     # print acceptance at each token position
+    acceptance_rate_per_pos = []
     for i in range(len(acceptance_counts)):
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
+        acceptance_rate_per_pos.append(acceptance_rate)
 
-    return acceptance_length
+    return acceptance_length, acceptance_rate_per_pos
 
 
 if __name__ == "__main__":
     args = parse_args()
-    acceptance_length = main(args)
+    acceptance_length, acceptance_rate_per_pos = main(args)
 
     if args.test:
         # takes ~30s to run on 1xH100
