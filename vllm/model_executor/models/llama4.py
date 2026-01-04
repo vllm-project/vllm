@@ -54,8 +54,8 @@ from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    dispatch_topk_sigmoid_routing_func,
     extract_layer_index,
-    fast_topk,
     is_pp_missing_parameter,
 )
 
@@ -70,10 +70,7 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # pseudo-standard is that the router scores are floats
-        router_scores = torch.sigmoid(router_scores.float())
-        return (router_scores, router_indices.to(torch.int32))
+        return dispatch_topk_sigmoid_routing_func()(gating_output, topk)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
