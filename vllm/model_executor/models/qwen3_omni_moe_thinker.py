@@ -1371,8 +1371,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             return inputs_embeds
 
         deepstack_input_embeds = None
-        # TODO (ywang96): support overlapping modalitiy embeddings so that
-        # `use_audio_in_video` will work on V1.
         # split the feat dim to obtain multi-scale visual feature
         has_vision_embeddings = [
             embeddings.shape[-1] != self.config.text_config.hidden_size
