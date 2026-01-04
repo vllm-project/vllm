@@ -426,12 +426,21 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         g_scale: torch.Tensor,
         dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
         backend: str,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
         return flashinfer_mm_fp4_(
-            A, B, A_scale, B_scale, g_scale, dtype, block_size=16, backend=backend
+            A,
+            B,
+            A_scale,
+            B_scale,
+            g_scale,
+            dtype,
+            block_size=16,
+            use_8x4_sf_layout=use_8x4_sf_layout,
+            backend=backend,
         )
 
     @torch.library.register_fake(
@@ -444,6 +453,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         g_scale: torch.Tensor,
         dtype: torch.dtype,
+        use_8x4_sf_layout: bool,
         backend: str,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
@@ -480,6 +490,34 @@ if has_flashinfer():
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
         )
 
+    @torch.library.custom_op(
+        "vllm::flashinfer_nvfp4_quantize",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_nvfp4_quantize(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import nvfp4_quantize as nvfp4_quantize_
+
+        return nvfp4_quantize_(
+            a, a_global_sf, sfLayout=SfLayout.layout_8x4, do_shuffle=False
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_nvfp4_quantize",
+    )
+    def flashinfer_nvfp4_quantize_fake(
+        a: torch.Tensor, a_global_sf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        padded_rows = ((a.shape[0] + 7) // 8) * 8
+        return torch.empty(
+            a.shape[0], a.shape[1] // 2, dtype=torch.uint8, device=a.device
+        ), torch.empty(
+            padded_rows, a.shape[1] // 16, dtype=torch.uint8, device=a.device
+        )
+
 
 def flashinfer_scaled_fp4_mm(
     a: torch.Tensor,
@@ -499,6 +537,8 @@ def flashinfer_scaled_fp4_mm(
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
+    use_8x4_sf_layout = bool(backend == "trtllm" and a.shape[0] <= 32)
+
     return flashinfer_mm_fp4(
         a,
         b.t(),
@@ -506,6 +546,7 @@ def flashinfer_scaled_fp4_mm(
         block_scale_b.t(),
         alpha,
         out_dtype,
+        use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
     )
 
@@ -540,6 +581,12 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+def flashinfer_quant_nvfp4_8x4_sf_layout(
+    a: torch.Tensor, a_global_sf: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return flashinfer_nvfp4_quantize(a, a_global_sf)
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -562,4 +609,5 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_quant_nvfp4_8x4_sf_layout",
 ]
