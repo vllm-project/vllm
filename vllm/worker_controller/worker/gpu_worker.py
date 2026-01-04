@@ -257,20 +257,25 @@ class Worker(WorkerBase):
                     f"utilization or reduce GPU memory used by other processes."
                 )
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
 
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device
-        )
+        self.model_runner = None
+        # self.model_runner: GPUModelRunner = GPUModelRunner(
+        #     self.vllm_config, self.device
+        # )
 
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        # if self.rank == 0:
+        #     # If usage stat is enabled, collect relevant info.
+        #     report_usage_stats(self.vllm_config)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self) -> None:
+    def load_model(self, vllm_config: VllmConfig) -> None:
+        self.model_runner: GPUModelRunner = GPUModelRunner(
+            vllm_config, self.device
+        )
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
@@ -423,7 +428,8 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(
+                size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -511,7 +517,8 @@ class Worker(WorkerBase):
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+                self.model_runner._dummy_sampler_run(
+                    hidden_states=last_hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -552,7 +559,8 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_input_tokens = self.model_runner._get_num_input_tokens(num_scheduled_tokens)
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
         all_gather_tensors = {
             "residual": not is_residual_scattered_for_sp(
                 self.vllm_config, num_input_tokens
@@ -661,8 +669,10 @@ class Worker(WorkerBase):
         from vllm.distributed.parallel_state import get_ep_group
 
         if get_ep_group().rank == 0:
-            logger.info("[Elastic EP] Starting expert resharding after scaling up...")
-        rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
+            logger.info(
+                "[Elastic EP] Starting expert resharding after scaling up...")
+        rank_mapping = {
+            old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
@@ -842,7 +852,8 @@ class Worker(WorkerBase):
 
         if new_ep_size > old_ep_size:
             assert global_expert_loads is not None
-            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_loads)
+            self._eplb_after_scale_up(
+                old_ep_size, new_ep_size, global_expert_loads)
 
     def save_sharded_state(
         self,
