@@ -74,6 +74,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    is_fp4_marlin_supported,
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -195,8 +196,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(
                     weight_quant, input_quant, layer.moe_config
                 )
-        elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
+        elif quant_config._is_nvfp4_format(weight_quant):
+            _is_valid_nvfp4_activations = (
+                quant_config._is_nvfp4_format(input_quant) or input_quant is None
+            )
+            if not _is_valid_nvfp4_activations:
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format ",
+                    "or None for NVFP4A16",
+                )
+            return CompressedTensorsW4A4Nvfp4MoEMethod(
+                layer.moe_config, layer_name, use_marlin=input_quant is None
+            )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -225,16 +236,36 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+        use_marlin: bool = False,
+    ):  # noqa: E501
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
 
         super().__init__(moe)
-        _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
-        self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
-        self.allow_flashinfer = _nvfp4.allow_flashinfer
-        self.use_marlin = _nvfp4.use_marlin
+
+        # Force marlin if requested in the case of NVFP4A16
+        if use_marlin:
+            if is_fp4_marlin_supported():
+                self.cutlass_nvfp4_supported = False
+                self.allow_flashinfer = False
+                self.use_marlin = True
+            else:
+                raise ValueError(
+                    "Marlin FP4 MoE kernel requested but not ",
+                    "supported on current platform.",
+                )
+        # Otherwise, select kernel based on platform
+        else:
+            _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
+            self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
+            self.allow_flashinfer = _nvfp4.allow_flashinfer
+            self.use_marlin = _nvfp4.use_marlin
+
         self.group_size = 16
         self.layer_name = layer_name
         self.marlin_input_dtype = (
