@@ -1151,7 +1151,10 @@ class EagleProposer:
 
     @torch.inference_mode()
     def dummy_run(
-        self, num_tokens: int, use_cudagraphs=True, is_graph_capturing=False
+        self,
+        num_tokens: int,
+        use_cudagraphs: bool = True,
+        is_graph_capturing: bool = False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph

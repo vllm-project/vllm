@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -152,8 +153,6 @@ def get_outlines_cache_path() -> str:
     if os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")
-
-    import tempfile
 
     # home_dir may be / inside a docker container without existing user
     tempdir = tempfile.gettempdir()
