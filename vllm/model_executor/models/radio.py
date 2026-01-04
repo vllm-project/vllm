@@ -510,7 +510,7 @@ class RadioModel(nn.Module):
         self,
         pixel_values: torch.Tensor | None = None,
         pixel_embeds: torch.Tensor | None = None,
-    ) -> torch.FloatTensor:
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         y = self.model(pixel_values)
         return self._extract_final(y)
 
@@ -563,7 +563,9 @@ class RadioModel(nn.Module):
 
         return loaded_params
 
-    def _extract_final(self, y: torch.Tensor):
+    def _extract_final(
+        self, y: torch.Tensor
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         # Remove CLS + REGISTERS tokens
         patch_gen = getattr(self.model, "patch_generator", None)
         if patch_gen is not None:
