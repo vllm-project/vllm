@@ -254,9 +254,9 @@ class InputPreprocessor:
 
         if not has_user_truncation and len(token_ids) > self.model_config.max_model_len:
             raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.model_config.max_model_len} tokens. The input text is too "
-                "long. Please shorten it or set `truncate_prompt_tokens`."
+                "The tokenized prompt contains more than "
+                f"{self.model_config.max_model_len} tokens which is the maximum "
+                "context length. Please shorten it or set truncate_prompt_tokens."
             )
 
         return token_ids
