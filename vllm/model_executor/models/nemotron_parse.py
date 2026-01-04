@@ -11,7 +11,6 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import albumentations as A
 import cv2
 import numpy as np
 import torch
@@ -399,6 +398,15 @@ class NemotronParseImageProcessor:
 
     def _create_transforms(self):
         """Create transform objects."""
+        try:
+            import albumentations as A
+        except ImportError as err:
+            raise ImportError(
+                "The package `albumentations` is required to use "
+                "NemotronParse model. Please install it with `pip install "
+                "albumentations`."
+            ) from err
+
         # Ensure final_size is a tuple of integers
         if isinstance(self.final_size, (list, tuple)):
             self.target_height, self.target_width = (
