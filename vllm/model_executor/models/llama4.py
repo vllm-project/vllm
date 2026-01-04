@@ -432,6 +432,8 @@ class Llama4Model(LlamaModel):
 
         # Whether the MoE expert weights are loaded successfully.
         expert_param_loaded = False
+        # DELETE ME!
+        loaded_weight = loaded_weight.to("cuda")
 
         # If fused is True, the loaded weight is in the layout of:
         # [num_experts, hidden_in, hidden_out], so we must transpose the last

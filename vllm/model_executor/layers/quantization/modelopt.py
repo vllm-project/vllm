@@ -890,8 +890,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w13,
             w13_scale,
             shard_size,
-            layer.num_local_experts,
-            self.moe.is_act_and_mul,
+            num_experts=layer.w13_weight.shape[0],
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
 
         # Shuffle weights to runtime format and setup kernel.
