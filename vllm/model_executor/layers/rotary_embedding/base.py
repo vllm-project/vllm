@@ -250,6 +250,15 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             )
         return query, key
 
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # Use PyTorch native implementation for CPU to ensure correctness
+        return self.forward_native(positions, query, key)
+
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
         s += f", max_position_embeddings={self.max_position_embeddings}"
