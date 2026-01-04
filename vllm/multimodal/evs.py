@@ -185,7 +185,7 @@ def recompute_mrope_positions(
 
     Args:
         input_ids: (N,) All input tokens of the prompt (entire sequence).
-        multimodal_positions: List of mrope positsions for each media.
+        multimodal_positions: List of mrope positions for each media.
         mrope_positions: Existing mrope positions (4, N) for entire sequence.
         num_computed_tokens: A number of computed tokens so far.
         vision_start_token_id: Token indicating start of vision media.

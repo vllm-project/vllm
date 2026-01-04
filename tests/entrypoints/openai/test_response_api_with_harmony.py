@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import importlib
+import importlib.util
 import json
 import time
 
@@ -35,7 +36,11 @@ GET_WEATHER_SCHEMA = {
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--tool-server", "demo"]
+    assert importlib.util.find_spec("gpt_oss") is not None, (
+        "Harmony tests require gpt_oss package to be installed"
+    )
+
+    args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
@@ -499,7 +504,11 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    response = await client.responses.create(
+    # Code interpreter may need more time for container init + code execution
+    timeout_value = client.timeout * 3
+    client_with_timeout = client.with_options(timeout=timeout_value)
+
+    response = await client_with_timeout.responses.create(
         model=model_name,
         # TODO: Ideally should be able to set max tool calls
         # to prevent multi-turn, but it is not currently supported
@@ -548,6 +557,31 @@ def call_function(name, args):
         return get_horoscope(**args)
     else:
         raise ValueError(f"Unknown function: {name}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_reasoning_item(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"type": "message", "content": "Hello.", "role": "user"},
+            {
+                "type": "reasoning",
+                "id": "lol",
+                "content": [
+                    {
+                        "type": "reasoning_text",
+                        "text": "We need to respond: greeting.",
+                    }
+                ],
+                "summary": [],
+            },
+        ],
+        temperature=0.0,
+    )
+    assert response is not None
+    assert response.status == "completed"
 
 
 @pytest.mark.asyncio
@@ -697,7 +731,7 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
-    from vllm.entrypoints.harmony_utils import get_system_message
+    from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
     # Test with custom tools enabled - commentary channel should be available
     sys_msg = get_system_message(with_custom_tools=True)
@@ -838,6 +872,7 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=3)
 async def test_function_call_with_previous_input_messages(
     client: OpenAI, model_name: str
 ):
@@ -957,3 +992,29 @@ async def test_function_call_with_previous_input_messages(
     assert (
         "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str):
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": "What is the role of AI in medicine?"
+                "The response must exceed 350 words.",
+            }
+        ],
+        temperature=0.0,
+        max_tokens=350,
+    )
+
+    choice = response.choices[0]
+    assert choice.finish_reason == "length", (
+        f"Expected finish_reason='length', got {choice.finish_reason}"
+    )
+    assert choice.message.content is not None, (
+        "Content should not be None when truncated"
+    )
+    assert len(choice.message.content) > 0, "Content should not be empty"

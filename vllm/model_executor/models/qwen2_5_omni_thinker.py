@@ -23,7 +23,6 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from copy import copy
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -71,7 +70,6 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    NestedTensors,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
@@ -89,7 +87,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -387,15 +384,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        use_audio_in_video = False
-        if "video" in mm_kwargs:
-            video_items = [item for item in mm_kwargs["video"] if item is not None]
-            # only check video items (if there are any)
-            if video_items:
-                use_audio_in_video = all(
-                    item["use_audio_in_video"].data for item in video_items
-                )
-
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
@@ -404,7 +392,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
@@ -414,7 +401,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
 
         return prompt_ids, mm_placeholders
@@ -603,7 +589,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     tokenization_kwargs=tokenization_kwargs,
                 )
             tokenizer = self.info.get_tokenizer()
-            prompt_ids = encode_tokens(tokenizer, prompt)
+            prompt_ids = tokenizer.encode(prompt)
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
@@ -639,19 +625,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         )
 
         return mm_processed_data
-
-    def _validate_mm_placeholders(
-        self,
-        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
-        mm_item_counts: Mapping[str, int],
-        use_audio_in_video: bool = False,
-    ) -> None:
-        if use_audio_in_video:
-            mm_item_counts = copy(mm_item_counts)
-            if "video" in mm_item_counts:
-                assert "audio" in mm_item_counts
-                mm_item_counts["audio"] -= mm_item_counts["video"]
-        super()._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
 
 class Qwen2_5OmniConditionalGenerationMixin:
@@ -799,8 +772,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -873,6 +844,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
+                multimodal_config=multimodal_config,
             )
         else:
             self.visual = None
@@ -1176,27 +1148,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
-
-    def embed_multimodal_v0(self, **kwargs: object) -> NestedTensors | None:
-        audio_input = self._parse_and_validate_audio_input(**kwargs)
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        video_input = self._parse_and_validate_video_input(**kwargs)
-
-        if audio_input is None and image_input is None and video_input is None:
-            return None
-
-        multimodal_embeddings: list[tuple[NestedTensors, str]] = []
-
-        if audio_input is not None:
-            audio_embeds = self._process_audio_input(audio_input)
-            multimodal_embeddings.append((audio_embeds, "audio"))
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            multimodal_embeddings.append((image_embeds, "image"))
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            multimodal_embeddings.append((video_embeds, "video"))
-        return multimodal_embeddings
 
     def forward(
         self,

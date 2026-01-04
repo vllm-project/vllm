@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -15,8 +17,8 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -39,8 +41,9 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(self, output_kind: RequestOutputKind):
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
@@ -91,9 +94,10 @@ class RequestState:
     def __init__(
         self,
         request_id: str,
+        external_req_id: str,
         parent_req: ParentRequest | None,
         request_index: int,
-        lora_name: str | None,
+        lora_request: LoRARequest | None,
         output_kind: RequestOutputKind,
         prompt: str | None,
         prompt_token_ids: list[int] | None,
@@ -104,14 +108,17 @@ class RequestState:
         arrival_time: float,
         queue: RequestOutputCollector | None,
         log_stats: bool,
+        stream_interval: int,
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
     ):
         self.request_id = request_id
+        self.external_req_id = external_req_id
         self.parent_req = parent_req
         self.request_index = request_index
-        self.lora_name = lora_name
+        self.lora_request = lora_request
+        self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -131,16 +138,21 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
+        # Stream Interval
+        self.stream_interval = stream_interval
+        self.sent_tokens_offset = 0  # Offset of sent tokens
+
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
         prompt: str | None,
         parent_req: ParentRequest | None,
         request_index: int,
         queue: RequestOutputCollector | None,
         log_stats: bool,
+        stream_interval: int,
     ) -> "RequestState":
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
@@ -168,13 +180,13 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
+        assert request.external_req_id is not None
         return cls(
             request_id=request.request_id,
+            external_req_id=request.external_req_id,
             parent_req=parent_req,
             request_index=request_index,
-            lora_name=(
-                request.lora_request.name if request.lora_request is not None else None
-            ),
+            lora_request=request.lora_request,
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -188,6 +200,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            stream_interval=stream_interval,
         )
 
     def make_request_output(
@@ -205,10 +218,36 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        request_id = self.request_id
+        if self.stream_interval > 1:
+            assert self.detokenizer is not None
+
+            # Send output request only when
+            # 1. It has finished, or
+            # 2. It is the first token, or
+            # 3. It has reached the stream interval number of tokens
+            if not (
+                finished
+                or self.sent_tokens_offset == 0
+                or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+                >= self.stream_interval
+            ):
+                return None
+
+            if self.output_kind == RequestOutputKind.DELTA:
+                # Send tokens from the offset in DELTA mode, otherwise all
+                # tokens are sent.
+                new_token_ids = self.detokenizer.output_token_ids[
+                    self.sent_tokens_offset :
+                ]
+                self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
+
+        external_req_id = self.external_req_id
+
         if pooling_output is not None:
             return self._new_request_output(
-                request_id, [self._new_pooling_output(pooling_output)], finished
+                external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -216,19 +255,18 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
-            request_id, outputs, finished = self.parent_req.get_outputs(
-                request_id, output
-            )
+            outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             if not outputs:
                 return None
+            external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            external_req_id, outputs, finished, kv_transfer_params
         )
 
     def _new_request_output(
         self,
-        request_id: str,
+        external_req_id: str,
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -239,7 +277,7 @@ class RequestState:
             # Prompt embeddings are currently not supported by pooling requests.
             assert self.prompt_token_ids is not None
             return PoolingRequestOutput(
-                request_id=request_id,
+                request_id=external_req_id,
                 outputs=first_output,
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
@@ -258,7 +296,8 @@ class RequestState:
             prompt_token_ids = [0] * len(self.prompt_embeds)
 
         return RequestOutput(
-            request_id=request_id,
+            request_id=external_req_id,  # request_id is what was provided externally
+            lora_request=self.lora_request,
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
@@ -300,29 +339,40 @@ class RequestState:
             stop_reason=stop_reason if finished else None,
         )
 
-    def _new_pooling_output(
-        self,
-        pooling_output: torch.Tensor,
-    ) -> PoolingOutput:
+    def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
 
 
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self, tokenizer: AnyTokenizer, log_stats: bool):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike | None,
+        log_stats: bool,
+        stream_interval: int = 1,
+    ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
+        self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracer: Tracer | None = None
+        self._requests_drained = asyncio.Event()
+        self._requests_drained.set()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
+
+    async def wait_for_requests_to_drain(self) -> None:
+        if not self.request_states:
+            return
+        await self._requests_drained.wait()
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
@@ -331,12 +381,41 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(
-        self,
-        request_ids: Iterable[str],
-    ) -> list[str]:
-        request_ids_to_abort = []
+    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+        """Abort a list of requests.
+
+        The request_ids may be either external request IDs (those passed to
+        InputProcessor.process_inputs()) or internal request IDs (those randomly
+        generated when creating the EngineCoreRequest).
+
+        If an external request ID is provided, and that external request ID
+        was used for multiple requests, all requests associated with that external
+        request ID are aborted.
+
+        In the case of parallel sampling, a request ID may be used to identify
+        a parent request, in which case the associated child requests are aborted
+        also.
+        """
+
+        internal_req_ids = []
         for request_id in request_ids:
+            if internal:
+                # Internal ID - this may be a parent request
+                internal_req_ids.append(request_id)
+
+                # Remove internal ID from the external->internal mapping
+                if req_state := self.request_states.get(request_id):
+                    external_req_id = req_state.external_req_id
+                    internal_ids = self.external_req_ids[external_req_id]
+                    internal_ids.remove(request_id)
+                    if not internal_ids:
+                        del self.external_req_ids[external_req_id]
+            elif internal_ids := self.external_req_ids.pop(request_id, []):
+                # External ID - abort all requests in the external->internal mapping
+                internal_req_ids.extend(internal_ids)
+
+        request_ids_to_abort = []
+        for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
@@ -360,9 +439,11 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs)
+                    child_reqs = self.abort_requests(child_reqs, internal=True)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
+        if not self.request_states:
+            self._requests_drained.set()
         return request_ids_to_abort
 
     def add_request(
@@ -385,10 +466,16 @@ class OutputProcessor:
             request_index=request_index,
             queue=queue,
             log_stats=self.log_stats,
+            stream_interval=self.stream_interval,
         )
+        if self._requests_drained.is_set():
+            self._requests_drained.clear()
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
+
+        # Track the external_req_id -> [internal_req_id, ...] mapping
+        self.external_req_ids[req_state.external_req_id].append(request_id)
 
     def process_outputs(
         self,
@@ -473,10 +560,18 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
+
+                internal_ids = self.external_req_ids[req_state.external_req_id]
+                internal_ids.remove(req_id)
+                if not internal_ids:
+                    del self.external_req_ids[req_state.external_req_id]
+
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
                     self.parent_requests.pop(parent_req.request_id, None)
+                if not self.request_states:
+                    self._requests_drained.set()
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
@@ -546,7 +641,9 @@ class OutputProcessor:
             )
 
             # meta
-            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_REQUEST_ID, req_state.external_req_id
+            )
             if req_state.top_p:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
             if req_state.max_tokens_param:
@@ -595,11 +692,10 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
-                req_state.prompt_token_ids, req_state.prompt_embeds
-            ),
+            num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
+            num_cached_tokens=req_state.num_cached_tokens,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

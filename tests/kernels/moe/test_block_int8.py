@@ -18,8 +18,6 @@ if current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 DTYPES = [torch.bfloat16]
 

@@ -10,7 +10,12 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     count_expert_num_tokens,
@@ -18,12 +23,14 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
     dbo_register_recv_hook,
     dbo_yield,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
+
+logger = init_logger(__name__)
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -361,7 +368,7 @@ class FusedMoEPrepareAndFinalize(ABC):
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
-    above.
+        above.
     """
 
     def __init__(
@@ -655,25 +662,6 @@ def _slice_scales(
     return None
 
 
-class SharedResizableBuffer:
-    def __init__(self):
-        self.buffer = None
-
-    def get(
-        self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype
-    ) -> torch.Tensor:
-        assert shape != ()
-        shape_numel = prod(shape)
-        if (
-            self.buffer is None
-            or self.buffer.numel() < shape_numel
-            or self.buffer.device != device
-            or self.buffer.dtype != dtype
-        ):
-            self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
-        return self.buffer[:shape_numel].view(*shape)
-
-
 @final
 class FusedMoEModularKernel(torch.nn.Module):
     """
@@ -688,32 +676,28 @@ class FusedMoEModularKernel(torch.nn.Module):
     objects.
     """
 
-    class SharedBuffers:
-        def __init__(self) -> None:
-            self.fused_out = SharedResizableBuffer()
-            self.workspace13 = SharedResizableBuffer()
-            self.workspace2 = SharedResizableBuffer()
-
-    # Persistent buffers that are shared across `FusedMoEModularKernel`
-    # instances (layers), to save memory and allocattions.
-    #
-    # We have two sets of buffers to support dual batch overlap (DBO) where each
-    # microbatch (ubatch) should use its own set of buffers to avoid
-    # cross-ubatch contimination.
-    # NOTE that memory is lazily allocated for these buffers, meaning that if
-    # DBO isn't being used, the second SharedBuffers will be empty.
-    shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
-
     def __init__(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+
+        # prefer an explicit FusedMoEParallelConfig when available (from
+        # FusedMoE layers / tests).
+        # if not provided, assume this kernel is
+        # running in a non-DP+EP context
+        self.moe_parallel_config: FusedMoEParallelConfig | None = moe_parallel_config
+        self.is_dp_ep = (
+            moe_parallel_config is not None
+            and moe_parallel_config.dp_size > 1
+            and moe_parallel_config.use_ep
+        )
 
         self._post_init_setup()
         assert (
@@ -756,7 +740,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             1,
             (
                 M
-                if not self.fused_experts.supports_chunking()
+                if not self.fused_experts.enable_chunking()
                 else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
             ),
         )
@@ -789,11 +773,37 @@ class FusedMoEModularKernel(torch.nn.Module):
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
-
-        # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
-        ubatch_idx = dbo_current_ubatch_id()
-        buffers = self.shared_buffers[ubatch_idx]
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
+
+        # Force worst-case allocation in profiling run for
+        # "mk.FusedMoEModularKernel.Standard" formats where this is only bounded
+        # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
+        # DP+EP due to the random token routing.
+        is_profile_run = (
+            is_forward_context_available()
+            and get_forward_context().attn_metadata is None
+        )
+        if is_profile_run and self.fused_experts.enable_chunking() and self.is_dp_ep:
+            max_workspace_13, max_workspace_2, max_fused_out_shape = (
+                self.fused_experts.workspace_shapes(
+                    envs.VLLM_FUSED_MOE_CHUNK_SIZE,
+                    N,
+                    K,
+                    top_k,
+                    global_num_experts,
+                    local_num_experts,
+                    # expert_tokens_meta help in allocating optimal/minimal
+                    # amount of workspace. Mark it None, so we allocate for
+                    # the worst-case scenario.
+                    expert_tokens_meta=None,
+                )
+            )
+
+            current_workspace_manager().get_simultaneous(
+                (max_workspace_13, workspace_dtype),
+                (max_workspace_2, workspace_dtype),
+                (max_fused_out_shape, out_dtype),
+            )
 
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
@@ -819,22 +829,23 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = buffers.workspace13.get(
-            workspace13_shape, device=device, dtype=workspace_dtype
-        )
-        workspace2 = buffers.workspace2.get(
-            workspace2_shape, device=device, dtype=workspace_dtype
-        )
-
         # Construct the entire output that can then be processed in chunks.
         # Reuse workspace13 for the output in the non-chunked case as long
         # as it is large enough. This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
+            workspace13, workspace2 = current_workspace_manager().get_simultaneous(
+                (workspace13_shape, workspace_dtype),
+                (workspace2_shape, workspace_dtype),
+            )
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
-            fused_out = buffers.fused_out.get(
-                fused_out_shape, device=device, dtype=out_dtype
+            workspace13, workspace2, fused_out = (
+                current_workspace_manager().get_simultaneous(
+                    (workspace13_shape, workspace_dtype),
+                    (workspace2_shape, workspace_dtype),
+                    (fused_out_shape, out_dtype),
+                )
             )
 
         return workspace13, workspace2, fused_out
@@ -1060,7 +1071,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 a1q_scale=_slice_scales(a1q_scale, s, e),
-                a2_scale=_slice_scales(self.fused_experts.a2_scale, e, e),
+                a2_scale=_slice_scales(self.fused_experts.a2_scale, s, e),
                 workspace13=workspace13,
                 workspace2=workspace2,
                 expert_tokens_meta=c_expert_tokens_meta,
@@ -1106,7 +1117,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(hidden_states)
 

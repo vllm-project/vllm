@@ -6,11 +6,10 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
-from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -46,8 +45,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -76,7 +78,34 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        """
+        Get the physical (memory layout) ordering of the kv cache dimensions.
+        e.g. if the KV cache shape is
+        [2, num_blocks, block_size, num_heads, head_size],
+        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
+        ordering of dimensions is
+        [num_blocks, num_heads, 2, block_size, head_size].
+
+        If this function is unimplemented / raises NotImplementedError,
+        the physical layout of the KV cache will match the logical shape.
+
+        Args:
+            include_num_layers_dimension: if True, includes an additional
+                num_layers dimension, which is assumed to be prepended
+                to the logical KV cache shape.
+                With the above example, a return value (2, 4, 0, 1, 3, 5)
+                corresponds to
+                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
+
+                If an additional dimension is NOT included in the returned
+                tuple, the physical layout will not include a layers dimension.
+
+        Returns:
+            A tuple of ints which is a permutation of range(len(shape)).
+        """
         raise NotImplementedError
 
     @classmethod
@@ -115,18 +144,17 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        if not cls.supported_kernel_block_sizes:
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
             return True
 
-        for supported_size in cls.supported_kernel_block_sizes:
-            is_multiple_of = (
-                isinstance(supported_size, MultipleOf)
-                and block_size % supported_size.base == 0
-            )
-            is_int_equal = (
-                isinstance(supported_size, int) and block_size == supported_size
-            )
-            if is_multiple_of or is_int_equal:
+        for supported_size in supported_kernel_block_sizes:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
                 return True
         return False
 
@@ -139,8 +167,21 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return False
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """Check if backend supports a given attention type.
+
+        By default, only supports decoder attention.
+        Backends should override this to support other attention types.
+        """
+        return attn_type == AttentionType.DECODER
 
     @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
@@ -170,7 +211,9 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
+        attn_type: str,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -181,6 +224,10 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
+        if use_mm_prefix and not cls.supports_mm_prefix():
+            invalid_reasons.append(
+                "partial multimodal token full attention not supported"
+            )
         if use_mla != cls.is_mla():
             if use_mla:
                 invalid_reasons.append("MLA not supported")
@@ -195,6 +242,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("non-sparse not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
+        if not cls.supports_attn_type(attn_type):
+            invalid_reasons.append(f"attention type {attn_type} not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -245,12 +294,34 @@ class AttentionImpl(ABC, Generic[T]):
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
 
+    # Whether the attention impl supports Prefill Context Parallelism.
+    supports_pcp: bool = False
+    # Whether the attention impl(or ops) supports MTP
+    # when cp_kv_cache_interleave_size > 1
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = False
+
     # some attention backends might not always want to return lse
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
 
+    # Whether this attention implementation supports pre-quantized query input.
+    # When True, the attention layer will quantize queries before passing them
+    # to this backend, allowing torch.compile to fuse the quantization with
+    # previous operations. This is typically supported when using FP8 KV cache
+    # with compatible attention kernels (e.g., TRT-LLM).
+    # Subclasses should set this in __init__.
+    # TODO add support to more backends:
+    # https://github.com/vllm-project/vllm/issues/25584
+    supports_quant_query_input: bool = False
+
     dcp_world_size: int
     dcp_rank: int
+
+    pcp_world_size: int
+    pcp_rank: int
+
+    total_cp_world_size: int
+    total_cp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
@@ -264,6 +335,17 @@ class AttentionImpl(ABC, Generic[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )
@@ -300,7 +382,7 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -308,22 +390,6 @@ class AttentionImpl(ABC, Generic[T]):
 
         :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
-        """
-        return False
-
-    def supports_quant_query_input(self) -> bool:
-        """
-        Check if this attention implementation supports pre-quantized query input.
-
-        When True, the attention layer will quantize queries before passing them
-        to this backend, allowing torch.compile to fuse the quantization with
-        previous operations. This is typically supported when using FP8 KV cache
-        with compatible attention kernels (e.g., TRT-LLM).
-        TODO add support to more backends:
-        https://github.com/vllm-project/vllm/issues/25584
-
-        Returns:
-            bool: True if the implementation can accept pre-quantized queries.
         """
         return False
 
@@ -352,7 +418,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
+        kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
     ) -> None:
         raise NotImplementedError

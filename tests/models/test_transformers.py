@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test the functionality of the Transformers backend."""
+"""Test the functionality of the Transformers modeling backend."""
 
 from typing import Any
 
@@ -59,10 +59,6 @@ def check_implementation(
     )
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Llama-3.2-1B-Instruct, Ilama-3.2-1B produce memory access fault.",
-)
 @pytest.mark.parametrize(
     "model,model_impl",
     [
@@ -85,7 +81,7 @@ def test_models(
     required = Version("5.0.0.dev")
     if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
         pytest.skip(
-            "MoE models with the Transformers backend require "
+            "MoE models with the Transformers modeling backend require "
             f"transformers>={required}, but got {installed}"
         )
 

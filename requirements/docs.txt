@@ -10,3 +10,7 @@ mkdocs-minify-plugin
 regex
 ruff
 pydantic
+
+# For generating argparse docs.
+# Adding requirements here should only be used as a last resort.
+msgspec  # Need for multiple inheritance involving msgspec.Struct

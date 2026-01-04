@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,8 +29,8 @@ CacheDType = Literal[
     "fp8_inc",
     "fp8_ds_mla",
 ]
-MambaDType = Literal["auto", "float32"]
-PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+MambaDType = Literal["auto", "float32", "float16"]
+PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -74,13 +73,25 @@ class CacheConfig:
     sliding_window: int | None = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: bool | None = None
-    """Whether to enable prefix caching. Enabled by default for V1."""
+    enable_prefix_caching: bool = True
+    """Whether to enable prefix caching."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
-    - "sha256" uses Pickle for object serialization before hashing.\n
+    - "sha256" uses Pickle for object serialization before hashing. This is the
+    current default, as SHA256 is the most secure choice to avoid potential
+    hash collisions.\n
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
-    serializes objects using canonical CBOR and hashes them with SHA-256."""
+    serializes objects using canonical CBOR and hashes them with SHA-256.\n
+    - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
+    non-cryptographic hashing. Requires the optional ``xxhash`` package.
+    IMPORTANT: Use of a hashing algorithm that is not considered 
+    cryptographically secure theoretically increases the risk of hash collisions,
+    which can cause undefined behavior or even leak private information in
+    multi-tenant environments. Even if collisions are still very unlikely, it is
+    important to consider your security risk tolerance against the performance
+    benefits before turning this on.\n
+    - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
+    reproducible hashing. Requires the optional ``xxhash`` package."""
     cpu_offload_gb: float = Field(default=0, ge=0)
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -145,7 +156,7 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend | None = None
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
     together with kv_offloading_size."""
 
     def compute_hash(self) -> str:
@@ -160,13 +171,27 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        factors.append(self.mamba_cache_dtype)
-        factors.append(self.mamba_ssm_cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/derived knobs that don't affect compiled graph shape
+            "gpu_memory_utilization",
+            "swap_space",
+            "is_attention_free",
+            "num_gpu_blocks_override",
+            "enable_prefix_caching",
+            "prefix_caching_hash_algo",
+            "cpu_kvcache_space_bytes",
+            "mamba_page_size_padded",
+            # Post-init/derived counters
+            "num_gpu_blocks",
+            "num_cpu_blocks",
+            # WIP feature toggle not impacting compiled graph shape
+            "kv_sharing_fast_prefill",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

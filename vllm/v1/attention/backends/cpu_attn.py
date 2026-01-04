@@ -21,11 +21,11 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 logger = init_logger(__name__)
 
-_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86,)
+_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM)
 
 
 class CPUAttentionBackend(AttentionBackend):
@@ -47,6 +47,17 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "CPU_ATTN"
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """CPU attention supports decoder,
+        encoder-only and encoder-decoder attention."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
+        )
 
     @staticmethod
     def get_impl_cls() -> type["CPUAttentionBackendImpl"]:
@@ -127,6 +138,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
         self.isa = _get_attn_isa(self.dtype, self.block_size)
+        self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
     def build(
         self,
@@ -142,7 +154,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        causal = common_attn_metadata.causal
+        causal = False if self.is_cross_attention else common_attn_metadata.causal
 
         sdpa_start_loc = query_start_loc
         num_decode_tokens = 0
@@ -162,22 +174,19 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
 
-        sheduler_metadata = None
-        if causal:
-            # for decode batch, use the custom kernel
-            sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
-                num_reqs=num_reqs,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                seq_lens=seq_lens,
-                dtype=self.dtype,
-                query_start_loc=query_start_loc,
-                causal=causal,
-                sliding_window_size=self.window_size,
-                isa=self.isa,
-                enable_kv_split=True,
-            )
+        sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+            num_reqs=num_reqs,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            seq_lens=seq_lens,
+            dtype=self.dtype,
+            query_start_loc=query_start_loc,
+            causal=causal,
+            sliding_window_size=self.window_size,
+            isa=self.isa,
+            enable_kv_split=True,
+        )
 
         attn_metadata = CPUAttentionMetadata(
             isa=self.isa,
@@ -480,6 +489,9 @@ def _get_attn_isa(dtype: torch.dtype, block_size: int) -> str:
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
-        return "vec"
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+            return "neon"
+        else:
+            return "vec"
     else:
         return "vec16"

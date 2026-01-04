@@ -20,7 +20,7 @@ for more installation details.
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
+pip install vllm "lm-eval[api]>=0.4.9.2"
 ```
 
 ## Quantization Process
@@ -298,7 +298,7 @@ There are two steps to generate and deploy a mixed precision model quantized wit
 
 Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized using AMD Quark. We will provide a detailed tutorial with Quark APIs later.
 
-As examples, we provide some ready-to-use quantized mixed precision model to show the usage in vLLM and the accuracy benifits. They are:
+As examples, we provide some ready-to-use quantized mixed precision model to show the usage in vLLM and the accuracy benefits. They are:
 
 - amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
 - amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
@@ -306,7 +306,7 @@ As examples, we provide some ready-to-use quantized mixed precision model to sho
 
 ### 2. inference the quantized mixed precision model in vLLM
 
-Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follow:
+Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follows:
 
 ```bash
 lm_eval --model vllm \
