@@ -50,16 +50,16 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
     "fp_quant",
     "bitblas",
-    "gptq_marlin",
+    "gptq_marlin_24",
+    "gptq_bitblas",
     "hqq",
     "experts_int8",
-    "moe_wna16",
+    "ipex",
     "auto-round",
     "rtn",
     "petit_nvfp4",
     "cpu_gptq",
     "cpu_awq",
-    "fp8",
 ]
 
 # The customized quantization methods which will be added to this dict.
