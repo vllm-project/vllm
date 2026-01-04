@@ -430,41 +430,65 @@ def kernel_unified_attention_2d(
             )  # Shape: [TILE_SIZE, K_NUM_SCALES]
 
             # ================================================================
-            # CORRECT SOLUTION: Full BF16 Dequantization
+            # FP8 TENSOR CORE SOLUTION with 4/6 Quantization
             #
-            # Problem: tl.dot_scaled requires uniform scales, but NVFP4 has per-token scales
-            # Solution: Dequantize K to BF16 using per-token scales, use regular tl.dot
+            # Key insight: FP8 E4M3 can represent ALL NVFP4 E2M1 values exactly:
+            # NVFP4: 0, 0.5, 1, 1.5, 2, 3, 4, 6 → All representable in FP8 E4M3
             #
-            # This preserves QUALITY by:
-            # - Using all precision from NVFP4's per-token scales
-            # - Avoiding forced uniform scale quantization error
-            # - Simple, proven approach
+            # With 4/6 quantization already applied during cache write:
+            # - K values are optimally quantized (L1 error minimized)
+            # - Tile-uniform scale has lower error over better-quantized values
+            # - Can use tl.dot_scaled for 4000 TFLOPS!
             # ================================================================
 
-            # Dequantize K using per-token scales
+            # K_float already contains dequantized NVFP4 values (0, 0.5, 1, 1.5, 2, 3, 4, 6)
+            # These can be represented exactly in FP8 E4M3
+
+            # Compute per-token scales for dequantization
             K_scale_exp = tl.math.exp2(
                 K_scale_per_token.to(tl.float32) - 127.0
             )  # [TILE_SIZE, K_NUM_SCALES]
 
-            # Reshape K_float from [HEAD_SIZE_PADDED, TILE_SIZE] to [K_NUM_SCALES, 32, TILE_SIZE]
+            # Reshape K_float for scale application
             K_float_reshaped = tl.reshape(K_float, (K_NUM_SCALES, 32, TILE_SIZE))
-
-            # Transpose and broadcast scales
             K_scale_exp_T = tl.trans(K_scale_exp)  # [K_NUM_SCALES, TILE_SIZE]
             K_scale_broadcast = tl.broadcast_to(
                 K_scale_exp_T[:, None, :], (K_NUM_SCALES, 32, TILE_SIZE)
             )
 
-            # Apply per-token scales to get fully dequantized K
-            K_dequant_reshaped = (
-                K_float_reshaped * K_scale_broadcast
-            )  # [K_NUM_SCALES, 32, TILE_SIZE]
+            # Fully dequantize K with per-token scales
+            K_dequant_reshaped = K_float_reshaped * K_scale_broadcast
 
-            # Reshape back to [HEAD_SIZE_PADDED, TILE_SIZE]
-            K_dequant = tl.reshape(K_dequant_reshaped, (HEAD_SIZE_PADDED, TILE_SIZE))
+            # Compute tile-uniform scale: max abs per K-block across ALL tokens
+            K_abs = tl.abs(K_dequant_reshaped)
+            K_max_over_tiles = tl.max(K_abs, axis=2)  # [K_NUM_SCALES, 32]
+            K_abs_max_per_block = tl.max(K_max_over_tiles, axis=1)  # [K_NUM_SCALES]
 
-            # K is now in BF16 with full precision
-            K = K_dequant.to(tl.bfloat16)
+            # Compute uniform scale (log2 + 127 bias)
+            K_log2_max = tl.where(
+                K_abs_max_per_block > 0, tl.math.log2(K_abs_max_per_block), 0.0
+            )
+            K_uniform_scale_f = tl.math.ceil(K_log2_max) + 127.0
+            K_uniform_scale = tl.maximum(tl.minimum(K_uniform_scale_f, 255.0), 0.0).to(
+                tl.uint8
+            )  # [K_NUM_SCALES]
+
+            # Normalize and convert to FP8 E4M3
+            K_inv_scale = tl.math.exp2(127.0 - K_uniform_scale_f)  # [K_NUM_SCALES]
+            K_inv_scale_broadcast = tl.broadcast_to(
+                K_inv_scale[:, None, None], (K_NUM_SCALES, 32, TILE_SIZE)
+            )
+            K_normalized_reshaped = K_dequant_reshaped * K_inv_scale_broadcast
+            K_normalized = tl.reshape(
+                K_normalized_reshaped, (HEAD_SIZE_PADDED, TILE_SIZE)
+            )
+            K = K_normalized.to(tl.float8e4nv)
+
+            # Prepare tile-uniform K_scale for tl.dot_scaled
+            # Shape: [TILE_SIZE, K_NUM_SCALES] - same scale for all tokens in tile
+            K_scale_reduced = tl.broadcast_to(
+                K_uniform_scale[None, :], (TILE_SIZE, K_NUM_SCALES)
+            )
         else:
             K = K_load
 
@@ -556,9 +580,17 @@ def kernel_unified_attention_2d(
         # - Q is in FP8 with per-block scales
         # - Use regular tl.dot for BF16 matmul
         if USE_NVFP4 and USE_NVFP4_TC:
-            # K is BF16 (dequantized from NVFP4 with per-token scales)
-            # Q is also converted to BF16 for matmul
-            S += scale * tl.dot(Q.to(tl.bfloat16), K).to(tl.float32)
+            # NVFP4 TC Path: Uses native FP8 Tensor Cores
+            # Q is quantized to FP8 with per-block scales [BLOCK_M, Q_NUM_SCALES]
+            # K is quantized to FP8 with tile-uniform scales [TILE_SIZE, K_NUM_SCALES]
+            S += scale * tl.dot_scaled(
+                Q_fp8,
+                Q_scale,
+                "e4m3",
+                K,
+                K_scale_reduced,
+                "e4m3",
+            )
         elif USE_NVFP4:
             S += scale * tl.dot(Q.to(tl.bfloat16), K.to(tl.bfloat16)).to(tl.float32)
         elif K.dtype.is_fp8():
@@ -879,36 +911,70 @@ def kernel_unified_attention_3d(
                 other=0,
             ).to(tl.uint8)
 
-            K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
-            K = nvfp4_to_fp8_e4m3(K_nibble)
+            K_float = nvfp4_to_fp8_e4m3(K_nibble).to(tl.float32)
 
             # ================================================================
-            # Load K scales (u8) - CUDA now uses 32-element groups
-            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
-            # tl.dot_scaled RHS scale must be [K_dim//32, N] = [4, TILE_SIZE]
+            # FP8 TENSOR CORE SOLUTION (3D) with 4/6 Quantization
             # ================================================================
-            K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
+            K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32
             offs_ks = tl.arange(0, K_NUM_SCALES)
-
             k_scale_base = (
-                physical_block_idx[:, None] * stride_k_cache_0
+                physical_block_idx[None, :] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
-                + (seq_offset % BLOCK_SIZE)[:, None] * stride_k_cache_1
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
                 + DATA_BYTES * stride_k_cache_3
             )
             k_scale_mask = tl.broadcast_to(
-                tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
+                tile_mask[None, :], (K_NUM_SCALES, TILE_SIZE)
             )
 
-            # Load scales - shape [TILE_SIZE, K_NUM_SCALES] = [32, 4]
-            # This matches Triton's expected rhs_scale shape [N, K//32]
-            K_scale_u8 = tl.load(
-                key_cache_ptr + k_scale_base + offs_ks[None, :] * stride_k_cache_3,
+            # Load scales - shape [K_NUM_SCALES, TILE_SIZE]
+            K_scale_per_token = tl.load(
+                key_cache_ptr + k_scale_base + offs_ks[:, None] * stride_k_cache_3,
                 mask=k_scale_mask,
                 other=127,
             ).to(tl.uint8)
 
-            K_scale_reduced = K_scale_u8
+            # Dequantize K fully using per-token scales
+            K_scale_exp = tl.math.exp2(
+                K_scale_per_token.to(tl.float32) - 127.0
+            )  # [4, 32]
+
+            # Reshape K_float for scale application: [128, 32] -> [4, 32, 32]
+            K_float_reshaped = tl.reshape(K_float, (K_NUM_SCALES, 32, TILE_SIZE))
+            # Broadcast scales to match K_float_reshaped
+            K_scale_broadcast = tl.broadcast_to(
+                K_scale_exp[:, None, :], (K_NUM_SCALES, 32, TILE_SIZE)
+            )
+
+            K_dequant_reshaped = K_float_reshaped * K_scale_broadcast
+
+            # Compute tile-uniform scale: max abs per K-block across ALL tokens
+            K_max_over_tiles = tl.max(tl.abs(K_dequant_reshaped), axis=2)  # [4, 32]
+            K_abs_max_per_block = tl.max(K_max_over_tiles, axis=1)  # [4]
+
+            K_log2_max = tl.where(
+                K_abs_max_per_block > 0, tl.math.log2(K_abs_max_per_block), 0.0
+            )
+            K_uniform_scale_f = tl.math.ceil(K_log2_max) + 127.0
+            K_uniform_scale = tl.maximum(tl.minimum(K_uniform_scale_f, 255.0), 0.0).to(
+                tl.uint8
+            )
+
+            # Normalize and convert to FP8
+            K_inv_scale = tl.math.exp2(127.0 - K_uniform_scale_f)
+            K_inv_scale_broadcast = tl.broadcast_to(
+                K_inv_scale[:, None, None], (K_NUM_SCALES, 32, TILE_SIZE)
+            )
+            K_normalized_reshaped = K_dequant_reshaped * K_inv_scale_broadcast
+            K = tl.reshape(K_normalized_reshaped, (HEAD_SIZE_PADDED, TILE_SIZE)).to(
+                tl.float8e4nv
+            )
+
+            # Prepare scale for dot_scaled: [TILE_SIZE, K_NUM_SCALES]
+            K_scale_reduced = tl.broadcast_to(
+                K_uniform_scale[None, :], (TILE_SIZE, K_NUM_SCALES)
+            )
 
         if not USE_NVFP4:
             V_load = tl.load(
