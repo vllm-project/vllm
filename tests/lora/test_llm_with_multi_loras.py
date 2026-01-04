@@ -30,9 +30,11 @@ LORA_TEST_EXPECTED = [
 ]
 
 
-def format_chatml_messages(prompt: str):
+def format_chatml_messages(
+    prompt: str, system_prompt: str = "You are a helpful assistant."
+) -> list[dict[str, str]]:
     return [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
 
@@ -188,8 +190,8 @@ def test_multiple_lora_requests():
 
 
 def test_load_inplace_offline_reload(
-    qwen3_meowing_lora_files, qwen3_woofing_lora_files
-):
+    qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
+) -> None:
     """
     Test that load_inplace=True allows reloading LoRA adapters with the same ID
     in offline mode (using LLM class directly).
@@ -198,14 +200,16 @@ def test_load_inplace_offline_reload(
         model=MODEL_PATH,
         enable_lora=True,
         max_loras=2,
-        max_lora_rank=8,
+        max_lora_rank=LORA_RANK,
         max_model_len=512,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
     )
     adapter_id = 1
-    messages = [
-        {"content": "Follow the instructions to make animal noises", "role": "system"},
-        {"content": "Make your favorite animal noise.", "role": "user"},
-    ]
+    messages = format_chatml_messages(
+        "Make your favorite animal noise.",
+        system_prompt="Follow the instructions to make animal noises",
+    )
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
     # Load meowing LoRA with load_inplace=True
@@ -237,8 +241,8 @@ def test_load_inplace_offline_reload(
 
 
 def test_load_inplace_false_no_reload(
-    qwen3_meowing_lora_files, qwen3_woofing_lora_files
-):
+    qwen3_meowing_lora_files: str, qwen3_woofing_lora_files: str
+) -> None:
     """
     Test that load_inplace=False prevents reloading when an adapter
     with the same ID already exists.
@@ -247,14 +251,16 @@ def test_load_inplace_false_no_reload(
         model=MODEL_PATH,
         enable_lora=True,
         max_loras=2,
-        max_lora_rank=8,
+        max_lora_rank=LORA_RANK,
         max_model_len=512,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
     )
     adapter_id = 2
-    messages = [
-        {"content": "Follow the instructions to make animal noises", "role": "system"},
-        {"content": "Make your favorite animal noise.", "role": "user"},
-    ]
+    messages = format_chatml_messages(
+        "Make your favorite animal noise.",
+        system_prompt="Follow the instructions to make animal noises",
+    )
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
     # Load meowing LoRA first with load_inplace=True
