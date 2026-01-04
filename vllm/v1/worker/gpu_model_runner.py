@@ -4501,39 +4501,43 @@ class GPUModelRunner(
 
         dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
 
-        dummy_metadata = SamplingMetadata(
-            temperature=dummy_tensors(0.5),
-            all_greedy=False,
-            all_random=False,
-            top_p=dummy_tensors(0.9),
-            top_k=dummy_tensors(logits.size(1) - 1),
-            generators={},
-            max_num_logprobs=None,
-            no_penalties=True,
-            prompt_token_ids=None,
-            frequency_penalties=dummy_tensors(0.1),
-            presence_penalties=dummy_tensors(0.1),
-            repetition_penalties=dummy_tensors(0.1),
-            output_token_ids=[[] for _ in range(num_reqs)],
-            spec_token_ids=[[] for _ in range(num_reqs)],
-            allowed_token_ids_mask=None,
-            bad_words_token_ids={},
-            logitsprocs=LogitsProcessors(),
-        )
-        try:
-            sampler_output = self.sampler(
-                logits=logits, sampling_metadata=dummy_metadata
+        # Run sampler warmup twice: once without logprobs, once with logprobs.
+        # The logprobs path uses torch.compile for batched_count_greater_than
+        # which triggers JIT compilation on first use.
+        for max_num_logprobs in (None, 1):
+            dummy_metadata = SamplingMetadata(
+                temperature=dummy_tensors(0.5),
+                all_greedy=False,
+                all_random=False,
+                top_p=dummy_tensors(0.9),
+                top_k=dummy_tensors(logits.size(1) - 1),
+                generators={},
+                max_num_logprobs=max_num_logprobs,
+                no_penalties=True,
+                prompt_token_ids=None,
+                frequency_penalties=dummy_tensors(0.1),
+                presence_penalties=dummy_tensors(0.1),
+                repetition_penalties=dummy_tensors(0.1),
+                output_token_ids=[[] for _ in range(num_reqs)],
+                spec_token_ids=[[] for _ in range(num_reqs)],
+                allowed_token_ids_mask=None,
+                bad_words_token_ids={},
+                logitsprocs=LogitsProcessors(),
             )
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                raise RuntimeError(
-                    "CUDA out of memory occurred when warming up sampler with "
-                    f"{num_reqs} dummy requests. Please try lowering "
-                    "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine."
-                ) from e
-            else:
-                raise e
+            try:
+                sampler_output = self.sampler(
+                    logits=logits, sampling_metadata=dummy_metadata
+                )
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    raise RuntimeError(
+                        "CUDA out of memory occurred when warming up sampler with "
+                        f"{num_reqs} dummy requests. Please try lowering "
+                        "`max_num_seqs` or `gpu_memory_utilization` when "
+                        "initializing the engine."
+                    ) from e
+                else:
+                    raise e
         if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
