@@ -132,11 +132,16 @@ class T5Gemma2TextScaledWordEmbedding(nn.Module):
         embeddings = embeddings * self.embed_scale
 
         # Replace EOI token embeddings
+        # Note: We use torch.where instead of conditional indexing to avoid CUDA graph issues
+        # The .any() call is not compatible with CUDA graph capture
         if self.eoi_token_index is not None:
             eoi_mask = (input_ids == self.eoi_token_index)
-            if eoi_mask.any():
-                embeddings = embeddings.clone()  # Avoid in-place operation
-                embeddings[eoi_mask] = self.eoi_embedding.to(embeddings.dtype)
+            # Use torch.where to replace EOI token embeddings without breaking CUDA graphs
+            embeddings = torch.where(
+                eoi_mask.unsqueeze(-1),
+                self.eoi_embedding.to(embeddings.dtype),
+                embeddings
+            )
 
         return embeddings
 
