@@ -127,6 +127,7 @@ class CustomOp(nn.Module, CustomOpBase):
     Base class for torch custom ops.
     Impletments and dispatches the forward method to the appropriate backend.
     """
+
     def __init__(self, enforce_enable: bool = False):
         nn.Module.__init__(self)
         CustomOpBase.__init__(self, enforce_enable=enforce_enable)
@@ -240,6 +241,7 @@ class CustomTritonOp(CustomOpBase):
     Base class for triton custom ops.
     Impletments and dispatches the forward method to the appropriate backend.
     """
+
     def __init__(self, enforce_enable: bool = False):
         super().__init__(enforce_enable=enforce_enable)
 
