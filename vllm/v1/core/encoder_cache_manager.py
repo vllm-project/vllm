@@ -65,10 +65,11 @@ class EncoderCacheManager:
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_mm_embeds: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
+        self.enable_mm_embeds = enable_mm_embeds
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
@@ -142,8 +143,10 @@ class EncoderCacheManager:
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
+        is_embedding_only_mode = self.enable_mm_embeds and encoder_compute_budget == 1
+
         # Not enough compute budget
-        if num_embeds > encoder_compute_budget:
+        if not is_embedding_only_mode and num_embeds > encoder_compute_budget:
             return False
 
         num_embeds += num_embeds_to_schedule
@@ -277,6 +280,7 @@ def compute_encoder_budget(
         return compute_mm_encoder_budget(
             scheduler_config,
             max_tokens_by_modality,
+            model_config,
         )
 
     return compute_text_encoder_budget(scheduler_config)
@@ -302,6 +306,7 @@ def compute_text_encoder_budget(scheduler_config: "SchedulerConfig") -> tuple[in
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     max_tokens_by_modality: Mapping[str, int],
+    model_config: "ModelConfig | None" = None,
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
@@ -310,6 +315,7 @@ def compute_mm_encoder_budget(
         scheduler_config: Scheduler configuration.
         max_tokens_by_modality: The maximum number of tokens for each
             non-text modality.
+        model_config: Model configuration. Used to check enable_mm_embeds flag.
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
@@ -319,6 +325,20 @@ def compute_mm_encoder_budget(
     """
 
     if not max_tokens_by_modality:
+        # Check if enable_mm_embeds is True - if so, return minimal cache size
+        # to allow None value caching for memory optimization
+        if (
+            model_config is not None
+            and model_config.multimodal_config is not None
+            and model_config.multimodal_config.enable_mm_embeds
+        ):
+            logger.info(
+                "All non-text modalities are disabled but enable_mm_embeds=True. "
+                "Initializing encoder cache with minimal size to support "
+                "embedding inputs."
+            )
+            return 1, 1
+
         logger.warning(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
@@ -354,9 +374,10 @@ def compute_mm_encoder_budget(
 # utilize the cache and this class will fold into EncoderCacheManager, as
 # differences with MM models shrink.
 class EncoderDecoderCacheManager(EncoderCacheManager):
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, enable_mm_embeds: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
+        self.enable_mm_embeds = enable_mm_embeds
         self.freed: list[str] = []
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
@@ -370,9 +391,12 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         num_embeds_to_schedule: int,
     ) -> bool:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+
+        is_embedding_only_mode = self.enable_mm_embeds and encoder_compute_budget == 1
+
         # Not enough compute budget
-        if num_encoder_embeds > encoder_compute_budget:
-            return False
+        if not is_embedding_only_mode and num_encoder_embeds > encoder_compute_budget:
+                return False
 
         num_encoder_embeds += num_embeds_to_schedule
         # Enough free slots
