@@ -395,6 +395,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self,
         common_metadata: CommonAttentionMetadata,
         metadata: M,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> M:
         """
         Update the block table for the attention metadata.

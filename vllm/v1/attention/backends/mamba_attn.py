@@ -291,9 +291,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self,
         common_metadata: CommonAttentionMetadata,
         metadata: M,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> M:
         new_metadata = copy.copy(metadata)
-        blk_table = common_metadata.block_table_tensor
         prefix_caching_all_mode = (
             self.vllm_config.cache_config.mamba_cache_mode == "all"
         )

@@ -499,10 +499,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self,
         common_metadata: CommonAttentionMetadata,
         metadata: FlashAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> FlashAttentionMetadata:
         new_metadata = copy.copy(metadata)
-        new_metadata.block_table = common_metadata.block_table_tensor
-        new_metadata.slot_mapping = common_metadata.slot_mapping
+        new_metadata.block_table = blk_table
+        new_metadata.slot_mapping = slot_mapping
         return new_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
