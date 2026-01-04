@@ -120,7 +120,7 @@ Please note that prefix caching is not yet supported for any of the above models
 
 Whisper is supported. Other models requiring cross-attention between separate
 encoder and decoder (e.g., `BartForConditionalGeneration`,
-`MllamaForConditionalGeneration`) are not yet supported.
+`MllamaForConditionalGeneration`) are not supported.
 
 ### Features
 

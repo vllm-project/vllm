@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import safetensors
 import torch
@@ -90,7 +90,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's 
         paged KV buffer.
 
@@ -191,7 +191,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
         return
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer 
         to the connector.
 

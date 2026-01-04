@@ -7,16 +7,9 @@
 
 #include <cmath>
 
+#include "../../cub_helpers.h"
 #include "../../dispatch_utils.h"
 #include "../vectorization_utils.cuh"
-
-#ifndef USE_ROCM
-  #include <cub/cub.cuh>
-  #include <cub/util_type.cuh>
-#else
-  #include <hipcub/hipcub.hpp>
-  #include <hipcub/util_type.hpp>
-#endif
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
@@ -173,7 +166,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  float block_max = BlockReduce(tmp).Reduce(thread_max, CubMaxOp{}, blockDim.x);
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;

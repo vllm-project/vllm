@@ -607,6 +607,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     # compatibility
                     if not lora_config else
                     lora_config.lora_vocab_padding_size),
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
             if self.tie_word_embeddings:

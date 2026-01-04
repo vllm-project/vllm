@@ -368,4 +368,4 @@ def test_invalid_env(use_v1: bool, monkeypatch: pytest.MonkeyPatch):
         # Should raise ValueError for invalid backend
         with pytest.raises(ValueError) as exc_info:
             get_attn_backend(32, torch.float16, None, 16, False)
-        assert "Invalid attention backend: 'INVALID'" in str(exc_info.value)
+        assert "Invalid value 'INVALID'" in str(exc_info.value)

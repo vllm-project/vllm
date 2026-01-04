@@ -71,12 +71,13 @@ class CPTestSettings:
         parallel_setups = []
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
-                for dcp_multiplier in [2, 4]:
+                for dcp_multiplier in [0.5, 1]:
                     for chunked_prefill_val in [True]:
                         parallel_setups.append(
                             ParallelSetup(tp_size=tp_base,
                                           pp_size=pp_multiplier * pp_base,
-                                          dcp_size=dcp_multiplier * dcp_base,
+                                          dcp_size=int(dcp_multiplier *
+                                                       tp_base),
                                           eager_mode=eager_mode_val,
                                           chunked_prefill=chunked_prefill_val))
         return CPTestSettings(
@@ -223,7 +224,9 @@ def _compare_cp_with_tp(
 
 CP_TEXT_GENERATION_MODELS = {
     # [MLA attention only]
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": CPTestSettings.detailed(),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat":
+    [CPTestSettings.detailed(),
+     CPTestSettings.detailed(tp_base=2)],
 }
 
 CP_TEST_MODELS = [
@@ -238,7 +241,7 @@ CP_TEST_MODELS = [
      "runner", "test_options"),
     [
         params for model_id, settings in CP_TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id)
+        for setting in settings for params in setting.iter_params(model_id)
         if model_id in CP_TEST_MODELS
     ],
 )

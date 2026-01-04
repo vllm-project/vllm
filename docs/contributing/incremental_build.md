@@ -40,6 +40,16 @@ python tools/generate_cmake_presets.py
 
 The script will prompt you if it cannot automatically determine certain paths (e.g., `nvcc` or a specific Python executable for your vLLM development environment). Follow the on-screen prompts. If an existing `CMakeUserPresets.json` is found, the script will ask for confirmation before overwriting it.
 
+**Force overwrite existing file:**
+
+To automatically overwrite an existing `CMakeUserPresets.json` without prompting, use the `--force-overwrite` flag:
+
+```console
+python tools/generate_cmake_presets.py --force-overwrite
+```
+
+This is particularly useful in automated scripts or CI/CD environments where interactive prompts are not desired.
+
 After running the script, a `CMakeUserPresets.json` file will be created in the root of your vLLM repository.
 
 ### Example `CMakeUserPresets.json`

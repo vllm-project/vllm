@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from vllm import bc_linter_include
+from vllm._bc_linter import bc_linter_include
 
 if TYPE_CHECKING:
     import numpy as np
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import Request
     from vllm.v1.core.kv_cache_utils import KVPrefixAlignedGroups
+    from vllm.v1.request import Request
 
 
 @bc_linter_include

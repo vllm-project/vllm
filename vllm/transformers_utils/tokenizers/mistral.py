@@ -274,7 +274,7 @@ class MistralTokenizer(TokenizerBase):
         return tokenizer_file
 
     # the following attributes are set to fit vLLM's design and are used
-    # by the guided structured output backends.
+    # by the structured output backends.
     @property
     def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
@@ -326,6 +326,10 @@ class MistralTokenizer(TokenizerBase):
     @property
     def max_token_id(self) -> int:
         return self._max_token_id
+
+    @property
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
 
     def __len__(self) -> int:
         return self.vocab_size
@@ -459,9 +463,6 @@ class MistralTokenizer(TokenizerBase):
 
         return decoded
 
-    # WARN: Outlines logits processors can overwrite this method.
-    # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
-    # for more.
     def decode(self,
                ids: Union[list[int], int],
                skip_special_tokens: bool = True) -> str:

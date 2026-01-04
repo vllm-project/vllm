@@ -63,8 +63,7 @@ class CacheConfig:
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: Optional[bool] = None
-    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
-    default for V1."""
+    """Whether to enable prefix caching. Enabled by default for V1."""
     enable_kv_prefix_trie: Optional[bool] = None
     """Whether to enable kv prefix trie for detecting common prefixes. 
     This flag must be set to true when multi-cascade_attention or 

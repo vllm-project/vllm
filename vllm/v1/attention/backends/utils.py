@@ -5,8 +5,8 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
+                    Protocol, TypeVar, Union, get_args)
 
 import numpy as np
 import torch
@@ -28,9 +28,15 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
-_KV_CACHE_LAYOUT_OVERRIDE = None
+KVCacheLayoutType = Literal["NHD", "HND"]
+_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+
+
+def is_valid_kv_cache_layout(value: str) -> bool:
+    return value in get_args(KVCacheLayoutType)
 
 
 @dataclass
@@ -76,12 +82,6 @@ class CommonAttentionMetadata:
     encoder_seq_lens: Optional[np.ndarray] = None
 
 
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
-
-
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
@@ -98,7 +98,7 @@ def slice_query_start_locs(
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UbatchSlice,
+        ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
     This function creates a new CommonAttentionMetadata that corresponds to 
@@ -128,6 +128,11 @@ def _make_metadata_with_slice(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
 
+    # This is to account for the case where we are in a dummy
+    # run and query_start_loc_cpu is full of 0s
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
+
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
@@ -147,12 +152,12 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
-    requests for each UbatchSlice in ubatch_slices.
+    requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """
@@ -294,6 +299,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
+
 @functools.lru_cache
 def get_kv_cache_layout():
     # Format specified by the code.
@@ -311,12 +317,13 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
+        assert is_valid_kv_cache_layout(cache_layout)
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
     return cache_layout
 
 
-def set_kv_cache_layout(cache_layout: str):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
@@ -780,22 +787,24 @@ KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
     ('num_logits_indices', int, 0),
 ]
 
+
 def reorder_batch_to_group_common_prefixes(
-    input_batch: InputBatch,
-    scheduler_output: SchedulerOutput
-):
+        input_batch: "InputBatch", scheduler_output: "SchedulerOutput"):
     kv_prefix_aligned_groups = scheduler_output.kv_prefix_aligned_groups
     if kv_prefix_aligned_groups:
-        insert_set: set[str] = set([req_data.req_id for req_data in scheduler_output.scheduled_new_reqs])
+        insert_set: set[str] = set([
+            req_data.req_id for req_data in scheduler_output.scheduled_new_reqs
+        ])
         request_ids = kv_prefix_aligned_groups.request_ids
         group_metadata = kv_prefix_aligned_groups.group_metadata
         for group in group_metadata:
             _, start, end = group
-            desired_request_set = set(request_ids[start: end])
-            actual_request_set = set(input_batch.req_ids[start: end])
+            desired_request_set = set(request_ids[start:end])
+            actual_request_set = set(input_batch.req_ids[start:end])
             desired_not_actual = desired_request_set - actual_request_set
             actual_not_desired = actual_request_set - desired_request_set
-            for actual_id, desired_id in zip(desired_not_actual, actual_not_desired):
+            for actual_id, desired_id in zip(desired_not_actual,
+                                             actual_not_desired):
                 actual_index = input_batch.req_id_to_index[actual_id]
                 desired_index = input_batch.req_id_to_index[desired_id]
                 input_batch.swap_states(actual_index, desired_index)
@@ -803,6 +812,7 @@ def reorder_batch_to_group_common_prefixes(
                 insert_set.add(actual_id)
         return True
     return False
+
 
 def subclass_attention_metadata(
     name_prefix: str,

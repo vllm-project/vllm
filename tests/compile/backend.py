@@ -65,3 +65,7 @@ class TestBackend:
             num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
             assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
             assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
+
+    def op_count(self, op: OpOverload, before=False) -> int:
+        graph = self.graph_pre_pass if before else self.graph_post_pass
+        return len(list(find_op_nodes(op, graph)))

@@ -91,7 +91,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # ==============================
 
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -212,7 +212,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
@@ -278,7 +279,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def get_finished(
             self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
+            **kwargs: Any) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

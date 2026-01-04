@@ -606,6 +606,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             config.text_config.vocab_size,
             config.text_config.hidden_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight

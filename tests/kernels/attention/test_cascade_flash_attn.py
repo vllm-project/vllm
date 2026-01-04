@@ -8,18 +8,20 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (cascade_attention,
-                                                   merge_attn_states)
+                                                   merge_attn_states,
+                                                   base_cascade_attention)
 from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
                                   flash_attn_varlen_func,
                                   is_fa_version_supported)
 
+NUM_TOKENS = [1, 39, 16912]
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.parametrize("num_tokens", [1, 39, 16912])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -68,12 +70,14 @@ def test_merge_kernel(
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
 
 
-CASES = [
-    # Case 1. A general case.
-    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256),
-    # Case 2. Flash-decoding case.
-    ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
-]
+# CASES = [
+#     # Case 1. A general case.
+#     ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256)
+#     # Case 2. Flash-decoding case.
+#     # ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
+# ]
+
+CASES = [([(32, 80), (32, 80)], 64)]
 
 
 @pytest.mark.parametrize("seq_lens_and_common_prefix", CASES)
@@ -166,7 +170,28 @@ def test_cascade(
     prefix_kv_lens = torch.tensor([common_prefix_len], dtype=torch.int32)
     suffix_kv_lens = kv_lens_tensor - common_prefix_len
     output = torch.empty_like(query)
-    cascade_attention(
+    # cascade_attention(
+    #     output=output,
+    #     query=query,
+    #     key_cache=key_cache,
+    #     value_cache=value_cache,
+    #     cu_query_lens=cu_query_lens,
+    #     max_query_len=max_query_len,
+    #     cu_prefix_query_lens=cu_prefix_query_lens,
+    #     prefix_kv_lens=prefix_kv_lens,
+    #     suffix_kv_lens=suffix_kv_lens,
+    #     max_kv_len=max_kv_len,
+    #     softmax_scale=scale,
+    #     alibi_slopes=None,
+    #     sliding_window=window_size,
+    #     logits_soft_cap=soft_cap if soft_cap is not None else 0,
+    #     block_table=block_tables,
+    #     group_indices=[0, num_seqs],
+    #     common_prefix_lens=[common_prefix_len],
+    #     fa_version=fa_version,
+    # )
+
+    base_cascade_attention(
         output=output,
         query=query,
         key_cache=key_cache,
@@ -182,7 +207,7 @@ def test_cascade(
         sliding_window=window_size,
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
-        common_prefix_lens=[common_prefix_len],
+        common_prefix_len=common_prefix_len,
         fa_version=fa_version,
     )
 

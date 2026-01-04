@@ -185,6 +185,11 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        # Disable DBO
+        if parallel_config.enable_dbo:
+            logger.warning(
+                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel

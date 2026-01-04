@@ -28,7 +28,6 @@ from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -82,10 +81,7 @@ class Worker(LocalOrDistributedWorkerBase):
                         "qwen3_next_mtp")) \
                     else {"return_hidden_states": True}
 
-        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if self.model_config.is_encoder_decoder:
-            ModelRunnerClass = EncoderDecoderModelRunner
-        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
+        self.model_runner: GPUModelRunnerBase = ModelRunner(
             vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,

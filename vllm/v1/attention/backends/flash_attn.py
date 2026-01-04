@@ -236,6 +236,7 @@ class FlashAttentionMetadataBuilder(
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -292,8 +293,7 @@ class FlashAttentionMetadataBuilder(
         use_cascade = common_prefix_lens[0] > 0
 
         if use_cascade:
-            #TODO: Must find request token count in current batch.
-            token_indices = [*[query_start_loc[group_indices[:-1]]],
+            token_indices = [*query_start_loc_cpu[group_indices[:-1]].tolist(),
                              num_actual_tokens]
             cu_prefix_query_lens = torch.tensor(token_indices,
                                                 dtype=torch.int32,
@@ -315,14 +315,14 @@ class FlashAttentionMetadataBuilder(
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
-                max_seq_len=torch.max(prefix_kv_lens),
+                max_seq_len=max(common_prefix_lens),
                 causal=False)
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
                 cu_query_lens=query_start_loc,
                 max_query_len=max_query_len,
                 seqlens=suffix_kv_lens,
-                max_seq_len=max_seq_len - torch.min(prefix_kv_lens),
+                max_seq_len=max_seq_len - min(common_prefix_lens),
                 causal=True)
         else:
             cu_prefix_query_lens = None
@@ -587,6 +587,7 @@ class FlashAttentionImpl(AttentionImpl):
             sliding_window=self.sliding_window,
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
+            group_indices=attn_metadata.group_indices,
             common_prefix_lens=attn_metadata.common_prefix_lens,
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
@@ -790,6 +791,7 @@ def cascade_attention(
     sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
+    group_indices: list[int],
     common_prefix_lens: list[int],
     fa_version: int,
     prefix_scheduler_metadata: Optional[torch.Tensor] = None,
@@ -814,16 +816,18 @@ def cascade_attention(
         max_num_common_tokens = min_num_common_tokens = common_prefix_len
         max_num_common_blocks = min_num_common_blocks = num_common_kv_blocks
     else:
-        assert torch.all(torch.eq(prefix_kv_lens % block_size, 0)).item()
-        assert torch.all(torch.gt(prefix_kv_lens // block_size, 0)).item()
-        max_num_common_tokens = torch.max(prefix_kv_lens)
-        min_num_common_tokens = torch.min(prefix_kv_lens)
+        assert all([cpl % block_size == 0 and cpl // block_size > 0 \
+            for cpl in common_prefix_lens])
+
+        max_num_common_tokens = max(common_prefix_lens)
+        min_num_common_tokens = min(common_prefix_lens)
         max_num_common_blocks = max_num_common_tokens // block_size
         min_num_common_blocks = min_num_common_tokens // block_size
 
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process shared prefix.
+    prefix_block_table = block_table[group_indices[:-1]]
     prefix_output, prefix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -835,7 +839,7 @@ def cascade_attention(
         softmax_scale=softmax_scale,
         causal=False,
         window_size=sliding_window,
-        block_table=block_table[:, :max_num_common_blocks],
+        block_table=prefix_block_table,
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         scheduler_metadata=prefix_scheduler_metadata,
@@ -850,17 +854,32 @@ def cascade_attention(
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
-    suffix_block_table = block_table[:, min_num_common_blocks:]
     # Only create new block table if multiple differing common_prefixes
-    if len(common_prefix_lens) != 1:
-        suffix_block_table = torch.empty_like(block_table[:, min_num_common_blocks:])
-        for i in range(len(common_prefix_lens)):
-            start = cu_prefix_query_lens[i]
-            end = cu_prefix_query_lens[i + 1]
-            suffix_block_table[start: end] = block_table[start: end,
-                                             prefix_kv_lens[i] // block_size:]
+    # if len(common_prefix_lens) != 1:
+    #     suffix_block_table = torch.empty_like(block_table[:, min_num_common_blocks:])
+    #     for i in range(len(common_prefix_lens)):
+    #         start = cu_prefix_query_lens[i]
+    #         end = cu_prefix_query_lens[i + 1]
+    #         num_common_blocks = common_prefix_lens[i] // block_size
+    #         if min_num_common_blocks != num_common_blocks:
+    #             suffix_block_table[start: end, :min_num_common_blocks - num_common_blocks] = block_table[start: end,
+    #                                             num_common_blocks:]
+    # else:
+    #     suffix_block_table = block_table[:, min_num_common_blocks:]
+
+    suffix_block_table = torch.empty_like(block_table[:, min_num_common_blocks:])
+    for i in range(len(common_prefix_lens)):
+        start = cu_prefix_query_lens[i]
+        end = cu_prefix_query_lens[i + 1]
+        num_common_blocks = common_prefix_lens[i] // block_size
+        if min_num_common_blocks != num_common_blocks:
+            suffix_block_table[start: end, :min_num_common_blocks - num_common_blocks] = block_table[start: end,
+                                            num_common_blocks:]
+        else:
+            suffix_block_table[start: end] = block_table[start: end, min_num_common_blocks:]
 
     # Process suffix per query.
+
     suffix_output, suffix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,

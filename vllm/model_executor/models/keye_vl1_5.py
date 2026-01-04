@@ -58,17 +58,18 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
     return torch.cat([ones, h_w], dim=1).repeat_interleave(t, dim=0)
 
 
-def get_num_patches(grid_thw: torch.Tensor, num_frames: Union[list[int],
-                                                              torch.Tensor]):
+def get_num_patches(grid_thw: torch.Tensor,
+                    num_frames: Union[list[int], torch.Tensor]) -> list[int]:
     """
     Return num_patches per video.
 
     Args:
-        t: tensor with shape [N, ...] where each item is a list/tensor
-        cu_seqlens: list indicating the boundaries of groups
+        grid_thw: Tensor with shape [N, 3] containing temporal, height, width
+            dimensions
+        num_frames: List or tensor indicating the number of frames per video
 
     Returns:
-        list of ints representing the sum of products for each group
+        List of ints representing the number of patches for each video
 
     Examples:
         >>> # Suppose there are 2 videos with a total of 3 grids
