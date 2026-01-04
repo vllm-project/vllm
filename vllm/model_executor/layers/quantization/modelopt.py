@@ -762,6 +762,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        layer.orig_dtype = params_dtype
+
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
             torch.float8_e4m3fn
