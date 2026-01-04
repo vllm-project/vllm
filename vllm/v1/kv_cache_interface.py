@@ -66,16 +66,18 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    page_size_bytes: int = None
 
-    @property
-    def page_size_bytes(self) -> int:
-        return (
-            2
-            * self.block_size
-            * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
-        )
+    def __post_init__(self):
+        if self.page_size_bytes is None:
+            page_size_bytes = (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * self.head_size
+                * get_dtype_size(self.dtype)
+            )
+            object.__setattr__(self, "page_size_bytes", page_size_bytes)
 
 
 @dataclass(frozen=True)
