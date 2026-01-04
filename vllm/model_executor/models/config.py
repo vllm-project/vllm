@@ -135,6 +135,8 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 
         config.layer_norm_eps = config.layer_norm_epsilon
         config.intermediate_size = config.n_inner
+        config.hidden_size = config.n_embd
+        config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
         max_trained_positions = getattr(config, "max_trained_positions", 2048)

@@ -344,22 +344,6 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
-class NomicBertModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_hidden_size(self) -> int:
-        return getattr(self.hf_text_config, "n_embd", 0)
-
-    def get_num_hidden_layers(self) -> int:
-        return getattr(self.hf_text_config, "n_layer", 0)
-
-    def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
-        # NomicBert uses max_trained_positions (default 2048) as the limit
-        # rather than max_position_embeddings (which can be 8192)
-        max_trained_positions = getattr(
-            self.hf_text_config, "max_trained_positions", 2048
-        )
-        return float(max_trained_positions), "max_trained_positions"
-
-
 class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -415,5 +399,4 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
-    "nomic_bert": NomicBertModelArchConfigConvertor,
 }
