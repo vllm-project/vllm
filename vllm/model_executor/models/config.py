@@ -138,7 +138,9 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.hidden_size = config.n_embd
         config.num_hidden_layers = config.n_layer
         model_config.model_arch_config.hidden_size = config.hidden_size
-        model_config.model_arch_config.total_num_hidden_layers = config.num_hidden_layers
+        model_config.model_arch_config.total_num_hidden_layers = (
+            config.num_hidden_layers
+        )
 
         head_dim = config.hidden_size // config.num_attention_heads
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
