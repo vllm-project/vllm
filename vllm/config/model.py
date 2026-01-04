@@ -935,6 +935,21 @@ class ModelConfig:
 
             current_platform.verify_quantization(self.quantization)
 
+        if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
+            if self.allow_deprecated_quantization:
+                logger.warning(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM.",
+                    self.quantization,
+                )
+            else:
+                raise ValueError(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM. To bypass, "
+                    "set `--allow-deprecated-quantization`.",
+                    self.quantization,
+                )
+
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
