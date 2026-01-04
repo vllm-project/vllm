@@ -12,6 +12,7 @@ from vllm.config import (
     MultiModalConfig,
     VllmConfig,
 )
+from vllm.multimodal.inputs import MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor

@@ -179,8 +179,8 @@ class OpenAIServingChat(OpenAIServing):
         start_time = time.perf_counter()
 
         try:
-            # Get the tokenizer from the engine
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.tokenizer
 
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
