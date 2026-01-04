@@ -280,14 +280,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None and not pynccl_comm.disabled
 
         # 'sizes' is not needed if all inputs in the same group have the same
         # shape
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
+        def _all_gather_single_pynccl(
+            input_: torch.Tensor, sizes: list[int] | None = None
+        ):
+            assert pynccl_comm is not None
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
@@ -297,7 +299,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 output_size = (sum(sizes),) + input_size[1:]
             else:
                 output_size = (input_size[0] * world_size,) + input_size[1:]
-            # Allocate output tensor.
             output_tensor = torch.empty(
                 output_size, dtype=input_.dtype, device=input_.device
             )
@@ -307,14 +308,52 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 pynccl_comm.all_gather(output_tensor, input_)
             return output_tensor
 
-        if isinstance(input_, torch.Tensor):
-            return _all_gather_single(input_, sizes)
+        def _all_gather_single_torch(
+            input_: torch.Tensor, sizes: list[int] | None = None
+        ):
+            input_size = input_.size()
+            if sizes is not None:
+                assert len(sizes) == world_size
+                assert input_.shape[dim] == sizes[self.rank_in_group], (
+                    f"{input_.shape[dim]} != {sizes[self.rank_in_group]}"
+                )
+                output_size = (sum(sizes),) + input_size[1:]
+                output_tensor = torch.empty(
+                    output_size, dtype=input_.dtype, device=input_.device
+                )
+                gather_list = list(output_tensor.split(sizes, dim=0))
+                torch.distributed.all_gather(
+                    gather_list, input_, group=self.device_group
+                )
+            else:
+                output_size = (input_size[0] * world_size,) + input_size[1:]
+                output_tensor = torch.empty(
+                    output_size, dtype=input_.dtype, device=input_.device
+                )
+                torch.distributed.all_gather_into_tensor(
+                    output_tensor, input_, group=self.device_group
+                )
+            return output_tensor
 
-        output_list = []
-        pynccl_comm.group_start()
-        for inp in input_:
-            output_list.append(_all_gather_single(inp, sizes=sizes))
-        pynccl_comm.group_end()
+        use_pynccl = pynccl_comm is not None and not pynccl_comm.disabled
+
+        gather_fn = (
+            _all_gather_single_pynccl if use_pynccl else _all_gather_single_torch
+        )
+
+        if isinstance(input_, torch.Tensor):
+            return gather_fn(input_, sizes)
+
+        # input_ is a list of tensors
+        if use_pynccl:
+            assert pynccl_comm is not None
+            pynccl_comm.group_start()
+
+        output_list = [gather_fn(inp, sizes=sizes) for inp in input_]
+
+        if use_pynccl:
+            assert pynccl_comm is not None
+            pynccl_comm.group_end()
 
         return output_list
 
