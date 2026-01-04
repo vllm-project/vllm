@@ -101,8 +101,7 @@ class EngineCore:
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
-            self.model_executor.register_failure_callback(
-                executor_fail_callback)
+            self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
 
@@ -113,8 +112,7 @@ class EngineCore:
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache", args=(
-            num_gpu_blocks, num_cpu_blocks))
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -142,8 +140,7 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector)  # type: ignore
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
@@ -180,8 +177,7 @@ class EngineCore:
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
         ) = None
         if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d",
-                        self.batch_queue_size)
+            logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.ec_producer = (
@@ -190,8 +186,7 @@ class EngineCore:
         )
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
-        self.request_block_hasher: Callable[[
-            Request], list[BlockHash]] | None = None
+        self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
@@ -264,8 +259,7 @@ class EngineCore:
                 available_gpu_memory,
             )
         else:
-            has_kv_cache = any(
-                kv_cache_spec for kv_cache_spec in kv_cache_specs)
+            has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
             if has_kv_cache:
                 if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
                     dp_group = getattr(self, "dp_group", None)
@@ -309,8 +303,7 @@ class EngineCore:
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
-            kv_cache_configs)
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
 
@@ -367,8 +360,7 @@ class EngineCore:
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
-        self.scheduler.finish_requests(
-            request_ids, RequestStatus.FINISHED_ABORTED)
+        self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -408,14 +400,12 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        future = self.model_executor.execute_model(
-            scheduler_output, non_block=True)
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(
-                    grammar_output)
+                model_output = self.model_executor.sample_tokens(grammar_output)
 
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
@@ -471,8 +461,7 @@ class EngineCore:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
-                exec_future.add_done_callback(
-                    self._log_err_callback(scheduler_output))
+                exec_future.add_done_callback(self._log_err_callback(scheduler_output))
 
                 if not scheduler_output.pending_structured_output_tokens:
                     # We aren't waiting for any tokens, get any grammar output
@@ -524,8 +513,7 @@ class EngineCore:
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            future = self.model_executor.sample_tokens(
-                grammar_output, non_block=True)
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
@@ -615,8 +603,7 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(
-            request, self.request_block_hasher)
+        req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -643,12 +630,12 @@ class EngineCoreProc(EngineCore):
         engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-        self.output_queue = queue.Queue[tuple[int,
-                                              EngineCoreOutputs] | bytes]()
+        self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
 
-        def executor_fail_callback(): return self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
+        def executor_fail_callback():
+            return self.input_queue.put_nowait(
+                (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+            )
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -719,8 +706,7 @@ class EngineCoreProc(EngineCore):
             # received.
             while not ready_event.wait(timeout=10):
                 if not input_thread.is_alive():
-                    raise RuntimeError(
-                        "Input socket thread died during startup")
+                    raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
@@ -1096,10 +1082,8 @@ class EngineCoreProc(EngineCore):
             while True:
                 for input_socket, _ in poller.poll():
                     # (RequestType, RequestData)
-                    type_frame, * \
-                        data_frames = input_socket.recv_multipart(copy=False)
-                    request_type = EngineCoreRequestType(
-                        bytes(type_frame.buffer))
+                    type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
                     if request_type == EngineCoreRequestType.ADD:
@@ -1265,8 +1249,7 @@ class DPEngineCoreProc(EngineCoreProc):
             ):
                 self.current_wave = new_wave
                 if not self.engines_running:
-                    logger.debug(
-                        "EngineCore starting idle loop for wave %d.", new_wave)
+                    logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
         else:
             super()._handle_client_request(request_type, request)
@@ -1282,8 +1265,7 @@ class DPEngineCoreProc(EngineCoreProc):
             stats = SchedulerStats(
                 *counts, step_counter=self.step_counter, current_wave=self.current_wave
             )
-            self.output_queue.put_nowait(
-                (-1, EngineCoreOutputs(scheduler_stats=stats)))
+            self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""

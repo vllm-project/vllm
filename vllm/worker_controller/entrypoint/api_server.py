@@ -190,8 +190,7 @@ async def build_async_engine_client(
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
     if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(
-            args.disable_frontend_multiprocessing)
+        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
@@ -222,8 +221,7 @@ async def build_async_engine_client_from_engine_args(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     if disable_frontend_multiprocessing:
-        logger.warning(
-            "V1 is enabled, but got --disable-frontend-multiprocessing.")
+        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -1322,8 +1320,7 @@ class AuthenticationMiddleware:
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
-        self.api_tokens = [hashlib.sha256(
-            t.encode("utf-8")).digest() for t in tokens]
+        self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
 
     def verify_token(self, headers: Headers) -> bool:
         authorization_header_value = headers.get("Authorization")
@@ -1352,8 +1349,7 @@ class AuthenticationMiddleware:
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith("/v1") and not self.verify_token(headers):
-            response = JSONResponse(
-                content={"error": "Unauthorized"}, status_code=401)
+            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
 
@@ -1382,8 +1378,7 @@ class XRequestIdMiddleware:
             """
             if message["type"] == "http.response.start":
                 response_headers = MutableHeaders(raw=message["headers"])
-                request_id = request_headers.get(
-                    "X-Request-Id", uuid.uuid4().hex)
+                request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
                 response_headers.append("X-Request-Id", request_id)
             await send(message)
 
@@ -1435,13 +1430,11 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
 
         # Try using Completion types for type-safe parsing
         if chunk_data.get("object") == "chat.completion.chunk":
-            chat_response = ChatCompletionStreamResponse.model_validate(
-                chunk_data)
+            chat_response = ChatCompletionStreamResponse.model_validate(chunk_data)
             if chat_response.choices and chat_response.choices[0].delta.content:
                 return chat_response.choices[0].delta.content
         elif chunk_data.get("object") == "text_completion":
-            completion_response = CompletionStreamResponse.model_validate(
-                chunk_data)
+            completion_response = CompletionStreamResponse.model_validate(chunk_data)
             if completion_response.choices and completion_response.choices[0].text:
                 return completion_response.choices[0].text
     except pydantic.ValidationError:
@@ -1550,8 +1543,7 @@ def _log_streaming_response(response, response_body: list) -> None:
                     return
 
     response.body_iterator = iterate_in_threadpool(buffered_iterator())
-    logger.info(
-        "response_body={streaming_started: chunks=%d}", len(response_body))
+    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
 
 
 def _log_non_streaming_response(response_body: list) -> None:
@@ -1989,8 +1981,7 @@ def setup_server(args):
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(
-            args.reasoning_parser_plugin)
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -2018,8 +2009,7 @@ def setup_server(args):
     else:
         addr, port = sock_addr
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        host_part = f"[{addr}]" if is_valid_ipv6_address(
-            addr) else addr or "0.0.0.0"
+        host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or "0.0.0.0"
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
@@ -2043,8 +2033,7 @@ async def run_server_worker(
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(
-            args.reasoning_parser_plugin)
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)

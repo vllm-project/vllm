@@ -206,8 +206,7 @@ class RemoteExecutor(Executor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                self._ensure_worker_termination(
-                    [uw.proc for uw in unready_workers])
+                self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
@@ -227,8 +226,7 @@ class RemoteExecutor(Executor):
             if not _self or getattr(_self, "shutting_down", False):
                 return
             _self.is_failed = True
-            proc_name = next(
-                h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly, shutting down executor.", proc_name
             )
@@ -277,8 +275,7 @@ class RemoteExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch",
-                            unique_reply_rank=self.output_rank)
+        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
@@ -314,13 +311,14 @@ class RemoteExecutor(Executor):
             )
         else:
             output_rank = unique_reply_rank
-            def aggregate(x): return x
+
+            def aggregate(x):
+                return x
 
         if isinstance(method, str):
             send_method = method
         else:
-            send_method = cloudpickle.dumps(
-                method, protocol=pickle.HIGHEST_PROTOCOL)
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
@@ -340,8 +338,7 @@ class RemoteExecutor(Executor):
                         timeout=dequeue_timeout, cancel=shutdown_event
                     )
                 except TimeoutError as e:
-                    raise TimeoutError(
-                        f"RPC call to {method} timed out.") from e
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
@@ -610,8 +607,7 @@ class WorkerProc:
         response_handle = handles["handle"]
         worker_response_mq: MessageQueue | None = None
         if len(response_handle.local_reader_ranks) > 0:
-            worker_response_mq = MessageQueue.create_from_handle(
-                response_handle, 0)
+            worker_response_mq = MessageQueue.create_from_handle(response_handle, 0)
         peer_response_handles = handles["peer_response_handles"]
         peer_worker_response_mqs = [
             MessageQueue.create_from_handle(handle, -1)

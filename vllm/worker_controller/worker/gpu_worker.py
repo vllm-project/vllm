@@ -243,7 +243,10 @@ class Worker(WorkerBase):
                 * self.cache_config.gpu_memory_utilization
             )
             if self.init_snapshot.free_memory < self.requested_memory:
-                def GiB(b): return round(b / GiB_bytes, 2)
+
+                def GiB(b):
+                    return round(b / GiB_bytes, 2)
+
                 raise ValueError(
                     f"Free memory on device "
                     f"({GiB(self.init_snapshot.free_memory)}/"
@@ -254,8 +257,7 @@ class Worker(WorkerBase):
                     f"utilization or reduce GPU memory used by other processes."
                 )
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
@@ -292,7 +294,10 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        def GiB(b): return b / GiB_bytes
+
+        def GiB(b):
+            return b / GiB_bytes
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -418,8 +423,7 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(
-                size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -440,7 +444,8 @@ class Worker(WorkerBase):
             # CUDAGraph memory size and may not utilize all gpu memory.
             # Users may want fine-grained control to specify kv cache
             # memory size.
-            def GiB(b): return round(b / GiB_bytes, 2)
+            def GiB(b):
+                return round(b / GiB_bytes, 2)
 
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
@@ -506,8 +511,7 @@ class Worker(WorkerBase):
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=last_hidden_states)
+                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -548,8 +552,7 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_input_tokens = self.model_runner._get_num_input_tokens(
-            num_scheduled_tokens)
+        num_input_tokens = self.model_runner._get_num_input_tokens(num_scheduled_tokens)
         all_gather_tensors = {
             "residual": not is_residual_scattered_for_sp(
                 self.vllm_config, num_input_tokens
@@ -658,10 +661,8 @@ class Worker(WorkerBase):
         from vllm.distributed.parallel_state import get_ep_group
 
         if get_ep_group().rank == 0:
-            logger.info(
-                "[Elastic EP] Starting expert resharding after scaling up...")
-        rank_mapping = {
-            old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
+            logger.info("[Elastic EP] Starting expert resharding after scaling up...")
+        rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
@@ -841,8 +842,7 @@ class Worker(WorkerBase):
 
         if new_ep_size > old_ep_size:
             assert global_expert_loads is not None
-            self._eplb_after_scale_up(
-                old_ep_size, new_ep_size, global_expert_loads)
+            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_loads)
 
     def save_sharded_state(
         self,
