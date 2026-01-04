@@ -40,13 +40,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    deepgemm_post_process_fp8_weight_block,
+    prepare_fp8_moe_layer_for_deepgemm,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -181,35 +181,35 @@ def convert_to_fp8_moe_kernel_format(
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
         assert block_quant
-        w13, w13_scale = deepgemm_post_process_fp8_weight_block(
-            wq=w13,
-            ws=w13_scale,
-            quant_block_shape=tuple(layer.weight_block_size),
-            use_e8m0=is_deep_gemm_e8m0_used(),
-        )
-        w2, w2_scale = deepgemm_post_process_fp8_weight_block(
-            wq=w2,
-            ws=w2_scale,
-            quant_block_shape=tuple(layer.weight_block_size),
-            use_e8m0=is_deep_gemm_e8m0_used(),
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            tuple(layer.weight_block_size),
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
-            layer, w13, w2, w13_scale, w2_scale
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
         )
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
+        is_trtllm = fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
             layer,
             w13,
             w2,
             w13_scale,
             w2_scale,
-            is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
+            is_trtllm,
         )
 
     return w13, w2, w13_scale, w2_scale

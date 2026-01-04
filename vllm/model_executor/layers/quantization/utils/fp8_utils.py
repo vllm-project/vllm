@@ -1212,6 +1212,29 @@ def deepgemm_post_process_fp8_weight_block(
     return wq, dg_ws
 
 
+def prepare_fp8_moe_layer_for_deepgemm(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_shape: tuple[int],
+):
+    w13, w13_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w13,
+        ws=w13_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+    w2, w2_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w2,
+        ws=w2_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+
+    return w13, w2, w13_scale, w2_scale
+
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
