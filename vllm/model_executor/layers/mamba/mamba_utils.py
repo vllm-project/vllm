@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeAlias
+
 import torch
 
 from vllm.config.cache import MambaDType
@@ -222,4 +226,75 @@ class MambaStateShapeCalculator:
             conv_state_k_shape,
             conv_state_k_shape,
             recurrent_state_shape,
+        )
+
+
+@dataclass
+class MambaCopySpec:
+    start_addr: int
+    num_elements: int
+
+
+MambaStateCopyFunc: TypeAlias = Callable[
+    [torch.Tensor, list[int], int, int], MambaCopySpec
+]
+
+
+def get_conv_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    src_block_id = block_ids[cur_block_idx]
+    src_state = state[src_block_id, num_accepted_tokens - 1 :]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
+def get_temporal_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    src_state = state[src_block_id]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
+get_full_copy_spec = get_temporal_copy_spec
+
+
+class MambaStateCopyFuncCalculator:
+    @classmethod
+    def linear_attention_state_copy_func(cls):
+        return (get_temporal_copy_spec,)
+
+    @classmethod
+    def mamba1_state_copy_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
+
+    @classmethod
+    def mamba2_state_copy_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
+
+    @classmethod
+    def short_conv_state_copy_func(cls):
+        return (get_conv_copy_spec,)
+
+    @classmethod
+    def gated_delta_net_state_copy_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
+
+    @classmethod
+    def kda_state_copy_func(cls):
+        return (
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_temporal_copy_spec,
         )

@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -74,7 +75,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.compilation_config.max_cudagraph_capture_size,
         )
 
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if self.vllm_config.cache_config.mamba_cache_mode == "all":
             self.state_indices_tensor = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,
@@ -192,7 +193,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if self.vllm_config.cache_config.mamba_cache_mode == "all":
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
@@ -209,7 +210,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )[:, 0]
 
         if num_prefills > 0:
             query_start_loc_p = (
@@ -230,7 +235,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 compute_causal_conv1d_metadata(query_start_loc_p)
             )
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert num_computed_tokens is not None
                 num_computed_tokens_p = num_computed_tokens[
                     num_reqs - num_prefills : num_reqs
@@ -249,7 +254,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
                     block_idx_last_scheduled_token, non_blocking=True
                 )
@@ -284,13 +289,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def update_block_table(
         self,
+        common_metadata: CommonAttentionMetadata,
         metadata: M,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
     ) -> M:
         new_metadata = copy.copy(metadata)
-        prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
-        state_indices_t = blk_table if prefix_caching else blk_table[:, 0]
+        blk_table = common_metadata.block_table_tensor
+        prefix_caching_all_mode = (
+            self.vllm_config.cache_config.mamba_cache_mode == "all"
+        )
+        state_indices_t = (
+            blk_table
+            if prefix_caching_all_mode
+            else mamba_get_block_table_tensor(
+                common_metadata,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )[:, 0]
+        )
         num_reqs = blk_table.shape[0]
 
         # For CUDA graphs, copy to persistent buffer

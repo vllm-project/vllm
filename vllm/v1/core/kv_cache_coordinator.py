@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
+from vllm.config.cache import CacheConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -32,6 +33,7 @@ class KVCacheCoordinator(ABC):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -42,6 +44,7 @@ class KVCacheCoordinator(ABC):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
+        self.cache_config = cache_config
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -59,6 +62,7 @@ class KVCacheCoordinator(ABC):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
+                cache_config=self.cache_config,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
@@ -75,6 +79,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
         total_computed_tokens: int,
+        num_tokens_main_model: int,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -88,6 +93,9 @@ class KVCacheCoordinator(ABC):
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
             total_computed_tokens: Include both local and external tokens.
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
 
         Returns:
             The number of blocks to allocate.
@@ -98,7 +106,7 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, [], 0
+                    request_id, num_encoder_tokens, [], 0, num_encoder_tokens
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -106,6 +114,7 @@ class KVCacheCoordinator(ABC):
                     num_tokens,
                     new_computed_blocks[i],
                     total_computed_tokens,
+                    num_tokens_main_model,
                 )
         return num_blocks_to_allocate
 
@@ -139,6 +148,7 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         num_tokens: int,
+        num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
@@ -149,6 +159,9 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
 
@@ -161,6 +174,7 @@ class KVCacheCoordinator(ABC):
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
+                num_tokens_main_model,
             )
             for manager in self.single_type_managers
         )
@@ -248,6 +262,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -258,6 +273,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -293,6 +309,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -304,6 +321,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -361,6 +379,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -372,6 +391,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -548,6 +568,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
 
 def get_kv_cache_coordinator(
+    cache_config: CacheConfig,
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     use_eagle: bool,
@@ -560,6 +581,7 @@ def get_kv_cache_coordinator(
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -571,6 +593,7 @@ def get_kv_cache_coordinator(
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -582,6 +605,7 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
+        cache_config,
         kv_cache_config,
         max_model_len,
         use_eagle,
