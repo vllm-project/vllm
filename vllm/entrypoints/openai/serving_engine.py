@@ -1146,8 +1146,8 @@ class OpenAIServing:
             )
         return None
 
+    @staticmethod
     def _prepare_extra_chat_template_kwargs(
-        self,
         request_chat_template_kwargs: dict[str, Any] | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
