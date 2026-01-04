@@ -535,6 +535,11 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
+    # Sanitize recipient: the model sometimes outputs malformed sequences
+    # like "to=functions.bash<|channel|>commentary" instead of the correct
+    # "to=functions.bash <|constrain|>json". Strip the malformed part.
+    if "<|channel|>" in recipient:
+        recipient = recipient.split("<|channel|>")[0].strip()
     function_name = recipient.split(".")[-1]
     output_items = []
     for content in message.content:

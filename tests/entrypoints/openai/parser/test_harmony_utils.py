@@ -888,6 +888,29 @@ class TestParseOutputMessage:
         assert output_items[0].call_id.startswith("call_")
         assert output_items[0].id.startswith("fc_")
 
+    def test_malformed_recipient_with_channel_token_is_sanitized(self):
+        """Test that malformed recipients containing <|channel|> are sanitized.
+
+        The model sometimes outputs malformed sequences like
+        'functions.bash<|channel|>commentary' instead of 'functions.bash'.
+        This test verifies the sanitization handles this case.
+        """
+        message = Message.from_role_and_content(
+            Role.ASSISTANT, '{"command": "date"}'
+        )
+        message = message.with_channel("commentary")
+        # Simulate malformed recipient from model output
+        message = message.with_recipient("functions.bash<|channel|>commentary")
+
+        output_items = parse_output_message(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].type == "function_call"
+        # The function name should be sanitized to just "bash"
+        assert output_items[0].name == "bash"
+        assert output_items[0].arguments == '{"command": "date"}'
+
     def test_commentary_with_python_recipient_creates_reasoning(self):
         """Test that commentary with recipient='python' creates reasoning items."""
         message = Message.from_role_and_content(
