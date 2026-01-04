@@ -27,10 +27,10 @@ from collections.abc import AsyncGenerator
 import grpc
 from grpc_reflection.v1alpha import reflection
 
+from vllm import TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.grpc.grpc_request_manager import (
-    GrpcRequestManager,
     create_sampling_params_from_proto,
 )
 from vllm.logger import init_logger
@@ -56,14 +56,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     - GetServerInfo: Server state
     """
 
-    def __init__(self, request_manager: GrpcRequestManager):
+    def __init__(self, async_llm: AsyncLLM, start_time: float):
         """
         Initialize the servicer.
 
         Args:
             request_manager: The GrpcRequestManager instance
         """
-        self.request_manager = request_manager
+        self.async_llm = async_llm
+        self.start_time = start_time
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -87,14 +88,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         try:
             # Extract tokenized input
             if not request.HasField("tokenized"):
-                yield self._error_response(
-                    request_id,
-                    "Missing tokenized input",
-                    "400",
-                )
-                return
+                raise ValueError("Missing tokenized input")
 
             prompt_token_ids = list(request.tokenized.input_ids)
+            prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids}
 
             # Build sampling params with detokenize=False
             sampling_params = create_sampling_params_from_proto(
@@ -102,21 +99,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 stream=request.stream,
             )
 
-            # Submit to request manager and stream outputs
-            arrival_time = time.time()
-
-            async for output in self.request_manager.generate(
-                request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+            async for output in self.async_llm.generate(
+                prompt=prompt,
                 sampling_params=sampling_params,
-                arrival_time=arrival_time,
+                request_id=request_id,
             ):
-                # Check if client disconnected
-                if context.cancelled():
-                    logger.info("Client disconnected for %s.", request_id)
-                    await self.request_manager.abort(request_id)
-                    return
-
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
                 if request.stream:
@@ -128,11 +115,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         except Exception as e:
             logger.exception("Error in Generate for %s", request_id)
-            yield self._error_response(
-                request_id,
-                str(e),
-                "500",
-            )
+            yield self._error_response(request_id, e)
 
     async def Embed(
         self,
@@ -175,14 +158,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             HealthCheckResponse protobuf
         """
-        is_healthy, message = await self.request_manager.health_check()
+        is_healthy = not self.async_llm.errored
+        message = "Health" if is_healthy else "Engine is not alive"
 
         logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
-        return vllm_engine_pb2.HealthCheckResponse(
-            healthy=is_healthy,
-            message=message,
-        )
+        return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
 
     async def Abort(
         self,
@@ -202,11 +183,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         request_id = request.request_id
         logger.info("Abort request for %s.", request_id)
 
-        success = await self.request_manager.abort(request_id)
+        await self.async_llm.abort(request_id)
 
         return vllm_engine_pb2.AbortResponse(
-            success=success,
-            message=f"Request {request_id} {'aborted' if success else 'not found'}",
+            success=True, message=f"Request {request_id} aborted"
         )
 
     async def GetModelInfo(
@@ -224,14 +204,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             GetModelInfoResponse protobuf
         """
-        model_config = self.request_manager.get_model_config()
+        model_config = self.async_llm.model_config
 
         return vllm_engine_pb2.GetModelInfoResponse(
-            model_path=model_config.get("model_path", ""),
-            is_generation=model_config.get("is_generation", True),
-            max_context_length=model_config.get("max_context_length", 0),
-            vocab_size=model_config.get("vocab_size", 0),
-            supports_vision=model_config.get("supports_vision", False),
+            model_path=model_config.model,
+            is_generation=model_config.runner_type == "generate",
+            max_context_length=model_config.max_model_len,
+            vocab_size=model_config.get_vocab_size(),
+            supports_vision=model_config.is_multimodal_model,
         )
 
     async def GetServerInfo(
@@ -249,22 +229,20 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             GetServerInfoResponse protobuf
         """
-        num_requests = self.request_manager.get_num_unfinished_requests()
+        num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
 
         return vllm_engine_pb2.GetServerInfoResponse(
             active_requests=num_requests,
-            is_paused=False,
-            last_receive_timestamp=time.time(),
-            uptime_seconds=0.0,  # TODO: track server start time
+            is_paused=False,  # TODO
+            last_receive_timestamp=time.time(),  # TODO looks wrong?
+            uptime_seconds=time.time() - self.start_time,
             server_type="vllm-grpc",
         )
 
     # ========== Helper methods ==========
 
     def _chunk_response(
-        self,
-        request_id: str,
-        output: RequestOutput,
+        self, request_id: str, output: RequestOutput
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
@@ -308,9 +286,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     def _complete_response(
-        self,
-        request_id: str,
-        output: RequestOutput,
+        self, request_id: str, output: RequestOutput
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
@@ -340,7 +316,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         # Build complete response
         # When streaming (DELTA mode): completion.token_ids will be empty/last delta
-        # When non-streaming (CUMULATIVE mode): completion.token_ids has all tokens
+        # When non-streaming (FINAL_ONLY mode): completion.token_ids has all tokens
         # Client will accumulate token counts for streaming
         return vllm_engine_pb2.GenerateResponse(
             request_id=request_id,
@@ -356,22 +332,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     def _error_response(
-        self,
-        request_id: str,
-        message: str,
-        status_code: str,
+        self, request_id: str, e: Exception
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build an error response.
 
         Args:
             request_id: The request ID
-            message: Error message
-            status_code: HTTP-style status code
+            e: The exception from vLLM
 
         Returns:
             GenerateResponse with error field set
         """
+        status_code = "400" if isinstance(e, ValueError) else "500"
+        message = str(e)
+
         return vllm_engine_pb2.GenerateResponse(
             request_id=request_id,
             error=vllm_engine_pb2.GenerateError(
@@ -392,6 +367,8 @@ async def serve_grpc(args: argparse.Namespace):
     logger.info("vLLM gRPC server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
+    start_time = time.time()
+
     # Create engine args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
@@ -408,11 +385,8 @@ async def serve_grpc(args: argparse.Namespace):
         disable_log_stats=args.disable_log_stats_server,
     )
 
-    # Create request manager
-    request_manager = GrpcRequestManager(async_llm)
-
     # Create servicer
-    servicer = VllmEngineServicer(request_manager)
+    servicer = VllmEngineServicer(async_llm, start_time)
 
     # Create gRPC server
     server = grpc.aio.server(
