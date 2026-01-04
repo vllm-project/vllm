@@ -1332,6 +1332,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs
             )
 
+            if self.vllm_config.scheduler_config.balance_scheduling:
+                self.scheduler.balance_gather(self.dp_group)
+
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
