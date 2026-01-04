@@ -215,7 +215,7 @@ def physical_to_logical_mapping(
     )
 
     # Only process valid blocks to avoid garbage values
-    num_blocks_per_seq = cdiv(seq_lens, block_size)
+    num_blocks_per_seq: torch.Tensor = cdiv(seq_lens, block_size)
     mask = (
         torch.arange(max_num_blocks, device=device)[None, :]
         < num_blocks_per_seq[:, None]
