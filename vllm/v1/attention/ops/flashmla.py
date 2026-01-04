@@ -69,7 +69,7 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
         return False, maybe_reason
     if not (
         current_platform.is_device_capability_family(90)
-        or current_platform.is_device_capability_family(100)
+        or current_platform.is_blackwell_class()
     ):
         return (
             False,

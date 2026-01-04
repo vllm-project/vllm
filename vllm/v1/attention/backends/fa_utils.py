@@ -87,7 +87,8 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
-        if device_capability.major == 10 and fa_version == 3:
+        # Blackwell-class: SM10x, SM11x, SM12x (GB10) - FA3 not supported
+        if device_capability.major in (10, 11, 12) and fa_version == 3:
             logger.warning_once(
                 "Cannot use FA version 3 on Blackwell platform, "
                 "defaulting to FA version 2."

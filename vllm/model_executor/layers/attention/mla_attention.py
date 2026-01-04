@@ -1149,11 +1149,19 @@ def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
 
 @functools.cache
 def use_flashinfer_prefill() -> bool:
-    # For blackwell default to flashinfer prefill if it's available since
-    # it is faster than FA2.
+    """Check if FlashInfer prefill should be used for MLA attention.
+
+    Note: This uses FlashInfer's general prefill path with is_blackwell_class(),
+    which supports SM10x, SM11x, and SM12x variants via Blackwell-family kernels.
+    This is distinct from FlashInfer MLA-specific backends which only support
+    SM100/SM103. The prefill kernels use gen_fmha_cutlass_sm100a_module.
+    See FlashInfer README: "beta support for 103, 110, 120, and 121"
+    """
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+    # FlashInfer MLA prefill only supports SM100 (capability.major == 10)
+    # SM121/GB10 will use TRITON_MLA instead
     if not (
         not vllm_config.attention_config.disable_flashinfer_prefill
         and has_flashinfer()
@@ -1167,20 +1175,36 @@ def use_flashinfer_prefill() -> bool:
 
 @functools.cache
 def use_cudnn_prefill() -> bool:
+    """Check if cuDNN prefill should be used for MLA attention.
+
+    The cuDNN SDPA cubins (named cudnn_sm100_*) are architecture-family
+    binaries. FlashInfer's cubin loader downloads these from NVIDIA artifactory.
+    Uses is_blackwell_class() to support all Blackwell variants (SM10x, SM12x).
+    See: https://github.com/flashinfer-ai/flashinfer (supports SM121 beta)
+    """
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
     return (
         has_flashinfer()
         and vllm_config.attention_config.use_cudnn_prefill
-        and current_platform.is_device_capability_family(100)
+        and current_platform.is_blackwell_class()
         and has_nvidia_artifactory()
     )
 
 
 @functools.cache
 def use_trtllm_ragged_deepseek_prefill() -> bool:
-    """Check if TRT-LLM ragged DeepSeek prefill should be used."""
+    """Check if TRT-LLM ragged DeepSeek prefill should be used.
+
+    Note: This uses FlashInfer's trtllm_ragged_attention_deepseek kernel which
+    is only supported on SM100/SM103 (B200/GB200), NOT on SM120/SM121 (GB10).
+    FlashInfer's benchmark matrix confirms this:
+    - SM10.0/10.3 (B200/GB200): trtllm-native supported
+    - SM12.0/12.1 (GB10): trtllm-native NOT supported (uses fa2/cudnn fallback)
+
+    We restrict this to is_device_capability_family(100) to exclude SM12x.
+    """
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
