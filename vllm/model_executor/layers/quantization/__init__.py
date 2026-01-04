@@ -43,6 +43,24 @@ QuantizationMethods = Literal[
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
+DEPRECATED_QUANTIZATION_METHODS = [
+    "deepspeedfp",
+    "tpu_int8",
+    "ptpc_fp8",
+    "fbgemm_fp8",
+    "fp_quant",
+    "bitblas",
+    "gptq_marlin",
+    "hqq",
+    "experts_int8",
+    "moe_wna16",
+    "auto-round",
+    "rtn",
+    "petit_nvfp4",
+    "cpu_gptq",
+    "cpu_awq",
+]
+
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
 
@@ -94,9 +112,25 @@ def register_quantization_config(quantization: str):
     return _wrapper
 
 
-def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
+def get_quantization_config(
+    quantization: str, allow_deprecated: bool = False
+) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
+
+    if quantization in DEPRECATED_QUANTIZATION_METHODS:
+        if not allow_deprecated:
+            raise ValueError(
+                f"The quantization method '{quantization}' is deprecated. "
+                "To use it, please set `allow_deprecated_quantization=True` "
+                "This method will be removed in a future release."
+            )
+        else:
+            logger.warning_once(
+                "The quantization method '%s' is deprecated and will be "
+                "removed in a future release.",
+                quantization,
+            )
 
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
