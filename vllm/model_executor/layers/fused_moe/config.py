@@ -1003,6 +1003,9 @@ class FusedMoEConfig:
     # The activation type.
     in_dtype: torch.dtype
 
+    # Defaults to in_dtype if not specified.
+    router_logits_dtype: torch.dtype | None = None
+
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
@@ -1018,6 +1021,9 @@ class FusedMoEConfig:
             )
 
         assert self.max_num_tokens > 0
+
+        if self.router_logits_dtype is None:
+            self.router_logits_dtype = self.in_dtype
 
     @property
     def tp_size(self):
