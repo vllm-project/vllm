@@ -490,15 +490,15 @@ class GPUModelRunner(
             # NOTE For PCP, we will pad the tokens of each request
             # to a multiple of 2 * pcp_size that is possible greater
             # than the max_num_batched_tokens.
-            max_buffer_num_tokens = (
+            max_padded_num_tokens = (
                 self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size
             )
         else:
-            max_buffer_num_tokens = self.max_num_tokens
+            max_padded_num_tokens = self.max_num_tokens
 
         # Persistent buffers for CUDA graphs.
-        self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-        self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+        self.input_ids = self._make_buffer(max_padded_num_tokens, dtype=torch.int32)
+        self.positions = self._make_buffer(max_padded_num_tokens, dtype=torch.int64)
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -512,12 +512,12 @@ class GPUModelRunner(
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
         self.inputs_embeds = self._make_buffer(
-            max_buffer_num_tokens,
+            max_padded_num_tokens,
             self.inputs_embeds_size,
             dtype=self.dtype,
             numpy=False,
         )
-        self.is_token_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.bool)
+        self.is_token_ids = self._make_buffer(max_padded_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
@@ -531,7 +531,7 @@ class GPUModelRunner(
         # Only relevant for multimodal models
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(
-                max_buffer_num_tokens, dtype=torch.bool
+                max_padded_num_tokens, dtype=torch.bool
             )
 
         # Manager for Prefill Context Parallism
@@ -539,7 +539,7 @@ class GPUModelRunner(
             self.pcp_manager = PCPManager(
                 self.pcp_world_size,
                 self.pcp_rank,
-                max_buffer_num_tokens,
+                max_padded_num_tokens,
                 self.max_num_reqs,
                 self.device,
                 self.pin_memory,
@@ -558,7 +558,7 @@ class GPUModelRunner(
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, max_buffer_num_tokens + 1), dtype=torch.int64
+                (3, max_padded_num_tokens + 1), dtype=torch.int64
             )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
@@ -574,7 +574,7 @@ class GPUModelRunner(
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(
-            max(self.max_num_reqs + 1, self.max_model_len, max_buffer_num_tokens),
+            max(self.max_num_reqs + 1, self.max_model_len, max_padded_num_tokens),
             dtype=np.int64,
         )
 
@@ -588,7 +588,7 @@ class GPUModelRunner(
         self.kv_sharing_fast_prefill_logits_indices = None
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
-                max_buffer_num_tokens, dtype=torch.int32, device=self.device
+                max_padded_num_tokens, dtype=torch.int32, device=self.device
             )
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens

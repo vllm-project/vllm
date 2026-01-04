@@ -27,21 +27,22 @@ class PCPManager:
         self,
         pcp_world_size: int,
         pcp_rank: int,
-        max_buffer_num_tokens: int,
+        max_padded_num_tokens: int,
         max_num_reqs: int,
         device: torch.device,
         pin_memory: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
+        self.device = device
         self.pcp_allgather_restore_idx = CpuGpuBuffer(
-            max_buffer_num_tokens,
+            max_padded_num_tokens,
             dtype=torch.int64,
             device=device,
             pin_memory=pin_memory,
         )
         self.pcp_padded_slot_mapping = torch.empty(
-            (max_buffer_num_tokens,),
+            (max_padded_num_tokens,),
             dtype=torch.int64,
             device=device,
         )
@@ -50,7 +51,7 @@ class PCPManager:
         )
         self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
         self.pcp_unpad_mask_cpu_tensor = torch.zeros(
-            (max_buffer_num_tokens,),
+            (max_padded_num_tokens,),
             device="cpu",
             dtype=torch.bool,
         )
@@ -110,7 +111,7 @@ class PCPManager:
         Args:
             num_scheduled_tokens: 1D numpy array of length num_reqs containing
                                   the number of new tokens scheduled per request.
-            arange_np: 1D numpy array of length max_buffer_num_tokens used for
+            arange_np: 1D numpy array of length max_padded_num_tokens used for
                        efficient batched arange operations.
             num_reqs: Total number of requests in the batch.
             reorder_batch_threshold: Threshold for decode vs prefill requests.
@@ -247,7 +248,7 @@ class PCPManager:
             torch.from_numpy(cu_num_tokens) * self.pcp_world_size
             - self.num_pcp_pads_cpu_tensor[:num_reqs]
             - 1
-        )
+        ).to(self.device, non_blocking=True)
 
     def get_discard_request_mask(
         self,
