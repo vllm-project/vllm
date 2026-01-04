@@ -1742,7 +1742,6 @@ class GPUModelRunner(
             ):
                 attn_metadata_i = builder.update_block_table(
                     cached_attn_metadata[cache_key],
-                    common_attn_metadata.seq_lens,
                     common_attn_metadata.block_table_tensor,
                     common_attn_metadata.slot_mapping,
                 )

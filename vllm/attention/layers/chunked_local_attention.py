@@ -62,14 +62,11 @@ def create_chunked_local_attention_backend(
         def update_block_table(
             self,
             metadata,
-            seq_lens: torch.Tensor,
             blk_table: torch.Tensor,
             slot_mapping: torch.Tensor,
         ):
             blk_table = metadata.make_virtual_batches_block_table(blk_table)
-            return super().update_block_table(
-                metadata, seq_lens, blk_table, slot_mapping
-            )
+            return super().update_block_table(metadata, blk_table, slot_mapping)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,

@@ -40,10 +40,14 @@ class BaseMambaAttentionMetadata:
 
     state_indices_tensor: torch.Tensor
 
-    # The following tensors are only used for prefix caching and are None if disabled
+    # The following tensors are only used for prefix caching with all mode and
+    # are None if disabled
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
+
+    # The following tensor is only used for prefix caching with align mode
+    seq_lens: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -283,6 +287,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             block_idx_last_computed_token=block_idx_last_computed_token,
             num_computed_tokens_p=num_computed_tokens_p,
             num_reqs=num_reqs,
+            seq_lens=common_attn_metadata.seq_lens,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
@@ -291,7 +296,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def update_block_table(
         self,
         metadata: M,
-        seq_lens: torch.Tensor,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
@@ -304,7 +308,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             if prefix_caching_all_mode
             else mamba_get_block_table_tensor(
                 blk_table,
-                seq_lens,
+                metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )[:, 0]
