@@ -135,8 +135,6 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 
         config.layer_norm_eps = config.layer_norm_epsilon
         config.intermediate_size = config.n_inner
-        config.hidden_size = config.n_embd
-        config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
@@ -195,12 +193,6 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
                 delattr(hf_text_config, "max_model_len")
             hf_text_config.max_position_embeddings = max_trained_positions
             hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
-
-            # Update the cached derived_max_model_len to enforce the limit
-            model_config.model_arch_config.derived_max_model_len_and_key = (
-                float(max_trained_positions),
-                "max_position_embeddings",
-            )
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
