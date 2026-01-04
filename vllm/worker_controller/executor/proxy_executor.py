@@ -28,7 +28,8 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
-from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+# from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.worker_controller.executor.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -88,12 +89,66 @@ class FutureWrapper(Future):
                 self.set_exception(e)
 
 
+class _SkipResponse:
+    """Sentinel class indicating that the worker should not send a response."""
+    pass
+
+
+SKIP_RESPONSE = _SkipResponse()
+
+
+def check_rank_and_execute(target_ranks, method, worker, *args, **kwargs):
+    if worker.rank in target_ranks:
+        # Set logical rank for distributed environment initialization
+        logical_rank = target_ranks.index(worker.rank)
+        worker.logical_rank = logical_rank
+
+        if isinstance(method, str):
+            func = getattr(worker, method)
+            # For methods that take a list indexed by rank, remap to use logical_rank
+            if method == "initialize_from_config" and args:
+                # args[0] is kv_cache_configs list, index by logical_rank not global_rank
+                kv_cache_configs = args[0]
+                if isinstance(kv_cache_configs, list) and logical_rank < len(kv_cache_configs):
+                    # Pass a single-element list so WorkerBase can index by global_rank=0
+                    # We need to make the list such that index [worker.global_rank] works
+                    # Easier: override the global_rank temporarily
+                    original_global_rank = worker.global_rank
+                    worker.global_rank = logical_rank
+                    try:
+                        return func(*args, **kwargs)
+                    finally:
+                        worker.global_rank = original_global_rank
+        else:
+            func = method
+        return func(*args, **kwargs)
+    # Return sentinel to indicate this worker should not respond
+    return SKIP_RESPONSE
+
+
 class ProxyExecutor(Executor):
     supports_pp: bool = True
 
     def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
         self.monitor_workers = monitor_workers
+        self.engines = {}  # engine_uuid -> {ranks, request_queue, response_queue}
+        self.running = True
         super().__init__(vllm_config)
+
+    def add_engine(self, engine_uuid, ranks, request_queue, response_queue, dist_port=None):
+        self.engines[engine_uuid] = {
+            "ranks": ranks,
+            "request_queue": request_queue,
+            "response_queue": response_queue,
+            "dist_port": dist_port,
+        }
+
+    def delete_engine(self, engine_uuid):
+        if engine_uuid in self.engines:
+            ranks = self.engines[engine_uuid]['ranks']
+            # Broadcast unload to these ranks
+            self._broadcast_request(ranks, "unload_model", (), {})
+            del self.engines[engine_uuid]
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -212,6 +267,69 @@ class ProxyExecutor(Executor):
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
+
+        # Start the request polling loop
+        self.polling_thread = Thread(
+            target=self.run_loop, daemon=True, name="ProxyExecutorLoop"
+        )
+        self.polling_thread.start()
+
+    def run_loop(self):
+        while self.running:
+            for engine_uuid, engine in list(self.engines.items()):
+                try:
+                    # Non-blocking get
+                    req = engine["request_queue"].get_nowait()
+                    method, args, kwargs = req
+                    target_ranks = engine["ranks"]
+
+                    # Broadcast to all workers, but wrapped with target ranks
+                    self._broadcast_request(target_ranks, method, args, kwargs)
+
+                    self._collect_and_forward_response(
+                        engine["response_queue"], target_ranks)
+
+                except queue.Empty:
+                    pass
+                except Exception as e:
+                    logger.error(
+                        f"Error processing request for engine {engine_uuid}: {e}")
+
+            time.sleep(0.001)  # Avoid busy loop
+
+    def _broadcast_request(self, target_ranks, method, args, kwargs):
+        # Wrap the method
+        wrapped_method = partial(check_rank_and_execute, target_ranks, method)
+
+        if isinstance(wrapped_method, str):
+            send_method = wrapped_method
+        else:
+            send_method = cloudpickle.dumps(
+                wrapped_method, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # We set output_rank=None so everyone receives it (and filters it)
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, None))
+
+    def _collect_and_forward_response(self, response_queue, target_ranks):
+        # Collect responses from the target ranks
+        responses = []
+        for rank in target_ranks:
+            mq = self.response_mqs[rank]
+            try:
+                status, result = mq.dequeue(timeout=120)  # 2 minute timeout
+            except TimeoutError:
+                logger.error(
+                    f"Timeout waiting for response from worker rank {rank}")
+                result = Exception(f"Worker {rank} timed out")
+                status = WorkerProc.ResponseStatus.FAILURE
+
+            if status != WorkerProc.ResponseStatus.SUCCESS:
+                # Handle error
+                result = Exception(f"Worker {rank} failed: {result}")
+            responses.append(result)
+
+        # Forward to RemoteExecutor
+        response_queue.put(responses)
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -806,16 +924,27 @@ class WorkerProc:
     def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
         while True:
+            # logger.info(f"Worker {self.rank} waiting for request...")
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True
             )
+            # logger.info(f"Worker {self.rank} received request: {method} (output_rank={output_rank})")
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
+                    method_name = method
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
+                    method_name = "<pickled_function>"
+
+                if self.rank == 0:
+                    logger.info(f"Worker {self.rank} executing {method_name}")
 
                 output = func(*args, **kwargs)
+
+                if self.rank == 0:
+                    logger.info(f"Worker {self.rank} finished {method_name}")
+
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
@@ -825,6 +954,10 @@ class WorkerProc:
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(e)
+                continue
+
+            # Skip response for workers not in target_ranks
+            if isinstance(output, _SkipResponse):
                 continue
 
             if output_rank is None or self.rank == output_rank:

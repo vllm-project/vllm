@@ -82,6 +82,7 @@ class EngineCreateRequest(BaseModel):
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     seed: int = 0
+    enforce_eager: bool = False
 
     # Advanced format: full vllm_config dict (optional)
     vllm_config: Optional[Dict[str, Any]] = None
@@ -196,7 +197,7 @@ def create_engine(request: EngineCreateRequest):
                 trust_remote_code=request.trust_remote_code,
                 dtype=request.dtype,
                 seed=request.seed,
-                enforce_eager=True,
+                enforce_eager=request.enforce_eager,
             )
 
             cache_config = CacheConfig(

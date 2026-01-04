@@ -1,16 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import multiprocessing
+import os
 
 from vllm.worker_controller.config.vllm import VllmConfig, DummyVllmConfig
 from vllm.worker_controller.config.model import ModelConfig, DummyModelConfig
 from vllm.worker_controller.config.cache import CacheConfig
 from vllm.worker_controller.config.parallel import ParallelConfig
 from vllm.logger import init_logger
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.entrypoints.openai.cli_args import make_arg_parser
 
 from vllm.worker_controller.executor.proxy_executor import ProxyExecutor
+from vllm.worker_controller.entrypoint.api_server import run_server
+
+import uvloop
 
 logger = init_logger(__name__)
+
+
+def run_api_server(request_queue, response_queue, engine_uuid, vllm_config, port):
+    """
+    Entry point for the spawned API server process.
+    """
+    # Create default args
+    parser = FlexibleArgumentParser()
+    parser = make_arg_parser(parser)
+    # Parse empty args to get defaults
+    args = parser.parse_args([])
+
+    # Override with provided config
+    args.model = vllm_config.model_config.model
+    args.port = port
+
+    # Inject queues and config for RemoteExecutor
+    args.request_queue = request_queue
+    args.response_queue = response_queue
+    args.engine_uuid = engine_uuid
+    # Pass the full vllm_config - API server will use this directly
+    args.vllm_config = vllm_config
+
+    # Disable frontend multiprocessing in the child process as it is managed by Controller
+    args.disable_frontend_multiprocessing = True
+
+    uvloop.run(run_server(args))
 
 
 class ResourceAllocator:
@@ -101,8 +135,56 @@ class WorkerController:
             vllm_config: Configuration for the model/engine
             engine_uuid: Unique identifier for this API server instance
         """
-        # Delegate to ProxyExecutor which handles the full workflow
-        return self.executor.create(vllm_config, engine_uuid)
+        logger.info(f"WorkerController.create called for {engine_uuid}")
+
+        # 1. Allocate resources
+        num_gpus = vllm_config.parallel_config.world_size
+        assigned_ranks, port = self.resource_allocator.assign(
+            num_gpus, engine_uuid)
+        # Allocate a port for distributed communication (e.g., tcp store)
+        # Only needed when world_size > 1 (multi-GPU)
+        if num_gpus > 1:
+            dist_port = self.resource_allocator.next_port
+            self.resource_allocator.next_port += 1
+        else:
+            dist_port = None
+
+        logger.info(
+            f"Assigned ranks {assigned_ranks}, port {port} to engine {engine_uuid}")
+
+        # 2. Create queues for communication
+        ctx = multiprocessing.get_context("spawn")
+        request_queue = ctx.Queue()
+        response_queue = ctx.Queue()
+
+        # 3. Register engine with ProxyExecutor
+        logger.info(f"Adding engine {engine_uuid} to ProxyExecutor")
+        self.executor.add_engine(
+            engine_uuid, assigned_ranks, request_queue, response_queue, dist_port)
+
+        # 4. Spawn API Server process
+        logger.info(f"Spawning APIServer process for {engine_uuid}")
+        proc = ctx.Process(
+            target=run_api_server,
+            args=(request_queue, response_queue,
+                  engine_uuid, vllm_config, port),
+            name=f"APIServer-{engine_uuid}"
+        )
+        proc.start()
+        logger.info(f"APIServer process started with PID {proc.pid}")
+
+        # Store process in executor engines dict (ProxyExecutor stores it too? No, ProxyExecutor stores queues/ranks)
+        # We might want to store proc somewhere to manage it (delete it later).
+        # ProxyExecutor engines dict has: ranks, queues.
+        # We can add proc to it or keep it separate.
+        # WorkerController.delete needs to terminate it.
+        # ProxyExecutor currently has delete_engine but it doesn't know about the process handle unless we pass it.
+        # But we can store it in ProxyExecutor.engines[uuid]['proc'] = proc
+
+        if engine_uuid in self.executor.engines:
+            self.executor.engines[engine_uuid]['proc'] = proc
+
+        return proc
 
     def delete(self, engine_uuid: str):
         """
@@ -124,5 +206,8 @@ class WorkerController:
                         f"Force killing API server process {proc.pid}")
                     proc.kill()
 
-        # Delegate to ProxyExecutor which handles worker unloading
-        self.executor.delete(engine_uuid)
+        # Delegate to ProxyExecutor which handles worker unloading (if implemented)
+        self.executor.delete_engine(engine_uuid)
+
+        # Release resources
+        self.resource_allocator.release_by_uuid(engine_uuid)

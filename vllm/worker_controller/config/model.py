@@ -189,7 +189,7 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
-    enforce_eager: bool = False
+    enforce_eager: bool = True
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
@@ -2107,7 +2107,7 @@ class DummyModelConfig:
 
         if self.tokenizer is None:
             self.tokenizer = self.model
-        
+
         if self.max_model_len is None:
             self.max_model_len = 2048
 

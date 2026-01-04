@@ -15,6 +15,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    destroy_model_parallel,
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
@@ -273,9 +274,37 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
+        self.compilation_config = vllm_config.compilation_config
+
+        from vllm.platforms import current_platform
+        self.current_platform = current_platform
+
+        # Re-initialize distributed groups for this engine's config
+        # This is needed because the worker may have been initialized with
+        # a different world_size than the engine requires
+        destroy_model_parallel()
+
+        # Re-init model parallel with engine's config
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
+            pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
+        )
+
         self.model_runner: GPUModelRunner = GPUModelRunner(
             vllm_config, self.device
         )
+
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
@@ -556,6 +585,8 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
+        logger.info(
+            f"Worker execute_model called with {scheduler_output.total_num_scheduled_tokens} tokens")
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -566,18 +597,32 @@ class Worker(WorkerBase):
                 self.vllm_config, num_input_tokens
             )
         }
-        if forward_pass and not get_pp_group().is_first_rank:
+
+        # Use engine's config PP size to determine rank status
+        # This handles cases where global distributed state differs from engine config
+        engine_pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        is_first_rank = engine_pp_size == 1 or get_pp_group().is_first_rank
+        is_last_rank = engine_pp_size == 1 or get_pp_group().is_last_rank
+
+        logger.info(
+            f"Worker forward_pass={forward_pass}, is_first_rank={is_first_rank}, engine_pp_size={engine_pp_size}")
+        if forward_pass and not is_first_rank:
+            logger.info("Worker waiting for recv_tensor_dict...")
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group(),
                     all_gather_tensors=all_gather_tensors,
                 )
             )
+            logger.info("Worker received tensor dict")
 
+        logger.info("Worker calling model_runner.execute_model...")
         with self.annotate_profile(scheduler_output):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            logger.info(
+                f"Worker model_runner.execute_model returned: {type(output)}")
             if isinstance(output, (ModelRunnerOutput, NoneType)):
                 return output
 
@@ -585,7 +630,7 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert (
             parallel_config.distributed_executor_backend != "external_launcher"
-            and not get_pp_group().is_last_rank
+            and not is_last_rank
         )
 
         get_pp_group().send_tensor_dict(
