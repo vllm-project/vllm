@@ -3,6 +3,7 @@ import subprocess
 import json
 import time
 import shutil
+import signal
 
 """
 Utility functions to manage the vLLM server for online profiling.
@@ -31,6 +32,10 @@ def kill_gpu_processes(port: int):
 
     # Do not kill this process
     filename = os.path.basename(__file__)
+
+    # REMOVE
+    print(f"filename to exclude: {filename}")
+
     pids_to_kill = []
     for line in ps_output.split("\n"):
         if "python3" in line and filename not in line:
@@ -41,6 +46,11 @@ def kill_gpu_processes(port: int):
     for pid in pids_to_kill:
         subprocess.run(["kill", "-9", pid])
 
+    wait_for_gpu_memory_to_clear()
+
+    # subprocess.run(["rm", "-rf", "~/.config/vllm"])
+
+def wait_for_gpu_memory_to_clear():
     # Wait until all GPUs have memory usage < 1000 MB
     if shutil.which("nvidia-smi"):
         while True:
@@ -66,9 +76,6 @@ def kill_gpu_processes(port: int):
             if used_vram < 1000:
                 break
             time.sleep(1)
-
-    subprocess.run(["rm", "-rf", "~/.config/vllm"])
-
 
 def setup_server():
     # install dependencies
@@ -103,7 +110,7 @@ def start_server(port: int,
 
     # start vllm server
     if not dry_run:
-        server_process = subprocess.Popen(server_command, shell=True)
+        server_process = subprocess.Popen(server_command, shell=True, preexec_fn=os.setsid)
 
         if wait_for_server(port):
             print("vllm server is up and running.")
@@ -116,7 +123,28 @@ def start_server(port: int,
         return None
 
 
-def kill_server(port: int, server_process: subprocess.Popen | None):
+# def kill_server(port: int, server_process: subprocess.Popen | None):
+#     if server_process:
+#         server_process.kill()
+#     kill_gpu_processes(port)
+
+def kill_server(port, server_process):
+
+    # REMOVE
+    # print(f"Killing server on port {port}...")
+
     if server_process:
-        server_process.kill()
-    kill_gpu_processes(port)
+        os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+
+    # REMOVE
+    # print(f"Killed server process with PID: {server_process.pid if server_process else 'N/A'}")
+
+    wait_for_gpu_memory_to_clear()
+
+    # Clean vLLM config
+    config_path = os.path.expanduser("~/.config/vllm")
+    if os.path.exists(config_path):
+        subprocess.run(["rm", "-rf", config_path])
+
+    # REMOVE
+    # print(f"Killed server on port {port} and cleaned up GPU processes.")

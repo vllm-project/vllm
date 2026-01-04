@@ -2,7 +2,18 @@ import re
 import os
 import json
 import argparse
-from vllm.v1.spec_decode.online_profiling_client import (NGRAM_FMT, EAGLE_FMT)
+from vllm.v1.spec_decode.dynamic.online_profiling_client import (NGRAM_FMT, EAGLE_FMT)
+
+
+def reverse_fmt(fmt_str):
+    # e.g., convert 'min-{min}-max-{max}-k-{k}' -> 'min-{}-max-{}-k-{}'
+    FMT = re.sub(r"\{[^}]+\}", "{}", fmt_str)
+    # e.g., convert 'min-{}-max-{}-k-{}' -> 'min-(.+)-max-(.+)-k-(.+)'
+    FMT = FMT.replace("{}", "(.+)")
+    return FMT
+
+NGRAM_FMT_REVERSE = reverse_fmt(NGRAM_FMT)
+EAGLE_FMT_REVERSE = reverse_fmt(EAGLE_FMT)
 
 
 def parse_itl(args):
@@ -31,12 +42,12 @@ def parse_itl(args):
             
             # find sd params
             spec_config_str = log_file.split("_")[0]
-            if method == "ngram":
-                FMT = NGRAM_FMT.replace("{}", "(.+)")
-                min, max, k = re.match(FMT, spec_config_str).groups()
+            if method == "vanilla":
+                k=0
+            elif method == "ngram":
+                min, max, k = re.match(NGRAM_FMT_REVERSE, spec_config_str).groups()
             elif method == "eagle":
-                FMT = EAGLE_FMT.replace("{}", "(.+)")
-                k = re.match(FMT, spec_config_str).groups()[0]
+                k = re.match(EAGLE_FMT_REVERSE, spec_config_str).groups()[0]
 
             # read the log file to get the itl
             with open(os.path.join(args.benchmark_path, log_file), "r") as f:
@@ -51,7 +62,11 @@ def parse_itl(args):
 
     return batch_stats
 
-
+"""
+python3 vllm/v1/spec_decode/process_benchmark_results.py \
+    --sd-method eagle \
+    --benchmark-path-parent 'log/dynamic_sd/tp-1_temp-0_top_p-1/philschmid/mt-bench/'
+"""
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sd-method", type=str, default=None)
@@ -61,3 +76,4 @@ if __name__ == "__main__":
     assert args.sd_method in ["ngram", "eagle"], "Invalid method specified."
 
     batch_stats = parse_itl(args)
+    print(json.dumps(batch_stats, indent=4))

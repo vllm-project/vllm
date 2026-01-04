@@ -7,7 +7,7 @@ from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from typing import Optional
 from vllm.config import VllmConfig
-from vllm.vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
+from vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
 
 
 class NgramProposer(SpeculativeDecodingProposer):

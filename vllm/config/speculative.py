@@ -38,10 +38,10 @@ MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
 
 @dataclass
 class DynamicSpeculativeConfig:
-    """A mapping from batch size to optimal number of drafts to use for that
-    batch size. This is used to dynamically adjust the number of drafts used
-    based on the current batch size."""
-    optimal_num_speculative_tokens: dict[int, int] = None
+    # """A mapping from batch size to optimal number of drafts to use for that
+    # batch size. This is used to dynamically adjust the number of drafts used
+    # based on the current batch size."""
+    # optimal_num_speculative_tokens: dict[int, int] = None
     
     """Whether the statistics are updated online or not during inference."""
     is_online: bool = False

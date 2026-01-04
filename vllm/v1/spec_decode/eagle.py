@@ -34,7 +34,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-from vllm.vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
+from vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
 
 logger = init_logger(__name__)
 
