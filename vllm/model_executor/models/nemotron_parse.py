@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -243,37 +244,6 @@ class MBartDecoderLayer(BartDecoderLayer):
         hidden_states = residual + hidden_states
 
         return hidden_states
-
-
-class NemotronParseInternVitConfig(PretrainedConfig):
-    def __init__(
-        self,
-        model_name: str,
-        patch_size: int = 16,
-        qkv_bias: bool = True,
-        qk_normalization: bool = False,
-        norm_type: str = "layer_norm",
-        layer_norm_eps: float = 1e-6,
-        initializer_factor: float = 1.0,
-        hidden_act: str = "gelu",
-        **kwargs,
-    ):
-        self.model_name = model_name
-        (
-            self.hidden_size,
-            self.num_hidden_layers,
-            self.num_attention_heads,
-            self.intermediate_size,
-            self.image_size,
-        ) = VIT_TIMM_DIM_BY_NAME[model_name]
-        self.patch_size = patch_size
-        self.qkv_bias = qkv_bias
-        self.qk_normalization = qk_normalization
-        self.norm_type = norm_type
-        self.layer_norm_eps = layer_norm_eps
-        self.initializer_factor = initializer_factor
-        self.hidden_act = hidden_act
-        super().__init__(**kwargs)
 
 
 class NemotronParsePixelInputs(TensorSchema):
@@ -673,22 +643,15 @@ class RadioWithNeck(nn.Module):
         if model_name is None:
             raise ValueError(f"Unsupported vit model type: {model_name}")
 
-        internvit_config = NemotronParseInternVitConfig(
+        radio_config = RadioConfig(
             model_name=model_name,
-            patch_size=getattr(hf_config_vision, "patch_size", 16),
-        )
-        # Set the actual image size from the main config
-        internvit_config.image_size = hf_config.image_size
-        internvit_config.max_img_size = hf_config_vision.args["cpe_max_size"]
-        internvit_config.reg_tokens = hf_config_vision.args.get(
-            "register_multiple", None
-        )
-        internvit_config.teachers = hf_config_vision.args.get("teachers", None)
-        internvit_config.cls_token_per_teacher = hf_config_vision.args.get(
-            "cls_token_per_teacher", None
+            image_size=hf_config.image_size,
+            max_img_size=hf_config_vision.args["cpe_max_size"],
+            reg_tokens=hf_config_vision.args["register_multiple"],
+            **hf_config_vision.to_dict(),
         )
 
-        return RadioModel(config=internvit_config, quant_config=quant_config)
+        return RadioModel(config=radio_config, quant_config=quant_config)
 
     def forward(self, pixel_values, **kwargs):
         radio_output = self.model_encoder(pixel_values)
