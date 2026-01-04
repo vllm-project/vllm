@@ -231,6 +231,7 @@ def get_score_prompt(
                 ],
                 chat_template=score_template,
                 tools=None,
+                tokenize=False,
             )
             prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
         except ChatTemplateResolutionError:
