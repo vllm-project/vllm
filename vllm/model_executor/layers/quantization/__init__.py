@@ -58,8 +58,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "auto-round",
     "rtn",
     "petit_nvfp4",
-    "cpu_gptq",
-    "cpu_awq",
 ]
 
 # The customized quantization methods which will be added to this dict.
