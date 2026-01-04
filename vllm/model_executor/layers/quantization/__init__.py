@@ -113,9 +113,7 @@ def register_quantization_config(quantization: str):
     return _wrapper
 
 
-def get_quantization_config(
-    quantization: str, allow_deprecated: bool = False
-) -> type[QuantizationConfig]:
+def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
