@@ -890,3 +890,103 @@ def cascade_attention(
                       suffix_lse)
 
     return output
+
+def base_cascade_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cu_query_lens: torch.Tensor,
+    max_query_len: int,
+    cu_prefix_query_lens: torch.Tensor,
+    prefix_kv_lens: torch.Tensor,
+    suffix_kv_lens: torch.Tensor,
+    max_kv_len: int,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    sliding_window: tuple[int, int],
+    logits_soft_cap: float,
+    block_table: torch.Tensor,
+    common_prefix_len: int,
+    fa_version: int,
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None,
+    suffix_scheduler_metadata: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
+    # TODO: Support sliding window.
+    assert sliding_window == (-1, -1), (
+        "Cascade attention does not support sliding window.")
+
+    num_tokens = query.shape[0]
+    block_size = key_cache.shape[-3]
+
+    assert common_prefix_len % block_size == 0
+    num_common_kv_blocks = common_prefix_len // block_size
+    assert num_common_kv_blocks > 0
+    max_num_common_tokens = min_num_common_tokens = common_prefix_len
+    max_num_common_blocks = min_num_common_blocks = num_common_kv_blocks
+
+    descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
+
+    # Process shared prefix.
+    prefix_output, prefix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_prefix_query_lens,
+        seqused_k=prefix_kv_lens,
+        max_seqlen_q=num_tokens,
+        max_seqlen_k=max_num_common_tokens,
+        softmax_scale=softmax_scale,
+        causal=False,
+        window_size=sliding_window,
+        block_table=block_table[:, :max_num_common_blocks],
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+        scheduler_metadata=prefix_scheduler_metadata,
+        fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
+    )
+
+    descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
+
+    suffix_block_table = block_table[:, min_num_common_blocks:]
+
+    # Process suffix per query.
+    suffix_output, suffix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=suffix_kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len - min_num_common_tokens,
+        softmax_scale=softmax_scale,
+        causal=True,
+        window_size=sliding_window,
+        block_table=suffix_block_table,
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+        scheduler_metadata=suffix_scheduler_metadata,
+        fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
+    )
+
+    # Merge prefix and suffix outputs, and store the result in output.
+    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
+                      suffix_lse)
+
+    return output
