@@ -222,9 +222,48 @@ def kernel_unified_attention_2d(
 
     # Hoist conversion to reduce layout pressure in the compiler.
     if USE_NVFP4_TC:
-        Q_fp8 = Q.to(tl.float8e4nv)
-        # Triton 3.6.0 requires lhs_scale shape [M, K//32] for dot_scaled
-        Q_scale = tl.full((BLOCK_M, HEAD_SIZE_PADDED // 32), 127, dtype=tl.uint8)
+        # ================================================================
+        # PROPER Q QUANTIZATION FOR FP8 TENSOR CORES
+        # FP8 E4M3 has limited dynamic range [-448, 448]. We must:
+        # 1. Compute max abs per 32-element block
+        # 2. Calculate proper scale (log2 exponent + 127 bias)
+        # 3. Normalize Q before FP8 conversion
+        # 4. Use accurate Q_scale in dot_scaled
+        #
+        # tl.dot_scaled computes: C = (A @ B) * 2^(A_scale-127) * 2^(B_scale-127)
+        # So we need Q_normalized such that Q_normalized * 2^(Q_scale-127) = Q_original
+        # ================================================================
+        Q_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # 4 scales for 128-dim head
+
+        # Reshape Q to [BLOCK_M, Q_NUM_SCALES, 32] to compute per-block max
+        Q_reshaped = tl.reshape(Q, (BLOCK_M, Q_NUM_SCALES, 32))
+
+        # Compute max abs per 32-element block: shape [BLOCK_M, Q_NUM_SCALES]
+        Q_abs_max = tl.max(tl.abs(Q_reshaped), axis=2)
+
+        # Compute scale: log2(max) clamped to valid FP8 range
+        # FP8 E4M3 max is 448, so scale = ceil(log2(max)) where max > 0
+        # For max <= 0, use neutral scale 127
+        # Bias by 127 for the exponent encoding
+        Q_log2_max = tl.where(Q_abs_max > 0, tl.math.log2(Q_abs_max), 0.0)
+        Q_scale_f = tl.math.ceil(Q_log2_max) + 127.0
+        Q_scale = tl.maximum(tl.minimum(Q_scale_f, 255.0), 0.0).to(
+            tl.uint8
+        )  # shape [BLOCK_M, Q_NUM_SCALES]
+
+        # Compute inverse scale for normalization: 2^(127 - scale)
+        # This normalizes Q values to fit in FP8 range
+        Q_inv_scale = tl.math.exp2(127.0 - Q_scale_f)  # shape [BLOCK_M, Q_NUM_SCALES]
+
+        # Broadcast inverse scale to full Q shape: [BLOCK_M, Q_NUM_SCALES] -> [BLOCK_M, HEAD_SIZE_PADDED]
+        Q_inv_scale_full = tl.reshape(
+            tl.broadcast_to(Q_inv_scale[:, :, None], (BLOCK_M, Q_NUM_SCALES, 32)),
+            (BLOCK_M, HEAD_SIZE_PADDED),
+        )
+
+        # Normalize Q and convert to FP8
+        Q_normalized = Q * Q_inv_scale_full
+        Q_fp8 = Q_normalized.to(tl.float8e4nv)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -322,11 +361,13 @@ def kernel_unified_attention_2d(
             K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
             K = nvfp4_to_fp8_e4m3(K_nibble)
 
-            # Load K scales (u8). Triton 3.6.0 requires scales per 32 elements for dot_scaled.
-            # We take the maximum of two 16-element blocks for superior quality.
-            K_NUM_SCALES: tl.constexpr = NUM_SCALES // 2
-            offs_s0 = tl.arange(0, K_NUM_SCALES) * 2
-            offs_s1 = offs_s0 + 1
+            # ================================================================
+            # Load K scales (u8) - CUDA now uses 32-element groups
+            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
+            # tl.dot_scaled requires rhs_scale shape [N, K // 32] = [TILE_SIZE, 4]
+            # ================================================================
+            K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
+            offs_ks = tl.arange(0, K_NUM_SCALES)
 
             k_scale_base = (
                 physical_block_idx[:, None] * stride_k_cache_0
@@ -338,24 +379,17 @@ def kernel_unified_attention_2d(
                 tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
 
-            s0 = tl.load(
-                key_cache_ptr + k_scale_base + offs_s0[None, :] * stride_k_cache_3,
+            # Load scales directly - no max() reduction needed
+            # CUDA stores 4 scales at positions: DATA_BYTES + [0, 1, 2, 3]
+            K_scale_u8 = tl.load(
+                key_cache_ptr + k_scale_base + offs_ks[None, :] * stride_k_cache_3,
                 mask=k_scale_mask,
                 other=127,
             ).to(tl.uint8)
-            s1 = tl.load(
-                key_cache_ptr + k_scale_base + offs_s1[None, :] * stride_k_cache_3,
-                mask=k_scale_mask,
-                other=127,
-            ).to(tl.uint8)
-            K_scale_u8 = tl.maximum(s0, s1)
 
-            if USE_NVFP4_TC:
-                # Triton 3.6.0 requires rhs_scale [N, K // 32] = [32, 4]
-                # Our K_scale_u8 is already [TILE_SIZE, K_NUM_SCALES]
-                K_scale_reduced = K_scale_u8
-            else:
-                K_scale_reduced = K_scale_u8
+            # K_scale_u8 shape: [TILE_SIZE, K_NUM_SCALES] = [32, 4]
+            # This matches tl.dot_scaled rhs_scale requirement exactly
+            K_scale_reduced = K_scale_u8
         else:
             K = K_load
 
@@ -387,15 +421,22 @@ def kernel_unified_attention_2d(
             V_nibble = tl.where((offs_d[None, :] & 1) == 0, V_u8 & 0xF, V_u8 >> 4)
             V = nvfp4_to_fp8_e4m3(V_nibble)
 
-            # Load V scales (u8), stored after DATA_BYTES (HEAD_SIZE // 2)
-            offs_s = tl.arange(0, NUM_SCALES)
+            # ================================================================
+            # Load V scales (u8) - CUDA now uses 32-element groups
+            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
+            # Stored at positions: DATA_BYTES + [0, 1, 2, 3]
+            # ================================================================
+            V_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
+            offs_vs = tl.arange(0, V_NUM_SCALES)
             v_scale_off = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
-                + (DATA_BYTES + offs_s)[None, :] * stride_v_cache_3
+                + (DATA_BYTES + offs_vs)[None, :] * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
-            v_scale_mask = tl.broadcast_to(tile_mask[:, None], (TILE_SIZE, NUM_SCALES))
+            v_scale_mask = tl.broadcast_to(
+                tile_mask[:, None], (TILE_SIZE, V_NUM_SCALES)
+            )
             V_scale_u8 = tl.load(
                 value_cache_ptr + v_scale_off, mask=v_scale_mask, other=127
             ).to(tl.uint8)
@@ -487,9 +528,13 @@ def kernel_unified_attention_2d(
             )
 
         if USE_NVFP4:
+            # Dequantize V with 32-element scale groups (4 scales per 128-dim head)
             V_scale_v = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0).to(tl.bfloat16)
+            # Broadcast each scale to 32 elements: [TILE_SIZE, 4] -> [TILE_SIZE, 4, 32] -> [TILE_SIZE, 128]
             V_scale_full = tl.reshape(
-                tl.broadcast_to(V_scale_v[:, :, None], (TILE_SIZE, NUM_SCALES, 16)),
+                tl.broadcast_to(
+                    V_scale_v[:, :, None], (TILE_SIZE, HEAD_SIZE_PADDED // 32, 32)
+                ),
                 (TILE_SIZE, HEAD_SIZE_PADDED),
             )
             V_deq = V.to(tl.bfloat16) * V_scale_full
@@ -658,9 +703,35 @@ def kernel_unified_attention_3d(
 
     # Hoist conversion to reduce layout pressure in the compiler.
     if USE_NVFP4_TC:
-        Q_fp8 = Q.to(tl.float8e4nv)
-        # Triton 3.6.0 requires lhs_scale shape [M, K//32] for dot_scaled
-        Q_scale = tl.full((BLOCK_M, HEAD_SIZE_PADDED // 32), 127, dtype=tl.uint8)
+        # ================================================================
+        # PROPER Q QUANTIZATION FOR FP8 TENSOR CORES (3D kernel)
+        # Same logic as 2D kernel for consistency
+        # ================================================================
+        Q_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # 4 scales for 128-dim head
+
+        # Reshape Q to [BLOCK_M, Q_NUM_SCALES, 32] to compute per-block max
+        Q_reshaped = tl.reshape(Q, (BLOCK_M, Q_NUM_SCALES, 32))
+
+        # Compute max abs per 32-element block: shape [BLOCK_M, Q_NUM_SCALES]
+        Q_abs_max = tl.max(tl.abs(Q_reshaped), axis=2)
+
+        # Compute scale: log2(max) clamped to valid FP8 range
+        Q_log2_max = tl.where(Q_abs_max > 0, tl.math.log2(Q_abs_max), 0.0)
+        Q_scale_f = tl.math.ceil(Q_log2_max) + 127.0
+        Q_scale = tl.maximum(tl.minimum(Q_scale_f, 255.0), 0.0).to(tl.uint8)
+
+        # Compute inverse scale for normalization
+        Q_inv_scale = tl.math.exp2(127.0 - Q_scale_f)
+
+        # Broadcast inverse scale to full Q shape
+        Q_inv_scale_full = tl.reshape(
+            tl.broadcast_to(Q_inv_scale[:, :, None], (BLOCK_M, Q_NUM_SCALES, 32)),
+            (BLOCK_M, HEAD_SIZE_PADDED),
+        )
+
+        # Normalize Q and convert to FP8
+        Q_normalized = Q * Q_inv_scale_full
+        Q_fp8 = Q_normalized.to(tl.float8e4nv)
 
     # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
@@ -737,11 +808,13 @@ def kernel_unified_attention_3d(
             K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
             K = nvfp4_to_fp8_e4m3(K_nibble)
 
-            # Load K scales (u8). Triton 3.6.0 requires scales per 32 elements for dot_scaled.
-            # We take the maximum of two 16-element blocks for superior quality.
-            K_NUM_SCALES: tl.constexpr = NUM_SCALES // 2
-            offs_s0 = tl.arange(0, K_NUM_SCALES) * 2
-            offs_s1 = offs_s0 + 1
+            # ================================================================
+            # Load K scales (u8) - CUDA now uses 32-element groups
+            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
+            # tl.dot_scaled requires rhs_scale shape [N, K // 32] = [TILE_SIZE, 4]
+            # ================================================================
+            K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
+            offs_ks = tl.arange(0, K_NUM_SCALES)
 
             k_scale_base = (
                 physical_block_idx[:, None] * stride_k_cache_0
@@ -753,23 +826,17 @@ def kernel_unified_attention_3d(
                 tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
 
-            s0 = tl.load(
-                key_cache_ptr + k_scale_base + offs_s0[None, :] * stride_k_cache_3,
+            # Load scales directly - no max() reduction needed
+            # CUDA stores 4 scales at positions: DATA_BYTES + [0, 1, 2, 3]
+            K_scale_u8 = tl.load(
+                key_cache_ptr + k_scale_base + offs_ks[None, :] * stride_k_cache_3,
                 mask=k_scale_mask,
                 other=127,
             ).to(tl.uint8)
-            s1 = tl.load(
-                key_cache_ptr + k_scale_base + offs_s1[None, :] * stride_k_cache_3,
-                mask=k_scale_mask,
-                other=127,
-            ).to(tl.uint8)
-            K_scale_u8 = tl.maximum(s0, s1)
 
-            if USE_NVFP4_TC:
-                # Triton 3.6.0 requires rhs_scale [N, K // 32]
-                K_scale_reduced = K_scale_u8
-            else:
-                K_scale_reduced = K_scale_u8
+            # K_scale_u8 shape: [TILE_SIZE, K_NUM_SCALES] = [32, 4]
+            # This matches tl.dot_scaled rhs_scale requirement exactly
+            K_scale_reduced = K_scale_u8
 
         if not USE_NVFP4:
             V_load = tl.load(
@@ -799,15 +866,22 @@ def kernel_unified_attention_3d(
             V_nibble = tl.where((offs_d[None, :] & 1) == 0, V_u8 & 0xF, V_u8 >> 4)
             V = nvfp4_to_fp8_e4m3(V_nibble)
 
-            # Load V scales (u8), stored after DATA_BYTES (HEAD_SIZE // 2)
-            offs_s = tl.arange(0, NUM_SCALES)
+            # ================================================================
+            # Load V scales (u8) - CUDA now uses 32-element groups
+            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
+            # Stored at positions: DATA_BYTES + [0, 1, 2, 3]
+            # ================================================================
+            V_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
+            offs_vs = tl.arange(0, V_NUM_SCALES)
             v_scale_off = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
-                + (DATA_BYTES + offs_s)[None, :] * stride_v_cache_3
+                + (DATA_BYTES + offs_vs)[None, :] * stride_v_cache_3
                 + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
             )
-            v_scale_mask = tl.broadcast_to(tile_mask[:, None], (TILE_SIZE, NUM_SCALES))
+            v_scale_mask = tl.broadcast_to(
+                tile_mask[:, None], (TILE_SIZE, V_NUM_SCALES)
+            )
             V_scale_u8 = tl.load(
                 value_cache_ptr + v_scale_off, mask=v_scale_mask, other=127
             ).to(tl.uint8)
@@ -899,9 +973,13 @@ def kernel_unified_attention_3d(
             )
 
         if USE_NVFP4:
+            # Dequantize V with 32-element scale groups (4 scales per 128-dim head)
             V_scale_v = tl.math.exp2(V_scale_u8.to(tl.float32) - 127.0).to(tl.bfloat16)
+            # Broadcast each scale to 32 elements: [TILE_SIZE, 4] -> [TILE_SIZE, 4, 32] -> [TILE_SIZE, 128]
             V_scale_full = tl.reshape(
-                tl.broadcast_to(V_scale_v[:, :, None], (TILE_SIZE, NUM_SCALES, 16)),
+                tl.broadcast_to(
+                    V_scale_v[:, :, None], (TILE_SIZE, HEAD_SIZE_PADDED // 32, 32)
+                ),
                 (TILE_SIZE, HEAD_SIZE_PADDED),
             )
             V_deq = V.to(tl.bfloat16) * V_scale_full
@@ -986,7 +1064,10 @@ def reduce_segments(
 
     # load and rescale segment exp sums
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    # Handle -inf - (-inf) = nan by neutralizing empty segments
+    exp_scale = tl.exp(segm_max - overall_max)
+    exp_scale = tl.where(segm_max == float("-inf"), 0.0, exp_scale)
+    segm_expsum = segm_expsum * exp_scale
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
@@ -1002,7 +1083,7 @@ def reduce_segments(
         mask=segm_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    segm_output *= tl.exp(segm_max - overall_max)[:, None]
+    segm_output *= exp_scale[:, None]
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
