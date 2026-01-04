@@ -41,14 +41,28 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+def _is_blackwell_class(device_capability: DeviceCapability) -> bool:
+    """Check if device is Blackwell-class (SM10x, SM11x, SM12x).
+
+    Blackwell architecture includes:
+    - SM100/SM101: B100, B200 (major=10)
+    - SM120/SM121: GB10 DGX Spark, Thor (major=12)
+
+    Note: SM11x may be used by future Blackwell variants.
+    """
+    return device_capability.major in (10, 11, 12)
+
+
 @cache
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    is_blackwell = _is_blackwell_class(device_capability)
+
     if use_mla:
-        if device_capability.major == 10:
+        if is_blackwell:
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
@@ -66,7 +80,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        if device_capability.major == 10:
+        if is_blackwell:
             return [
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
@@ -147,6 +161,21 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
+    def is_blackwell_class(cls, device_id: int = 0) -> bool:
+        """Check if device is Blackwell-class (SM10x, SM11x, SM12x).
+
+        Blackwell architecture includes:
+        - SM100/SM101: B100, B200 (major=10)
+        - SM120/SM121: GB10 DGX Spark, Thor (major=12)
+
+        Note: SM11x may be used by future Blackwell variants.
+        """
+        capability = cls.get_device_capability(device_id)
+        if capability is None:
+            return False
+        return capability.major in (10, 11, 12)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -191,8 +220,10 @@ class CudaPlatformBase(Platform):
                     and not use_sparse
                     and qk_nope_head_dim == 128
                 ):
-                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
+                    # SM100/B200 => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
                     # and only if qk_nope_head_dim == 128 (kernel constraint)
+                    # Note: SM121/GB10 will fall through to automatic selection
+                    # → TRITON_MLA (FlashInfer MLA only supports SM100)
                     use_flashinfer_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
@@ -200,13 +231,14 @@ class CudaPlatformBase(Platform):
                         AttentionBackendEnum.FLASHINFER_MLA
                     )
                 elif cls.is_device_capability_family(100) and not use_sparse:
-                    # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
+                    # Fall back to CUTLASS_MLA as 2nd priority on SM100/B200
                     use_cutlass_mla = True
                 elif is_flashmla_dense_supported()[0]:
-                    # Non-Blackwell with FlashMLA support
+                    # Non-SM100 with FlashMLA support (SM90/Hopper)
                     use_flashmla = True
                 else:
                     # Fallback: will use Triton MLA or other compatible backend
+                    # This path handles SM121/GB10 → TRITON_MLA
                     pass
             else:
                 # Forced case
