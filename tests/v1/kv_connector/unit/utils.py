@@ -11,6 +11,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     KVTransferConfig,
@@ -94,6 +95,7 @@ def create_vllm_config(
     dtype: str = "float16",
     cache_dtype: str = "auto",
     hf_overrides: dict[str, Any] | None = None,
+    attention_backend: str | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -124,12 +126,14 @@ def create_vllm_config(
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
     )
+    attention_config = AttentionConfig(backend=attention_backend)
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
+        attention_config=attention_config,
     )
 
 

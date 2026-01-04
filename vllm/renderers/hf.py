@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormat,
     ChatTemplateContentFormatOption,
+    ChatTemplateResolutionError,
     ConversationMessage,
     load_chat_template,
     parse_chat_messages,
@@ -445,7 +446,7 @@ def safe_apply_chat_template(
         model_config=model_config,
     )
     if chat_template is None:
-        raise ValueError(
+        raise ChatTemplateResolutionError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
