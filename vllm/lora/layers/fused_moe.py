@@ -130,7 +130,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 prepare_finalize, self.base_layer
             ),
             self.base_layer.shared_experts,
-            getattr(self.base_layer, "shared_experts_stream", None),
         )
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
