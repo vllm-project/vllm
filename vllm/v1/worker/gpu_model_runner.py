@@ -3410,12 +3410,7 @@ class GPUModelRunner(
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
-                struct_output = scheduler_output.has_structured_output_requests
-                # Draft tokens don't need to be copied to the CPU if async
-                # scheduling is in use and there are no structured output reqs.
-                if struct_output or not self.use_async_scheduling:
-                    self._copy_draft_token_ids_to_cpu(self._draft_token_ids)
-                    self._draft_token_req_ids = self.input_batch.req_ids.copy()
+                self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
         use_padded_batch_for_eagle = (
@@ -3460,20 +3455,12 @@ class GPUModelRunner(
                 self._copy_valid_sampled_token_count(
                     next_token_ids, valid_sampled_tokens_count
                 )
-
-                # Since we couldn't run the drafter, just use zeros for the
-                # draft tokens.
-                num_reqs = len(self.input_batch.req_ids)
+                # Since we couldn't run the drafter,
+                # just use zeros for the draft tokens.
                 self._draft_token_ids = torch.zeros(
                     1, device=self.device, dtype=torch.int32
-                ).expand(num_reqs, self.num_spec_tokens)
-                struct_output = scheduler_output.has_structured_output_requests
-                if struct_output or not self.use_async_scheduling:
-                    self._draft_token_req_ids = self.input_batch.req_ids.copy()
-                    assert self.draft_token_ids_cpu is not None
-                    assert self.draft_token_ids_event is not None
-                    self.draft_token_ids_cpu[:num_reqs] = 0
-                    self.draft_token_ids_event.record()
+                ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
@@ -3545,33 +3532,44 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if not self.num_spec_tokens:
+        if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         req_ids = self._draft_token_req_ids
-        if not req_ids:
-            return None
         draft_token_ids = self._get_draft_token_ids_cpu(len(req_ids))
-        if draft_token_ids is None:
-            return None
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_draft_token_ids_to_cpu(
-        self, draft_token_ids: torch.Tensor | list[list[int]]
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
-        if isinstance(draft_token_ids, list) or self.draft_token_ids_event is None:
+        struct_output = scheduler_output.has_structured_output_requests
+        if self.use_async_scheduling and not struct_output:
+            # Draft tokens don't need to be copied to the CPU if async
+            # scheduling is in use and there are no structured output reqs.
             return
-        # Trigger async copy of draft token ids to cpu.
+        # We must also set the corresponding request ids.
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_copy_stream is not None
+        assert self.draft_token_ids_cpu is not None
         default_stream = torch.cuda.current_stream()
+        num_reqs = draft_token_ids.shape[0]
         with torch.cuda.stream(self.draft_token_ids_copy_stream):
-            assert self.draft_token_ids_copy_stream is not None
-            assert self.draft_token_ids_cpu is not None
-            self.draft_token_ids_copy_stream.wait_stream(default_stream)
-            self.draft_token_ids_cpu[: draft_token_ids.shape[0]].copy_(
-                draft_token_ids, non_blocking=True
-            )
+            if not zeros_only:
+                # Trigger async copy of draft token ids to cpu.
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                # No copy needed, just zero-out cpu tensor.
+                self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
-    def _get_draft_token_ids_cpu(self, num_reqs: int) -> list[list[int]] | None:
+    def _get_draft_token_ids_cpu(self, num_reqs: int) -> list[list[int]]:
         if isinstance(self._draft_token_ids, list):
             return self._draft_token_ids
         assert self.draft_token_ids_event is not None
