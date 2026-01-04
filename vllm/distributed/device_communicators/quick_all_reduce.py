@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 try:
     ops.qr_max_size()
     quick_ar = True
-except Exception:
+except (RuntimeError, AttributeError):
     # For CPUs and CUDA
     quick_ar = False
 
@@ -229,7 +229,7 @@ class QuickAllReduce:
             gcn_arch = getattr(props, "gcnArchName", "")
             supported_archs = ["gfx94", "gfx95"]
             return any(gfx in gcn_arch for gfx in supported_archs)
-        except Exception as e:
+        except (RuntimeError, AttributeError) as e:
             logger.warning("Failed to determine ROCm for quick allreduce: %s", e)
             return False
 
