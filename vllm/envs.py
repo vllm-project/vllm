@@ -1153,6 +1153,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEPLL_NVFP4_DISPATCH": lambda: bool(
         int(os.getenv("VLLM_DEEPEPLL_NVFP4_DISPATCH", "0"))
     ),
+    # Whether to use single batch overlapping optimization
+    "VLLM_EP_USE_SBO": lambda: bool(int(os.getenv("VLLM_EP_USE_SBO", "0"))),
+    # Whether to turn on the outlines cache for V0
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V0_USE_OUTLINES_CACHE": lambda: os.environ.get(
+        "VLLM_V0_USE_OUTLINES_CACHE", "0"
+    )
+    == "1",
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.

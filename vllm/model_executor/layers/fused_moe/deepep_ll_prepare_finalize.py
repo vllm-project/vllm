@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 import deep_ep
 import torch
@@ -22,6 +24,8 @@ from vllm.v1.worker.ubatching import (
     dbo_maybe_run_recv_hook,
 )
 
+alt_stream = torch.cuda.Stream()
+
 logger = init_logger(__name__)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
@@ -29,6 +33,38 @@ DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class CombineOverlapArgs:
+    # we launch deepep ll combine on this stream, which
+    # is different from the default compute stream
+    stream: torch.cuda.Stream
+    # We record this wait even in the compute stream between
+    # silu_mul_fp4_quantize and w2 gemm.
+    # And we wait for this even before deepep ll combine on the
+    # combine stream to ensure signal tensors have been allocated
+    wait_event: torch.cuda.Event
+    # Number of CU used for combine kernel, currently hardcoded to be 32
+    num_sms: int
+    # The signal tensor is shared by the w2 gemm and deepep ll combine.
+    # w2 gemm atomic_add to the tensor to signal deepep combine can start
+    # send data
+    signal: torch.Tensor | None = None
+    # Set to the number of CU used by W2 gemm, which is a persistent kernel
+    # So when all CU has completed the computation for an expert,
+    # combine kernel can start to send data for this expert
+    threshold: int = 0
+
+
+@dataclass
+class W2GemmOverlapArgs:
+    # Number of CU used by W2 gemm
+    num_sms: int
+    # Same signal tensor mentioned above
+    signal: torch.Tensor
+    # Same as the wait_even in CombineOverlapArgs
+    start_event: torch.cuda.Event
 
 
 def dequant_fp8(
@@ -239,6 +275,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
+        local_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
@@ -306,6 +343,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
         self.handles[a2a_idx] = handle
 
+        # We need to pass w2_gemm_overlap_args to moe implementation,
+        # so return it as an output paramter
+        w2_gemm_overlap_args = self._create_sbo_args(local_num_experts, a1.device)
         return (
             hook,
             lambda: self._receiver(
@@ -315,6 +355,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 a1.dtype,
                 quant_config,
             ),
+            w2_gemm_overlap_args,
         )
 
     def _receiver(
@@ -339,6 +380,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
+        local_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
@@ -382,18 +424,38 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(
-            fused_expert_output,
-            combine_topk_ids,
-            combine_topk_weights,
-            handle,
-            async_finish=False,
-            zero_copy=False,
-            return_recv_hook=do_recv_hook,
-            out=output,
-        )
+        ctx = nullcontext()
+        if self.combine_overlap_args is not None:
+            # For SBO, we need to wait for compute stream
+            # to have completed signal tensor allocation
+            self.combine_overlap_args.stream.wait_event(
+                self.combine_overlap_args.wait_event
+            )
+            # And we launch ll combine phase 1 in a separate stream
+            # for overlaping
+            ctx = torch.cuda.stream(self.combine_overlap_args.stream)
+        with ctx:
+            _, _, recv_hook = self.buffer.low_latency_combine(
+                fused_expert_output,
+                combine_topk_ids,
+                combine_topk_weights,
+                handle,
+                async_finish=False,
+                zero_copy=False,
+                return_recv_hook=do_recv_hook,
+                out=output,
+                **(
+                    dict(
+                        overlap=True,
+                        src_signals=self.combine_overlap_args.signal,
+                        src_signal_expect_value=self.combine_overlap_args.threshold,
+                    )
+                    if self.combine_overlap_args is not None
+                    else {}
+                ),
+            )
 
-        return recv_hook, lambda: None
+        return recv_hook, lambda: self._sbo_wait_stream()
 
     def finalize_async(
         self,
@@ -432,3 +494,43 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weight_and_reduce_impl,
             do_async=False,
         )
+
+    def _create_sbo_args(
+        self, local_num_experts: int, device: torch.device
+    ) -> W2GemmOverlapArgs:
+        w2_gemm_overlap_args = None
+        self.combine_overlap_args = None
+        if envs.VLLM_EP_USE_SBO:
+            total_num_sms = torch.cuda.get_device_properties(
+                device="cuda"
+            ).multi_processor_count
+            communicate_num_sms = 32
+            compute_num_sms = total_num_sms - communicate_num_sms
+
+            combine_wait_event = torch.cuda.Event()
+            combine_overlap_args = CombineOverlapArgs(
+                num_sms=communicate_num_sms,
+                stream=alt_stream,
+                wait_event=combine_wait_event,
+            )
+
+            combine_signal = torch.zeros(
+                local_num_experts, dtype=torch.uint32, device=device
+            )
+
+            w2_gemm_overlap_args = W2GemmOverlapArgs(
+                signal=combine_signal,
+                start_event=combine_wait_event,
+                num_sms=compute_num_sms,
+            )
+            combine_overlap_args.signal = combine_signal
+            combine_overlap_args.threshold = compute_num_sms
+            self.combine_overlap_args = combine_overlap_args
+        return w2_gemm_overlap_args
+
+    def _sbo_wait_stream(self) -> None:
+        # When SBO enabled, ll combine phase 2 is still launched
+        # on the main compute stream, but we need to wait for
+        # ll combine 1 to complete
+        if self.combine_overlap_args is not None:
+            torch.cuda.current_stream().wait_stream(self.combine_overlap_args.stream)
