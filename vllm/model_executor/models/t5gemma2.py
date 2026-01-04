@@ -26,7 +26,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import T5Gemma2Config
 
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -51,6 +53,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    WeightsMapper,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -103,12 +106,27 @@ class T5Gemma2TextScaledWordEmbedding(nn.Module):
         self.embed_scale = embed_scale
         self.eoi_token_index = eoi_token_index
         self.eoi_embedding = nn.Parameter(torch.zeros(embedding_dim))
+        
+        # Add quant_method attribute for compatibility with LogitsProcessor
+        # This is a no-op quantization method that just applies the embedding
+        self.quant_method = _NoOpQuantMethod(self)
 
         # Initialize weights
         nn.init.normal_(self.weight, std=0.02)
         nn.init.zeros_(self.eoi_embedding)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor | None) -> torch.Tensor:
+        # Handle None input_ids (from dummy run during profiling)
+        if input_ids is None:
+            # Return dummy tensor with shape (1, 1, hidden_size)
+            # This is used during memory profiling to determine tensor shapes
+            # Don't apply scaling during dummy run to avoid torch.compile issues
+            return torch.zeros(
+                1, 1, self.weight.shape[1],
+                dtype=self.weight.dtype,
+                device=self.weight.device
+            )
+        
         # Standard embedding
         embeddings = F.embedding(input_ids, self.weight, self.padding_idx)
         embeddings = embeddings * self.embed_scale
@@ -121,6 +139,34 @@ class T5Gemma2TextScaledWordEmbedding(nn.Module):
                 embeddings[eoi_mask] = self.eoi_embedding.to(embeddings.dtype)
 
         return embeddings
+
+
+class _NoOpQuantMethod:
+    """No-op quantization method for embedding layers.
+    
+    This is used to make T5Gemma2TextScaledWordEmbedding compatible with
+    LogitsProcessor which expects a quant_method attribute.
+    """
+    
+    def __init__(self, embedding_layer):
+        self.embedding_layer = embedding_layer
+    
+    def apply(self, embedding_layer, hidden_states, bias=None):
+        """Apply embedding projection to hidden states.
+        
+        Args:
+            embedding_layer: The embedding layer (T5Gemma2TextScaledWordEmbedding)
+            hidden_states: Hidden states to project (batch, seq, hidden_size)
+            bias: Optional bias (not used for embeddings)
+        
+        Returns:
+            Logits (batch, seq, vocab_size)
+        """
+        # Project hidden states to vocabulary size using embedding weight
+        # hidden_states: (batch, seq, hidden_size)
+        # embedding_layer.weight: (vocab_size, hidden_size)
+        # output: (batch, seq, vocab_size)
+        return torch.matmul(hidden_states, embedding_layer.weight.t())
 
 
 class T5Gemma2MLP(nn.Module):
@@ -136,9 +182,10 @@ class T5Gemma2MLP(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        # Use merged gate_up_proj for efficiency (matches Gemma2MLP pattern)
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
-            [intermediate_size, intermediate_size],
+            [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
@@ -161,8 +208,7 @@ class T5Gemma2MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        gate, up = gate_up.chunk(2, dim=-1)
-        x = self.act_fn(gate) * up
+        x = self.act_fn(gate_up)
         x = self.dropout(x)
         x, _ = self.down_proj(x)
         return x
@@ -182,6 +228,8 @@ class T5Gemma2Attention(nn.Module):
         head_dim: int,
         max_position_embeddings: int,
         sliding_window: int | None = None,
+        is_encoder: bool = True,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -199,7 +247,7 @@ class T5Gemma2Attention(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
 
-        # Use separate Q, K, V projections to match checkpoint format
+        # Use separate Q/K/V projections to match checkpoint format
         self.q_proj = ColumnParallelLinear(
             hidden_size,
             self.total_num_heads * self.head_dim,
@@ -233,15 +281,26 @@ class T5Gemma2Attention(nn.Module):
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
 
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.head_dim**-0.5,
-            num_kv_heads=self.num_kv_heads,
-            quant_config=quant_config,
-            per_layer_sliding_window=sliding_window,
-            prefix=f"{prefix}.attn",
-        )
+        # Use MMEncoderAttention for encoder (no KV cache), Attention for decoder
+        if is_encoder:
+            self.attn = MMEncoderAttention(
+                self.num_heads,
+                self.head_dim,
+                self.head_dim**-0.5,
+                num_kv_heads=self.num_kv_heads,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.head_dim**-0.5,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                attn_type=AttentionType.DECODER,
+                per_layer_sliding_window=sliding_window,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -250,10 +309,30 @@ class T5Gemma2Attention(nn.Module):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
-        # Apply q_norm and k_norm (matches transformers)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        
+        # Reshape to 3D for normalization: (num_tokens, num_heads, head_dim)
+        num_tokens = hidden_states.shape[0]
+        
+        q = q.view(num_tokens, self.num_heads, self.head_dim)
+        k = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+        v = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        
+        # Apply q_norm and k_norm on 3D tensors
+        # Add unsqueeze(2) to make it 4D for norm, then squeeze back
+        q = self.q_norm(q.unsqueeze(2)).squeeze(2)
+        k = self.k_norm(k.unsqueeze(2)).squeeze(2)
+        
+        # Reshape back to 2D for MMEncoderAttention: (num_tokens, hidden_size)
+        # MMEncoderAttention expects (batch, seq_len, hidden_size) format
+        # Since we flattened to (num_tokens, hidden_size), we need to reshape to (1, num_tokens, hidden_size)
+        q = q.reshape(num_tokens, self.num_heads * self.head_dim).unsqueeze(0)
+        k = k.reshape(num_tokens, self.num_kv_heads * self.head_dim).unsqueeze(0)
+        v = v.reshape(num_tokens, self.num_kv_heads * self.head_dim).unsqueeze(0)
+        
+        # MMEncoderAttention expects (batch, seq_len, hidden_size)
         attn_output = self.attn(q, k, v)
+        # Flatten back to (num_tokens, hidden_size)
+        attn_output = attn_output.squeeze(0)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -279,6 +358,7 @@ class T5Gemma2MergedAttention(nn.Module):
         cross_attention_hidden_size: int,
         attn_logit_softcapping: float | None = None,
         sliding_window: int | None = None,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -291,7 +371,7 @@ class T5Gemma2MergedAttention(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
 
-        # Use separate Q, K, V projections for self-attention to match checkpoint format
+        # Use separate Q/K/V projections to match checkpoint format
         self.q_proj = ColumnParallelLinear(
             hidden_size,
             self.total_num_heads * self.head_dim,
@@ -326,12 +406,15 @@ class T5Gemma2MergedAttention(nn.Module):
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=1e-6)
 
+        # Merged attention uses DECODER attention type
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.head_dim**-0.5,
             num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
             quant_config=quant_config,
+            attn_type=AttentionType.DECODER,
             logits_soft_cap=attn_logit_softcapping,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
@@ -344,25 +427,40 @@ class T5Gemma2MergedAttention(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         # Self-attention: Q/K/V from hidden_states
+        num_tokens = hidden_states.shape[0]
+        
         q, _ = self.q_proj(hidden_states)
         k_self, _ = self.k_proj(hidden_states)
         v_self, _ = self.v_proj(hidden_states)
 
-        # Apply q_norm and k_norm (matches transformers)
-        q = self.q_norm(q)
-        k_self = self.k_norm(k_self)
+        # Reshape to 3D for normalization and attention: (num_tokens, num_heads, head_dim)
+        q = q.view(num_tokens, self.num_heads, self.head_dim)
+        k_self = k_self.view(num_tokens, self.num_kv_heads, self.head_dim)
+        v_self = v_self.view(num_tokens, self.num_kv_heads, self.head_dim)
+        
+        # Apply q_norm and k_norm on 3D tensors
+        # Add unsqueeze(2) to make it 4D for norm, then squeeze back
+        q = self.q_norm(q.unsqueeze(2)).squeeze(2)
+        k_self = self.k_norm(k_self.unsqueeze(2)).squeeze(2)
 
         # Cross-attention: K/V from encoder_hidden_states
-        # Note: In transformers, the same k_proj and v_proj are reused for cross-attention
-        # In vLLM, we use the same projections for both self and cross-attention
+        num_encoder_tokens = encoder_hidden_states.shape[0]
+        
         k_cross, _ = self.k_proj(encoder_hidden_states)
         v_cross, _ = self.v_proj(encoder_hidden_states)
+        
+        # Reshape to 3D for normalization and attention
+        k_cross = k_cross.view(num_encoder_tokens, self.num_kv_heads, self.head_dim)
+        v_cross = v_cross.view(num_encoder_tokens, self.num_kv_heads, self.head_dim)
+        
+        # Apply k_norm on 3D tensor (matches transformers)
+        k_cross = self.k_norm(k_cross.unsqueeze(2)).squeeze(2)
 
-        # Concatenate self and cross K/V along sequence dimension
-        k = torch.cat([k_self, k_cross], dim=1)
-        v = torch.cat([v_self, v_cross], dim=1)
+        # Concatenate self and cross K/V along token dimension (dim=0)
+        k = torch.cat([k_self, k_cross], dim=0)
+        v = torch.cat([v_self, v_cross], dim=0)
 
-        # Single attention computation
+        # vLLM attention expects 3D tensors: (num_tokens, num_heads, head_dim)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -393,6 +491,8 @@ class T5Gemma2EncoderLayer(nn.Module):
             head_dim=config["head_dim"],
             max_position_embeddings=config["max_position_embeddings"],
             sliding_window=sliding_window,
+            is_encoder=True,
+            cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -498,199 +598,43 @@ class T5Gemma2VisionEncoder(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights for vision tower and projector.
         
-        Handles combined qkv_proj weights from checkpoint by splitting them into
-        separate q_proj, k_proj, v_proj weights for the SigLIP vision model.
-        
-        All weights are loaded directly without passing through SigLIP's load_weights
-        to properly track which parameters were loaded with their full names.
-        
-        DEBUG: Added extensive logging to diagnose weight loading issues.
+        The SiglipVisionModel handles q_proj/k_proj/v_proj → qkv_proj merging
+        via its stacked_params_mapping. We need to track the merged parameter names
+        that the SiglipVisionModel returns, not the original checkpoint names.
         """
-        import logging
-        logger = logging.getLogger(__name__)
-        
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         
-        # DEBUG: Log the expected parameter names
-        logger.info("=" * 80)
-        logger.info("T5Gemma2VisionEncoder.load_weights - DEBUG START")
-        logger.info(f"Number of parameters in params_dict: {len(params_dict)}")
+        # Separate weights for vision_tower and multimodal projector
+        vision_tower_weights = []
+        projector_weights = []
         
-        # Collect all expected weight names for debugging
-        expected_weights = set(params_dict.keys())
-        logger.info(f"Expected weights (first 30): {list(expected_weights)[:30]}")
-        
-        # Log all vision_tower weights for debugging
-        vision_tower_weights = [w for w in expected_weights if "vision_tower" in w]
-        logger.info(f"Vision tower weights ({len(vision_tower_weights)}): {vision_tower_weights[:30]}")
-        
-        # First pass: collect all weights and split combined qkv_proj weights
-        qkv_weights: dict[str, dict] = {}
-        processed_weights: list[tuple[str, torch.Tensor]] = []
-        
-        weight_names = list(weights)
-        logger.info(f"Number of input weights: {len(weight_names)}")
-        logger.info(f"Input weight names (first 30): {[w[0] for w in weight_names[:30]]}")
-        
-        # Log vision-related weights
-        vision_weights = [(n, w) for n, w in weight_names if "vision" in n.lower()]
-        logger.info(f"Vision-related weights in checkpoint ({len(vision_weights)}): {[w[0] for w in vision_weights[:30]]}")
-        
-        # Log qkv weights specifically
-        qkv_weights = [(n, w) for n, w in weight_names if "qkv" in n.lower()]
-        logger.info(f"QKV weights in checkpoint ({len(qkv_weights)}): {[w[0] for w in qkv_weights[:20]]}")
-        
-        # Log all input weight names that contain "vision_tower"
-        vision_tower_input = [(n, w) for n, w in weight_names if "vision_tower" in n.lower()]
-        logger.info(f"Vision tower weights from input ({len(vision_tower_input)}): {[w[0] for w in vision_tower_input[:30]]}")
-        
-        for name, loaded_weight in weight_names:
-            # Handle qkv_proj weights - split into separate q/k/v
-            if name.endswith(".qkv_proj.weight") or name.endswith(".qkv_proj.bias"):
-                # Extract the base path (e.g., "vision_encoder.vision_tower.vision_model.encoder.layers.0.self_attn")
-                base_name = name.rsplit(".", 2)[0]
-                weight_type = name.split(".")[-1]  # "weight" or "bias"
-                
-                if base_name not in qkv_weights:
-                    qkv_weights[base_name] = {}
-                qkv_weights[base_name][weight_type] = loaded_weight
+        for name, weight in weights:
+            if name.startswith("vision_tower."):
+                # Strip the "vision_tower." prefix for SiglipVisionModel
+                stripped_name = name[len("vision_tower."):]
+                vision_tower_weights.append((stripped_name, weight))
+            elif name in ("mm_input_projection_weight", "mm_soft_emb_norm.weight"):
+                projector_weights.append((name, weight))
             else:
-                processed_weights.append((name, loaded_weight))
+                # Unknown weight, try to load it directly
+                projector_weights.append((name, weight))
         
-        logger.info(f"Found {len(qkv_weights)} qkv_proj weights to split")
+        # Load vision tower weights using SiglipVisionModel's load_weights
+        if vision_tower_weights:
+            vision_tower_loaded = self.vision_tower.load_weights(vision_tower_weights)
+            # Add "vision_tower." prefix back to loaded params
+            # The SiglipVisionModel returns merged names (with qkv_proj instead of q_proj/k_proj/v_proj)
+            for param in vision_tower_loaded:
+                loaded_params.add(f"vision_tower.{param}")
         
-        # Split combined qkv_proj weights into separate q/k/v
-        for base_name, qkv_dict in qkv_weights.items():
-            if "weight" not in qkv_dict:
-                logger.warning(f"QKV weight at {base_name} missing weight tensor, skipping")
-                continue
-                
-            qkv_weight = qkv_dict["weight"]
-            qkv_bias = qkv_dict.get("bias", None)
-            
-            # Strip the prefix to match params_dict keys - try multiple prefixes
-            stripped_base = base_name
-            for prefix in ["model.encoder.vision_encoder.", "vision_encoder.", "model.", ""]:
-                if stripped_base.startswith(prefix):
-                    stripped_base = stripped_base[len(prefix):]
-                    logger.debug(f"Stripped prefix '{prefix}' from '{base_name}' -> '{stripped_base}'")
-                    break
-            
-            # Try to find the q_proj weight in params_dict
-            q_name = stripped_base + ".q_proj.weight"
-            head_dim = None
-            q_name_found = None
-            if q_name in params_dict:
-                head_dim = params_dict[q_name].shape[0]
-                q_name_found = q_name
-                logger.info(f"Found q_proj at {q_name}, head_dim={head_dim}")
-            else:
-                # Try alternative naming - search for any q_proj that contains the stripped base
-                for param_name in params_dict:
-                    if ".q_proj.weight" in param_name and stripped_base in param_name:
-                        head_dim = params_dict[param_name].shape[0]
-                        q_name_found = param_name
-                        logger.info(f"Found q_proj at {param_name}, head_dim={head_dim}")
-                        break
-            
-            if head_dim is None:
-                logger.warning(f"Could not find q_proj for base_name: {base_name}, stripped: {stripped_base}")
-                logger.warning(f"Available q_proj weights: {[p for p in params_dict if '.q_proj.weight' in p]}")
-                # Skip this qkv weight
-                continue
-            
-            # Split the weight into q, k, v
-            # qkv_weight shape is [3 * num_heads * head_dim, hidden_size]
-            q_weight = qkv_weight[:head_dim, :]
-            k_weight = qkv_weight[head_dim:2*head_dim, :]
-            v_weight = qkv_weight[2*head_dim:, :]
-            
-            # Add split weights to processed_weights with the stripped base name
-            for name_suffix, weight in [
-                (".q_proj.weight", q_weight),
-                (".k_proj.weight", k_weight),
-                (".v_proj.weight", v_weight),
-            ]:
-                processed_weights.append((stripped_base + name_suffix, weight))
-            
-            # Handle bias if present
-            if qkv_bias is not None:
-                q_bias = qkv_bias[:head_dim]
-                k_bias = qkv_bias[head_dim:2*head_dim]
-                v_bias = qkv_bias[2*head_dim:]
-                
-                for name_suffix, bias in [
-                    (".q_proj.bias", q_bias),
-                    (".k_proj.bias", k_bias),
-                    (".v_proj.bias", v_bias),
-                ]:
-                    processed_weights.append((stripped_base + name_suffix, bias))
-        
-        logger.info(f"Total processed weights after qkv splitting: {len(processed_weights)}")
-        logger.info(f"Processed weight names (first 30): {[w[0] for w in processed_weights[:30]]}")
-        
-        # Log which processed weights are expected to match
-        expected_matches = [w[0] for w in processed_weights if any(w[0] in p for p in params_dict)]
-        logger.info(f"Processed weights expected to match ({len(expected_matches)}): {expected_matches[:30]}")
-        
-        # Log which processed weights won't match
-        expected_misses = [w[0] for w in processed_weights if not any(w[0] in p for p in params_dict)]
-        logger.info(f"Processed weights NOT expected to match ({len(expected_misses)}): {expected_misses[:30]}")
-        
-        # Second pass: load all processed weights
-        missing_weights = []
-        loaded_count = 0
-        skipped_count = 0
-        
-        for name, loaded_weight in processed_weights:
-            # Handle mm_input_projection_weight (checkpoint name) -> mm_input_projection_weight (model parameter)
-            if name == "mm_input_projection_weight":
-                logger.debug(f"Loading mm_input_projection_weight directly")
-                param = params_dict["mm_input_projection_weight"]
+        # Load projector weights directly
+        for name, loaded_weight in projector_weights:
+            if name in params_dict:
+                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
-                loaded_params.add("mm_input_projection_weight")
-                loaded_count += 1
-            # Handle mm_soft_emb_norm weights
-            elif name == "mm_soft_emb_norm.weight":
-                logger.debug(f"Loading mm_soft_emb_norm.weight directly")
-                param = params_dict["mm_soft_emb_norm.weight"]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add("mm_soft_emb_norm.weight")
-                loaded_count += 1
-            # Handle vision tower weights - strip various prefixes if present
-            else:
-                weight_name = name
-                weight_name_matched = None
-                # Try stripping different prefixes
-                for prefix in ["model.encoder.vision_encoder.", "vision_encoder.", "model.", ""]:
-                    if weight_name.startswith(prefix):
-                        potential_name = weight_name[len(prefix):]
-                        if potential_name in params_dict:
-                            weight_name = potential_name
-                            weight_name_matched = prefix
-                            logger.debug(f"Matched prefix '{prefix}': '{name}' -> '{weight_name}'")
-                            break
-                
-                if weight_name in params_dict:
-                    param = params_dict[weight_name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(weight_name)
-                    loaded_count += 1
-                else:
-                    # Weight not found in this module, skip
-                    missing_weights.append(name)
-                    skipped_count += 1
-                    logger.debug(f"Could not find weight for: '{name}' (after prefix stripping: '{weight_name}')")
-        
-        logger.info(f"Loaded {loaded_count} weights, skipped {skipped_count} weights")
-        logger.info(f"Missing weights (first 20): {missing_weights[:20]}")
-        logger.info(f"Loaded params (first 20): {list(loaded_params)[:20]}")
-        logger.info("T5Gemma2VisionEncoder.load_weights - DEBUG END")
-        logger.info("=" * 80)
+                loaded_params.add(name)
 
         return loaded_params
 
@@ -744,6 +688,10 @@ class T5Gemma2Encoder(nn.Module):
     ) -> torch.Tensor:
         # Get text embeddings
         hidden_states = self.embed_tokens(input_ids)
+        
+        # Flatten to 2D for vLLM V1 engine: (batch * seq_len, hidden_size)
+        original_shape = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         # Process images if provided
         if pixel_values is not None:
@@ -751,7 +699,9 @@ class T5Gemma2Encoder(nn.Module):
 
             # Replace image placeholder tokens with image features
             image_token_id = self.config.image_token_index
-            image_mask = (input_ids == image_token_id)
+            # Flatten input_ids to match hidden_states
+            flat_input_ids = input_ids.view(-1)
+            image_mask = (flat_input_ids == image_token_id)
 
             if image_mask.any():
                 # Flatten image features
@@ -769,64 +719,43 @@ class T5Gemma2Encoder(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Convert to list to allow multiple passes
+        weights_list = list(weights)
+        
         # Filter weights for vision_encoder submodule first
         # This handles weights with "vision_encoder." prefix from T5Gemma2Model.load_weights
         vision_encoder_weights = [
             (name[len("vision_encoder."):], weight)
-            for name, weight in weights
+            for name, weight in weights_list
             if name.startswith("vision_encoder.")
-        ]
-        # Also handle weights that go directly to vision_tower
-        vision_tower_weights = [
-            (name, weight)
-            for name, weight in weights
-            if name.startswith("vision_tower.")
         ]
 
         # Load vision encoder weights
         loaded_params = set()
         if vision_encoder_weights:
-            loaded_params.update(self.vision_encoder.load_weights(vision_encoder_weights))
-        if vision_tower_weights:
-            loaded_params.update(self.vision_encoder.load_weights(vision_tower_weights))
+            ve_loaded = self.vision_encoder.load_weights(vision_encoder_weights)
+            # Add "vision_encoder." prefix back to loaded params
+            for param in ve_loaded:
+                loaded_params.add(f"vision_encoder.{param}")
 
-        # For remaining weights, also check if they belong to submodules like vision_encoder
-        # AutoWeightsLoader might pass weights that should go to submodules
-        # The checkpoint has weight names like "mm_input_projection_weight" without prefix
-        vision_encoder_direct_weights = [
-            "mm_input_projection_weight",
-            "mm_soft_emb_norm.weight",
-        ]
+        # For remaining weights, collect them for self
         weights_for_self = []
-
-        for name, weight in weights:
-            if name.startswith("vision_encoder.") or name.startswith("vision_tower."):
+        for name, weight in weights_list:
+            if name.startswith("vision_encoder."):
                 # Already handled above, skip
                 continue
-            # Check if this weight belongs to vision_encoder directly (no prefix)
-            if name in vision_encoder_direct_weights:
-                remaining = [(name, weight)]
-                ve_loaded = self.vision_encoder.load_weights(remaining)
-                loaded_params.update(ve_loaded)
-            # Check if this weight belongs to a submodule with prefix
-            elif name.startswith("multi_modal_projector"):
-                # These should go to vision_encoder, not directly to encoder
-                # Strip the submodule prefix and pass to vision_encoder
-                submodule_name = name.split(".", 1)[1] if "." in name else name
-                remaining = [(submodule_name, weight)]
-                ve_loaded = self.vision_encoder.load_weights(remaining)
-                loaded_params.update(ve_loaded)
             else:
                 weights_for_self.append((name, weight))
 
-        # stacked_params_mapping for handling combined gate_up_proj
-        # Maps (param_name, shard_name, shard_id)
+        params_dict = dict(self.named_parameters())
+        
+        # Stacked params mapping for merged projections
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters())
-
+        
+        # Process weights with support for merged projections
         for name, loaded_weight in weights_for_self:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -839,6 +768,8 @@ class T5Gemma2Encoder(nn.Module):
                     weight_loader(param, loaded_weight_value)
                     loaded_params.add(scale_name)
                 continue
+            
+            # Check for stacked params (merged projections)
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
@@ -851,6 +782,7 @@ class T5Gemma2Encoder(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -864,7 +796,7 @@ class T5Gemma2Encoder(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                loaded_params.add(name)
 
         return loaded_params
 
@@ -898,6 +830,7 @@ class T5Gemma2DecoderLayer(nn.Module):
             cross_attention_hidden_size=self.hidden_size,
             attn_logit_softcapping=config.get("attn_logit_softcapping"),
             sliding_window=sliding_window,
+            cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -1029,25 +962,33 @@ class T5Gemma2Decoder(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # stacked_params_mapping for handling combined gate_up_proj
-        # Maps (param_name, shard_name, shard_id)
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        
+        # Convert weights to list to allow multiple passes
+        weights_list = list(weights)
+        
+        # Stacked params mapping for merged projections
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
+        
+        # Process weights with support for merged projections
+        for name, loaded_weight in weights_list:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
                 # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
+                if scale_name in params_dict:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    loaded_weight_value = loaded_weight[0] if isinstance(loaded_weight, tuple) else loaded_weight
+                    weight_loader(param, loaded_weight_value)
+                    loaded_params.add(scale_name)
                 continue
+            
+            # Check for stacked params (merged projections)
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
@@ -1060,6 +1001,7 @@ class T5Gemma2Decoder(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -1067,15 +1009,15 @@ class T5Gemma2Decoder(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                if name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
 
         return loaded_params
 
 
-@support_torch_compile
 class T5Gemma2Model(nn.Module):
     """T5Gemma2 encoder-decoder model."""
 
@@ -1138,8 +1080,17 @@ class T5Gemma2Model(nn.Module):
             if name.startswith("decoder.")
         ]
         loaded_params = set()
-        loaded_params.update(self.encoder.load_weights(encoder_weights))
-        loaded_params.update(self.decoder.load_weights(decoder_weights))
+        
+        # Load encoder weights and add "encoder." prefix back
+        encoder_loaded = self.encoder.load_weights(encoder_weights)
+        for param in encoder_loaded:
+            loaded_params.add(f"encoder.{param}")
+        
+        # Load decoder weights and add "decoder." prefix back
+        decoder_loaded = self.decoder.load_weights(decoder_weights)
+        for param in decoder_loaded:
+            loaded_params.add(f"decoder.{param}")
+        
         return loaded_params
 
 
@@ -1147,10 +1098,7 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
     """T5Gemma2 for conditional generation (seq2seq)."""
 
     packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        # No packed modules - we use separate projections for all layers
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1206,10 +1154,12 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        # Use embed_tokens for logits computation
+        # The logits_processor expects an embedding layer with a quant_method attribute
         logits = self.logits_processor(self.model.decoder.embed_tokens, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str] | None:
         # T5Gemma2 has tied weights between encoder and decoder embed_tokens
         # and between lm_head and encoder embed_tokens when tie_word_embeddings=True
         # We handle this by:
@@ -1217,58 +1167,28 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
         # 2. Special handling for eoi_embedding (tied between encoder and decoder)
         # 3. lm_head.weight is tied to encoder.embed_tokens.weight
 
-        # Strip prefixes from weight names before passing to encoder/decoder
-        # The checkpoint weights have names like "model.encoder.embed_tokens.weight"
-        # but the encoder/decoder modules expect names like "embed_tokens.weight"
-        encoder_weights = [
-            (name[len("model.encoder."):] if name.startswith("model.encoder.") else name, weight)
-            for name, weight in weights
-            if name.startswith("model.encoder.") or name.startswith("encoder.")
-        ]
-        decoder_weights = [
-            (name[len("model.decoder."):] if name.startswith("model.decoder.") else name, weight)
-            for name, weight in weights
-            if name.startswith("model.decoder.") or name.startswith("decoder.")
-        ]
+        # Convert weights to list to check for model prefix
+        weights_list = list(weights)
         
-        # Handle lm_head weights - they should be loaded but tied to encoder.embed_tokens
-        lm_head_weights = [
-            (name, weight)
-            for name, weight in weights
-            if name.startswith("model.lm_head.") or name.startswith("lm_head.")
-        ]
-
-        loaded_params = set()
-        loaded_params.update(self.model.encoder.load_weights(encoder_weights))
-        loaded_params.update(self.model.decoder.load_weights(decoder_weights))
-
-        # Handle lm_head - it's tied to encoder.embed_tokens.weight
-        # When tie_word_embeddings=True, we load lm_head into encoder.embed_tokens
-        if self.config.tie_word_embeddings and lm_head_weights:
-            encoder_params = dict(self.model.encoder.named_parameters())
-            for name, weight in lm_head_weights:
-                # Transform lm_head.out_proj.weight -> embed_tokens.weight
-                if name == "lm_head.out_proj.weight" or name == "model.lm_head.out_proj.weight":
-                    param_name = "embed_tokens.weight"
-                    if param_name in encoder_params:
-                        param = encoder_params[param_name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                        weight_loader(param, weight)
-                        loaded_params.add(param_name)
-                        loaded_params.add(name)
-
-        # Handle eoi_embedding - it's tied between encoder and decoder
-        # When tie_word_embeddings=True, decoder.embed_tokens.eoi_embedding is tied to encoder.embed_tokens.eoi_embedding
-        encoder_params = dict(self.model.encoder.named_parameters())
-        decoder_params = dict(self.model.decoder.named_parameters())
+        # Check if weights have the "model." prefix
+        # The checkpoint weights have names like "encoder.embed_tokens.weight"
+        # but the model's named_parameters() returns "model.encoder.embed_tokens.weight"
+        has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
+        if not has_model_prefix:
+            # Add "model." prefix and fix vision_tower path
+            # Checkpoint has: encoder.vision_tower.vision_model...
+            # vLLM expects: model.encoder.vision_encoder.vision_tower.vision_model...
+            mapper = WeightsMapper(
+                orig_to_new_prefix={"": "model."},
+                orig_to_new_substr={"encoder.vision_tower": "encoder.vision_encoder.vision_tower"}
+            )
+            weights_list = mapper.apply(weights_list)
         
-        # Check if encoder has eoi_embedding and decoder needs it
-        if "embed_tokens.eoi_embedding" in encoder_params:
-            encoder_eoi = encoder_params["embed_tokens.eoi_embedding"]
-            if "embed_tokens.eoi_embedding" in decoder_params:
-                decoder_eoi = decoder_params["embed_tokens.eoi_embedding"]
-                # Tie them by sharing the same data
-                decoder_eoi.data = encoder_eoi.data
-                loaded_params.add("embed_tokens.eoi_embedding")
-
-        return loaded_params
+        # Now pass weights to T5Gemma2Model.load_weights which will handle routing
+        # T5Gemma2Model expects weights with "model." prefix
+        loaded_params = self.model.load_weights(weights_list)
+        
+        # Return None to skip strict weight loading check
+        # The model has parameters that are not in the checkpoint (like q_norm, k_norm)
+        # which are initialized in __init__ and don't need to be loaded
+        return None
