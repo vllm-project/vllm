@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import datasets
 import pytest
 import torch
 
@@ -58,9 +59,6 @@ def get_fake_sample_fn() -> SamplerOutput:
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
         assert logits is not None
-        print(
-            f"[UNIT TEST] fake_sample_fn: {logits.shape=} {spec_decode_metadata=} {self.input_ids.cpu=}"  # noqa: E501
-        )
         num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
         num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
         if num_computed_tokens < self.input_batch.num_prompt_tokens[0].item():
@@ -68,9 +66,6 @@ def get_fake_sample_fn() -> SamplerOutput:
         else:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
-            print(
-                f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {prompt_token_ids[first_token_id_index]=}"  # noqa: E501
-            )
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
                     [[prompt_token_ids[first_token_id_index]]],
@@ -87,17 +82,6 @@ def get_fake_sample_fn() -> SamplerOutput:
         sampled_token_ids = accpeted_tokens + [-1] * (
             num_sampled_tokens - len(accpeted_tokens)
         )
-        print(
-            f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {accpeted_tokens=} {sampled_token_ids=}"  # noqa: E501
-        )
-        # if (
-        #     self.input_batch.num_computed_tokens_cpu_tensor[0].item()
-        #     >= self.input_batch.num_prompt_tokens[0].item()
-        # ):
-        #     for i, x in enumerate(sampled_token_ids):
-        #         if x == -1:
-        #             continue
-        #         assert x == self.input_ids.cpu[i + 1]
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids], device="cuda", dtype=torch.int32
@@ -131,18 +115,12 @@ def get_fake_propose_draft_token_ids_fn():
             first_token_id_index = (
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
-        print(
-            f"fake_propose_draft_token_ids_fn: {self.input_batch.num_accepted_tokens_cpu=}"  # noqa: E501
-        )
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
             prompt_token_ids[
                 first_token_id_index : first_token_id_index + num_speculative_tokens
             ]
         ]
-        print(
-            f"[UNIT TEST] fake_propose_draft_token_ids_fn: {num_computed_tokens=} num_accepted_tokens={self.input_batch.num_accepted_tokens_cpu[0].item()} num_prompt_tokens={self.input_batch.num_prompt_tokens[0].item()} num_tokens_no_spec={self.input_batch.num_tokens_no_spec[0].item()} {first_token_id_index=} {proposed_draft_token_ids=}"  # noqa: E501
-        )
         return proposed_draft_token_ids
 
     return fake_propose_draft_token_ids_fn
@@ -157,7 +135,7 @@ def get_fake_step_action_fn(original_step_action_fn: Callable):
             cur_step_action_idx += 1
         else:
             cur_step_action = None
-        print(f"fake_get_output: {cur_step_action_idx=} {cur_step_action=}")
+        print(f"cur_step_action: {cur_step_action_idx=} {cur_step_action=}")
         return original_step_action_fn(self)
 
     return fake_get_output
@@ -187,7 +165,6 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             num_encoder_tokens,
         )
         if cur_step_action is not None:
-            print("[UNIT TEST STEP] verifying kv_cache_block_ids")
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
                 request.request_id
             ]
@@ -215,20 +192,15 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
             assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-            print("[UNIT TEST STEP] verified num_scheduled_tokens")
         mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
             mamba_group_id
         ].layer_names[0]
-        print(f"fake_execute_model_fn: {mamba_spec=}")
         nonlocal last_num_computed_tokens
         if len(scheduler_output.scheduled_cached_reqs.req_ids) > 0:
             num_computed_tokens = (
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
-            )
-            print(
-                f"fake_execute_model_fn: {num_computed_tokens=} {last_num_computed_tokens=} {num_computed_tokens // BLOCK_SIZE > last_num_computed_tokens // BLOCK_SIZE=}"  # noqa: E501
             )
             if (
                 num_computed_tokens // BLOCK_SIZE
@@ -236,9 +208,6 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             ):
                 # generated a new aligned block in this step
                 block_idx = num_computed_tokens // mamba_spec.block_size - 1
-                print(
-                    f"[UNIT TEST] fake_execute_model_fn: block_idx= {block_idx} for num_computed_tokens={num_computed_tokens - num_computed_tokens % BLOCK_SIZE}"  # noqa: E501
-                )
                 block_id = (
                     self.input_batch.block_table.block_tables[mamba_group_id]
                     .block_table.cpu[0, block_idx]
@@ -258,7 +227,6 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             last_num_computed_tokens = num_computed_tokens
         else:
             last_num_computed_tokens = 0
-            print("[UNIT TEST] fake_execute_model_fn: clear last_num_computed_tokens")
 
         ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
 
@@ -267,7 +235,6 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 cur_step_action.num_computed_tokens_start
                 == self.input_batch.num_computed_tokens_cpu[0].item()
             )
-            print("[UNIT TEST STEP] verified num_computed_tokens_start")
 
         return ret
 
@@ -405,8 +372,8 @@ def _run_ref_mamba_state_worker():
         sampling_params = SamplingParams(
             temperature=0.0, max_tokens=num_generated_tokens
         )
-        with open(f"{os.path.dirname(__file__)}/input.txt") as file:
-            full_prompt = file.read()
+        prompt_dataset = datasets.load_dataset("heheda/a_long_article")
+        full_prompt = prompt_dataset["train"][0]["text"]
         fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
         GPUModelRunner.execute_model = fake_execute_model_fn
         fake_sample_fn = get_fake_sample_fn()
@@ -425,7 +392,6 @@ def _run_ref_mamba_state_worker():
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
-        print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
         # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
         # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
         # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
@@ -450,11 +416,9 @@ def check_mamba_state_equal(
         assert key in mamba_state_ref
         # mamba state new is a subset of mamba state ref
         for i, (ref, new) in enumerate(zip(mamba_state_ref[key], mamba_state_new[key])):
-            print("check_mamba_state_equal: ", ref.shape, new.shape)
             if ref.device != new.device:
                 new = new.to(ref.device)
             new = new[: ref.shape[0]]
-            print("check_mamba_state_equal after convert: ", ref.shape, new.shape)
             if not torch.allclose(ref, new, atol=atol, rtol=rtol):
                 diff_mask = ~torch.isclose(ref, new, atol=atol, rtol=rtol)
                 diff_idx = torch.nonzero(diff_mask)
@@ -463,14 +427,6 @@ def check_mamba_state_equal(
                         f"[WARNING] found {diff_idx.shape[0] * 100 / ref.numel()}% of the elements are different"  # noqa: E501
                     )
                     continue
-                print(
-                    "diff: ",
-                    diff_idx.shape,
-                    diff_idx,
-                    ref[diff_mask],
-                    new[diff_mask],
-                    torch.max(torch.abs(ref - new)),
-                )
                 raise ValueError(
                     f"Mamba state is not equal for key: {key} at index {i}"
                 )
@@ -520,8 +476,8 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
-    with open(f"{os.path.dirname(__file__)}/input.txt") as file:
-        full_prompt = file.read()
+    prompt_dataset = datasets.load_dataset("heheda/a_long_article")
+    full_prompt = prompt_dataset["train"][0]["text"]
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -764,9 +720,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     )
     global prompt_token_ids
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-    # print(f"Token IDs: {token_ids}")
     print(f"Token IDs length: {len(prompt_token_ids)}")
-    # mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
     for test_case_name, test_config in tests.items():
         print(f"Running test case: {test_case_name}")
         num_generated_tokens = test_config.num_generated_tokens
@@ -790,7 +744,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                     step_action_next.kv_cache_block_ids = prev_block_ids.copy()
         global step_actions
         step_actions = test_config.step_actions
-        print("step actions: ", step_actions)
         _ = engine.generate(
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
