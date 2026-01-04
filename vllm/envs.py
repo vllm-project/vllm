@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_LOG_API_SERVER_EXCEPTION: bool = False
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -615,6 +616,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: os.environ.get(
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
+    ).lower()
+    == "true",
+    # Whether to log exception from API Server
+    "VLLM_LOG_API_SERVER_EXCEPTION": lambda: os.environ.get(
+        "VLLM_LOG_API_SERVER_EXCEPTION", "False"
     ).lower()
     == "true",
     # S3 access information, used for tensorizer to load model from S3
