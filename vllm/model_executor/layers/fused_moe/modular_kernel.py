@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
 )
@@ -575,16 +576,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def activation(
         self, activation: str, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        assert output.size(-1) * 2 == input.size(-1)
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(output, input)
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(output, input)
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(output, input)
-        else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        apply_moe_activation(activation, output, input)
 
     def enable_chunking(self):
         return (
