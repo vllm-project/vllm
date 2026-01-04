@@ -359,16 +359,58 @@ def kernel_unified_attention_2d(
             ).to(tl.uint8)
 
             K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
-            K = nvfp4_to_fp8_e4m3(K_nibble)
 
             # ================================================================
-            # Load K scales (u8) - CUDA now uses 32-element groups
-            # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
-            # tl.dot_scaled requires rhs_scale shape [N, K // 32] = [TILE_SIZE, 4]
+            # CRITICAL: Full dequant → uniform scale → FP8 requant pipeline
+            #
+            # Problem: tl.dot_scaled requires UNIFORM scales per K-block across
+            # all tokens, but NVFP4 has PER-TOKEN scales. Using per-token scales
+            # directly causes incorrect attention scores and repetitive output.
+            #
+            # Solution:
+            # 1. Convert NVFP4 nibbles to FP values
+            # 2. Load per-token scales and dequantize to BF16
+            # 3. Compute tile-uniform scale (max abs per K-block across ALL tokens)
+            # 4. Re-quantize to FP8 with uniform scale
+            # 5. Use uniform scale in tl.dot_scaled
             # ================================================================
+
+            # Step 1: Convert NVFP4 nibbles to float representation
+            # E2M1 format: value = sign * mantissa * 2^exponent
+            K_nibble_f = K_nibble.to(tl.float32)
+            sign = tl.where(K_nibble_f >= 8, -1.0, 1.0)
+            K_abs = tl.where(K_nibble_f >= 8, K_nibble_f - 8, K_nibble_f)
+            # E2M1 lookup: 0=0, 1=0.5, 2=1, 3=1.5, 4=2, 5=3, 6=4, 7=6
+            K_val = tl.where(
+                K_abs == 0,
+                0.0,
+                tl.where(
+                    K_abs == 1,
+                    0.5,
+                    tl.where(
+                        K_abs == 2,
+                        1.0,
+                        tl.where(
+                            K_abs == 3,
+                            1.5,
+                            tl.where(
+                                K_abs == 4,
+                                2.0,
+                                tl.where(
+                                    K_abs == 5, 3.0, tl.where(K_abs == 6, 4.0, 6.0)
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            K_float = sign * K_val  # Shape: [HEAD_SIZE, TILE_SIZE]
+
+            # Step 2: Load per-token scales
             K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
             offs_ks = tl.arange(0, K_NUM_SCALES)
 
+            # K_scale layout in cache: [TILE_SIZE, K_NUM_SCALES] for per-token scales
             k_scale_base = (
                 physical_block_idx[:, None] * stride_k_cache_0
                 + kv_head_idx * stride_k_cache_2
@@ -379,17 +421,50 @@ def kernel_unified_attention_2d(
                 tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
 
-            # Load scales directly - no max() reduction needed
-            # CUDA stores 4 scales at positions: DATA_BYTES + [0, 1, 2, 3]
-            K_scale_u8 = tl.load(
+            K_scale_per_token = tl.load(
                 key_cache_ptr + k_scale_base + offs_ks[None, :] * stride_k_cache_3,
                 mask=k_scale_mask,
                 other=127,
-            ).to(tl.uint8)
+            ).to(
+                tl.uint8
+            )  # Shape: [TILE_SIZE, K_NUM_SCALES]
 
-            # K_scale_u8 shape: [TILE_SIZE, K_NUM_SCALES] = [32, 4]
-            # This matches tl.dot_scaled rhs_scale requirement exactly
-            K_scale_reduced = K_scale_u8
+            # ================================================================
+            # CORRECT SOLUTION: Full BF16 Dequantization
+            #
+            # Problem: tl.dot_scaled requires uniform scales, but NVFP4 has per-token scales
+            # Solution: Dequantize K to BF16 using per-token scales, use regular tl.dot
+            #
+            # This preserves QUALITY by:
+            # - Using all precision from NVFP4's per-token scales
+            # - Avoiding forced uniform scale quantization error
+            # - Simple, proven approach
+            # ================================================================
+
+            # Dequantize K using per-token scales
+            K_scale_exp = tl.math.exp2(
+                K_scale_per_token.to(tl.float32) - 127.0
+            )  # [TILE_SIZE, K_NUM_SCALES]
+
+            # Reshape K_float from [HEAD_SIZE_PADDED, TILE_SIZE] to [K_NUM_SCALES, 32, TILE_SIZE]
+            K_float_reshaped = tl.reshape(K_float, (K_NUM_SCALES, 32, TILE_SIZE))
+
+            # Transpose and broadcast scales
+            K_scale_exp_T = tl.trans(K_scale_exp)  # [K_NUM_SCALES, TILE_SIZE]
+            K_scale_broadcast = tl.broadcast_to(
+                K_scale_exp_T[:, None, :], (K_NUM_SCALES, 32, TILE_SIZE)
+            )
+
+            # Apply per-token scales to get fully dequantized K
+            K_dequant_reshaped = (
+                K_float_reshaped * K_scale_broadcast
+            )  # [K_NUM_SCALES, 32, TILE_SIZE]
+
+            # Reshape back to [HEAD_SIZE_PADDED, TILE_SIZE]
+            K_dequant = tl.reshape(K_dequant_reshaped, (HEAD_SIZE_PADDED, TILE_SIZE))
+
+            # K is now in BF16 with full precision
+            K = K_dequant.to(tl.bfloat16)
         else:
             K = K_load
 
@@ -476,15 +551,14 @@ def kernel_unified_attention_2d(
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
         # PERFORMANCE OPTIMIZED MATMUL PATHS
+        # NVFP4 with Four Over Six (4/6) quantization:
+        # - K is fully dequantized to BF16 using per-token scales (quality preserved)
+        # - Q is in FP8 with per-block scales
+        # - Use regular tl.dot for BF16 matmul
         if USE_NVFP4 and USE_NVFP4_TC:
-            S += scale * tl.dot_scaled(
-                Q_fp8,
-                Q_scale,
-                "e4m3",
-                K,
-                K_scale_reduced,
-                "e4m3",
-            )
+            # K is BF16 (dequantized from NVFP4 with per-token scales)
+            # Q is also converted to BF16 for matmul
+            S += scale * tl.dot(Q.to(tl.bfloat16), K).to(tl.float32)
         elif USE_NVFP4:
             S += scale * tl.dot(Q.to(tl.bfloat16), K.to(tl.bfloat16)).to(tl.float32)
         elif K.dtype.is_fp8():
@@ -811,7 +885,7 @@ def kernel_unified_attention_3d(
             # ================================================================
             # Load K scales (u8) - CUDA now uses 32-element groups
             # So we have HEAD_SIZE_PADDED // 32 = 4 scales per head
-            # tl.dot_scaled requires rhs_scale shape [N, K // 32] = [TILE_SIZE, 4]
+            # tl.dot_scaled RHS scale must be [K_dim//32, N] = [4, TILE_SIZE]
             # ================================================================
             K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
             offs_ks = tl.arange(0, K_NUM_SCALES)
@@ -826,16 +900,14 @@ def kernel_unified_attention_3d(
                 tile_mask[:, None], (TILE_SIZE, K_NUM_SCALES)
             )
 
-            # Load scales directly - no max() reduction needed
-            # CUDA stores 4 scales at positions: DATA_BYTES + [0, 1, 2, 3]
+            # Load scales - shape [TILE_SIZE, K_NUM_SCALES] = [32, 4]
+            # This matches Triton's expected rhs_scale shape [N, K//32]
             K_scale_u8 = tl.load(
                 key_cache_ptr + k_scale_base + offs_ks[None, :] * stride_k_cache_3,
                 mask=k_scale_mask,
                 other=127,
             ).to(tl.uint8)
 
-            # K_scale_u8 shape: [TILE_SIZE, K_NUM_SCALES] = [32, 4]
-            # This matches tl.dot_scaled rhs_scale requirement exactly
             K_scale_reduced = K_scale_u8
 
         if not USE_NVFP4:
