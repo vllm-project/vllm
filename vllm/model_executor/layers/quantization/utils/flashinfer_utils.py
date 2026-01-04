@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
-from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -313,12 +312,12 @@ def align_fp8_moe_weights_for_fi(
 
 
 def prepare_fp8_moe_layer_for_fi(
-    fp8_backend: "Fp8MoeBackend",
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Convert Fp8 MoE weights to flashinfer kernel format"""
 
@@ -344,7 +343,7 @@ def prepare_fp8_moe_layer_for_fi(
     # FI TRT-LLM FP8 per-tensor MoE kernel requires weight shuffle
     # and registration of alpha scales. Note that we do not register
     # as nn.Parameters since they are not needed for weight-reloading.
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and not block_quant:
+    if is_trtllm and not block_quant:
         rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
         register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer, w13_scale, w2_scale)
 

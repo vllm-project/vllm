@@ -204,12 +204,12 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
         w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
-            fp8_backend,
             layer,
             w13,
             w2,
             w13,
             block_quant,
+            is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
 
     return w13, w2, w13_scale, w2_scale
