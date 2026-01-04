@@ -47,8 +47,6 @@ def clear_triton_cache():
 
     # Try to clear Triton's runtime cache
     try:
-        import triton
-
         if (
             hasattr(triton, "runtime")
             and hasattr(triton.runtime, "cache")

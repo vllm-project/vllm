@@ -380,6 +380,28 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         self.quant_config = quant_config
 
+    @staticmethod
+    def convert_weights_to_kernel_format(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w1_scale: torch.Tensor | None,
+        w2_scale: torch.Tensor | None,
+        a1_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """
+        Convert the weights to the format expected by this kernel.
+        By default, this is a no-op that returns the weights as is.
+        """
+        return w1, w2, w1_scale, w2_scale, a1_scale, a2_scale
+
     @property
     @abstractmethod
     def activation_formats(
