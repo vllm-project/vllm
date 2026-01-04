@@ -320,8 +320,8 @@ class AttentionImpl(ABC, Generic[T]):
     pcp_world_size: int
     pcp_rank: int
 
-    total_cp_world_size: int
-    total_cp_rank: int
+    cp_world_size: int
+    cp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
@@ -343,11 +343,11 @@ class AttentionImpl(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
-            self.dcp_world_size > 1 and self.can_return_lse_for_decode
+            self.cp_world_size > 1 and self.can_return_lse_for_decode
         )
         return self
 
