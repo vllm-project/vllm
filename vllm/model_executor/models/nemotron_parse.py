@@ -18,7 +18,6 @@ from timm.data.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 from torchvision import transforms as T
 from transformers import (
     BartConfig,
-    BatchEncoding,
     BatchFeature,
     PretrainedConfig,
     TensorType,
@@ -27,6 +26,7 @@ from transformers import (
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -41,7 +41,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
 )
 from vllm.model_executor.models.radio import RadioModel
-from vllm.model_executor.models.utils import _flatten_embeddings, flatten_bn
+from vllm.model_executor.models.utils import _flatten_embeddings
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -459,7 +459,8 @@ class NemotronParseImageProcessor:
         pixel_values = torch.stack(pixel_values)
 
         # Normalize pixel values
-        return (pixel_values - self.norm_mean) / self.norm_std
+        normalized_values = (pixel_values - self.norm_mean) / self.norm_std
+        return {"pixel_values": normalized_values}
 
     def __call__(
         self, images: Image.Image | list[Image.Image], **kwargs
@@ -500,18 +501,13 @@ class NemotronParseProcessor:
         **kwargs,
     ):
         text, images = [self._make_batch_input(x) for x in (text, images)]
-
-        if len(images) == 0:
-            image_inputs = {}
-        else:
-            pixel_values = self.image_processor(images)
-            image_inputs = {"pixel_values": pixel_values}
+        image_inputs = {} if len(images) == 0 else self.image_processor(images)
 
         text_inputs = self.tokenizer(text, add_special_tokens=False, **kwargs)
-        combined_outputs = {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-        }
+        combined_outputs = BatchFeature(
+            data={**text_inputs, **image_inputs},
+            tensor_type=return_tensors,
+        )
         return combined_outputs
 
 
@@ -556,10 +552,12 @@ class NemotronParseDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_hf_config().image_size
+        # TODO amitz-nv: Check the order here (was originally: width, height)
+        target_height, target_width = self.info.get_hf_config().image_size
 
         return {
             "image": self._get_dummy_images(
@@ -682,9 +680,18 @@ class RadioWithNeck(nn.Module):
             model_name=model_name,
             patch_size=getattr(hf_config_vision, "patch_size", 16),
         )
-        hf_config_vision.internvit_config = internvit_config
+        # Set the actual image size from the main config
+        internvit_config.image_size = hf_config.image_size
+        internvit_config.max_img_size = hf_config_vision.args["cpe_max_size"]
+        internvit_config.reg_tokens = hf_config_vision.args.get(
+            "register_multiple", None
+        )
+        internvit_config.teachers = hf_config_vision.args.get("teachers", None)
+        internvit_config.cls_token_per_teacher = hf_config_vision.args.get(
+            "cls_token_per_teacher", None
+        )
 
-        return RadioModel(config=hf_config_vision, quant_config=quant_config)
+        return RadioModel(config=internvit_config, quant_config=quant_config)
 
     def forward(self, pixel_values, **kwargs):
         radio_output = self.model_encoder(pixel_values)
@@ -808,35 +815,43 @@ class MBartDecoderNoPos(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        model_params_dict = dict(self.named_parameters())
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
+            # (param_name, shard_name, shard_id)
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
+            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
         ]
-
-        for name, w in weights:
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
             if name.startswith("embed_positions"):
                 continue
 
-            is_stacked = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                rep_name = name.replace(weight_name, param_name)
-                if rep_name not in model_params_dict:
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = model_params_dict[rep_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, w, shard_id)
-                is_stacked = True
-                break
 
-            if not is_stacked:
-                param = model_params_dict[name]
-                with torch.no_grad():
-                    default_weight_loader(param, w)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -894,7 +909,8 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
             h, w = self.config.image_size
             return NemotronParsePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values, concat=True),
+                # TODO amitz-nv: Is the flatten_bn really unnecessary here?
+                data=pixel_values,  # flatten_bn(pixel_values, concat=True),
                 resolve_bindings={
                     "h": h,
                     "w": w,
@@ -918,9 +934,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.decoder
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -959,7 +973,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         """
         inputs_embeds = None
         if encoder_input_ids.numel() > 0:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            vision_embeddings = self.embed_multimodal(**kwargs)
             inputs_embeds = self.get_input_embeddings(vision_embeddings)
         hidden_states = self.decoder(
             decoder_input_ids=input_ids, encoder_hidden_states=inputs_embeds
