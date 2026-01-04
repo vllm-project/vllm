@@ -330,8 +330,9 @@ def prepare_fp8_moe_layer_for_fi(
     """
 
     assert hasattr(layer.moe_config, "is_act_and_mul")
-    assert hasattr(layer, "weight_block_size")
-    block_quant = layer.weight_block_size is not None
+    block_quant = (
+        hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
+    )
 
     # Some FI MoE kernels require internal alignment of 16
     # for the gate-up proj. Pad the weights to respect this.
