@@ -223,14 +223,14 @@ def get_score_prompt(
         # fall back to the default implementation.
         try:
             full_prompt = safe_apply_chat_template(
+                model_config,
                 tokenizer,
                 [
                     {"role": "query", "content": prompt_1},
                     {"role": "document", "content": prompt_2},
                 ],
-                score_template,
+                chat_template=score_template,
                 tools=None,
-                model_config=model_config,
             )
             prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
         except ChatTemplateResolutionError:
