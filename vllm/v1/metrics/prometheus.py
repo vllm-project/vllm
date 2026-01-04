@@ -36,18 +36,35 @@ def setup_multiprocess_prometheus():
         )
 
 
-def get_prometheus_registry() -> CollectorRegistry:
+def get_prometheus_registry(exemplars_enabled: bool = False) -> CollectorRegistry:
     """Get the appropriate prometheus registry based on multiprocessing
     configuration.
+
+    Note: Exemplars are not supported in multiprocess mode. If exemplars
+    are enabled, we use the regular REGISTRY even if multiprocess mode
+    is configured.
+
+    Args:
+        exemplars_enabled: Whether exemplars are enabled. If True, multiprocess
+            mode will be disabled even if configured, because prometheus_client
+            doesn't support exemplars in multiprocess mode.
 
     Returns:
         Registry: A prometheus registry
     """
-    if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
+    if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None and not exemplars_enabled:
         logger.debug("Using multiprocess registry for prometheus metrics")
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
         return registry
+    elif exemplars_enabled and os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
+        logger.warning(
+            "Exemplars enabled but multiprocess mode is configured. "
+            "Disabling multiprocess mode because prometheus_client doesn't "
+            "support exemplars in multiprocess mode. Metrics from multiple "
+            "API server processes will NOT be aggregated. To fix: disable "
+            "exemplars (--no-enable-exemplars) or use api_server_count=1."
+        )
 
     return REGISTRY
 
