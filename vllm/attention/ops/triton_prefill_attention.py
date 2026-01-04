@@ -150,23 +150,30 @@ def _fwd_kernel(
         m_ij = tl.max(qk, 1)
         # For sliding window there's a chance the max is -inf due to masking of
         # the entire row. In this case we need to set m_j 0 to avoid NaN
-        m_ij = tl.where(m_ij > float("-inf"), m_ij, 0.0)
-        p = tl.exp(qk - m_ij[:, None])
+        m_ij_valid_mask = m_ij > float("-inf")
+        m_ij_masked = tl.where(m_ij_valid_mask, m_ij, 0.0)
+        # -- compute p and l_ij --
+        p = tl.exp(qk - m_ij_masked[:, None])
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         m_i_new = tl.maximum(m_i, m_ij)
+        m_i_new_mask = m_i_new > float("-inf")
         alpha = tl.exp(m_i - m_i_new)
         beta = tl.exp(m_ij - m_i_new)
+        # mask alpha and beta for sliding window
+        alpha = tl.where(m_i_new_mask, alpha, 1.0)
+        beta = tl.where(m_i_new_mask, beta, 0.0)
         l_i_new = alpha * l_i + beta * l_ij
         # -- update output accumulator --
         # scale p
         # For sliding window there's a chance the l_i_new is 0 due to masking
         # the entire row. We need to set l_i_new 1 to avoid zero division
-        l_i_new = tl.where(l_i_new > 0, l_i_new, 1.0)
-        p_scale = beta / l_i_new
+        l_i_new_mask = (l_i_new != 0.0) & (m_i_new_mask > float("-inf"))
+        l_i_new_safe = tl.where(l_i_new_mask, l_i_new, 1.0)
+        p_scale = beta / l_i_new_safe
         p = p * p_scale[:, None]
         # scale acc
-        acc_scale = l_i / l_i_new * alpha
+        acc_scale = l_i / l_i_new_safe * alpha
         acc = acc * acc_scale[:, None]
         # update acc
         v = tl.load(
