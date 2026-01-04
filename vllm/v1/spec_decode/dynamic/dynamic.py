@@ -157,7 +157,6 @@ class DynamicSpeculativeDecodingManager:
 
 # python3 vllm/v1/spec_decode/dynamic.py
 if __name__ == "__main__":
-    # print(_get_batch_stats(21))
     MAX_TEST_BS = 128
     dynamic_sd = DynamicSpeculativeDecodingManager(
         dynamic_config=_DYNAMIC_STATS,

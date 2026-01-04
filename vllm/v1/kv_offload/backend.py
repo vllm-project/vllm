@@ -18,6 +18,7 @@ class BlockStatus(ctypes.Structure):
     load_store_spec - backend-specific information on how to actually
         read/write the block.
     """
+
     _fields_ = [("ref_cnt", ctypes.c_int32)]
 
     def __init__(self):
@@ -51,8 +52,7 @@ class Backend(ABC):
         pass
 
     @abstractmethod
-    def allocate_blocks(self,
-                        block_hashes: list[BlockHash]) -> list[BlockStatus]:
+    def allocate_blocks(self, block_hashes: list[BlockHash]) -> list[BlockStatus]:
         """
         Allocate space for writing blocks.
         This method assumes there is enough space for allocation.
@@ -80,8 +80,9 @@ class Backend(ABC):
         """
         pass
 
-    def get_load_store_spec(self, block_hashes: Iterable[BlockHash],
-                            blocks: Iterable[BlockStatus]) -> LoadStoreSpec:
+    def get_load_store_spec(
+        self, block_hashes: Iterable[BlockHash], blocks: Iterable[BlockStatus]
+    ) -> LoadStoreSpec:
         """
         Get backend-specific information on how to read/write blocks.
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from pydantic.dataclasses import dataclass
 
@@ -28,7 +27,7 @@ class SpeechToTextConfig:
     splitting long audio. This helps maintain context across chunk boundaries
     and improves transcription quality at split points."""
 
-    min_energy_split_window_size: Optional[int] = 1600
+    min_energy_split_window_size: int | None = 1600
     """Window size in samples for finding low-energy (quiet) regions to split
     audio chunks. The algorithm looks for the quietest moment within this
     window to minimize cutting through speech. Default 1600 samples ≈ 100ms

@@ -4,8 +4,13 @@
 import prometheus_client
 import pytest
 
-from vllm.v1.metrics.reader import (Counter, Gauge, Histogram, Vector,
-                                    get_metrics_snapshot)
+from vllm.v1.metrics.reader import (
+    Counter,
+    Gauge,
+    Histogram,
+    Vector,
+    get_metrics_snapshot,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -20,10 +25,12 @@ def test_registry(monkeypatch):
 
 @pytest.mark.parametrize("num_engines", [1, 4])
 def test_gauge_metric(test_registry, num_engines):
-    g = prometheus_client.Gauge("vllm:test_gauge",
-                                "Test gauge metric",
-                                labelnames=["model", "engine_index"],
-                                registry=test_registry)
+    g = prometheus_client.Gauge(
+        "vllm:test_gauge",
+        "Test gauge metric",
+        labelnames=["model", "engine_index"],
+        registry=test_registry,
+    )
     for i in range(num_engines):
         g.labels(model="foo", engine_index=str(i)).set(98.5)
 
@@ -41,10 +48,12 @@ def test_gauge_metric(test_registry, num_engines):
 
 @pytest.mark.parametrize("num_engines", [1, 4])
 def test_counter_metric(test_registry, num_engines):
-    c = prometheus_client.Counter("vllm:test_counter",
-                                  "Test counter metric",
-                                  labelnames=["model", "engine_index"],
-                                  registry=test_registry)
+    c = prometheus_client.Counter(
+        "vllm:test_counter",
+        "Test counter metric",
+        labelnames=["model", "engine_index"],
+        registry=test_registry,
+    )
     for i in range(num_engines):
         c.labels(model="bar", engine_index=str(i)).inc(19)
 
@@ -62,11 +71,13 @@ def test_counter_metric(test_registry, num_engines):
 
 @pytest.mark.parametrize("num_engines", [1, 4])
 def test_histogram_metric(test_registry, num_engines):
-    h = prometheus_client.Histogram("vllm:test_histogram",
-                                    "Test histogram metric",
-                                    labelnames=["model", "engine_index"],
-                                    buckets=[10, 20, 30, 40, 50],
-                                    registry=test_registry)
+    h = prometheus_client.Histogram(
+        "vllm:test_histogram",
+        "Test histogram metric",
+        labelnames=["model", "engine_index"],
+        buckets=[10, 20, 30, 40, 50],
+        registry=test_registry,
+    )
     for i in range(num_engines):
         hist = h.labels(model="blaa", engine_index=str(i))
         hist.observe(42)
@@ -97,7 +108,8 @@ def test_vector_metric(test_registry, num_engines):
         "vllm:spec_decode_num_accepted_tokens_per_pos",
         "Vector-like counter metric",
         labelnames=["position", "model", "engine_index"],
-        registry=test_registry)
+        registry=test_registry,
+    )
     for i in range(num_engines):
         c.labels(position="0", model="llama", engine_index=str(i)).inc(10)
         c.labels(position="1", model="llama", engine_index=str(i)).inc(5)

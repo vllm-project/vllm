@@ -5,26 +5,38 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import set_env_var
+from vllm.utils.system_utils import set_env_var
 
 from .post_cleanup import PostCleanupPass
 from .vllm_inductor_pass import VllmInductorPass
+
+if rocm_aiter_ops.is_enabled():
+    from vllm.compilation.rocm_aiter_fusion import (
+        RocmAiterRMSNormFusionPass,
+        RocmAiterSiluMulFp8GroupQuantFusionPass,
+    )
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
+    from .qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
 from .fix_functionalization import FixFunctionalizationPass
-from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
+from .inductor_pass import (
+    CustomGraphPass,
+    InductorPass,
+    get_pass_context,
+)
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -69,11 +81,13 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
-        shape = get_pass_context().runtime_shape
+        compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
+            else:
+                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
@@ -86,27 +100,40 @@ class PostGradPassManager(CustomGraphPass):
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        if self.pass_config.enable_noop:
-            self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass(config)]
-            if self.pass_config.enable_async_tp:
-                self.passes += [AsyncTPPass(config)]
+        # Set the current vllm config to allow tracing CustomOp instances
+        with set_current_vllm_config(config, check_compile=False):
+            if self.pass_config.eliminate_noops:
+                self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_fi_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
+            if self.pass_config.enable_sp:
+                self.passes += [SequenceParallelismPass(config)]
+                if self.pass_config.fuse_gemm_comms:
+                    self.passes += [AsyncTPPass(config)]
 
-        if self.pass_config.enable_fusion:
-            self.passes += [RMSNormQuantFusionPass(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
+            if self.pass_config.fuse_allreduce_rms:
+                self.passes += [AllReduceFusionPass(config)]
 
-        if self.pass_config.enable_attn_fusion:
-            self.passes += [AttnFusionPass(config)]
+            if self.pass_config.fuse_norm_quant:
+                self.passes += [RMSNormQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [
+                        RocmAiterRMSNormFusionPass(config),
+                    ]
+            if self.pass_config.fuse_act_quant:
+                self.passes += [ActivationQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-        # needs a functional graph
-        self.post_cleanup = PostCleanupPass(config)
-        self.fix_functionalization = FixFunctionalizationPass(config)
+            if self.pass_config.fuse_attn_quant:
+                self.passes += [AttnFusionPass(config)]
+
+            if self.pass_config.enable_qk_norm_rope_fusion:
+                self.passes += [QKNormRoPEFusionPass(config)]
+
+            # needs a functional graph
+            self.post_cleanup = PostCleanupPass(config)
+            self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
@@ -118,8 +145,13 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.uuid(), "passes": []}
+        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
+
+        # Include the compile range in the uuid to ensure that inductor
+        # recompiles the graph for the new dynamic compile range.
+        state["compile_range"] = str(get_pass_context().compile_range)
+
         return InductorPass.hash_dict(state)

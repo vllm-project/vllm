@@ -4,12 +4,11 @@
 import csv
 import os
 from datetime import datetime
-from typing import Optional
 
 import flashinfer
 import torch
 
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = torch.float8_e4m3fn
@@ -28,9 +27,7 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 @torch.no_grad()
 def benchmark_prefill(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_len: int,
     num_heads: tuple[int, int] = (64, 8),
@@ -142,8 +139,8 @@ def benchmark_prefill(
 
     def time_fn(fn, warmup=10, trials=20):
         torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+        start = torch.Event(enable_timing=True)
+        end = torch.Event(enable_timing=True)
         times = []
         for i in range(warmup):
             fn()

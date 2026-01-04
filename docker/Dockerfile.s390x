@@ -14,7 +14,7 @@ ENV LANG=C.UTF-8 \
 
 # Install development utilities
 RUN microdnf install -y \
-    which procps findutils tar vim git gcc gcc-gfortran g++ make patch zlib-devel \
+    which procps findutils tar vim git gcc-toolset-14 gcc-toolset-14-libatomic-devel patch zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
     openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy libsndfile \
     clang llvm-devel llvm-static clang-devel && \
@@ -85,40 +85,15 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup default stable && \
     rustup show
 
-FROM python-install AS torch
-ARG TORCH_VERSION=2.7.0
-ENV export _GLIBCXX_USE_CXX11_ABI=1
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-
-WORKDIR /tmp
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
-    --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    git clone https://github.com/pytorch/pytorch.git && \
-    cd pytorch && \
-    git checkout v2.7.0 && \
-    git submodule sync && \
-    git submodule update --init --recursive && \
-    uv pip install cmake ninja && \
-    uv pip install -r requirements.txt && \
-    python setup.py bdist_wheel
-    
-
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VERSION=2.7.0
-ARG TORCH_VISION_VERSION=v0.20.1
+ARG TORCH_VISION_VERSION=v0.23.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl | head -n 1) && \
-    uv pip install -v $TORCH_WHL_FILE && \
+    uv pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -199,26 +174,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
        sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
     fi && python setup.py bdist_wheel
-
-# Edit aws-lc-sys to support s390x
-FROM python-install AS aws-lc-sys-editor
-WORKDIR /tmp
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-ARG AWS_LC_VERSION=v0.30.0
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
-    --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    git clone --recursive https://github.com/aws/aws-lc-rs.git && \
-    cd aws-lc-rs && \
-    git checkout tags/aws-lc-sys/${AWS_LC_VERSION} && \
-    git submodule sync && \
-    git submodule update --init --recursive && \
-    cd aws-lc-sys && \
-    sed -i '682 s/strncmp(buf, "-----END ", 9)/memcmp(buf, "-----END ", 9)/' aws-lc/crypto/pem/pem_lib.c && \
-    sed -i '712 s/strncmp(buf, "-----END ", 9)/memcmp(buf, "-----END ", 9)/' aws-lc/crypto/pem/pem_lib.c && \
-    sed -i '747 s/strncmp(buf, "-----END ", 9)/memcmp(buf, "-----END ", 9)/' aws-lc/crypto/pem/pem_lib.c
     
 # Build Outlines Core
 FROM python-install AS outlines-core-builder
@@ -226,17 +181,17 @@ WORKDIR /tmp
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-ARG OUTLINES_CORE_VERSION=0.2.10
+COPY requirements/common.txt /tmp/requirements/common.txt
+ARG OUTLINES_CORE_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    --mount=type=bind,from=aws-lc-sys-editor,source=/tmp/aws-lc-rs/aws-lc-sys,target=/tmp/aws-lc-sys,rw \
+    OUTLINES_CORE_VERSION=${OUTLINES_CORE_VERSION:-$(grep -E '^outlines_core\s*==\s*[0-9.]+' /tmp/requirements/common.txt | grep -Eo '[0-9.]+')} && \
+    if [ -z "${OUTLINES_CORE_VERSION}" ]; then echo "ERROR: Could not determine outlines_core version"; exit 1; fi && \
     git clone https://github.com/dottxt-ai/outlines-core.git && \
     cd outlines-core && \
     git checkout tags/${OUTLINES_CORE_VERSION} && \
     sed -i "s/version = \"0.0.0\"/version = \"${OUTLINES_CORE_VERSION}\"/" Cargo.toml && \
-    echo '[patch.crates-io]' >> Cargo.toml && \
-    echo 'aws-lc-sys = { path = "/tmp/aws-lc-sys" }' >> Cargo.toml && \
     uv pip install maturin && \
     python -m maturin build --release --out dist
 
@@ -245,13 +200,15 @@ FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
 
 # Set correct library path for torch and numactl
-ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:/opt/rh/gcc-toolset-14/root/usr/lib64:$LD_LIBRARY_PATH"
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 ENV UV_LINK_MODE=copy
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
 ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
+ENV PCP_DIR=/opt/rh/gcc-toolset-14/root
+ENV PKG_CONFIG_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig/"
+ENV PATH="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}:/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/bin:$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
 
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
@@ -266,7 +223,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
     --mount=type=bind,from=torch-vision,source=/tmp/vision/dist,target=/tmp/vision-wheels/ \
     --mount=type=bind,from=hf-xet-builder,source=/tmp/hf-xet/dist,target=/tmp/hf-xet-wheels/ \
-    --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
     --mount=type=bind,from=outlines-core-builder,source=/tmp/outlines-core/dist,target=/tmp/outlines-core/dist/ \
@@ -274,7 +230,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
      ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
-     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl) && \
      LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
      OUTLINES_CORE_WHL_FILE=$(ls /tmp/outlines-core/dist/*.whl) && \
@@ -282,7 +237,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
-        $TORCH_WHL_FILE \
         $LLVM_WHL_FILE \
         $NUMBA_WHL_FILE \
         $OUTLINES_CORE_WHL_FILE \
