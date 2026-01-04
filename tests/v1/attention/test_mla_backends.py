@@ -19,10 +19,10 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.layer import MLAAttention
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
@@ -258,35 +258,6 @@ def create_and_prepopulate_kv_cache(
     return kv_cache
 
 
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
-
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-    def forward(self, *_args, **_kwargs):
-        raise NotImplementedError
-
-
-class MockMLAAttentionLayer(AttentionLayerBase):
-    """A mock MLA attention layer for populating static_forward_context."""
-
-    def __init__(self, impl):
-        self.impl = impl
-
-    def get_attn_backend(self):
-        raise NotImplementedError
-
-    def get_kv_cache_spec(self, vllm_config):
-        raise NotImplementedError
-
-
 def run_attention_backend(
     backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
@@ -320,6 +291,34 @@ def run_attention_backend(
         )
         head_size = vllm_config.model_config.get_head_size()
         scale = 1.0 / (head_size**0.5)
+        # Create the actual MLAAttention layer
+        act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+        torch.set_default_dtype(act_dtype)
+
+        # Use a unique prefix that includes the backend name to avoid conflicts
+        # when testing multiple backends in the same test
+        unique_prefix = f"{layer_names[0] if layer_names else 'mla'}_{backend.value}"
+
+        # Remove any existing layer with this prefix to avoid conflicts
+        compilation_config = vllm_config.compilation_config
+        if unique_prefix in compilation_config.static_forward_context:
+            del compilation_config.static_forward_context[unique_prefix]
+
+        mla_layer = MLAAttention(
+            num_heads=num_heads,
+            scale=scale,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=mock_kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix=unique_prefix,
+            use_sparse=backend.get_class().is_sparse(),
+        ).to(device=device, dtype=act_dtype)
+
+        # Replace the impl with the test's impl_cls
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -339,16 +338,26 @@ def run_attention_backend(
             v_head_dim=v_head_dim,
             kv_b_proj=mock_kv_b_proj,
         )
+        mla_layer.impl = impl
 
-        # Process weights to create W_UK_T and W_UV attributes needed by MLA
-        act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
-        impl.process_weights_after_loading(act_dtype)
+        mla_layer.is_aiter_triton_fp8_bmm_enabled = getattr(
+            impl, "is_aiter_triton_fp8_bmm_enabled", False
+        )
+        mla_layer.dcp_world_size = getattr(impl, "dcp_world_size", None)
+        mla_layer.chunked_prefill_workspace_size = getattr(
+            impl, "chunked_prefill_workspace_size", 0
+        )
+        mla_layer._pad_v = getattr(impl, "_pad_v", False)
+        mla_layer._use_fi_prefill = getattr(impl, "_use_fi_prefill", False)
 
-        # Populate static_forward_context with mock attention layers
+        # Populate static_forward_context
         for layer_name in layer_names:
             vllm_config.compilation_config.static_forward_context[layer_name] = (
-                MockMLAAttentionLayer(impl)
+                mla_layer
             )
+
+        # Process weights on the layer to create W_UK_T and W_UV attributes
+        mla_layer.process_weights_after_loading(act_dtype)
 
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
@@ -357,19 +366,24 @@ def run_attention_backend(
             common_attn_metadata=common_attn_metadata,
         )
 
-        # Create mock layer and output buffer
-        mock_layer = MockAttentionLayer(device)
+        # Create output buffer
         num_tokens = query.shape[0]
         output = torch.empty(
             num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
         )
 
-        # Run forward pass
+        # Run forward pass using the real MLAAttention layer
         # NOTE: The query, key, and value are already shaped correctly
         # in the calling test function.
-        output = impl.forward(
-            mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
-        )
+        # Dense backends use forward_impl(), sparse backends use impl.forward()
+        if backend.get_class().is_sparse():
+            output = impl.forward(
+                mla_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+            )
+        else:
+            output = mla_layer.forward_impl(
+                mla_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+            )
 
         return output
 
