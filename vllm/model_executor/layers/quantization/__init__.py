@@ -37,6 +37,7 @@ QuantizationMethods = Literal[
     "rtn",
     "inc",
     "mxfp4",
+    "mxfp8",
     "petit_nvfp4",
     "cpu_gptq",
     "cpu_awq",
@@ -126,6 +127,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
@@ -161,6 +163,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "rtn": RTNConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_gptq": CPUGPTQConfig,
         "cpu_awq": CPUAWQConfig,
