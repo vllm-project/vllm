@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 else:
     torch = LazyLoader("torch", globals(), "torch")
+    from PIL.Image import Image
 
 _T = TypeVar("_T")
 
@@ -107,6 +108,28 @@ The number of data items allowed per modality is restricted by
 """
 
 
+class VisionChunkImage(TypedDict):
+    """Represents an image wrapped as a vision chunk."""
+
+    type: Literal["image"]
+    image: Image
+    uuid: str | None
+
+
+class VisionChunkVideo(TypedDict):
+    """Represents a video chunk with metadata."""
+
+    type: Literal["video_chunk"]
+    video_chunk: list[Image]
+    uuid: str | None
+    prompt: str
+    video_idx: int
+
+
+VisionChunk = VisionChunkImage | VisionChunkVideo
+"""A vision chunk is either an image or a video chunk."""
+
+
 @final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Type annotations for modality types predefined by vLLM."""
@@ -119,6 +142,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    vision_chunk: ModalityData[VisionChunk]
+    """The input visual atom(s) - unified modality for images and video chunks."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
