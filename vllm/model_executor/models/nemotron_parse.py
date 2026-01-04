@@ -646,9 +646,7 @@ class RadioWithNeck(nn.Module):
         radio_config = RadioConfig(
             model_name=model_name,
             image_size=hf_config.image_size,
-            max_img_size=hf_config_vision.args["cpe_max_size"],
-            reg_tokens=hf_config_vision.args["register_multiple"],
-            **hf_config_vision.to_dict(),
+            **hf_config_vision.args,
         )
 
         return RadioModel(config=radio_config, quant_config=quant_config)
