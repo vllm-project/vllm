@@ -22,12 +22,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-from enum import Enum
 import logging
 import os
 import random
 import uuid
 from collections.abc import AsyncIterator
+from enum import Enum
 
 import aiohttp
 import uvicorn
@@ -741,9 +741,7 @@ if __name__ == "__main__":
         ]
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
 
-    app.state.encoder_dispatch_mode = EncoderDispatchMode(
-        args.encoder_dispatch_mode
-    )
+    app.state.encoder_dispatch_mode = EncoderDispatchMode(args.encoder_dispatch_mode)
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)
     logger.info("Encode servers: %s", app.state.e_urls)
