@@ -6,6 +6,9 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import torch
+import torch.distributed as dist
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -224,6 +227,21 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
+        # Balance scheduling.
+        if self.vllm_config.scheduler_config.balance_scheduling:
+            self.stable_count = 0
+            self.max_stable_count = 50
+            self.balance_queue = [
+                torch.tensor([0], dtype=torch.int, device="cpu")
+                for _ in range(self.vllm_config.parallel_config.data_parallel_size)
+            ]
+
+    def balance_gather(self, dp_group):
+        running_tensor = torch.tensor(
+            [len(self.running)], dtype=torch.int, device="cpu"
+        )
+        dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -438,6 +456,16 @@ class Scheduler(SchedulerInterface):
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
+
+                if self.vllm_config.scheduler_config.balance_scheduling:
+                    balance_flag = (
+                        max(t.item() for t in self.balance_queue)
+                        == self.max_num_running_reqs
+                    )
+                    if balance_flag and self.stable_count < self.max_stable_count:
+                        self.stable_count += 1
+                        break
+                    self.stable_count = 0
 
                 request = self.waiting.peek_request()
 

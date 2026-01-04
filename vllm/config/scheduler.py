@@ -144,6 +144,13 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    balance_scheduling: bool = False
+    """EXPERIMENTAL: If set to True, perform balance scheduling. This may help
+    increase output throughput and reduce TPOT in v1 sheduler. However, TTFT 
+    may degrade in some scenarios. Furthermore, enabling this feature is not 
+    recommended in scenarios where PD is separated.
+    """
+
     @staticmethod
     def default_factory(**kwargs):
         """
