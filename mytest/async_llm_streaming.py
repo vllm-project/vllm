@@ -76,9 +76,9 @@ async def main():
     try:
         # Example prompts to demonstrate streaming
         prompts = [
-            "The future of artificial intelligence is",
-            "In a galaxy far, far away",
-            "The key to happiness is",
+            "人工智能的未来是",
+            "在一个遥远的星系里，非常遥远的星系里",
+            "幸福的关键在于",
         ]
 
         print(f"🎯 Running {len(prompts)} streaming examples...")
