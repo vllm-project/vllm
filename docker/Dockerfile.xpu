@@ -1,5 +1,10 @@
 FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
 
+WORKDIR /workspace/
+
+ARG PYTHON_VERSION=3.12
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
+
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics-staging
@@ -27,6 +32,13 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
 RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
 
+ENV PATH="/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
 # This oneccl contains the BMG support which is not the case for default version of oneapi 2025.2.
 ARG ONECCL_INSTALLER="intel-oneccl-2021.15.7.6_offline.sh"
 RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/${ONECCL_INSTALLER}" && \
@@ -41,20 +53,20 @@ SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 
 WORKDIR /workspace/vllm
-COPY requirements/xpu.txt /workspace/vllm/requirements/xpu.txt
-COPY requirements/common.txt /workspace/vllm/requirements/common.txt
 
-# suppress the python externally managed environment error
-RUN python3 -m pip config set global.break-system-packages true
+ENV UV_HTTP_TIMEOUT=500
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir \
-    -r requirements/xpu.txt
+# Configure package index for XPU
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"
 
-# arctic-inference is built from source which needs torch-xpu properly installed
-# used for suffix method speculative decoding
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir arctic-inference==0.1.1
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    uv pip install --upgrade pip && \
+    uv pip install -r requirements/xpu.txt
 
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
@@ -68,7 +80,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    pip install --no-build-isolation .
+    uv pip install --no-build-isolation .
 
 CMD ["/bin/bash"]
 
@@ -76,10 +88,10 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
+    uv pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
 
 # install development dependencies (for testing)
-RUN python3 -m pip install -e tests/vllm_test_utils
+RUN uv pip install -e tests/vllm_test_utils
 
 # install nixl from source code
 ENV NIXL_VERSION=0.7.0
@@ -90,6 +102,6 @@ RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
 
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip uninstall oneccl oneccl-devel -y
+    uv pip uninstall oneccl oneccl-devel
 
 ENTRYPOINT ["vllm", "serve"]
