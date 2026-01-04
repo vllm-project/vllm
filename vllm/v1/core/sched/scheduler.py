@@ -164,6 +164,7 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        self.preempted_requests_being_async_loaded: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -445,7 +446,16 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
-                        request.status = RequestStatus.WAITING
+                        if (
+                            request.request_id
+                            in self.preempted_requests_being_async_loaded
+                        ):
+                            request.status = RequestStatus.PREEMPTED
+                            self.preempted_requests_being_async_loaded.remove(
+                                request.request_id
+                            )
+                        else:
+                            request.status = RequestStatus.WAITING
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -618,6 +628,10 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     skipped_waiting_requests.prepend_request(request)
+                    if request.status == RequestStatus.PREEMPTED:
+                        self.preempted_requests_being_async_loaded.add(
+                            request.request_id
+                        )
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
@@ -1392,6 +1406,8 @@ class Scheduler(SchedulerInterface):
                 running_requests_to_remove.add(request)
             else:
                 waiting_requests_to_remove.append(request)
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    self.preempted_requests_being_async_loaded.discard(req_id)
 
         # Remove all requests from queues at once for better efficiency
         if running_requests_to_remove:
