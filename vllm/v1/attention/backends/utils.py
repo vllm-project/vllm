@@ -393,8 +393,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
     def update_block_table(
         self,
-        common_metadata: CommonAttentionMetadata,
         metadata: M,
+        seq_lens: torch.Tensor,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:

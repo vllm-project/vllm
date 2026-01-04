@@ -497,8 +497,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
     def update_block_table(
         self,
-        common_metadata: CommonAttentionMetadata,
         metadata: FlashAttentionMetadata,
+        seq_lens: torch.Tensor,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> FlashAttentionMetadata:

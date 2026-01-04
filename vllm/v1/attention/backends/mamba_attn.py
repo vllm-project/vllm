@@ -290,8 +290,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def update_block_table(
         self,
-        common_metadata: CommonAttentionMetadata,
         metadata: M,
+        seq_lens: torch.Tensor,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
@@ -304,7 +304,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             if prefix_caching_all_mode
             else mamba_get_block_table_tensor(
                 blk_table,
-                common_metadata.seq_lens,
+                seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )[:, 0]
