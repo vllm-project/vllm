@@ -133,6 +133,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     parallel_config = SimpleNamespace(
         data_parallel_size=1,
         data_parallel_rank=0,
+        data_parallel_index=0,
         data_parallel_size_local=1,
         data_parallel_rank_local=None,
         data_parallel_hybrid_lb=False,
@@ -733,6 +734,7 @@ def test_kv_cache_events(
         )
         assert event.parent_block_hash is None, "Parent block hash should be None"
         assert event.lora_id is None, "Lora id should be None"
+        assert event.lora_name is None, "Lora name should be None"
         assert len(event.token_ids) == num_blocks * block_size, (
             "Token ids should be the same as the custom tokens"
         )
