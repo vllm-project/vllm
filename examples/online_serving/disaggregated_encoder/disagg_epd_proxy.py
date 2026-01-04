@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+from enum import Enum
 import logging
 import os
 import random
@@ -53,6 +54,11 @@ decode_session: aiohttp.ClientSession | None = None
 
 
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
+
+
+class EncoderDispatchMode(str, Enum):
+    SINGLE = "single"
+    FANOUT = "fanout"
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
