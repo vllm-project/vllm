@@ -318,9 +318,7 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 raise ValueError(
                     "apply_router_weight_on_input is only supported for topk=1"
                 )
-            topk_scores = torch.ones_like(topk_weights).flatten()[
-                sorted_scattered_idxs
-            ]
+            topk_scores = torch.ones_like(topk_weights).flatten()[sorted_scattered_idxs]
         else:
             topk_scores = topk_weights.flatten()[sorted_scattered_idxs]
         _router_forward(
