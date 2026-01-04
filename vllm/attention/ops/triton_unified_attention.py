@@ -375,36 +375,7 @@ def kernel_unified_attention_2d(
             # 5. Use uniform scale in tl.dot_scaled
             # ================================================================
 
-            # Step 1: Convert NVFP4 nibbles to float representation
-            # E2M1 format: value = sign * mantissa * 2^exponent
-            K_nibble_f = K_nibble.to(tl.float32)
-            sign = tl.where(K_nibble_f >= 8, -1.0, 1.0)
-            K_abs = tl.where(K_nibble_f >= 8, K_nibble_f - 8, K_nibble_f)
-            # E2M1 lookup: 0=0, 1=0.5, 2=1, 3=1.5, 4=2, 5=3, 6=4, 7=6
-            K_val = tl.where(
-                K_abs == 0,
-                0.0,
-                tl.where(
-                    K_abs == 1,
-                    0.5,
-                    tl.where(
-                        K_abs == 2,
-                        1.0,
-                        tl.where(
-                            K_abs == 3,
-                            1.5,
-                            tl.where(
-                                K_abs == 4,
-                                2.0,
-                                tl.where(
-                                    K_abs == 5, 3.0, tl.where(K_abs == 6, 4.0, 6.0)
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            )
-            K_float = sign * K_val  # Shape: [HEAD_SIZE, TILE_SIZE]
+            K_float = nvfp4_to_fp8_e4m3(K_nibble).to(tl.float32)
 
             # Step 2: Load per-token scales
             K_NUM_SCALES: tl.constexpr = HEAD_SIZE_PADDED // 32  # = 4 for head_size=128
@@ -911,6 +882,7 @@ def kernel_unified_attention_3d(
                 other=0,
             ).to(tl.uint8)
 
+            K_nibble = tl.where((offs_d[:, None] & 1) == 0, K_u8 & 0xF, K_u8 >> 4)
             K_float = nvfp4_to_fp8_e4m3(K_nibble).to(tl.float32)
 
             # ================================================================
