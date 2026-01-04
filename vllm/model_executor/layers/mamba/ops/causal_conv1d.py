@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.model_executor.custom_op import CustomTritonOp
 from vllm.triton_utils import tl, triton
 
 
@@ -745,6 +746,12 @@ def causal_conv1d_fn(
     return out.to(original_x_dtype)
 
 
+@CustomTritonOp.register("causal_conv1d")
+class CausalConv1d(CustomTritonOp):
+    def forward_cuda(self, *args, **kwargs):
+        return causal_conv1d_fn(*args, **kwargs)
+
+
 @triton.jit()
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
@@ -1238,3 +1245,9 @@ def causal_conv1d_update(
     if unsqueeze:
         out = out.squeeze(-1)
     return out.to(original_x_dtype)
+
+
+@CustomTritonOp.register("causal_conv1d_update")
+class CausalConv1dUpdate(CustomTritonOp):
+    def forward_cuda(self, *args, **kwargs):
+        return causal_conv1d_update(*args, **kwargs)

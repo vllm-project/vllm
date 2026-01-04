@@ -12,6 +12,8 @@ import warnings
 import torch
 from einops import rearrange
 
+from vllm.model_executor.custom_op import CustomTritonOp
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_o import chunk_fwd_o
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
@@ -238,3 +240,9 @@ def chunk_gated_delta_rule(
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
     return o, final_state
+
+
+@CustomTritonOp.register("chunk_gated_delta_rule")
+class ChunkGatedDeltaRule(CustomTritonOp):
+    def forward_cuda(self, *args, **kwargs):
+        return chunk_gated_delta_rule(*args, **kwargs)
