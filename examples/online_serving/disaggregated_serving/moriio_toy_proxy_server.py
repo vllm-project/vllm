@@ -97,7 +97,7 @@ def start_service_discovery(hostname, port):
 
 
 async def send_request_to_prefill(
-    endpoint, req_data, request_id, p_endpoint, pip, pports, selected_prefill_dp_rank
+    endpoint, req_data, request_id, d_endpoint, dip, dport, selected_prefill_dp_rank
 ):
     req_data_copy = req_data
 
@@ -105,12 +105,12 @@ async def send_request_to_prefill(
         {
             "do_remote_decode": True,
             "do_remote_prefill": False,
-            "remote_handshake_port": p_endpoint["handshake_port"],
-            "remote_notify_port": p_endpoint["notify_port"],
+            "remote_handshake_port": d_endpoint["handshake_port"],
+            "remote_notify_port": d_endpoint["notify_port"],
             "remote_engine_id": None,
             "remote_block_ids": None,
-            "remote_host": pip,
-            "remote_port": pports,
+            "remote_host": dip,
+            "remote_port": dport,
         }
     )
     req_data_copy["stream"] = False
