@@ -405,7 +405,7 @@ class GptOssModel(nn.Module):
                 continue
 
             # mapping to convert individual experts input_scale into fused_moe.
-            elif "input_scale" in name and "mlp.experts" in name:
+            elif all(key in name for key in ["input_scale", "mlp.experts"]):
                 assert loaded_weight.numel() == 1
                 expert_data = params_dict[fused_name].data[expert_id]
                 expert_data.copy_(loaded_weight)
