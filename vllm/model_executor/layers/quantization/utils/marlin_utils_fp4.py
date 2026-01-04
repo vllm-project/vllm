@@ -146,12 +146,13 @@ def apply_fp4_marlin_linear(
 def prepare_fp4_layer_for_marlin(
     layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
-    logger.warning_once(
-        "Your GPU does not have native support for FP4 computation but "
-        "FP4 quantization is being used. Weight-only FP4 compression will "
-        "be used leveraging the Marlin kernel. This may degrade "
-        "performance for compute-heavy workloads."
-    )
+    if current_platform.get_device_capability(0).major < 10:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
 
     is_nvfp4 = hasattr(layer, "weight_scale_2")
     if input_dtype is not None and input_dtype.itemsize == 1:
@@ -229,12 +230,13 @@ def prepare_fp4_layer_for_marlin(
 def prepare_moe_fp4_layer_for_marlin(
     layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
-    logger.warning_once(
-        "Your GPU does not have native support for FP4 computation but "
-        "FP4 quantization is being used. Weight-only FP4 compression will "
-        "be used leveraging the Marlin kernel. This may degrade "
-        "performance for compute-heavy workloads."
-    )
+    if current_platform.get_device_capability(0).major < 10:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
 
     is_nvfp4 = hasattr(layer, "w13_weight_scale_2")
     if input_dtype is not None and input_dtype.itemsize == 1:
