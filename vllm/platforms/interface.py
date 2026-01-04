@@ -341,6 +341,23 @@ class Platform:
         return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
+    def is_blackwell_class(cls, device_id: int = 0) -> bool:
+        """Check if device is Blackwell-class GPU (SM10x, SM11x, SM12x).
+
+        Blackwell architecture family includes:
+        - SM100/SM101: B100, B200 data center GPUs (major=10)
+        - SM120/SM121: GB10 DGX Spark, Thor edge devices (major=12)
+
+        Note: SM11x reserved for future Blackwell variants.
+
+        Returns False for non-CUDA platforms.
+        """
+        capability = cls.get_device_capability(device_id=device_id)
+        if capability is None:
+            return False
+        return capability.major in (10, 11, 12)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError

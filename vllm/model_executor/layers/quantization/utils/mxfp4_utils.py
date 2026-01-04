@@ -63,7 +63,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
                 "split_k": 1,
             }
             opt_flags.update_opt_flags_constraints(constraints)
-        elif current_platform.is_device_capability_family(100):
+        elif current_platform.is_blackwell_class():
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,
