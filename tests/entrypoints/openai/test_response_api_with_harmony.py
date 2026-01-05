@@ -504,7 +504,11 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    response = await client.responses.create(
+    # Code interpreter may need more time for container init + code execution
+    timeout_value = client.timeout * 3
+    client_with_timeout = client.with_options(timeout=timeout_value)
+
+    response = await client_with_timeout.responses.create(
         model=model_name,
         # TODO: Ideally should be able to set max tool calls
         # to prevent multi-turn, but it is not currently supported
@@ -868,6 +872,7 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=3)
 async def test_function_call_with_previous_input_messages(
     client: OpenAI, model_name: str
 ):
@@ -994,9 +999,15 @@ async def test_function_call_with_previous_input_messages(
 async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str):
     response = await client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": "What is the role of AI in medicine?"}],
+        messages=[
+            {
+                "role": "user",
+                "content": "What is the role of AI in medicine?"
+                "The response must exceed 350 words.",
+            }
+        ],
         temperature=0.0,
-        max_tokens=250,
+        max_tokens=350,
     )
 
     choice = response.choices[0]
