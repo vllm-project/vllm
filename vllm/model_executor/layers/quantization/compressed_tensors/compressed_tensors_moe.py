@@ -394,7 +394,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            # TODO(rob): update marlin prepare to match fp8 moe.
             a13_scale = None
             a2_scale = None
             (
