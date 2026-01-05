@@ -207,7 +207,7 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
-    additional_kwargs: field(default_factory=dict)
+    additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
