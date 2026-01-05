@@ -340,7 +340,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - uv pip install -r /vllm-workspace/requirements/kv_connectors.txt
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -662,8 +662,8 @@ steps:
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
-  - uv pip install --system torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
-  - uv pip install --system conch-triton-kernels
+  - uv pip install torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
+  - uv pip install conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: LM Eval Small Models # 53min
@@ -781,8 +781,8 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - uv pip install --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     # Shard hybrid language model tests
     - pytest -v -s models/language/generation \
                    -m hybrid_model \
@@ -800,8 +800,8 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - uv pip install --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
@@ -1047,7 +1047,7 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - uv pip install 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: Blackwell Quantized MoE Test
@@ -1278,7 +1278,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - uv pip install -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed)
@@ -1289,7 +1289,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - uv pip install -r /vllm-workspace/requirements/kv_connectors.txt
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
