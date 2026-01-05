@@ -169,6 +169,7 @@ def render_message(
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
     reasoning_content = msg.get("reasoning") or msg.get("reasoning_content")
+    is_prefix = msg.get("prefix", False)
 
     if tools:
         tools = tools_from_openai_format(tools)
@@ -273,11 +274,14 @@ def render_message(
                 + thinking_end_token
             )
 
-        prompt += assistant_msg_template.format(
-            reasoning=thinking_part,
-            content=summary_content,
-            tool_calls=tool_calls_content,
-        )
+        if not tool_calls and is_prefix:
+            prompt += summary_content
+        else:
+            prompt += assistant_msg_template.format(
+                reasoning=thinking_part,
+                content=summary_content,
+                tool_calls=tool_calls_content,
+            )
     else:
         raise NotImplementedError(f"Unknown role: {role}")
 
