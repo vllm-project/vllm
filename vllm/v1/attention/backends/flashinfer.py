@@ -1054,10 +1054,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         ## DECODE PATHWAY
         if num_decodes > 0:
-            if decode_use_trtllm:
-                assert num_decode_tokens % num_decodes == 0, (
-                    "TRTLLM decode requires uniform query lengths per request."
+            # Check if TRTLLM's uniform query length requirement is met
+            if decode_use_trtllm and num_decode_tokens % num_decodes != 0:
+                logger.warning_once(
+                    "TRTLLM decode requires uniform query lengths per request, "
+                    "but got %d decodes with %d total tokens (not divisible). "
+                    "Falling back to FlashInfer decode.",
+                    num_decodes,
+                    num_decode_tokens,
                 )
+                decode_use_trtllm = False
+
+            if decode_use_trtllm:
                 attn_metadata.decode = TRTLLMDecode(
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],
