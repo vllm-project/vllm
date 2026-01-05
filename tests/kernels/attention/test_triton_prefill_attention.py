@@ -9,8 +9,13 @@ from vllm.attention.ops.triton_prefill_attention import context_attention_fwd
 
 
 def ref_masked_attention(
-    q, k, v, is_causal=True, sliding_window_q=None, sliding_window_k=None
-):
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    is_causal: bool = True,
+    sliding_window_q: int | None = None,
+    sliding_window_k: int | None = None,
+) -> torch.Tensor:
     """Reference implementation using PyTorch SDPA."""
     # q, k, v: [total_tokens, num_heads, head_dim]
     # SDPA expects [batch, num_heads, seq_len, head_dim]
@@ -27,9 +32,9 @@ def ref_masked_attention(
     use_causal = is_causal
 
     # If we have sliding window or need custom masking, create explicit mask
-    if (sliding_window_q is not None and sliding_window_q > 0) or (
-        sliding_window_k is not None and sliding_window_k > 0
-    ):
+    sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
+    sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
+    if (sliding_window_q > 0) or (sliding_window_k > 0):
         # Position indices
         pos_q = torch.arange(total_tokens, device=q.device).unsqueeze(1)
         pos_k = torch.arange(total_tokens, device=q.device).unsqueeze(0)
@@ -44,17 +49,14 @@ def ref_masked_attention(
             mask = mask & (pos_q >= pos_k)
 
         # Apply sliding window masks
-        sliding_window_mask = (
-            torch.ones_like(mask) if any([sliding_window_q, sliding_window_k]) else None
-        )
-        if sliding_window_q is not None and sliding_window_q > 0:
+        sliding_window_mask = torch.ones_like(mask)
+        if sliding_window_q > 0:
             sliding_window_mask &= pos_q - pos_k <= sliding_window_q
 
-        if sliding_window_k is not None and sliding_window_k > 0:
+        if sliding_window_k > 0:
             sliding_window_mask &= pos_k - pos_q <= sliding_window_k
 
-        if sliding_window_mask is not None:
-            mask = mask & sliding_window_mask
+        mask = mask & sliding_window_mask
 
         attn_mask = torch.where(mask, 0.0, float("-inf")).to(q.dtype)
         use_causal = False  # Don't use is_causal when providing explicit mask
@@ -77,7 +79,15 @@ def ref_masked_attention(
 @pytest.mark.parametrize("D", [128])
 @pytest.mark.parametrize("is_causal", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_context_attention(B, max_seq_len, H_Q, H_KV, D, is_causal, dtype):
+def test_context_attention(
+    B: int,
+    max_seq_len: int,
+    H_Q: int,
+    H_KV: int,
+    D: int,
+    is_causal: bool,
+    dtype: torch.dtype,
+):
     """Test basic context attention without sliding window."""
     torch.manual_seed(42)
 
@@ -146,7 +156,13 @@ def test_context_attention(B, max_seq_len, H_Q, H_KV, D, is_causal, dtype):
 @pytest.mark.parametrize("sliding_window", [(32, 32), (32, 0), (0, 32)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention_sliding_window(
-    B, max_seq_len, H_Q, H_KV, D, sliding_window, dtype
+    B: int,
+    max_seq_len: int,
+    H_Q: int,
+    H_KV: int,
+    D: int,
+    sliding_window: tuple[int, int],
+    dtype: torch.dtype,
 ):
     sliding_window_q, sliding_window_k = sliding_window
     """Test context attention with sliding window."""
