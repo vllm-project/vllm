@@ -459,7 +459,7 @@ class GptOssModel(nn.Module):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_weight"):
+            elif name.endswith(".w13_weight") and moe_quant_method == "mxfp4":
                 if expert_id is None:
                     # Handle MLP gate and up projection weights
                     # flat weight from (E, 2 * N, block_size, entry_per_block)
@@ -468,17 +468,14 @@ class GptOssModel(nn.Module):
                         num_experts, 2 * intermediate_size, -1
                     ).contiguous()
 
-                if moe_quant_method == "mxfp4":
-                    # Extract gate and up projection parts
-                    # since the weight is shuffled, we can slice directly
-                    if use_ep:
-                        narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
-                    else:
-                        narrow_weight = loaded_weight[
-                            2 * tp_rank_start : 2 * tp_rank_end, ...
-                        ]
+                # Extract gate and up projection parts
+                # since the weight is shuffled, we can slice directly
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight
+                    narrow_weight = loaded_weight[
+                        2 * tp_rank_start : 2 * tp_rank_end, ...
+                    ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -493,7 +490,7 @@ class GptOssModel(nn.Module):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w2_weight"):
+            elif name.endswith(".w2_weight") and moe_quant_method == "mxfp4":
                 if expert_id is None:
                     # Handle MLP down projection weights
                     # same flatten here, but since 2 mx4 value are packed in 1
@@ -502,15 +499,12 @@ class GptOssModel(nn.Module):
                         num_experts, -1, intermediate_size // 2
                     ).contiguous()
 
-                if moe_quant_method == "mxfp4":
-                    if use_ep:
-                        narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
-                    else:
-                        narrow_weight = loaded_weight[
-                            ..., tp_rank_start // 2 : tp_rank_end // 2
-                        ]
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight
+                    narrow_weight = loaded_weight[
+                        ..., tp_rank_start // 2 : tp_rank_end // 2
+                    ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)

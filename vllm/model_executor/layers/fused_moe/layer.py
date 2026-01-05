@@ -1408,7 +1408,6 @@ class FusedMoE(CustomOp):
                     param=param,
                     loaded_weight=loaded_weight,
                     expert_id=expert_id,
-                    # combined_w13=True,
                 )
             else:
                 WEIGHT_SCALE_SUPPORTED = [e.value for e in FusedMoeWeightScaleSupported]

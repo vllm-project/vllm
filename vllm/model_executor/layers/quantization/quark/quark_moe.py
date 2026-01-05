@@ -154,11 +154,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer.weight_block_size = None
         params_dtype = torch.float8_e4m3fn
 
+        combined_w13 = self.model_type == "gpt_oss"
+        w13_size_coefficient = 4 if combined_w13 else 2
+
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_size_coefficient * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
