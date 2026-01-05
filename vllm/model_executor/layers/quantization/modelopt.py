@@ -46,7 +46,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    prepare_nvfp4_moe_layer_for_fi,
+    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -1589,7 +1589,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
-        if self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS:
+        if (
+            self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
+            or self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
+        ):
             (
                 w13,
                 w13_scale,
@@ -1599,7 +1602,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_scale,
                 w2_scale_2,
                 a2_scale,
-            ) = prepare_nvfp4_moe_layer_for_fi(
+            ) = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
                 backend=self.nvfp4_backend,
                 layer=layer,
                 w13=layer.w13_weight,
@@ -1616,9 +1619,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
             prepare_moe_fp4_layer_for_marlin(layer)
-        else:
-            # TODO(rob): need to do the swizzling here.
-            pass
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -1735,7 +1735,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 input_dtype=self.marlin_input_dtype,
             )
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+        elif self.nvfp4_backend in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.VLLM_CUTLASS,
+        ]:
             assert self.kernel is not None
             return self.kernel(
                 x,
@@ -1748,28 +1751,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-
-        elif self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS:
-            # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
-            # only (no EP).
-            from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
-
-            assert self.moe_quant_config is not None
-            return cutlass_moe_fp4(
-                a=x,
-                w1_fp4=layer.w13_weight,
-                w2_fp4=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                quant_config=self.moe_quant_config,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                # TODO: derive from arguments
-                m=x.shape[0],
-                n=layer.w2_weight.shape[2] * 2,
-                k=x.shape[1],
-                e=layer.w13_weight.shape[0],
             )
         else:
             raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")

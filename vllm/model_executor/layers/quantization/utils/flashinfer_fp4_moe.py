@@ -424,7 +424,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     return out
 
 
-def prepare_nvfp4_moe_layer_for_fi(
+def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
     layer: torch.nn.Module,
     w13: torch.Tensor,
@@ -452,8 +452,16 @@ def prepare_nvfp4_moe_layer_for_fi(
         NvFp4MoeBackend,
     )
 
+    assert backend in [
+        NvFp4MoeBackend.VLLM_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    ]
+
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
     if is_act_and_mul and backend in [
+        NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
     ]:
@@ -474,6 +482,8 @@ def prepare_nvfp4_moe_layer_for_fi(
         num_experts = w13.shape[0]
         a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
         a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+    else:
+        a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:

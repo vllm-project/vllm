@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     nvfp4_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    CutlassExpertsFp4,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
@@ -119,10 +122,8 @@ def make_nvfp4_moe_kernel(
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         return mk.FusedMoEModularKernel(
-            prepare_finalize=MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=True,
-            ),
-            fused_experts=FlashInferExperts(
+            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            FlashInferExperts(
                 out_dtype=moe_config.in_dtype,
                 quant_config=quant_config,
                 ep_rank=moe_config.ep_rank,
@@ -131,6 +132,17 @@ def make_nvfp4_moe_kernel(
                 tp_size=moe_config.tp_size,
                 use_dp=False,
                 use_deepseek_fp8_block_scale=False,
+            ),
+        )
+
+    elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
+        return mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            CutlassExpertsFp4(
+                out_dtype=moe_config.in_dtype,
+                # TODO(rob): see what impact this has on expert map?
+                max_experts_per_worker=moe_config.num_experts,
+                quant_config=quant_config,
             ),
         )
     else:
