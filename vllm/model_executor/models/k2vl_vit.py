@@ -694,11 +694,11 @@ def mm_projector_forward(
 
 
 @torch.inference_mode()
-def vision_tower_forward_auto(
+def vision_tower_forward(
     vision_tower: Any,
     pixel_values: torch.Tensor,
     grid_thw: torch.Tensor,
-    mm_projector: Any | None = None,
+    mm_projector: Any,
 ) -> list[torch.Tensor]:
     """Auto-batched vision tower forward."""
     assert isinstance(pixel_values, torch.Tensor), (
