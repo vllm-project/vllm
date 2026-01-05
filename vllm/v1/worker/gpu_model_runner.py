@@ -3564,14 +3564,13 @@ class GPUModelRunner(
     def _get_valid_sampled_token_count(self) -> list[int]:
         # Wait until valid_sampled_tokens_count is copied to cpu,
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        if (
-            self.valid_sampled_token_count_event is None
-            or prev_sampled_token_ids is None
-        ):
+        sampled_count_event = self.valid_sampled_token_count_event
+        if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
 
         counts_cpu = self.valid_sampled_token_count_cpu
-        self.valid_sampled_token_count_event.synchronize()
+        assert counts_cpu is not None
+        sampled_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
