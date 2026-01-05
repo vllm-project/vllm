@@ -114,7 +114,8 @@ class Glm4MoeModelToolParser(ToolParser):
                     ToolCall(
                         type="function",
                         function=FunctionCall(
-                            name=tc_name, arguments=json.dumps(arg_dct)
+                            name=tc_name,
+                            arguments=json.dumps(arg_dct, ensure_ascii=False),
                         ),
                     )
                 )

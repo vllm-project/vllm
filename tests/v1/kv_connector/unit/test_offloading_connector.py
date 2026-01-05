@@ -528,6 +528,7 @@ def test_offloading_connector(request_runner):
     assert event.token_ids == []
     assert event.parent_block_hash is None
     assert event.lora_id is None
+    assert event.lora_name is None
     event = events[1]
     assert isinstance(event, BlockRemoved)
     assert event.block_hashes == to_hashes([4, 5, 6])
