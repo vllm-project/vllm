@@ -753,31 +753,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    max_repetition_pattern_size: int = (
-        Field(
-            default=0,
-            description=(
-                "Max repetition pattern size to check for "
-                "stopping generation on repetitive token patterns."
-            ),
+    max_repetition_pattern_size: int = Field(
+        default=0,
+        description=(
+            "Max repetition pattern size to check for "
+            "stopping generation on repetitive token patterns."
         ),
     )
-    min_repetition_pattern_size: int = (
-        Field(
-            default=0,
-            description=(
-                "Min repetition pattern size to check for "
-                "stopping generation on repetitive token patterns."
-            ),
+
+    min_repetition_pattern_size: int = Field(
+        default=0,
+        description=(
+            "Min repetition pattern size to check for "
+            "stopping generation on repetitive token patterns."
         ),
     )
-    repetition_min_count: int = (
-        Field(
-            default=0,
-            description=(
-                "Minimum number of repetitions to detect for "
-                "stopping generation on repetitive token patterns"
-            ),
+
+    repetition_min_count: int = Field(
+        default=0,
+        description=(
+            "Minimum number of repetitions to detect for "
+            "stopping generation on repetitive token patterns"
         ),
     )
 
@@ -1218,31 +1214,27 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    max_repetition_pattern_size: int = (
-        Field(
-            default=0,
-            description=(
-                "Max repetition pattern size to check for "
-                "stopping generation on repetitive token patterns."
-            ),
+    max_repetition_pattern_size: int = Field(
+        default=0,
+        description=(
+            "Max repetition pattern size to check for "
+            "stopping generation on repetitive token patterns."
         ),
     )
-    min_repetition_pattern_size: int = (
-        Field(
-            default=0,
-            description=(
-                "Min repetition pattern size to check for "
-                "stopping generation on repetitive token patterns.",
-            ),
+
+    min_repetition_pattern_size: int = Field(
+        default=0,
+        description=(
+            "Min repetition pattern size to check for "
+            "stopping generation on repetitive token patterns."
         ),
     )
-    repetition_min_count: int = (
-        Field(
-            default=0,
-            description=(
-                "Minimum number of repetitions to detect for "
-                "stopping generation on repetitive token patterns."
-            ),
+
+    repetition_min_count: int = Field(
+        default=0,
+        description=(
+            "Minimum number of repetitions to detect for "
+            "stopping generation on repetitive token patterns."
         ),
     )
 
