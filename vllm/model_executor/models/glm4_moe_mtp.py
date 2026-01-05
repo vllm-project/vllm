@@ -262,6 +262,9 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 name = f"model.layers.{spec_layer}.shared_head.head.weight"
             elif name == "model.embed_tokens.weight":
                 spec_layer = self.model.mtp_start_layer_idx
+            elif name == "lm_head.weight_scale":
+                spec_layer = self.model.mtp_start_layer_idx
+                name = f"model.layers.{spec_layer}.shared_head.head.weight_scale"
             else:
                 spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
                 if spec_layer is None:
