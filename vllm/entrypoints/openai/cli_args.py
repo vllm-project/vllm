@@ -187,6 +187,9 @@ class FrontendArgs:
     enable_log_outputs: bool = False
     """If True, log model outputs (generations).
     Requires --enable-log-requests."""
+    exclude_log_deltas: bool = False
+    """If True, model outputs will be logged once streaming is complete. Deltas
+    will not be logged. Requires --enable-log-outputs."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     """Maximum size (bytes) of an incomplete HTTP event (header or body) for
     h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
@@ -305,6 +308,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
+    if args.exclude_log_deltas and not args.enable_log_outputs:
+        raise TypeError("Error: --exclude-log-deltas requires --enable-log-outputs")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 

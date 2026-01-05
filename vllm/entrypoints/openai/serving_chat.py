@@ -101,6 +101,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        exclude_log_deltas: bool = False,
         log_error_stack: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -118,6 +119,7 @@ class OpenAIServingChat(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
+        self.exclude_log_deltas = exclude_log_deltas
 
         # set up logits processors
         self.logits_processors = self.model_config.logits_processors
@@ -1135,7 +1137,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if tc.function and tc.function.arguments
                             )
 
-                        if delta_content:
+                        if delta_content and not self.exclude_log_deltas:
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,
