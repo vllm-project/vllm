@@ -1064,15 +1064,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     num_decode_tokens,
                 )
                 decode_use_trtllm = False
-                # After fallback, ensure seq_lens_cpu, seq_lens_np, num_blocks_np
-                # and paged_kv_indices are available for FlashInfer
+                # After fallback, ensure all required metadata is available
+                # for FlashInfer
                 if seq_lens_cpu is None:
                     seq_lens_cpu = seq_lens[:num_decodes].cpu()
-                if seq_lens_np is None:
                     seq_lens_np = seq_lens_cpu.numpy()
-                if num_blocks_np is None:
                     num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
-                if paged_kv_indices is None:
                     paged_kv_indices = self._compute_flashinfer_kv_metadata(
                         num_blocks_np,
                         seq_lens_np,
