@@ -15,9 +15,6 @@ service VllmEngine {
   // Health check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 
-  // Abort a running request
-  rpc Abort(AbortRequest) returns (AbortResponse);
-
   // Get model information
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
 
@@ -180,16 +177,6 @@ message HealthCheckRequest {}
 
 message HealthCheckResponse {
   bool healthy = 1;
-  string message = 2;
-}
-
-message AbortRequest {
-  string request_id = 1;
-  string reason = 2;
-}
-
-message AbortResponse {
-  bool success = 1;
   string message = 2;
 }
 

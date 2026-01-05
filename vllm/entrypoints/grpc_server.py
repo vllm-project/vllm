@@ -49,7 +49,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     - Generate: Streaming text generation
     - Embed: Embeddings (TODO)
     - HealthCheck: Health probe
-    - Abort: Cancel a request
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
     """
@@ -161,30 +160,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
         return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
-
-    async def Abort(
-        self,
-        request: vllm_engine_pb2.AbortRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> vllm_engine_pb2.AbortResponse:
-        """
-        Handle abort requests.
-
-        Args:
-            request: The AbortRequest protobuf
-            context: gRPC context
-
-        Returns:
-            AbortResponse protobuf
-        """
-        request_id = request.request_id
-        logger.info("Abort request for %s.", request_id)
-
-        await self.async_llm.abort(request_id)
-
-        return vllm_engine_pb2.AbortResponse(
-            success=True, message=f"Request {request_id} aborted"
-        )
 
     async def GetModelInfo(
         self,
