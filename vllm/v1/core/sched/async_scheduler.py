@@ -10,10 +10,7 @@ logger = init_logger(__name__)
 
 
 class AsyncScheduler(Scheduler):
-    def _update_after_schedule(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
+    def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         pending_structured_output_tokens = False
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -41,9 +38,7 @@ class AsyncScheduler(Scheduler):
         )
 
     def _update_request_with_output(
-        self,
-        request: Request,
-        new_token_ids: list[int],
+        self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:
         if request.discard_latest_async_tokens:
             # If the request is force preempted in reset_prefix_cache, we
