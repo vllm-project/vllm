@@ -391,8 +391,16 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
     """
     Test frame recovery with an actual corrupted video file.
 
-    This test verifies that frame_recovery=True produces at least as many
-    frames as frame_recovery=False, and that metadata is consistent.
+    This test uses corrupted.mp4 which has genuine H.264 codec errors.
+    The corruption affects frame 17 AND damages the H.264 reference frame
+    chain, making subsequent frames also unreadable (this is a characteristic
+    of real H.264 corruption vs simulated failures).
+
+    This test verifies:
+    1. Both modes load the video without crashing
+    2. Recovery attempts don't make things worse (>= frames)
+    3. Metadata is consistent with loaded frames
+    4. Recovery correctly handles unrecoverable corruption gracefully
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
@@ -409,22 +417,46 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
             video_data, num_frames=-1, frame_recovery=False
         )
 
-        # Test with recovery
+        # Test with recovery enabled
         frames_with_recovery, meta_with_recovery = loader.load_bytes(
             video_data, num_frames=-1, frame_recovery=True
         )
 
-        # With recovery, we should have at least as many frames as without
-        assert frames_with_recovery.shape[0] >= frames_no_recovery.shape[0]
+        # Verify metadata consistency for both modes
+        assert frames_no_recovery.shape[0] == len(meta_no_recovery["frames_indices"]), (
+            "Frame count must match indices without recovery"
+        )
+        assert frames_with_recovery.shape[0] == len(
+            meta_with_recovery["frames_indices"]
+        ), "Frame count must match indices with recovery"
 
-        # Both should have consistent metadata
-        assert frames_no_recovery.shape[0] == len(meta_no_recovery["frames_indices"])
-        num_with_recovery = len(meta_with_recovery["frames_indices"])
-        assert frames_with_recovery.shape[0] == num_with_recovery
+        # Recovery should never produce FEWER frames than no recovery
+        assert frames_with_recovery.shape[0] >= frames_no_recovery.shape[0], (
+            f"Recovery should not reduce frame count. "
+            f"Got {frames_with_recovery.shape[0]} with recovery vs "
+            f"{frames_no_recovery.shape[0]} without"
+        )
+
+        # Verify the video metadata is correct
+        expected_total_frames = 26
+        assert meta_with_recovery["total_num_frames"] == expected_total_frames, (
+            f"Expected {expected_total_frames} total frames in metadata"
+        )
+
+        min_expected_frames = int(expected_total_frames * 0.9)
+        assert frames_no_recovery.shape[0] >= min_expected_frames, (
+            f"Should load at least {min_expected_frames} frames, "
+            f"got {frames_no_recovery.shape[0]}"
+        )
 
 
 def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
-    """Test that frame_recovery works with the dynamic video backend."""
+    """
+    Test that frame_recovery works with the dynamic video backend.
+
+    The dynamic backend samples frames based on fps/duration rather than
+    loading all frames. This test verifies recovery works in that context.
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
 
@@ -435,13 +467,31 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
 
+        # Test without recovery
+        frames_no_recovery, meta_no = loader.load_bytes(
+            video_data, fps=2, max_duration=10, frame_recovery=False
+        )
+
         # Test with frame_recovery enabled
-        frames, metadata = loader.load_bytes(
+        frames_with_recovery, meta_with = loader.load_bytes(
             video_data, fps=2, max_duration=10, frame_recovery=True
         )
 
-        # Should have some frames loaded
-        assert frames.shape[0] > 0
-        assert "do_sample_frames" in metadata
-        assert metadata["do_sample_frames"] is False  # Dynamic backend always False
-        assert frames.shape[0] == len(metadata["frames_indices"])
+        # Verify basic properties
+        assert frames_no_recovery.shape[0] > 0, (
+            "Should load some frames without recovery"
+        )
+        assert frames_with_recovery.shape[0] > 0, (
+            "Should load some frames with recovery"
+        )
+        assert "do_sample_frames" in meta_with
+        assert meta_with["do_sample_frames"] is False  # Dynamic backend always False
+        assert frames_with_recovery.shape[0] == len(meta_with["frames_indices"])
+
+        # Key assertion: recovery should help when corrupted frames are sampled
+        # We expect recovery to produce >= frames than without recovery
+        assert frames_with_recovery.shape[0] >= frames_no_recovery.shape[0], (
+            f"Recovery should produce at least as many frames. "
+            f"Got {frames_with_recovery.shape[0]} with recovery vs "
+            f"{frames_no_recovery.shape[0]} without"
+        )

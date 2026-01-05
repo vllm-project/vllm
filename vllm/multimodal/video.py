@@ -108,8 +108,9 @@ class VideoLoader:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        if width == 0 or height == 0:
-            width, height = 640, 480
+        assert width > 0 and height > 0, (
+            f"Invalid video frame size: width={width}, height={height}"
+        )
 
         frame_idx_set = set(frame_indices)
         max_frame_idx = frame_indices[-1] if frame_indices else 0
