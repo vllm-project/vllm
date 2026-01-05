@@ -87,14 +87,17 @@ message TokenizedInput {
 message GenerateRequest {
   string request_id = 1;
 
-  // Pre-tokenized input (required)
-  TokenizedInput tokenized = 2;
+  // Prompt input
+  oneof input {
+    TokenizedInput tokenized = 2;
+    string text = 3;
+  }
 
   // Generation parameters (includes logprobs config)
-  SamplingParams sampling_params = 3;
+  SamplingParams sampling_params = 4;
 
   // Streaming
-  bool stream = 4;
+  bool stream = 5;
 }
 
 // =====================

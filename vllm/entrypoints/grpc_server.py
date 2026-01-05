@@ -27,7 +27,7 @@ from collections.abc import AsyncGenerator
 import grpc
 from grpc_reflection.v1alpha import reflection
 
-from vllm import SamplingParams, TokensPrompt
+from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
@@ -84,11 +84,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         try:
             # Extract tokenized input
-            if not request.HasField("tokenized"):
-                raise ValueError("Missing tokenized input")
-
-            prompt_token_ids = list(request.tokenized.input_ids)
-            prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids}
+            if request.WhichOneof("input") == "tokenized":
+                prompt: TokensPrompt = {
+                    "prompt_token_ids": list(request.tokenized.input_ids)
+                }
+                if request.tokenized.original_text:
+                    prompt["prompt"] = request.tokenized.original_text
+            else:
+                prompt: TextPrompt = {"prompt": request.text}
 
             # Build sampling params with detokenize=False
             sampling_params = self._sampling_params_from_proto(
