@@ -176,9 +176,10 @@ def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
             # e.g. exec(). We can't actually check these.
             continue
         hash_content.append(content)
-    return safe_hash(
+    result: str = safe_hash(
         "\n".join(hash_content).encode(), usedforsecurity=False
     ).hexdigest()
+    return result
 
 
 def _compute_code_hash(files: set[str]) -> str:
