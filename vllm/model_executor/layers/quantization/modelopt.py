@@ -937,8 +937,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             if self.moe.is_act_and_mul:
                 layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
 
-            # NOTE(rob): these scales do not need to be registered as parameters
-            # since they are not used for weight (re)-loading.
+            # NOTE: this adds some attributes used by the trtllm kernel,
+            # which does not conform to the modular kernels abstraction (yet).
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
                 register_scales_for_trtllm_fp8_per_tensor_moe(
@@ -1001,8 +1001,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             return None
 
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            # Flashinfer CUTLASS per-tensor uses single dq scale
-            # (alpha = w_scale * a_scale) and inverse a2 scale.
             g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
                 layer.w13_weight_scale,
                 layer.w13_input_scale,
