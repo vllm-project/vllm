@@ -71,47 +71,48 @@ def client(app, mock_async_llm):
 
 
 class TestPauseStepEndpoint:
-    """Tests for POST /pause/step."""
+    """Tests for POST /pause/step with various query parameters."""
 
-    def test_pause_step_returns_step_counter(self, client):
+    def test_pause_step_default_with_barrier(self, client, mock_engine_core):
+        """Default behavior: pause + wait for barrier at step+1."""
         response = client.post("/pause/step")
         assert response.status_code == 200
         data = response.json()
         assert data["paused"] is True
-        assert data["step_counter"] == 42
-        assert data["recommended_target_step"] == 43
-        assert "message" in data
-        assert data["status"] == "paused"
-
-
-class TestPauseStepBarrier:
-    """Tests for POST /pause/step/barrier."""
-
-    def test_pause_step_barrier_success(self, client, mock_engine_core):
-        response = client.post(
-            "/pause/step/barrier",
-            json={"target_steps": 100},
+        # Final step should be from the barrier (1000 from mock)
+        assert data["step_counter"] == 1000
+        # Verify barrier was called with step_counter + 1 = 43
+        mock_engine_core.call_utility_async.assert_any_call(
+            "run_until_target_step_count", 43
         )
+
+    def test_pause_step_no_barrier(self, client, mock_engine_core):
+        """With no_barrier=true: fast pause, immediate return."""
+        response = client.post("/pause/step?no_barrier=true")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
-        # Verify both calls were made
+        data = response.json()
+        assert data["paused"] is True
+        assert data["step_counter"] == 42  # Step counter at pause time
+        # Verify run_until_target_step_count was NOT called
+        for call in mock_engine_core.call_utility_async.call_args_list:
+            assert call[0][0] != "run_until_target_step_count"
+
+    def test_pause_step_custom_barrier(self, client, mock_engine_core):
+        """With barrier=<value>: wait until specified step."""
+        response = client.post("/pause/step?barrier=100")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["paused"] is True
+        # Verify barrier was called with custom target
         mock_engine_core.call_utility_async.assert_any_call(
             "run_until_target_step_count", 100
         )
-        mock_engine_core.call_utility_async.assert_any_call("get_step_counter")
 
-    def test_pause_step_barrier_missing_param(self, client):
-        response = client.post(
-            "/pause/step/barrier",
-            json={},
+    def test_pause_step_barrier_overrides_default(self, client, mock_engine_core):
+        """Explicit barrier value overrides the default step+1."""
+        response = client.post("/pause/step?barrier=50")
+        assert response.status_code == 200
+        # Verify barrier was called with 50, not 43 (step_counter + 1)
+        mock_engine_core.call_utility_async.assert_any_call(
+            "run_until_target_step_count", 50
         )
-        assert response.status_code == 400
-        assert "target_steps" in response.json()["detail"]
-
-    def test_pause_step_barrier_invalid_param(self, client):
-        response = client.post(
-            "/pause/step/barrier",
-            json={"target_steps": "not_an_int"},
-        )
-        assert response.status_code == 400
-        assert "integer" in response.json()["detail"]

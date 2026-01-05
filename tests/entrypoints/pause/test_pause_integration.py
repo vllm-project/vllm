@@ -61,11 +61,14 @@ def skip_if_no_server(server_url):
 
 
 class TestPauseStepIntegration:
-    """Integration tests for step-barrier pause endpoints against a real vLLM server."""
+    """Integration tests for step-barrier pause endpoints."""
 
-    def test_pause_step_returns_step_counter(self, server_url, skip_if_no_server):
-        """Test that /pause/step returns step_counter and recommended_target_step."""
-        response = requests.post(f"{server_url}/pause/step", timeout=30)
+    def test_pause_step_default_with_barrier(self, server_url, skip_if_no_server):
+        """Test that default /pause/step waits for barrier and returns step."""
+        # Ensure clean state
+        requests.post(f"{server_url}/resume", timeout=30)
+
+        response = requests.post(f"{server_url}/pause/step", timeout=60)
         assert response.status_code == 200
 
         data = response.json()
@@ -73,24 +76,55 @@ class TestPauseStepIntegration:
         assert "step_counter" in data
         assert isinstance(data["step_counter"], int)
         assert data["step_counter"] >= 0
-        assert data["recommended_target_step"] == data["step_counter"] + 1
-        assert "message" in data
-        assert data["status"] == "paused"
 
         # Clean up: resume
         requests.post(f"{server_url}/resume", timeout=30)
 
-    def test_pause_step_is_fast(self, server_url, skip_if_no_server):
-        """Test that /pause/step returns quickly (< 1 second)."""
+    def test_pause_step_no_barrier_is_fast(self, server_url, skip_if_no_server):
+        """Test that /pause/step?no_barrier=true returns quickly (< 1 second)."""
         # First resume to ensure clean state
         requests.post(f"{server_url}/resume", timeout=30)
 
         start = time.time()
-        response = requests.post(f"{server_url}/pause/step", timeout=30)
+        response = requests.post(
+            f"{server_url}/pause/step?no_barrier=true", timeout=30
+        )
         elapsed = time.time() - start
 
         assert response.status_code == 200
         assert elapsed < 1.0, f"Pause took {elapsed:.2f}s, expected < 1s"
+
+        data = response.json()
+        assert data["paused"] is True
+        assert "step_counter" in data
+
+        # Clean up
+        requests.post(f"{server_url}/resume", timeout=30)
+
+    def test_pause_step_custom_barrier(self, server_url, skip_if_no_server):
+        """Test /pause/step?barrier=<value> waits for custom target."""
+        # Ensure clean state
+        requests.post(f"{server_url}/resume", timeout=30)
+
+        # First get current step via fast pause
+        fast_response = requests.post(
+            f"{server_url}/pause/step?no_barrier=true", timeout=30
+        )
+        assert fast_response.status_code == 200
+        current_step = fast_response.json()["step_counter"]
+
+        # Resume to allow stepping
+        requests.post(f"{server_url}/resume", timeout=30)
+
+        # Now pause with custom barrier
+        target = current_step + 1
+        response = requests.post(
+            f"{server_url}/pause/step?barrier={target}", timeout=60
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["paused"] is True
+        assert data["step_counter"] >= target
 
         # Clean up
         requests.post(f"{server_url}/resume", timeout=30)
@@ -98,12 +132,12 @@ class TestPauseStepIntegration:
     def test_pause_step_is_idempotent(self, server_url, skip_if_no_server):
         """Test that calling /pause/step multiple times is safe."""
         # First pause
-        r1 = requests.post(f"{server_url}/pause/step", timeout=30)
+        r1 = requests.post(f"{server_url}/pause/step?no_barrier=true", timeout=30)
         assert r1.status_code == 200
         step1 = r1.json()["step_counter"]
 
         # Second pause (should also succeed)
-        r2 = requests.post(f"{server_url}/pause/step", timeout=30)
+        r2 = requests.post(f"{server_url}/pause/step?no_barrier=true", timeout=30)
         assert r2.status_code == 200
         step2 = r2.json()["step_counter"]
 
@@ -113,128 +147,87 @@ class TestPauseStepIntegration:
         # Clean up
         requests.post(f"{server_url}/resume", timeout=30)
 
-    def test_is_paused_reflects_state(self, server_url, skip_if_no_server):
-        """Test that /is_paused correctly reflects pause state."""
-        # Start with resume
-        requests.post(f"{server_url}/resume", timeout=30)
-
-        # Check not paused
-        r1 = requests.get(f"{server_url}/is_paused", timeout=30)
-        assert r1.status_code == 200
-        assert r1.json()["is_paused"] is False
-
-        # Pause
-        requests.post(f"{server_url}/pause/step", timeout=30)
-
-        # Check paused
-        r2 = requests.get(f"{server_url}/is_paused", timeout=30)
-        assert r2.status_code == 200
-        assert r2.json()["is_paused"] is True
-
-        # Resume
-        requests.post(f"{server_url}/resume", timeout=30)
-
-        # Check not paused again
-        r3 = requests.get(f"{server_url}/is_paused", timeout=30)
-        assert r3.status_code == 200
-        assert r3.json()["is_paused"] is False
-
-    def test_pause_step_barrier(self, server_url, skip_if_no_server):
-        """Test the barrier endpoint."""
-        # First resume
-        requests.post(f"{server_url}/resume", timeout=30)
-
-        # Pause and get step counter
-        pause_response = requests.post(f"{server_url}/pause/step", timeout=30)
-        assert pause_response.status_code == 200
-        target = pause_response.json()["recommended_target_step"]
-
-        # Run until target step count (this is the barrier)
-        barrier_response = requests.post(
-            f"{server_url}/pause/step/barrier",
-            json={"target_steps": target},
-            timeout=60,
-        )
-        assert barrier_response.status_code == 200
-        assert barrier_response.json()["status"] == "ok"
-
-        # Should still be paused after barrier
-        is_paused = requests.get(f"{server_url}/is_paused", timeout=30)
-        assert is_paused.json()["is_paused"] is True
-
-        # Clean up
-        requests.post(f"{server_url}/resume", timeout=30)
-
-    def test_pause_step_barrier_validation(self, server_url, skip_if_no_server):
-        """Test that /pause/step/barrier validates input."""
-        # Missing target_steps
-        r1 = requests.post(
-            f"{server_url}/pause/step/barrier",
-            json={},
-            timeout=30,
-        )
-        assert r1.status_code == 400
-        assert "target_steps" in r1.json()["detail"]
-
-        # Invalid target_steps type
-        r2 = requests.post(
-            f"{server_url}/pause/step/barrier",
-            json={"target_steps": "not_an_int"},
-            timeout=30,
-        )
-        assert r2.status_code == 400
-
     def test_full_weight_sync_workflow(self, server_url, skip_if_no_server):
         """
         Simulate the full weight synchronization workflow as used in RL training.
 
-        This is the critical path:
-        1. POST /pause/step → get step_counter
-        2. Compute target = step_counter + 1
-        3. POST /pause/step/barrier(target) → barrier
-        4. (update weights - simulated here)
-        5. POST /resume
+        This is the simplified workflow with the new API:
+        1. POST /pause/step → pause + wait for barrier
+        2. (update weights - simulated here)
+        3. POST /resume
         """
         # Ensure clean state
         requests.post(f"{server_url}/resume", timeout=30)
 
-        # Step 1: Pause
-        pause_response = requests.post(f"{server_url}/pause/step", timeout=30)
+        # Step 1: Pause with default barrier
+        pause_response = requests.post(f"{server_url}/pause/step", timeout=60)
         assert pause_response.status_code == 200
         step_counter = pause_response.json()["step_counter"]
-        target_steps = step_counter + 1
 
-        print(f"Paused at step {step_counter}, target barrier: {target_steps}")
+        print(f"Paused at step {step_counter} - all engines synced")
 
-        # Step 2: Barrier
-        barrier_response = requests.post(
-            f"{server_url}/pause/step/barrier",
-            json={"target_steps": target_steps},
-            timeout=120,  # May need more time for DP sync
-        )
-        assert barrier_response.status_code == 200
-
-        print("Barrier reached - all engines at target step")
-
-        # Step 3: Simulate weight update
+        # Step 2: Simulate weight update
         print("Simulating weight update...")
         time.sleep(0.1)
 
-        # Step 4: Resume
+        # Step 3: Resume
         resume_response = requests.post(f"{server_url}/resume", timeout=30)
         assert resume_response.status_code == 200
 
         print("Weights updated and engine resumed!")
 
-        # Verify we can do inference after resume
-        # (This tests that the engine is actually working after the pause/resume cycle)
+    def test_advanced_workflow_with_custom_barrier(
+        self, server_url, skip_if_no_server
+    ):
+        """
+        Advanced workflow for when user needs control over barrier target.
+
+        This replicates the old 2-call pattern:
+        1. POST /pause/step?no_barrier=true → fast pause, get step
+        2. Compute target
+        3. POST /pause/step?barrier=<target> → wait for barrier
+        4. (update weights)
+        5. POST /resume
+        """
+        # Ensure clean state
+        requests.post(f"{server_url}/resume", timeout=30)
+
+        # Step 1: Fast pause to get step counter
+        fast_response = requests.post(
+            f"{server_url}/pause/step?no_barrier=true", timeout=30
+        )
+        assert fast_response.status_code == 200
+        step_counter = fast_response.json()["step_counter"]
+
+        print(f"Fast pause at step {step_counter}")
+
+        # Step 2: Compute target (user's custom logic)
+        target = step_counter + 1 if step_counter > 0 else step_counter
+
+        # Step 3: Wait for barrier
+        barrier_response = requests.post(
+            f"{server_url}/pause/step?barrier={target}", timeout=60
+        )
+        assert barrier_response.status_code == 200
+
+        print(f"Barrier reached at step {barrier_response.json()['step_counter']}")
+
+        # Step 4: Simulate weight update
+        print("Simulating weight update...")
+        time.sleep(0.1)
+
+        # Step 5: Resume
+        resume_response = requests.post(f"{server_url}/resume", timeout=30)
+        assert resume_response.status_code == 200
+
+        print("Weights updated and engine resumed!")
 
 
 class TestPauseStepWithInference:
     """Tests that combine step-barrier pause with actual inference requests."""
 
     def test_pause_step_during_inference(self, server_url, skip_if_no_server):
-        """Test that /pause/step returns quickly even during inference."""
+        """Test that /pause/step?no_barrier=true returns quickly during inference."""
         import concurrent.futures
 
         # Ensure clean state
@@ -264,9 +257,11 @@ class TestPauseStepWithInference:
             # Give inference a moment to start
             time.sleep(0.5)
 
-            # Pause should still be fast
+            # Pause (no_barrier) should still be fast
             start = time.time()
-            pause_response = requests.post(f"{server_url}/pause/step", timeout=30)
+            pause_response = requests.post(
+                f"{server_url}/pause/step?no_barrier=true", timeout=30
+            )
             pause_elapsed = time.time() - start
 
             assert pause_response.status_code == 200
