@@ -671,19 +671,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
-
-        # (num_experts,rank,input_size)
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        # (output_size,rank,num_experts)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], -1, num_experts)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], -1, num_experts)
-        # (num_experts,output_size,rank)
-        w13_lora_b = w13_lora_b.permute(2, 0, 1)
-        w2_lora_b = w2_lora_b.permute(2, 0, 1)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
