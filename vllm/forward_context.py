@@ -102,6 +102,7 @@ class DPMetadata:
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
         assert parallel_config.data_parallel_size > 1
+        assert parallel_config.is_moe_model is not False
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
 
