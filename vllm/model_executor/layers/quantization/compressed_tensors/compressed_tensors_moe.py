@@ -426,7 +426,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = a2_scale
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None:
+        use_dp = self.moe.dp_size > 1
+        if self.moe_quant_config is not None and not use_dp:
             self.kernel = make_nvfp4_moe_kernel(
                 backend=self.nvfp4_backend,
                 quant_config=self.moe_quant_config,
