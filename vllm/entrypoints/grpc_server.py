@@ -58,7 +58,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Initialize the servicer.
 
         Args:
-            request_manager: The GrpcRequestManager instance
+            async_llm: The AsyncLLM instance
+            start_time: The server start time, in seconds since epoch
         """
         self.async_llm = async_llm
         self.start_time = start_time
