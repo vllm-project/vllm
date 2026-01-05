@@ -105,8 +105,14 @@ def make_nvfp4_moe_kernel(
 ) -> mk.FusedMoEModularKernel | None:
     assert moe_config.dp_size == 1
 
-    if backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+    # TRTLLM backend does not support the mk abstraction.
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        return None
+
+    elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         return mk.FusedMoEModularKernel(
+            # TODO(rob): make defer_input_quant an attr
+            # of FlashInferExperts for nvfp4.
             prepare_finalize=MoEPrepareAndFinalizeNoEP(
                 defer_input_quant=True,
             ),
