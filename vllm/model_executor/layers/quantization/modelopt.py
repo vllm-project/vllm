@@ -1013,7 +1013,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
-                a2_scale=(1.0 / layer.w2_input_scale),
+                a2_scale=layer.w2_input_scale,
+                a1_gscale=(1.0 / layer.w13_input_scale),
+                a2_gscale=(1.0 / layer.w2_input_scale),
                 g1_alphas=g1_alphas,
                 g2_alphas=g2_alphas,
             )
