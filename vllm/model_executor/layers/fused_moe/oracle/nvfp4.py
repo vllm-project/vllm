@@ -105,8 +105,15 @@ def make_nvfp4_moe_kernel(
 ) -> mk.FusedMoEModularKernel | None:
     assert moe_config.dp_size == 1
 
+    # TRTLLM does not support the modular kernel abstraction.
+    # CUTEDSL is used BATCHED (masked) format only.
+    UNSUPPORTED_BACKENDS = [
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+    ]
+
     # TRTLLM backend does not support the mk abstraction.
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+    if backend in UNSUPPORTED_BACKENDS:
         return None
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
