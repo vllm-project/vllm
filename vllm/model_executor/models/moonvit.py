@@ -54,8 +54,13 @@ from transformers.modeling_utils import PreTrainedModel
 
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -308,11 +313,19 @@ class MLP2(nn.Module):
         super().__init__()
         assert len(dims) == 3
         self.use_data_parallel = use_data_parallel
-        self.fc0 = ReplicatedLinear(
-            dims[0], dims[1], bias=bias, prefix=maybe_prefix(prefix, "fc0")
+        self.fc0 = ColumnParallelLinear(
+            dims[0],
+            dims[1],
+            bias=bias,
+            prefix=maybe_prefix(prefix, "fc0"),
+            disable_tp=self.use_data_parallel,
         )
-        self.fc1 = ReplicatedLinear(
-            dims[1], dims[2], bias=bias, prefix=maybe_prefix(prefix, "fc1")
+        self.fc1 = RowParallelLinear(
+            dims[1],
+            dims[2],
+            bias=bias,
+            prefix=maybe_prefix(prefix, "fc1"),
+            disable_tp=self.use_data_parallel,
         )
         self.activation = activation
 
@@ -336,32 +349,48 @@ class MoonVitEncoderLayer(nn.Module):
         attn_bias: bool = False,
     ):
         super().__init__()
-        self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
-
-        self.norm0 = nn.LayerNorm(hidden_dim)
-        self.norm1 = nn.LayerNorm(hidden_dim)
         self.use_data_parallel = (
             multimodal_config.mm_encoder_tp_mode == "data"
             if multimodal_config
             else False
         )
+
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
+        self.tp_size = (
+            1 if self.use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        self.num_attention_heads_per_partition = divide(num_heads, self.tp_size)
+
+        self.norm0 = nn.LayerNorm(hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP2(
             [hidden_dim, mlp_dim, hidden_dim],
             activation,
             prefix=f"{prefix}.mlp",
             use_data_parallel=self.use_data_parallel,
         )
-        self.wqkv = ReplicatedLinear(
-            hidden_dim, hidden_dim * 3, bias=attn_bias, prefix=f"{prefix}.wqkv"
+        self.wqkv = QKVParallelLinear(
+            hidden_size=hidden_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=attn_bias,
+            prefix=f"{prefix}.wqkv",
+            disable_tp=self.use_data_parallel,
         )
-        self.wo = ReplicatedLinear(
-            hidden_dim, hidden_dim, bias=attn_bias, prefix=f"{prefix}.wo"
+        self.wo = RowParallelLinear(
+            hidden_dim,
+            hidden_dim,
+            bias=attn_bias,
+            prefix=f"{prefix}.wo",
+            disable_tp=self.use_data_parallel,
         )
         self.attn = MMEncoderAttention(
-            num_heads=self.num_heads,
+            num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -381,7 +410,7 @@ class MoonVitEncoderLayer(nn.Module):
 
         qkv_shape = xqkv.size()[:-1] + (
             3,
-            self.num_heads,
+            self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head,
         )
         # xqkv: (batch_size, seqlen, 3, nheads, headdim)
@@ -399,7 +428,9 @@ class MoonVitEncoderLayer(nn.Module):
             max_seqlen=max_seqlen,
         )
         attn_out = attn_out.reshape(
-            seq_length, self.num_heads * self.hidden_size_per_attention_head
+            seq_length,
+            self.num_attention_heads_per_partition
+            * self.hidden_size_per_attention_head,
         )
         attn_out, _ = self.wo(attn_out)
         return attn_out
