@@ -3,6 +3,7 @@
 import logging
 import multiprocessing
 import os
+import sys
 
 from vllm.worker_controller.config.vllm import VllmConfig, DummyVllmConfig
 from vllm.worker_controller.config.model import ModelConfig, DummyModelConfig
@@ -24,6 +25,13 @@ def run_api_server(request_queue, response_queue, engine_uuid, vllm_config, port
     """
     Entry point for the spawned API server process.
     """
+    try:
+        multiprocessing.set_start_method("forkserver", force=True)
+        multiprocessing.set_forkserver_preload(["vllm.worker_controller.entrypoint.api_server"])
+    except RuntimeError:
+        # Context already set
+        pass
+
     # Create default args
     parser = FlexibleArgumentParser()
     parser = make_arg_parser(parser)
@@ -153,7 +161,7 @@ class WorkerController:
             f"Assigned ranks {assigned_ranks}, port {port} to engine {engine_uuid}")
 
         # 2. Create queues for communication
-        ctx = multiprocessing.get_context("spawn")
+        ctx = multiprocessing.get_context("forkserver")
         request_queue = ctx.Queue()
         response_queue = ctx.Queue()
 

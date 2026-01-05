@@ -301,6 +301,15 @@ class Worker(WorkerBase):
             pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
         )
 
+        # Take memory snapshot before loading model (needed for determine_available_memory)
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.init_snapshot = MemorySnapshot()
+        self.requested_memory = (
+            self.init_snapshot.total_memory
+            * self.cache_config.gpu_memory_utilization
+        )
+
         self.model_runner: GPUModelRunner = GPUModelRunner(
             vllm_config, self.device
         )
@@ -308,6 +317,49 @@ class Worker(WorkerBase):
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
+
+    def unload_model(self) -> None:
+        """Unload the model and free GPU memory.
+
+        This method cleans up the model runner and releases GPU memory
+        so the worker can load a different model.
+        """
+        logger.info(f"Worker {self.rank} unloading model...")
+
+        if self.model_runner is not None:
+            # Delete the model from model runner
+            if hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
+                del self.model_runner.model
+                self.model_runner.model = None
+
+            # Clear KV cache if initialized
+            if hasattr(self.model_runner, 'kv_caches') and self.model_runner.kv_caches is not None:
+                for kv_cache in self.model_runner.kv_caches:
+                    if kv_cache is not None:
+                        del kv_cache
+                self.model_runner.kv_caches = None
+
+            # Clear kv_cache_config
+            if hasattr(self.model_runner, 'kv_cache_config'):
+                self.model_runner.kv_cache_config = None
+
+            # Delete the model runner itself
+            del self.model_runner
+            self.model_runner = None
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Reset memory snapshot for next model
+        self.init_snapshot = MemorySnapshot()
+
+        logger.info(f"Worker {self.rank} model unloaded. "
+                    f"Free GPU memory: {torch.cuda.mem_get_info()[0] / GiB_bytes:.2f} GiB")
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

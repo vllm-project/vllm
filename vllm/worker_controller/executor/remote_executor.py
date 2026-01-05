@@ -42,6 +42,12 @@ class RemoteExecutor(Executor):
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
 
+    def determine_available_memory(self) -> List[int]:
+        return self.collective_rpc("determine_available_memory")
+
+    def determine_kv_cache_specs(self) -> List[Dict[str, Any]]:
+        return self.collective_rpc("get_kv_cache_spec")
+
     def execute_model(
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:

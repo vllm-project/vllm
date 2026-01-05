@@ -148,6 +148,16 @@ class ProxyExecutor(Executor):
             ranks = self.engines[engine_uuid]['ranks']
             # Broadcast unload to these ranks
             self._broadcast_request(ranks, "unload_model", (), {})
+            
+            # Drain responses to prevent stale messages in the queue
+            for rank in ranks:
+                mq = self.response_mqs[rank]
+                try:
+                    # Wait for response with timeout
+                    mq.dequeue(timeout=120)
+                except Exception as e:
+                    logger.error(f"Error draining response from rank {rank} during delete_engine: {e}")
+
             del self.engines[engine_uuid]
 
     def _init_executor(self) -> None:
