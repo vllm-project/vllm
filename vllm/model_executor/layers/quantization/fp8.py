@@ -1104,8 +1104,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             return None
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            if self.moe.dp_size == 1:
-                return None
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
                 use_deepseek_fp8_block_scale=self.block_quant,

@@ -50,6 +50,7 @@ def can_initialize(
         "--load-format",
         "dummy",
         "--trust-remote-code",
+        "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0}),
         *extra_args,
