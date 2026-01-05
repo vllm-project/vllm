@@ -166,7 +166,7 @@ class GPTNeoXLayer(nn.Module):
         self.attention = GPTNeoXAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attention"
         )
-        self.mlp = GPTNeoXMLP(config, quant_config)
+        self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
