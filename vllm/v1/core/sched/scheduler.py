@@ -127,7 +127,7 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
-            self.parallel_config.data_parallel_rank,
+            self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
@@ -587,10 +587,11 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
+                    num_new_tokens,
+                    num_new_computed_tokens=num_new_local_computed_tokens,
+                    new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
@@ -606,7 +607,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        self.kv_cache_manager.get_blocks(request.request_id),
                         num_external_computed_tokens,
                     )
 
@@ -761,11 +762,7 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _preempt_request(
-        self,
-        request: Request,
-        timestamp: float,
-    ) -> None:
+    def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
@@ -785,10 +782,7 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
-    def _update_after_schedule(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
+    def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
         # 1. The scheduler_output of the current step has to include the
@@ -1005,8 +999,7 @@ class Scheduler(SchedulerInterface):
             )
             curr_embeds_start, curr_embeds_end = (
                 mm_feature.mm_position.get_embeds_indices_in_range(
-                    start_idx_rel,
-                    end_idx_rel,
+                    start_idx_rel, end_idx_rel
                 )
             )
             # There's no embeddings in the current range of encoder placeholder tokens
@@ -1033,8 +1026,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def get_grammar_bitmask(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
         # Collect list of scheduled request ids that use structured output.
         # The corresponding rows of the bitmask will be in this order.
@@ -1284,9 +1276,7 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _update_request_with_output(
-        self,
-        request: Request,
-        new_token_ids: list[int],
+        self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
@@ -1374,9 +1364,7 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
-        self,
-        request_ids: str | Iterable[str],
-        finished_status: RequestStatus,
+        self, request_ids: str | Iterable[str], finished_status: RequestStatus
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
@@ -1593,6 +1581,13 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
+
+        # Free any out-of-window prefix blocks before we hand the block table to
+        # the connector.
+        self.kv_cache_manager.remove_skipped_blocks(
+            request_id=request.request_id,
+            total_computed_tokens=request.num_tokens,
+        )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
