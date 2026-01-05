@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
-from vllm.config.cache import CacheConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -31,7 +30,6 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        cache_config: CacheConfig,
         block_pool: BlockPool,
         enable_caching: bool,
         kv_cache_group_id: int,
@@ -45,7 +43,6 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_group_id: The id of the kv cache group of this manager.
         """
-        self.cache_config = cache_config
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
@@ -743,11 +740,9 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 
 class MambaManager(SingleTypeKVCacheManager):
-    def __init__(
-        self, kv_cache_spec: MambaSpec, cache_config: CacheConfig, **kwargs
-    ) -> None:
-        super().__init__(kv_cache_spec, cache_config=cache_config, **kwargs)
-        self.mamba_cache_mode = cache_config.mamba_cache_mode
+    def __init__(self, kv_cache_spec: MambaSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
             self.last_state_block_idx: dict[str, int] = {}
@@ -1025,7 +1020,6 @@ class SinkFullAttentionManager(FullAttentionManager):
     def __init__(
         self,
         kv_cache_spec: SinkFullAttentionSpec,
-        cache_config: CacheConfig,
         block_pool: BlockPool,
         enable_caching: bool,
         kv_cache_group_id: int,
@@ -1034,7 +1028,6 @@ class SinkFullAttentionManager(FullAttentionManager):
     ):
         super().__init__(
             kv_cache_spec,
-            cache_config,
             block_pool,
             enable_caching,
             kv_cache_group_id,
