@@ -381,7 +381,10 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             # Guard against speculative draft tokens that suggested reasoning
             # ended but were not actually accepted in the output.
-            if not self.reasoner.is_reasoning_end(list(request.all_token_ids)):
+            if (
+                not structured_req.reasoning_ended_by_fallback
+                and not self.reasoner.is_reasoning_end(list(request.all_token_ids))
+            ):
                 structured_req.reasoning_ended = False
                 return False
             return True
