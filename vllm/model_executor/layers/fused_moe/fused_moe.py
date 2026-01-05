@@ -617,11 +617,11 @@ def invoke_fused_moe_wna16_triton_kernel(
     compute_type: tl.dtype,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
-    block_shape: list[int],
+    block_shape: list[int] | None,
 ):
     assert B_scale is not None and B_scale.ndim == 3
     assert B_zp is None or B_zp.ndim == 3
-    assert block_shape[0] == 0
+    assert block_shape is not None and block_shape[0] == 0
 
     M = A.size(0)
     num_tokens = M * top_k
