@@ -386,7 +386,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
-            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+            prepare_moe_fp4_layer_for_marlin(
+                layer, input_dtype=get_marlin_input_dtype("")
+            )
         else:
             raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
 
@@ -505,8 +507,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             return fused_marlin_moe(
                 x,
-                layer.w13_weight,
-                layer.w2_weight,
+                layer.w13_weight_packed,
+                layer.w2_weight_packed,
                 None,
                 None,
                 layer.w13_weight_scale,
@@ -520,7 +522,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
-                input_dtype=self.marlin_input_dtype,
+                input_dtype=get_marlin_input_dtype(""),
             )
         elif self.nvfp4_backend in [
             NvFp4MoeBackend.FLASHINFER_CUTLASS,

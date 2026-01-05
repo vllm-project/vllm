@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     nvfp4_moe_quant_config,
+    nvfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp4,
@@ -71,7 +72,7 @@ def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
     def _make_log_backend(backend: NvFp4MoeBackend):
         return f"Using {backend.value} backend for NvFp4 MoE"
 
-    if cutlass_fp4_supported():
+    if cutlass_fp4_supported() and not envs.VLLM_TEST_FORCE_FP8_MARLIN:
         allow_flashinfer = (
             is_flashinfer_fp4_cutlass_moe_available()
             or is_flashinfer_fp4_cutedsl_moe_available()
@@ -157,9 +158,17 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig | None:
-    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM, NvFp4MoeBackend.MARLIN]
+    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
     if backend in UNSUPPORTED:
         return None
+    elif backend == NvFp4MoeBackend.MARLIN:
+        return None
+        return nvfp4_w4a16_moe_quant_config(
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_scale_2=w13_scale_2,
+            w2_scale_2=w2_scale_2,
+        )
 
     g1_alphas = a13_scale * w13_scale_2
     g2_alphas = a2_scale * w2_scale_2

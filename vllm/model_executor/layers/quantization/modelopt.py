@@ -1621,14 +1621,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         else:
             raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
 
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-        replace_parameter(layer, "w13_input_scale", a13_scale)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
-        replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        replace_parameter(layer, "w2_input_scale", a2_scale)
+        if not self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
+            replace_parameter(layer, "w13_input_scale", a13_scale)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+            replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
+            replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.kernel = make_nvfp4_moe_kernel(
@@ -1734,7 +1735,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
-                input_dtype=self.marlin_input_dtype,
+                input_dtype=get_marlin_input_dtype(""),
             )
         elif self.nvfp4_backend in [
             NvFp4MoeBackend.FLASHINFER_CUTLASS,
