@@ -992,20 +992,16 @@ class OpenAIServing:
             async_tokenizer = self._get_async_tokenizer(tokenizer)
             input_text = await async_tokenizer.decode(input_ids)
 
-        return self._validate_input(
-            request, input_ids, input_text, skip_length_validation=True
-        )
+        # Length validation has already been performed above; avoid repeating it.
+        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _validate_input(
         self,
         request: AnyRequest,
         input_ids: list[int],
         input_text: str,
-        *,
-        skip_length_validation: bool = False,
     ) -> TokensPrompt:
-        if not skip_length_validation:
-            self._validate_length_only(request, len(input_ids))
+        self._validate_length_only(request, len(input_ids))
         return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _validate_length_only(self, request: AnyRequest, token_num: int) -> None:
