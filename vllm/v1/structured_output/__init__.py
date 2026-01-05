@@ -256,9 +256,39 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
-                state_advancements = 0
+                # Check if reasoning ends within the scheduled spec tokens.
+                # This handles MTP/spec decode where </think> might be a draft
+                # token, and we need to constrain the bonus token that follows.
+                reasoning_ends_at_idx = -1
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if (
+                    not apply_bitmask
+                    and self.reasoner is not None
+                    and req_tokens
+                    and not structured_output_request.reasoning_ended
+                ):
+                    # Check each spec token position to find where reasoning ends
+                    for idx in range(len(req_tokens)):
+                        check_seq = list(request.all_token_ids) + list(
+                            req_tokens[: idx + 1]
+                        )
+                        if self.reasoner.is_reasoning_end(check_seq):
+                            reasoning_ends_at_idx = idx
+                            break
+
+                state_advancements = 0
+                for token_idx, token in enumerate(itertools.chain(req_tokens, (-1,))):
+                    # Enable bitmask for positions after reasoning ends in spec
+                    # tokens. token_idx corresponds to spec token positions,
+                    # with -1 being the bonus token position.
+                    if (
+                        not apply_bitmask
+                        and reasoning_ends_at_idx >= 0
+                        and token_idx > reasoning_ends_at_idx
+                    ):
+                        apply_bitmask = True
+                        structured_output_request.reasoning_ended = True
+
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
