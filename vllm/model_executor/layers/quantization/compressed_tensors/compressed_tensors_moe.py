@@ -477,6 +477,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_group=layer.topk_group,
                 custom_routing_function=layer.custom_routing_function,
                 e_score_correction_bias=layer.e_score_correction_bias,
+                weight_attr_name="weight_packed",
             )
 
         # Hidden_states in select_experts is only used to extract metadata
@@ -499,6 +500,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
+                weight_attr_name="weight_packed",
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             return fused_marlin_moe(
