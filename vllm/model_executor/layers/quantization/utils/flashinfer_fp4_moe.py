@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -20,11 +21,20 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    swizzle_blockscale,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
+
+logger = init_logger(__name__)
+
 
 __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
@@ -410,3 +420,84 @@ def flashinfer_trtllm_fp4_routed_moe(
     )[0]
 
     return out
+
+
+def prepare_nvfp4_moe_layer_for_fi(
+    backend: NvFp4MoeBackend,
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+    a13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    a2_scale: torch.Tensor,
+    is_act_and_mul: bool,
+    is_global_sf: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
+    if is_act_and_mul and backend in [
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    ]:
+        w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
+
+    # Use a single weight_scale_2 for FI NVFP4 MoE kernels.
+    assert w13_scale_2.shape[1] == 2
+    w1_scale_2, w3_scale_2 = w13_scale_2[:, 0], w13_scale_2[:, 1]
+    if is_act_and_mul and not torch.allclose(w1_scale_2, w3_scale_2):
+        logger.warning_once(
+            "w1_scale_2 must match w3_scale_2. Accuracy may be affected.",
+            scope="local",
+        )
+    w13_scale_2 = w13_scale_2[:, 0].contiguous()
+
+    # For some FI kernels, the input scales are shared by all experts.
+    if is_global_sf:
+        num_experts = w13.shape[0]
+        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
+        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+
+    # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w2.size(-2),  # hidden_size
+            w13.size(-2) // 2,  # intermediate_size
+            w13.size(0),  # num_experts
+        )
+
+        # We do not need to make this a parameter, because
+        # it is not used during the weight (re)-loading process.
+        layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+    else:
+        # Swizzle the block scales for other FI NVFP4 MoE kernels.
+        w13_scale = swizzle_blockscale(w13_scale)
+
+        # Apply padding if needed.
+        pad_size = w13_scale.size(1) - w13.size(1)
+        if pad_size > 0:
+            if is_act_and_mul:
+                raise NotImplementedError(
+                    "Intermediate size padding for w1 and w3, for %s "
+                    "NvFp4 backend, but this is not currently supported",
+                    backend.value,
+                )
+            w13 = torch.nn.functional.pad(w13, (0, 0, 0, pad_size))
+            w2 = torch.nn.functional.pad(w2, (0, pad_size // 2, 0, 0))
+            w2_scale = torch.nn.functional.pad(w2_scale, (0, pad_size // 16))
+
+        w2_scale = swizzle_blockscale(w2_scale)
+
+    return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, a2_scale
