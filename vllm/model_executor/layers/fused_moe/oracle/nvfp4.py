@@ -5,10 +5,18 @@ from enum import Enum
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
     nvfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_flashinfer_fp4_cutedsl_moe_available,
@@ -90,8 +98,31 @@ def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
     return backend
 
 
-def make_nvfp4_moe_kernel():
-    pass
+def make_nvfp4_moe_kernel(
+    backend: NvFp4MoeBackend,
+    quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+) -> mk.FusedMoEModularKernel | None:
+    assert moe_config.dp_size == 1
+
+    if backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+        return mk.FusedMoEModularKernel(
+            prepare_finalize=MoEPrepareAndFinalizeNoEP(
+                defer_input_quant=True,
+            ),
+            shared_experts=FlashInferExperts(
+                out_dtype=moe_config.in_dtype,
+                quant_config=quant_config,
+                ep_rank=moe_config.ep_rank,
+                ep_size=moe_config.ep_size,
+                tp_rank=moe_config.tp_rank,
+                tp_size=moe_config.tp_size,
+                use_dp=False,
+                use_deepseek_fp8_block_scale=False,
+            ),
+        )
+    else:
+        return None
 
 
 def make_nvfp4_moe_quant_config(

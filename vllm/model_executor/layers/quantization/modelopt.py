@@ -1724,18 +1724,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 input_dtype=self.marlin_input_dtype,
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                flashinfer_cutlass_moe_fp4,
-            )
-
-            assert self.moe_quant_config is not None
-            return flashinfer_cutlass_moe_fp4(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                quant_config=self.moe_quant_config,
+            assert self.kernel is not None
+            return self.kernel(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
                 inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
