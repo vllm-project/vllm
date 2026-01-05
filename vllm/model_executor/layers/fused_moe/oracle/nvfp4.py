@@ -161,8 +161,8 @@ def make_nvfp4_moe_quant_config(
     UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
     if backend in UNSUPPORTED:
         return None
+
     elif backend == NvFp4MoeBackend.MARLIN:
-        return None
         return nvfp4_w4a16_moe_quant_config(
             w13_scale=w13_scale,
             w2_scale=w2_scale,

@@ -468,16 +468,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     ]:
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
 
-    # Use a single weight_scale_2 for FI NVFP4 MoE kernels.
-    assert w13_scale_2.shape[1] == 2
-    w1_scale_2, w3_scale_2 = w13_scale_2[:, 0], w13_scale_2[:, 1]
-    if is_act_and_mul and not torch.allclose(w1_scale_2, w3_scale_2):
-        logger.warning_once(
-            "w1_scale_2 must match w3_scale_2. Accuracy may be affected.",
-            scope="local",
-        )
-    w13_scale_2 = w13_scale_2[:, 0].contiguous()
-
     # For some FI kernels, the input scales are shared by all experts.
     if is_global_sf_supported_for_nvfp4_backend(backend):
         num_experts = w13.shape[0]
