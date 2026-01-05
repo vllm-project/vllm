@@ -401,9 +401,8 @@ class SpeculativeConfig:
                             method=self.method,
                             model_type="eagle",
                         )
-                        # Refresh all hf_config-dependent fields in draft_model_config
-                        # This is specific to the draft model case where we wrap
-                        # the original config with EAGLEConfig after ModelConfig init
+                        # EAGLEConfig primarily updates architectures, so update
+                        # all architectures-related fields in draft_model_config
                         self.draft_model_config.hf_config = eagle_config
                         self.draft_model_config.hf_text_config = get_hf_text_config(
                             self.draft_model_config.hf_config
