@@ -110,7 +110,7 @@ def make_nvfp4_moe_kernel(
             prepare_finalize=MoEPrepareAndFinalizeNoEP(
                 defer_input_quant=True,
             ),
-            shared_experts=FlashInferExperts(
+            fused_experts=FlashInferExperts(
                 out_dtype=moe_config.in_dtype,
                 quant_config=quant_config,
                 ep_rank=moe_config.ep_rank,
