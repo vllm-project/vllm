@@ -1030,7 +1030,6 @@ async def benchmark(
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
-    # Print speculative decoding stats if available
     if spec_decode_stats is not None:
         print("{s:{c}^{n}}".format(s=" Speculative Decoding ", n=50, c="-"))
         print(
