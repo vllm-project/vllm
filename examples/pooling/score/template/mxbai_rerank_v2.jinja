@@ -1,0 +1,8 @@
+<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
+<|im_start|>user
+query: {{ (messages | selectattr("role", "eq", "query") | first).content }}
+document: {{ (messages | selectattr("role", "eq", "document") | first).content }}
+You are a search relevance expert who evaluates how well documents match search queries. For each query-document pair, carefully analyze the semantic relationship between them, then provide your binary relevance judgment (0 for not relevant, 1 for relevant).
+Relevance:<|im_end|>
+<|im_start|>assistant

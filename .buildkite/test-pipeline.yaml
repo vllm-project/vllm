@@ -383,6 +383,7 @@ steps:
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
+  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
     - vllm/v1/attention
     - tests/v1/attention
@@ -943,7 +944,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
+  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
@@ -985,6 +986,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
+  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -1052,6 +1054,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   gpu: b200
+  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py
