@@ -1443,7 +1443,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
-
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,

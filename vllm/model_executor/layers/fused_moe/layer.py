@@ -1120,7 +1120,7 @@ class FusedMoE(CustomOp):
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self.quant_method, "allow_global_sf", False)
+            getattr(self.quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
             and quant_method_name == "ModelOptNvFp4FusedMoE"
         )
