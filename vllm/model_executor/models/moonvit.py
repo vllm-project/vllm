@@ -368,9 +368,10 @@ class MoonVitEncoderLayer(nn.Module):
     ):
         """
         Args:
-            x (torch.Tensor): (batch_size, seqlen, hidden_dim)
+            x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor):
         """
+        seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
 
         qkv_shape = xqkv.size()[:-1] + (
@@ -384,11 +385,16 @@ class MoonVitEncoderLayer(nn.Module):
 
         xq, xk = apply_rope(xq, xk, rope_freqs_cis)
 
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         attn_out = self.attn(
-            xq,
-            xk,
-            xv,
+            xq.unsqueeze(0),
+            xk.unsqueeze(0),
+            xv.unsqueeze(0),
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        attn_out = attn_out.reshape(
+            seq_length, self.num_heads * self.hidden_size_per_attention_head
         )
         attn_out, _ = self.wo(attn_out)
         return attn_out
