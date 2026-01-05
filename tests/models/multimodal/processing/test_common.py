@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 from collections.abc import Set as AbstractSet
 from functools import partial
 
@@ -102,6 +103,7 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "nemotron_parse": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
@@ -403,6 +405,11 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
+    if (
+        model_id == "nvidia/NVIDIA-Nemotron-Parse-v1.1"
+        and importlib.util.find_spec("albumentations") is None
+    ):
+        pytest.skip("Nemotron Parse processing requires 'albumentations' installed")
 
     _test_processing_correctness(
         model_id,
