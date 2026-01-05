@@ -142,6 +142,11 @@ def main():
         default=5,
         help="Number of iterations to trace for each kernel (default: 5)",
     )
+    parser.add_argument(
+        "--no-triton-timing",
+        action="store_true",
+        help="Disable Triton's optimized timing (use manual CUDA timing instead)",
+    )
     args = parser.parse_args()
 
     # List all benchmarks if requested
@@ -193,6 +198,7 @@ def main():
     print(f"Mode: {args.mode}")
     print(f"Hidden size: {args.hidden_size}")
     print(f"CUDA graphs: {'DISABLED' if args.no_cudagraph else 'ENABLED'}")
+    print(f"Triton timing: {'DISABLED' if args.no_triton_timing else 'ENABLED'}")
     print(f"Correctness verification: {'DISABLED' if args.no_verify else 'ENABLED'}")
     print(f"GPU execution tracing: {'DISABLED' if args.no_trace else 'ENABLED'}")
     if not args.no_trace:
@@ -239,6 +245,7 @@ def main():
         enable_trace=not args.no_trace,
         trace_iterations=args.trace_iterations,
         trace_output_dir=str(output_dir),
+        use_triton_timing=not args.no_triton_timing,
     )
 
     # Print results
