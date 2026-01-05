@@ -28,7 +28,7 @@ def _get_module_info(module: nn.Module) -> str:
 
     if parts:
         return f"{class_name}({', '.join(parts)})"
-    
+
     # For unknown modules, use the default PyTorch repr
     return str(module)
 
@@ -64,7 +64,7 @@ def _format_module_tree(
     indent: int = 0,
 ) -> list[str]:
     """Format a module tree with indentation, grouping identical layers.
-    
+
     Produces output like:
         (layers): ModuleList(
           (0-27, 29-47): 47 x LlamaDecoderLayer(
@@ -116,7 +116,9 @@ def _format_module_tree(
 
             if len(indices) > 1:
                 range_str = _format_index_ranges(indices)
-                child_lines[0] = f"{child_prefix}({range_str}): {len(indices)} x {first_line}"
+                child_lines[0] = (
+                    f"{child_prefix}({range_str}): {len(indices)} x {first_line}"
+                )
             else:
                 child_lines[0] = f"{child_prefix}({indices[0]}): {first_line}"
             lines.extend(child_lines)
