@@ -352,6 +352,7 @@ class Zamba2MLP(nn.Module):
                     config.adapter_rank,
                     2 * [self.intermediate_size],
                     quant_config,
+                    prefix=f"{prefix}.gate_up_proj_adapter_list.{block_idx}",
                 )
             else:
                 gate_up_proj_adapter = nn.Identity()

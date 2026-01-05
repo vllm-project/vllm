@@ -201,7 +201,9 @@ class ModernBertEncoderLayer(nn.Module):
         self.layers = nn.ModuleList(
             [
                 ModernBertLayer(
-                    config=config, layer_id=layer_id, prefix=f"{prefix}.{layer_id}"
+                    config=config,
+                    layer_id=layer_id,
+                    prefix=f"{prefix}.layers.{layer_id}",
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -234,7 +236,7 @@ class ModernBertModel(nn.Module):
         self.config = config
         self.embeddings = ModernBertEmbeddings(config)
         self.encoder_layer = ModernBertEncoderLayer(
-            vllm_config, prefix=f"{prefix}.layers"
+            vllm_config, prefix=f"{prefix}.encoder_layer"
         )
         self.final_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
