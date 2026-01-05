@@ -1618,6 +1618,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
             prepare_moe_fp4_layer_for_marlin(layer)
+        else:
+            raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
