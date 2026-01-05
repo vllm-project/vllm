@@ -593,6 +593,147 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
+# ==============================================================================
+# MoE utilities (unified from flashinfer_utils.py to reduce code duplication)
+# ==============================================================================
+
+from enum import Enum
+
+
+class FlashinferMoeBackend(Enum):
+    """Backend selection for FlashInfer MoE kernels."""
+
+    TENSORRT_LLM = "TensorRT-LLM"
+    CUTLASS = "CUTLASS"
+    CUTEDSL = "CUTEDSL"
+
+
+def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
+    """Swap W1 and W3 weight ordering to W3 and W1."""
+    return (
+        x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
+    )
+
+
+def get_moe_scaling_factors(
+    input_scale: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Calculate MoE scaling factors for FP8 quantization."""
+    output1_scales_scalar = gemm1_weights_scale * input_scale * (1.0 / activation_scale)
+    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
+    output2_scales_scalar = activation_scale * gemm2_weights_scale
+
+    return output1_scales_scalar, output1_scales_gate_scalar, output2_scales_scalar
+
+
+def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
+    """Get the FlashInfer MoE backend based on environment configuration."""
+    backend_map = {
+        "throughput": FlashinferMoeBackend.CUTLASS,
+        "latency": FlashinferMoeBackend.TENSORRT_LLM,
+        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
+    }
+
+    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    if flashinfer_moe_backend in backend_map:
+        if (
+            flashinfer_moe_backend == "latency"
+            and not current_platform.is_device_capability_family(100)
+        ):
+            logger.info_once(
+                "Flashinfer TRTLLM MOE backend is only supported on "
+                "SM100 and later, using CUTLASS backend instead",
+                scope="local",
+            )
+            return FlashinferMoeBackend.CUTLASS
+        return backend_map[flashinfer_moe_backend]
+    elif current_platform.is_device_capability(90):
+        return FlashinferMoeBackend.CUTLASS
+
+    raise ValueError(
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
+        f"Expected one of {list(backend_map.keys())}."
+    )
+
+
+def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
+    """Check if the backend supports global scaling factors."""
+    backends_supporting_global_sf = (
+        FlashinferMoeBackend.CUTLASS,
+        FlashinferMoeBackend.TENSORRT_LLM,
+        FlashinferMoeBackend.CUTEDSL,
+    )
+    return backend in backends_supporting_global_sf
+
+
+def calculate_tile_tokens_dim(num_tokens: int, top_k: int, num_experts: int) -> int:
+    """Calculate tile token dimension for FlashInfer MoE kernels."""
+    from flashinfer import next_positive_power_of_2
+
+    # A factor considering tokens are not perfectly balanced among experts.
+    imbalance_factor = 1.3
+    # Calculate the number of tokens per expert assuming perfect distribution.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # Apply the imbalance factor.
+    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
+    # And pad the number to the next power of 2.
+    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
+    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
+    # as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
+
+    return tile_tokens_dim
+
+
+def rotate_flashinfer_fp8_moe_weights(
+    gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor
+) -> None:
+    """Rotate FP8 MoE weights for FlashInfer kernel compatibility."""
+    from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
+
+    epilogue_tile_m = 128
+    num_experts = gemm1_weights.shape[0]
+    hidden_size = gemm1_weights.shape[-1]
+    intermediate_size = gemm1_weights.shape[1] // 2
+
+    # Reorder rows of W1 for fused gated activation
+    gemm1_weights_fp8_interleaved = []
+    for i in range(num_experts):
+        gemm1_weights_fp8_interleaved.append(
+            reorder_rows_for_gated_act_gemm(gemm1_weights[i])
+        )
+
+    # Stack weights and scales for all experts
+    gemm1_weights_fp8_interleaved = torch.stack(gemm1_weights_fp8_interleaved).reshape(
+        num_experts, 2 * intermediate_size, hidden_size
+    )
+
+    # Shuffle weights and scaling factors for transposed mma output
+    gemm1_weights_fp8_shuffled = []
+    gemm2_weights_fp8_shuffled = []
+    for i in range(num_experts):
+        gemm1_weights_fp8_shuffled.append(
+            shuffle_matrix_a(
+                gemm1_weights_fp8_interleaved[i].view(torch.uint8), epilogue_tile_m
+            )
+        )
+
+        gemm2_weights_fp8_shuffled.append(
+            shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
+        )
+
+    # Stack weights for all experts
+    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
+        torch.float8_e4m3fn
+    )
+    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
+        torch.float8_e4m3fn
+    )
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -619,4 +760,12 @@ __all__ = [
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
+    # MoE utilities (unified from flashinfer_utils.py)
+    "FlashinferMoeBackend",
+    "swap_w13_to_w31",
+    "get_moe_scaling_factors",
+    "get_flashinfer_moe_backend",
+    "is_flashinfer_supporting_global_sf",
+    "calculate_tile_tokens_dim",
+    "rotate_flashinfer_fp8_moe_weights",
 ]
