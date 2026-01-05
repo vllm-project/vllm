@@ -247,15 +247,6 @@ class RMSNorm(CustomOp):
             self.variance_epsilon,
         )
 
-    def forward_cpu(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Use PyTorch native implementation for CPU to ensure correctness
-        # The CPU C++ kernel may have inconsistencies with the native impl
-        return self.forward_native(x, residual)
-
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"
@@ -328,15 +319,6 @@ class GemmaRMSNorm(CustomOp):
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
-
-    def forward_cpu(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Use PyTorch native implementation for CPU to ensure correctness
-        return self.forward_native(x, residual)
-
 
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
@@ -439,13 +421,6 @@ class RMSNormGated(CustomOp):
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
         )
-
-    def forward_cpu(
-        self, x: torch.Tensor, z: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        # Use PyTorch native implementation for CPU to ensure correctness
-        return self.forward_native(x, z)
-
 
 class LayerNorm(nn.Module):
     """
