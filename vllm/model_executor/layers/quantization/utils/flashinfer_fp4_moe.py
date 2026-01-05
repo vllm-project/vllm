@@ -77,11 +77,9 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
     enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    pf = create_flashinfer_prepare_finalize(
+    return create_flashinfer_prepare_finalize(
         use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
     )
-    print(f"{pf=}")
-    return pf
 
 
 def select_nvfp4_gemm_impl(
