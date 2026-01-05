@@ -14,6 +14,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.protocol import EngineClient
@@ -181,31 +182,66 @@ def _validate_truncation_size(
     max_model_len: int,
     truncate_prompt_tokens: int | None,
     tokenization_kwargs: dict[str, Any] | None = None,
-) -> int:
+) -> int | None:
     """
     Normalize and enforce truncation settings.
 
-    - Always enables truncation and sets `max_length`.
-    - Defaults to `max_model_len + 1` when caller did not specify a value.
+    - When `tokenization_kwargs` is provided, always enables truncation and sets
+      `max_length` for tokenization.
+    - Defaults tokenization `max_length` to `max_model_len + 1` when caller did
+      not specify a value (guardrail to detect overlong prompts).
     - Negative values map to `max_model_len`.
     - Raises if user-specified value exceeds `max_model_len`.
     """
-    if truncate_prompt_tokens is None:
-        truncate_prompt_tokens = max_model_len + 1
-    elif truncate_prompt_tokens <= -1:
-        truncate_prompt_tokens = max_model_len
-    elif truncate_prompt_tokens > max_model_len:
-        raise ValueError(
-            f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-            f"is greater than max_model_len ({max_model_len})."
-            f" Please, select a smaller truncation size."
-        )
+    # Normalize user-facing truncation (used for token-id slicing).
+    if truncate_prompt_tokens is not None:
+        if truncate_prompt_tokens <= -1:
+            truncate_prompt_tokens = max_model_len
+        elif truncate_prompt_tokens > max_model_len:
+            raise ValueError(
+                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                f"is greater than max_model_len ({max_model_len})."
+                f" Please, select a smaller truncation size."
+            )
 
+    # Configure tokenization kwargs (used for text -> ids tokenization).
     if tokenization_kwargs is not None:
+        if truncate_prompt_tokens is None:
+            max_length = max_model_len + 1
+        else:
+            max_length = truncate_prompt_tokens
+
         tokenization_kwargs["truncation"] = True
-        tokenization_kwargs["max_length"] = truncate_prompt_tokens
+        tokenization_kwargs["max_length"] = max_length
 
     return truncate_prompt_tokens
+
+
+# A conservative guardrail to early-fail obviously unreasonable text inputs
+# before attempting tokenization. This is intentionally high to avoid false
+# positives while still preventing runaway work on extremely long prompts.
+#
+# Can be overridden with `VLLM_MAX_CHARS_PER_TOKEN` (default: 32).
+MAX_CHARS_PER_TOKEN = envs.VLLM_MAX_CHARS_PER_TOKEN
+
+
+def _validate_text_prompt_char_length(
+    prompt: str,
+    max_model_len: int,
+    truncate_prompt_tokens: int | None,
+) -> None:
+    """Early-fail on extremely long text prompts before tokenization.
+
+    Per review guidance, skip this guard when `truncate_prompt_tokens == -1`.
+    """
+    if truncate_prompt_tokens == -1:
+        return
+
+    if len(prompt) > max_model_len * MAX_CHARS_PER_TOKEN:
+        raise ValueError(
+            "Input text is too long to tokenize safely. Please shorten it "
+            "or set truncate_prompt_tokens=-1."
+        )
 
 
 def get_max_tokens(

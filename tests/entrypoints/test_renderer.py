@@ -115,10 +115,8 @@ class TestRenderPrompt:
 
         assert len(results) == 1
         call_args = mock_async_tokenizer.call_args
-        assert (
-            "truncation" not in call_args.kwargs
-            or call_args.kwargs["truncation"] is False
-        )
+        assert call_args.kwargs["truncation"] is True
+        assert call_args.kwargs["max_length"] == 101
 
     @pytest.mark.asyncio
     async def test_truncation_positive(self, renderer, mock_async_tokenizer):

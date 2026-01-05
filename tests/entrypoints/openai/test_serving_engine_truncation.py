@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+import vllm.entrypoints.utils as entry_utils
+from vllm import envs
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.utils import MAX_CHARS_PER_TOKEN
 
 
 class DummyAsyncTokenizer:
@@ -73,8 +77,8 @@ async def test_disable_truncation_passes_through(serving: OpenAIServing):
 
     assert isinstance(result, dict)
     assert "prompt_token_ids" in result
-    assert tokenizer.calls[0]["truncation"] is False
-    assert "max_length" not in tokenizer.calls[0]
+    assert tokenizer.calls[0]["truncation"] is True
+    assert tokenizer.calls[0]["max_length"] == 0
     assert len(result["prompt_token_ids"]) == 3
 
 
@@ -108,4 +112,51 @@ async def test_prompt_too_long_raises_value_error(serving: OpenAIServing):
     with pytest.raises(ValueError):
         await serving._normalize_prompt_text_to_input(
             request, prompt="too long", tokenizer=object(), add_special_tokens=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_prompt_char_length_guard_early_fails(serving: OpenAIServing):
+    tokenizer = DummyAsyncTokenizer(return_len=3)
+    serving._get_async_tokenizer = Mock(return_value=tokenizer)
+
+    request = SimpleNamespace(truncate_prompt_tokens=None, max_tokens=None)
+    too_long = "x" * (serving.max_model_len * MAX_CHARS_PER_TOKEN + 1)
+    with pytest.raises(ValueError):
+        await serving._normalize_prompt_text_to_input(
+            request, prompt=too_long, tokenizer=object(), add_special_tokens=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_prompt_char_length_guard_skipped_for_minus_one(serving: OpenAIServing):
+    tokenizer = DummyAsyncTokenizer(return_len=3)
+    serving._get_async_tokenizer = Mock(return_value=tokenizer)
+
+    request = SimpleNamespace(truncate_prompt_tokens=-1, max_tokens=None)
+    too_long = "x" * (serving.max_model_len * MAX_CHARS_PER_TOKEN + 1)
+    result = await serving._normalize_prompt_text_to_input(
+        request, prompt=too_long, tokenizer=object(), add_special_tokens=True
+    )
+    assert "prompt_token_ids" in result
+
+
+@pytest.mark.asyncio
+async def test_prompt_char_length_guard_respects_env_override(
+    serving: OpenAIServing, monkeypatch
+):
+    # Reset env cache between tests (safe even if cache isn't enabled).
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_MAX_CHARS_PER_TOKEN", "1")
+    # The module-level constant is read at import time, so reload is needed.
+    importlib.reload(entry_utils)
+
+    tokenizer = DummyAsyncTokenizer(return_len=3)
+    serving._get_async_tokenizer = Mock(return_value=tokenizer)
+
+    request = SimpleNamespace(truncate_prompt_tokens=None, max_tokens=None)
+    too_long = "x" * (serving.max_model_len * 1 + 1)
+    with pytest.raises(ValueError):
+        await serving._normalize_prompt_text_to_input(
+            request, prompt=too_long, tokenizer=object(), add_special_tokens=True
         )

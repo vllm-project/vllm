@@ -13,7 +13,10 @@ from pydantic import Field
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import (
+    _validate_text_prompt_char_length,
+    _validate_truncation_size,
+)
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
@@ -42,14 +45,19 @@ class RenderConfig:
     needs_detokenization: bool | None = False
     """If True, detokenize IDs back to text for inclusion in outputs."""
 
-    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int:
+    def verify_truncate_prompt_tokens(self, model_config: ModelConfig) -> int | None:
         """Validate and normalize `truncate_prompt_tokens` parameter."""
-        truncate_prompt_tokens = self.truncate_prompt_tokens
+        raw_truncate = self.truncate_prompt_tokens
         truncate_prompt_tokens = _validate_truncation_size(
-            model_config.max_model_len, truncate_prompt_tokens
+            model_config.max_model_len, raw_truncate
         )
         max_length = self.max_length
-        if max_length is not None and truncate_prompt_tokens > max_length:  # type: ignore[operator]
+        if (
+            max_length is not None
+            and raw_truncate is not None
+            and truncate_prompt_tokens is not None
+            and truncate_prompt_tokens > max_length  # type: ignore[operator]
+        ):
             raise ValueError(
                 f"{truncate_prompt_tokens=} cannot be greater than "
                 f"{max_length=}. Please select a smaller truncation size."
@@ -297,6 +305,9 @@ class CompletionRenderer(BaseRenderer):
             )
 
         if prompt is not None:
+            _validate_text_prompt_char_length(
+                prompt, self.model_config.max_model_len, config.truncate_prompt_tokens
+            )
             return await self._create_prompt_from_text(
                 prompt,
                 config.max_length,

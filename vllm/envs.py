@@ -252,6 +252,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_MAX_CHARS_PER_TOKEN: int = 32
 
 
 def get_default_cache_root():
@@ -1605,6 +1606,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
+    # Upper bound for characters per token used by the early-fail prompt length
+    # guard before tokenization.
+    "VLLM_MAX_CHARS_PER_TOKEN": lambda: int(
+        os.getenv("VLLM_MAX_CHARS_PER_TOKEN", "32")
     ),
 }
 

@@ -86,7 +86,10 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import (
+    _validate_text_prompt_char_length,
+    _validate_truncation_size,
+)
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
@@ -953,6 +956,9 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
+        _validate_text_prompt_char_length(
+            prompt, self.max_model_len, truncate_prompt_tokens
+        )
 
         tokenizer_kwargs: dict[str, bool | int] = {
             "add_special_tokens": add_special_tokens
