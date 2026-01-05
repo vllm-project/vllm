@@ -491,16 +491,6 @@ class GPUModelRunner(
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             kernel_block_sizes=[self.cache_config.block_size],
-            max_num_blocks_per_req=[
-                # Note(hc): each dcp rank only store
-                # (max_model_len//dcp_world_size) tokens in kvcache,
-                # so the block_size which used for calc max_num_blocks_per_req
-                # must be multiplied by dcp_world_size.
-                cdiv(
-                    self.max_model_len,
-                    self.cache_config.block_size * get_total_cp_world_size(),
-                )
-            ],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -5292,11 +5282,12 @@ class GPUModelRunner(
             if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
         max_num_blocks = []
+        max_model_len = max(self.max_model_len, self.max_encoder_len)
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             max_num_blocks_per_req = cdiv(
-                self.max_model_len, block_sizes[i] * get_total_cp_world_size()
+                max_model_len, block_sizes[i] * get_total_cp_world_size()
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
@@ -5319,7 +5310,7 @@ class GPUModelRunner(
             )
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_model_len=max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
