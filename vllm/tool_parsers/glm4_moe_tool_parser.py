@@ -56,6 +56,20 @@ class Glm4MoeModelToolParser(ToolParser):
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer = ""
 
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        """
+        Adjust request parameters to ensure tool call tokens are not skipped
+        during tokenizer decoding.
+        """
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            # Ensure tool call tokens (<tool_call>, </tool_call>) are not skipped
+            # during decoding. Even though they are not marked as special tokens,
+            # setting skip_special_tokens=False ensures proper handling in
+            # transformers 5.x where decoding behavior may have changed.
+            request.skip_special_tokens = False
+        return request
+
     def extract_tool_calls(
         self,
         model_output: str,
