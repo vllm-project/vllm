@@ -154,7 +154,7 @@ def run_tests(
 
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
-        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
+        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
