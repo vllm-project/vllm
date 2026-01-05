@@ -272,6 +272,7 @@ class PhiMoE(nn.Module):
             bias=False,
             params_dtype=params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.experts = FusedMoE(
