@@ -115,27 +115,23 @@ async def fetch_spec_decode_metrics(
                 return None
             text = await response.text()
 
-            # Parse Prometheus text format for spec decode metrics
             num_draft_tokens = 0
             num_accepted_tokens = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
-                # Skip comments and empty lines
-                if line.startswith("#") or not line.strip():
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
 
-                # Parse metric lines: metric_name{labels} value
-                # or metric_name value
                 if line.startswith("vllm:spec_decode_num_draft_tokens"):
                     found_spec_decode = True
-                    # Extract the value (last space-separated token)
                     parts = line.split()
                     if parts:
                         with contextlib.suppress(ValueError):
                             num_draft_tokens += int(float(parts[-1]))
-                elif line.startswith("vllm:spec_decode_num_accepted_tokens{") or (
-                    line.startswith("vllm:spec_decode_num_accepted_tokens ")
+                elif (
+                    line.startswith("vllm:spec_decode_num_accepted_tokens")
                     and "_per_pos" not in line
                 ):
                     found_spec_decode = True
@@ -913,24 +909,6 @@ async def benchmark(
         )
     )
 
-    if spec_decode_stats is not None:
-        print("{s:{c}^{n}}".format(s=" Speculative Decoding ", n=50, c="-"))
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
-            )
-        )
-        print(
-            "{:<40} {:<10}".format(
-                "Draft tokens:", int(spec_decode_stats["draft_tokens"])
-            )
-        )
-        print(
-            "{:<40} {:<10}".format(
-                "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
-            )
-        )
-
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -1016,6 +994,25 @@ async def benchmark(
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+
+    # Print speculative decoding stats if available
+    if spec_decode_stats is not None:
+        print("{s:{c}^{n}}".format(s=" Speculative Decoding ", n=50, c="-"))
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Draft tokens:", int(spec_decode_stats["draft_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
 
     print("=" * 50)
 
