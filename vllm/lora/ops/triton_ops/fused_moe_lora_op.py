@@ -454,6 +454,98 @@ def _get_a_workspace(
             buf.zero_()
     return buf
 
+@torch.inference_mode()
+def _fused_moe_lora_expand_to_output(
+    output: torch.Tensor,                # (M, topk, out_total)
+    a_intermediate_cache1: torch.Tensor,  # (num_slices, M, topk, rank)
+    lora_b_stacked: list[torch.Tensor],   # [(max_loras, num_experts, out_dim, rank), ...]
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    device: torch.device,
+    EM: int,
+    num_tokens: int,
+    num_experts: int,
+    num_slices: int,
+    max_lora_rank: int,
+    out_dim: int,
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    split_k: int,
+    mul_routed_weight: bool = False,
+    offset: int = 0,
+) -> None:
+    b_ptr = _get_ptr(lora_b_stacked, device)
+    w1_lora_b = lora_b_stacked[0]
+
+    K = max_lora_rank
+    N = out_dim
+
+    a2d = a_intermediate_cache1.view(-1, a_intermediate_cache1.shape[3])
+
+    # output slice flatten: (M*topk, num_slices*out_dim)
+    out_view = output[:, :, offset : offset + num_slices * out_dim]
+    out2d = out_view.view(-1, out_view.shape[2])
+
+    use_gdc = supports_pdl(a2d.device)
+    max_loras_total = sorted_token_ids.shape[0]
+
+    grid0 = triton.cdiv(EM, block_size_m) * triton.cdiv(N, block_size_n)
+    grid = (grid0, len(lora_b_stacked), lora_ids.numel())
+
+    _fused_moe_lora_kernel[grid](
+        a2d,
+        b_ptr,
+        out2d,                              # <-- write to output
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        N,
+        K,
+        EM,
+        num_tokens,
+        num_experts,
+        lora_ids,
+        adapter_enabled,
+        max_loras_total,
+        a2d.stride(0),
+        a2d.stride(1),
+        w1_lora_b.stride(0),
+        w1_lora_b.stride(1),
+        w1_lora_b.stride(3),
+        w1_lora_b.stride(2),
+        out2d.stride(0),
+        out2d.stride(1),
+        sorted_token_ids.stride(0),
+        expert_ids.stride(0),
+        slice_a_size=a2d.numel() // num_slices,
+        slice_c_size=out_dim,
+        num_slice_a=num_slices,
+        num_slice_c=num_slices,
+        top_k=1,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        ADD_TO_C=True,                      # <-- key
+        USE_B_L2_CACHE=True,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_size_n,
+        BLOCK_SIZE_K=block_size_k,
+        GROUP_SIZE_M=group_size_m,
+        SPLIT_K=split_k,
+        USE_GDC=use_gdc,
+        launch_pdl=use_gdc,
+        IS_PRIMARY=False,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
 
 @torch.inference_mode()
 def _fused_moe_lora(
@@ -487,24 +579,8 @@ def _fused_moe_lora(
     fully_sharded: bool = False,
     offset: int = 0,
 ) -> None:
-    assert len(lora_a_stacked) == len(lora_b_stacked) > 0
-    assert (
-        sorted_token_ids.dim()
-        == expert_ids.dim()
-        == topk_weights.dim()
-        == qcurr_hidden_states.dim()
-        == 2
-    )
-    assert (
-        sorted_token_ids.shape[0]
-        == expert_ids.shape[0]
-        == num_tokens_post_padded.shape[0]
-    )
-    assert output.shape[0] == topk_weights.shape[0]
-    assert top_k_num == topk_weights.shape[1]
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
-
     w1_lora_b = lora_b_stacked[0]
     num_experts = lora_a_stacked[0].shape[1]
 
@@ -512,9 +588,9 @@ def _fused_moe_lora(
     EM = sorted_token_ids.shape[1]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
-    out_dim = w1_lora_b.shape[2]  # w1_output_dim_size
+    out_dim = w1_lora_b.shape[2]
 
-    # a_intermediate：fully_sharded 或 shrink_split_k>1(atomic_add) 必须清零
+    # a_intermediate: must be cleared when either fully_sharded or shrink_split_k>1 (atomic_add)
     must_zero_a = fully_sharded or (shrink_split_k != 1)
     a_intermediate_cache1 = _get_a_workspace(
         device=device,
@@ -526,7 +602,6 @@ def _fused_moe_lora(
         must_zero=must_zero_a,
     )
 
-    # shrink：不改（你已有实现即可）；这里只展示调用
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,
@@ -563,7 +638,45 @@ def _fused_moe_lora(
             a_intermediate_cache1 = tensor_model_parallel_all_gather(a_intermediate_cache1)
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
-    # delta：expand_split_k==1 时不需要清零；>1 时 atomic_add 需要 0
+    # ---------------------------
+    # - During capture (typically decode/cudagraph): Use delta (to maintain dual streams)
+    # - During non-capture (typically prefill/TTFT): Write output (optimal for TTFT)
+    # ---------------------------
+    in_capture = torch.cuda.is_current_stream_capturing()
+
+    if not in_capture:
+        # TTFT fast-path: write to output directly (ADD_TO_C=True)
+        _fused_moe_lora_expand_to_output(
+            output,
+            a_intermediate_cache1,
+            lora_b_stacked,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            top_k_num,
+            lora_ids,
+            adapter_enabled,
+            device,
+            EM=EM,
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            num_slices=num_slices,
+            max_lora_rank=max_lora_rank,
+            out_dim=out_dim,
+            block_size_m=expand_block_size_m,
+            block_size_n=expand_block_size_n,
+            block_size_k=expand_block_size_k,
+            group_size_m=expand_group_size_m,
+            num_warps=expand_num_warps,
+            num_stages=expand_num_stages,
+            split_k=expand_split_k,
+            mul_routed_weight=mul_routed_weight,
+            offset=offset,
+        )
+        return
+
+    # decode/capture path: delta + apply (maintaining dual streams)
     must_zero_delta = (expand_split_k != 1)
     lora_delta = _get_lora_delta_workspace(
         device=device,
@@ -575,7 +688,6 @@ def _fused_moe_lora(
         must_zero=must_zero_delta,
     )
 
-    # expand：写 delta，不碰 output（不会阻塞双流）
     _fused_moe_lora_expand(
         output,
         lora_delta,
@@ -605,7 +717,7 @@ def _fused_moe_lora(
         mul_routed_weight=mul_routed_weight,
     )
 
-    # apply：单次 add（这是唯一依赖 output 的地方）
+    # Using Triton apply (to replace add_)
     _fused_moe_lora_apply_delta(output, lora_delta, offset)
 
 def _fused_moe_lora_fake(
