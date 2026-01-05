@@ -1267,8 +1267,8 @@ steps:
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
 
-- label: NixlConnector PD accuracy tests (Distributed) # 30min
-  timeout_in_minutes: 30
+- label: NixlConnector PD accuracy tests (Distributed) # 40min
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -1278,8 +1278,8 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: DP EP NixlConnector PD accuracy tests (Distributed)
-  timeout_in_minutes: 30
+- label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
