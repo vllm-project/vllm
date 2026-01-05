@@ -236,11 +236,8 @@ def main():
     output_strs = {}
 
     for i, prompt_data in enumerate(test_prompts):
-        print(
-            f"\nRunning prompt {i + 1}/{len(test_prompts)}: {
-                prompt_data['description']
-            }"
-        )
+        description = prompt_data["description"]
+        print(f"\nRunning prompt {i + 1}/{len(test_prompts)}: {description}")
 
         output_str = run_chat_completion(
             base_url=service_url,

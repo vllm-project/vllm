@@ -47,7 +47,7 @@ def test_gptq_marlin_moe_method_uses_dynamic_bits_override():
     mock_moe_config = MagicMock()
     mock_layer = MagicMock(spec=FusedMoE)
     mock_layer.moe_config = mock_moe_config
-    
+
     # Use get_moe_quant_method to properly instantiate the method
     eight_bit_method = get_moe_quant_method(
         config, mock_layer, "model.layers.1.mlp.experts", GPTQMarlinMoEMethod
@@ -83,7 +83,7 @@ def test_gptq_marlin_moe_method_retains_base_bits_without_override():
     mock_moe_config = MagicMock()
     mock_layer = MagicMock(spec=FusedMoE)
     mock_layer.moe_config = mock_moe_config
-    
+
     # Use get_moe_quant_method to properly instantiate the method
     four_bit_method = get_moe_quant_method(
         config, mock_layer, "model.layers.5.mlp.experts", GPTQMarlinMoEMethod
