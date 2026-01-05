@@ -544,6 +544,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -756,6 +757,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.
@@ -791,6 +793,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     # amount of workspace. Mark it None, so we allocate for
                     # the worst-case scenario.
                     expert_tokens_meta=None,
+                    activation=activation,
                 )
             )
 
@@ -809,6 +812,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # Get final output shape based on the full M size.
@@ -820,6 +824,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts,
             local_num_experts,
             expert_tokens_meta,
+            activation,
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
@@ -1066,6 +1071,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts,
                 local_num_experts,
                 expert_tokens_meta,
+                activation,
             )
 
         for chunk_idx in range(num_chunks):

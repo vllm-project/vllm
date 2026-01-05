@@ -305,6 +305,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
@@ -312,9 +313,16 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        # For NO_MUL activations, we need full N size for activation output
+        is_no_mul_activation = activation.endswith("_no_mul")
+        activation_out_dim = N if is_no_mul_activation else N // 2
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
-        output = (num_experts, max_num_tokens * num_dispatchers, K)
+        workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
+        output: tuple[int, int, int] = (
+            num_experts,
+            max_num_tokens * num_dispatchers,
+            K,
+        )
         return (workspace13, workspace2, output)
 
     def estimate_expected_m(

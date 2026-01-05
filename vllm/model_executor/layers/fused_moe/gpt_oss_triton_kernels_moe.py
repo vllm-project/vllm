@@ -323,10 +323,14 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
+        # For NO_MUL activations, we need full N size for activation output
+        is_no_mul_activation = activation.endswith("_no_mul")
+        activation_out_dim = N if is_no_mul_activation else N // 2
         workspace1 = (0, 0)
-        workspace2 = (M * topk, N // 2)
+        workspace2 = (M * topk, activation_out_dim)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -415,9 +419,13 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M * topk, N // 2)
+        # For NO_MUL activations, we need full N size for activation output
+        is_no_mul_activation = activation.endswith("_no_mul")
+        activation_out_dim = N if is_no_mul_activation else N // 2
+        workspace1 = (M * topk, activation_out_dim)
         workspace2 = (M * topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)

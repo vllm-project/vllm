@@ -2096,11 +2096,14 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str = "silu",
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # Use max(N, K) instead of max(N // 2, K) to support NO_MUL activations
-        # which need full N size instead of N // 2 for the activation output
+        # For NO_MUL activations (e.g., silu_no_mul), we need full N size
+        # For regular activations with gated multiplication, N // 2 suffices
+        is_no_mul_activation = activation.endswith("_no_mul")
+        activation_out_dim = N if is_no_mul_activation else N // 2
         workspace1 = (M, topk, max(N, K))
-        workspace2 = (M, topk, max(N, K))
+        workspace2 = (M, topk, max(activation_out_dim, K))
         output = (M, K)
         return (workspace1, workspace2, output)
 
