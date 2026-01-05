@@ -1593,9 +1593,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
             logger.warning_once(
-                "w13_weight_scale_2 must match w13_weight_scale_2. "
-                "Accuracy may be affected.",
-                scope="local",
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
