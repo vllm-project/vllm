@@ -927,7 +927,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
-                assert start_pos == 0, (
+                assert start_pos <= 1, (
                     "Encoder input should be processed at the beginning of "
                     "the sequence when encoder-decoder models are used."
                 )

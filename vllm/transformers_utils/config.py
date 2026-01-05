@@ -75,6 +75,7 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
+    cogagent="CogAgentConfig",
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
@@ -114,6 +115,47 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+def _get_model_type_from_architecture(config_dict: dict[str, Any]) -> str | None:
+    """Get model name from architecture"""
+    # list copied from config.py suffix_to_preferred_task
+    # https://github.com/vllm-project/vllm/blob/b877031d806e3d9ebc834e0191ae64de40c4ddc2/vllm/config.py#L531
+    common_suffixes: list[str] = [
+        # Other models follow this pattern
+        "ForCausalLM",
+        "ForConditionalGeneration",
+        "ForSequenceClassification",
+        "ChatModel",
+        "LMHeadModel",
+        "EmbeddingModel",
+        "RewardModel",
+    ]
+
+    # take the first until an example gives otherwise
+    arch = config_dict.get("architectures")
+    if arch is None:
+        return None
+
+    arch = arch[0]
+
+    # case sensitivity. Original Case is more correct.
+    if arch in _CONFIG_REGISTRY:
+        return arch
+    if arch.lower() in _CONFIG_REGISTRY:
+        return arch.lower()
+
+    # Using common naming convention
+    for suffix in common_suffixes:
+        model_type = arch.replace(suffix, "", 1)
+
+        if model_type in _CONFIG_REGISTRY:
+            return model_type
+
+        if model_type.lower() in _CONFIG_REGISTRY:
+            return model_type.lower()
+
+    return None
+
+
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     """Check if rope_parameters is nested by layer types."""
     # Cannot be nested if rope_parameters is empty
@@ -146,7 +188,7 @@ class HFConfigParser(ConfigParserBase):
             model_type = (
                 "speculators"
                 if config_dict.get("speculators_config") is not None
-                else model_type
+                else _get_model_type_from_architecture(config_dict)
             )
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
