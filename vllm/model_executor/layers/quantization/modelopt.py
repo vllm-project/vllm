@@ -1614,7 +1614,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_scale_2=layer.w2_weight_scale_2,
                 a2_scale=layer.w2_input_scale,
                 is_act_and_mul=self.moe.is_act_and_mul,
-                is_global_sf=self.use_global_sf,
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.

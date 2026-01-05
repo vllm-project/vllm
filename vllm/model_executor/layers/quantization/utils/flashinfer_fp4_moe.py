@@ -436,7 +436,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
     is_act_and_mul: bool,
-    is_global_sf: bool,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -450,6 +449,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     # Delayed import for circular dependency avoidance.
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
+        is_global_sf_supported_for_nvfp4_backend,
     )
 
     assert backend in [
@@ -461,7 +461,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
     if is_act_and_mul and backend in [
-        NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
     ]:
@@ -478,7 +477,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w13_scale_2 = w13_scale_2[:, 0].contiguous()
 
     # For some FI kernels, the input scales are shared by all experts.
-    if is_global_sf:
+    if is_global_sf_supported_for_nvfp4_backend(backend):
         num_experts = w13.shape[0]
         a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
         a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
