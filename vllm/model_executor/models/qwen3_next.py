@@ -145,7 +145,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self.shared_expert_gate = ReplicatedLinear(
+            config.hidden_size,
+            1,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.shared_expert_gate",
+        )
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(
@@ -1115,6 +1121,12 @@ class Qwen3NextModel(nn.Module):
                             f"Parameter {name} not found in params_dict, skip loading"
                         )
                         continue
+
+                    if (
+                        "mlp.shared_expert_gate" in name
+                        and len(loaded_weight.shape) == 1
+                    ):
+                        loaded_weight = loaded_weight[None, :]
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
