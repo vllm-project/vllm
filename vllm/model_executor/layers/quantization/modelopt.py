@@ -752,6 +752,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
             if self.moe.dp_size == 1:
                 return None
 
@@ -1456,6 +1457,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
         ):
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
             if self.moe.dp_size == 1:
                 return None
             # For now, fp4 moe only works with the flashinfer dispatcher.
