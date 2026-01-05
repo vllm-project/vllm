@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
@@ -102,6 +102,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         log_error_stack: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -115,6 +116,7 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
 
         # set up logits processors
@@ -203,6 +205,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts=None,
                 documents=None,
                 chat_template_kwargs=None,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 tool_parser=None,
                 add_special_tokens=False,
             )
@@ -310,6 +313,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts=tool_dicts,
                     documents=request.documents,
                     chat_template_kwargs=request.chat_template_kwargs,
+                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
                 )
@@ -1208,15 +1212,8 @@ class OpenAIServingChat(OpenAIServing):
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=index,
-                                        function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
+                            delta_message = self._create_remaining_args_delta(
+                                delta_message, remaining_call, index
                             )
 
                         # Send the finish response for each request.n only once
@@ -1801,6 +1798,35 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+        )
+
+    @staticmethod
+    def _create_remaining_args_delta(
+        delta_message: DeltaMessage,
+        remaining_call: str,
+        index: int,
+    ) -> DeltaMessage:
+        """
+        Create a delta message for remaining tool arguments, preserving
+        id/type/name from the original delta.
+        """
+        original_tc = next(
+            (tc for tc in delta_message.tool_calls if tc.index == index),
+            None,
+        )
+        original_fn = original_tc.function if original_tc else None
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    id=original_tc.id if original_tc else None,
+                    type=original_tc.type if original_tc else None,
+                    function=DeltaFunctionCall(
+                        name=original_fn.name if original_fn else None,
+                        arguments=remaining_call,
+                    ),
+                )
+            ]
         )
 
     def _make_request_with_harmony(

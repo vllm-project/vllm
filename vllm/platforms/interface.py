@@ -372,6 +372,10 @@ class Platform:
 
         Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
         """
+        logger.info_once(
+            "`seed_everything` is deprecated. It will be removed in v0.14.0 or later. "
+            "Please use `vllm.utils.torch_utils.set_random_seed` instead."
+        )
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)

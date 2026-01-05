@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
@@ -277,7 +278,7 @@ def test_cutlass_moe_8_bit_no_graph(
     workspace_init,
     ep_size: int | None = None,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
@@ -332,7 +333,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
     monkeypatch,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
@@ -469,7 +470,7 @@ def test_run_cutlass_moe_fp8(
     ep_size: int,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(
             m, k, n, e, per_act_token, per_out_channel
