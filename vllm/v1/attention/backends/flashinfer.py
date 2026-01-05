@@ -772,6 +772,45 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         return paged_kv_indices
 
+    def _fix_decode_counts_for_trtllm(
+        self,
+        num_decodes: int,
+        num_prefills: int,
+        num_decode_tokens: int,
+        num_prefill_tokens: int,
+        num_reqs: int,
+        num_actual_tokens: int,
+        query_start_loc_cpu: torch.Tensor,
+    ) -> tuple[int, int, int, int]:
+        """Fix decode counts to exclude zero-length or non-uniform requests."""
+        if num_decodes == 0:
+            return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
+
+        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        decode_query_lens = query_lens[:num_decodes]
+
+        has_zero_length = torch.any(decode_query_lens == 0)
+        is_non_uniform = num_decode_tokens % num_decodes != 0
+
+        if not (has_zero_length or is_non_uniform):
+            return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
+
+        # Find the first problematic request
+        if has_zero_length:
+            first_invalid = (decode_query_lens == 0).int().argmax(dim=-1).item()
+        else:
+            first_invalid = (
+                (decode_query_lens != decode_query_lens[0]).int().argmax(dim=-1).item()
+            )
+
+        # Recalculate with corrected num_decodes
+        num_decodes = first_invalid
+        num_decode_tokens = query_start_loc_cpu[num_decodes].item()
+        num_prefills = num_reqs - num_decodes
+        num_prefill_tokens = num_actual_tokens - num_decode_tokens
+
+        return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
+
     def build(
         self,
         common_prefix_len: int,
@@ -785,6 +824,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
+            )
+        )
+
+        # Fix for zero-length padding requests to meet TRTLLM requirements
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            self._fix_decode_counts_for_trtllm(
+                num_decodes,
+                num_prefills,
+                num_decode_tokens,
+                num_prefill_tokens,
+                num_reqs,
+                num_actual_tokens,
+                common_attn_metadata.query_start_loc_cpu,
             )
         )
 
@@ -1054,10 +1106,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         ## DECODE PATHWAY
         if num_decodes > 0:
-            if decode_use_trtllm:
-                assert num_decode_tokens % num_decodes == 0, (
-                    "TRTLLM decode requires uniform query lengths per request."
+            # Check if TRTLLM's uniform query length requirement is met
+            if decode_use_trtllm and num_decode_tokens % num_decodes != 0:
+                logger.warning_once(
+                    "TRTLLM decode requires uniform query lengths per request, "
+                    "but got %d decodes with %d total tokens (not divisible). "
+                    "Falling back to FlashInfer decode.",
+                    num_decodes,
+                    num_decode_tokens,
                 )
+                decode_use_trtllm = False
+                # After fallback, ensure all required metadata is available
+                # for FlashInfer
+                if seq_lens_cpu is None:
+                    seq_lens_cpu = seq_lens[:num_decodes].cpu()
+                    seq_lens_np = seq_lens_cpu.numpy()
+                    num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+                    paged_kv_indices = self._compute_flashinfer_kv_metadata(
+                        num_blocks_np,
+                        seq_lens_np,
+                        block_table_tensor,
+                        num_decodes,
+                        page_size,
+                    )
+
+            if decode_use_trtllm:
                 attn_metadata.decode = TRTLLMDecode(
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],
