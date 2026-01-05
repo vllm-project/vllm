@@ -122,9 +122,46 @@ steps:
       - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
       - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
+  # Build release images (13.0)
+  - label: "Build release image CUDA 13.0 (x86)"
+    depends_on: ~
+    id: build-release-image-cuda13-x86
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-$(uname -m)"
+      # re-tag to default cuda13 image tag and push, just in case arm64 build fails
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13"
+
+  - label: "Build release image CUDA 13.0 (arm64)"
+    depends_on: ~
+    id: build-release-image-cuda13-arm64
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-$(uname -m)"
+
+  - label: "Create multi-arch manifest for CUDA 13.0"
+    depends_on:
+      - build-release-image-cuda13-x86
+      - build-release-image-cuda13-arm64
+    id: create-multi-arch-manifest-cuda13
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-aarch64 --amend"
+      - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13"
+
   - label: "Annotate release workflow"
     depends_on:
       - create-multi-arch-manifest
+      - create-multi-arch-manifest-cuda13
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
@@ -187,8 +224,36 @@ steps:
       - "docker manifest create vllm/vllm-openai:nightly-$BUILDKITE_COMMIT vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
       - "docker manifest push vllm/vllm-openai:nightly"
       - "docker manifest push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
-      # Clean up old nightly builds (keep only last 14)
-      - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
+      # Clean up old CUDA 12.9 nightly builds (keep only last 14)
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly-"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
+  - label: "Build and publish nightly CUDA 13.0 multi-arch image to DockerHub"
+    depends_on:
+      - create-multi-arch-manifest-cuda13
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-x86_64"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-aarch64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-x86_64 vllm/vllm-openai:cuda13-nightly-x86_64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cuda13-aarch64 vllm/vllm-openai:cuda13-nightly-aarch64"
+      - "docker push vllm/vllm-openai:cuda13-nightly-x86_64"
+      - "docker push vllm/vllm-openai:cuda13-nightly-aarch64"
+      - "docker manifest create vllm/vllm-openai:cuda13-nightly vllm/vllm-openai:cuda13-nightly-x86_64 vllm/vllm-openai:cuda13-nightly-aarch64 --amend"
+      - "docker manifest create vllm/vllm-openai:cuda13-nightly-$BUILDKITE_COMMIT vllm/vllm-openai:cuda13-nightly-x86_64 vllm/vllm-openai:cuda13-nightly-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:cuda13-nightly"
+      - "docker manifest push vllm/vllm-openai:cuda13-nightly-$BUILDKITE_COMMIT"
+      # Clean up old CUDA 13.0 nightly builds (keep only last 14)
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh cuda13-nightly-"
     plugins:
       - docker-login#v3.0.0:
           username: vllmbot
