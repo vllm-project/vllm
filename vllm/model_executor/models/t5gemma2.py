@@ -449,21 +449,27 @@ class T5Gemma2MergedAttention(nn.Module):
         k_self = self.k_norm(k_self.unsqueeze(2)).squeeze(2)
 
         # Cross-attention: K/V from encoder_hidden_states
-        num_encoder_tokens = encoder_hidden_states.shape[0]
-        
-        k_cross, _ = self.k_proj(encoder_hidden_states)
-        v_cross, _ = self.v_proj(encoder_hidden_states)
-        
-        # Reshape to 3D for normalization and attention
-        k_cross = k_cross.view(num_encoder_tokens, self.num_kv_heads, self.head_dim)
-        v_cross = v_cross.view(num_encoder_tokens, self.num_kv_heads, self.head_dim)
-        
-        # Apply k_norm on 3D tensor (matches transformers)
-        k_cross = self.k_norm(k_cross.unsqueeze(2)).squeeze(2)
+        if encoder_hidden_states is not None:
+            num_encoder_tokens = encoder_hidden_states.shape[0]
 
-        # Concatenate self and cross K/V along token dimension (dim=0)
-        k = torch.cat([k_self, k_cross], dim=0)
-        v = torch.cat([v_self, v_cross], dim=0)
+            k_cross, _ = self.k_proj(encoder_hidden_states)
+            v_cross, _ = self.v_proj(encoder_hidden_states)
+
+            # Reshape to 3D for normalization and attention
+            k_cross = k_cross.view(num_encoder_tokens, self.num_kv_heads,
+                                   self.head_dim)
+            v_cross = v_cross.view(num_encoder_tokens, self.num_kv_heads,
+                                   self.head_dim)
+
+            # Apply k_norm on 3D tensor (matches transformers)
+            k_cross = self.k_norm(k_cross.unsqueeze(2)).squeeze(2)
+
+            # Concatenate self and cross K/V along token dimension (dim=0)
+            k = torch.cat([k_self, k_cross], dim=0)
+            v = torch.cat([v_self, v_cross], dim=0)
+        else:
+            k = k_self
+            v = v_self
 
         # vLLM attention expects 3D tensors: (num_tokens, num_heads, head_dim)
         attn_output = self.attn(q, k, v)
@@ -1042,16 +1048,10 @@ class T5Gemma2Model(nn.Module):
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        encoder_input_ids: torch.Tensor | None,
+        encoder_outputs: torch.Tensor | None,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        encoder_outputs = self.encoder(
-            input_ids=encoder_input_ids,
-            pixel_values=pixel_values,
-        )
-
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
@@ -1126,10 +1126,23 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.decoder.make_empty_intermediate_tensors
         )
-
+ 
+    def get_language_model(self) -> nn.Module:
+        return self.model.decoder
+ 
+    def get_encoder_outputs(
+        self,
+        input_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.model.get_encoder_outputs(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+        )
+ 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.decoder.embed_input_ids(input_ids)
-
+ 
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1144,14 +1157,13 @@ class T5Gemma2ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsPP):
             encoder_outputs = self.model.get_encoder_outputs(
                 kwargs.get("encoder_input_ids"), pixel_values
             )
-
+ 
         decoder_outputs = self.model(
             input_ids=input_ids,
             positions=positions,
-            encoder_input_ids=kwargs.get("encoder_input_ids"),
+            encoder_outputs=encoder_outputs,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
-            pixel_values=pixel_values,
         )
         return decoder_outputs
 
