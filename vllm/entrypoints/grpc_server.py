@@ -81,7 +81,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GenerateResponse protobuf messages (streaming)
         """
         request_id = request.request_id
-        logger.info("Generate request %s received.", request_id)
+        logger.debug("Generate request %s received.", request_id)
 
         try:
             # Extract tokenized input
@@ -113,8 +113,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if output.finished:
                     yield self._complete_response(request_id, output)
 
+        except ValueError as e:
+            yield self._error_response(request_id, e)
         except Exception as e:
-            logger.exception("Error in Generate for %s", request_id)
+            logger.exception("Error in Generate for request %s", request_id)
             yield self._error_response(request_id, e)
 
     async def Embed(
@@ -161,7 +163,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         is_healthy = not self.async_llm.errored
         message = "Health" if is_healthy else "Engine is not alive"
 
-        logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
+        logger.debug("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
         return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
 
@@ -261,17 +263,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
         return SamplingParams(
-            temperature=params.temperature if params.temperature > 0 else 1.0,
-            top_p=params.top_p if params.top_p > 0 else 1.0,
-            top_k=params.top_k if params.top_k > 0 else -1,
-            min_p=params.min_p if params.min_p > 0 else 0.0,
+            temperature=params.temperature if params.HasField("temperature") else 1.0,
+            top_p=params.top_p if params.top_p != 0.0 else 1.0,
+            top_k=params.top_k,
+            min_p=params.min_p,
             frequency_penalty=params.frequency_penalty,
             presence_penalty=params.presence_penalty,
             repetition_penalty=params.repetition_penalty
-            if params.repetition_penalty > 0
+            if params.repetition_penalty != 0.0
             else 1.0,
             max_tokens=params.max_tokens if params.HasField("max_tokens") else None,
-            min_tokens=params.min_tokens if params.min_tokens > 0 else 0,
+            min_tokens=params.min_tokens,
             stop=stop,
             stop_token_ids=stop_token_ids,
             skip_special_tokens=params.skip_special_tokens,
@@ -496,7 +498,7 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("gRPC server stopped")
 
         # Shutdown AsyncLLM
-        await async_llm.shutdown()
+        async_llm.shutdown()
         logger.info("AsyncLLM engine stopped")
 
         logger.info("Shutdown complete")
