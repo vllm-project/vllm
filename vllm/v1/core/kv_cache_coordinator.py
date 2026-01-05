@@ -471,10 +471,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 is_full_attn = isinstance(spec, FullAttentionSpec)
 
                 # Full attention: reuse cached blocks (downward-closed property)
-                if is_full_attn and hit_blocks_by_group[group_ids[0]] is not None:
-                    this_hit_length = (
-                        len(hit_blocks_by_group[group_ids[0]]) * spec.block_size
-                    )
+                cached_blocks = hit_blocks_by_group[group_ids[0]]
+                if is_full_attn and cached_blocks is not None:
+                    curr_hit_length = len(cached_blocks) * spec.block_size
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
@@ -485,12 +484,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         use_eagle=self.use_eagle,
                         alignment_tokens=self.lcm_block_size,
                     )
-                    this_hit_length = len(hit_blocks[0]) * spec.block_size
+                    curr_hit_length = len(hit_blocks[0]) * spec.block_size
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-                if this_hit_length < hit_length:
-                    hit_length = this_hit_length
+                if curr_hit_length < hit_length:
+                    hit_length = curr_hit_length
                     reduced = True
                     break
 
@@ -502,7 +501,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if isinstance(spec, FullAttentionSpec):
                 num_blocks = hit_length // spec.block_size
                 for group_id in group_ids:
-                    del hit_blocks_by_group[group_id][num_blocks:]
+                    group_blocks = hit_blocks_by_group[group_id]
+                    if group_blocks is not None:
+                        del group_blocks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group

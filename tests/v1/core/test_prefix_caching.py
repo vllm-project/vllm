@@ -506,9 +506,7 @@ _HYBRID_MODEL_TEST_CASES = [
     pytest.param(["full", "mamba"], id="2g-full+mamba"),
     # 2 groups: 0 full (all other types)
     pytest.param(["sliding_window", "mamba"], id="2g-sw+mamba"),
-    pytest.param(
-        ["sliding_window", "sliding_window_large"], id="2g-sw+sw_large"
-    ),
+    pytest.param(["sliding_window", "sliding_window_large"], id="2g-sw+sw_large"),
     # 3 groups: 1 full + 2 others (same type)
     pytest.param(["full", "sliding_window", "sliding_window"], id="3g-full+2sw"),
     pytest.param(["full", "mamba", "mamba"], id="3g-full+2mamba"),
@@ -567,9 +565,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     # Allocate enough blocks for all groups
     num_blocks = 10 * num_groups
 
-    kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, spec_types
-    )
+    kv_cache_config = _make_hybrid_kv_cache_config(block_size, num_blocks, spec_types)
     manager = KVCacheManager(
         kv_cache_config,
         max_model_len=8192,
