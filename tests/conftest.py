@@ -45,7 +45,11 @@ from transformers import (
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from tests.models.utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (
+    TokensTextLogprobs,
+    TokensTextLogprobsPromptLogprobs,
+    softmax,
+)
 from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -410,7 +414,7 @@ class HfRunner:
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
@@ -513,7 +517,7 @@ class HfRunner:
             elif problem_type == "multi_label_classification":
                 logits = output.logits.sigmoid()[0].tolist()
             else:
-                logits = output.logits.softmax(dim=-1)[0].tolist()
+                logits = softmax(output.logits)[0].tolist()
             outputs.append(logits)
 
         return outputs

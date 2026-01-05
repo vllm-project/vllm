@@ -13,6 +13,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
@@ -76,6 +77,39 @@ class TritonAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+
+    @property
+    def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+        """Convert mm_prefix_range dict to padded tensor for Triton kernel.
+
+        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
+        Empty ranges have start==end==0, which kernel skips via is_valid check.
+        """
+        # TODO(Isotr0py): Move to model runner's attention metadata
+        # preparation to avoid duplicate computation.
+        if self.mm_prefix_range is None:
+            return None
+
+        num_seqs = self.seq_lens.shape[0]
+        device = self.seq_lens.device
+
+        # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
+        range_lists = [
+            self.mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
+        ]
+
+        # Return None if all ranges are trivial (only (0,0) placeholders)
+        if all(r == [(0, 0)] for r in range_lists):
+            return None
+
+        # Create 2D tensors with shape (num_ranges, 2) for each sequence
+        range_tensors = [
+            torch.tensor(r, dtype=torch.int32, device=device).view(-1, 2)
+            for r in range_lists
+        ]
+
+        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -282,8 +316,22 @@ class TritonAttentionBackend(AttentionBackend):
         return head_size >= 32
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """TritonAttention supports all attention types."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
+        )
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -317,6 +365,8 @@ class TritonAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
+        elif attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+            self.sliding_window = (sliding_window - 1, sliding_window - 1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
@@ -328,10 +378,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
-            raise NotImplementedError(
-                "Encoder self-attention is not implemented for TritonAttentionImpl"
-            )
         self.attn_type = attn_type
         self.fp8_dtype = current_platform.fp8_dtype()
 
@@ -393,6 +439,21 @@ class TritonAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # Handle encoder attention differently - no KV cache needed
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return self._forward_encoder_attention(
+                query[:num_actual_tokens],
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                output[:num_actual_tokens],
+                attn_metadata,
+                layer,
+            )
+
+        # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
         if (
@@ -440,6 +501,7 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -466,6 +528,52 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range_tensor,
         )
 
+        return output
+
+    def _forward_encoder_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: TritonAttentionMetadata,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Forward pass for encoder attention without KV cache.
+
+        Args:
+            query: shape = [num_encoder_tokens, num_heads, head_size]
+            key: shape = [num_encoder_tokens, num_kv_heads, head_size]
+            value: shape = [num_encoder_tokens, num_kv_heads, head_size]
+            output: shape = [num_encoder_tokens, num_heads, head_size]
+            attn_metadata: Encoder attention metadata
+            layer: The attention layer
+        """
+        # For encoder attention, process FP8 quantization if needed
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError(
+                "quantization is not supported for encoder attention"
+            )
+
+        # Use encoder-specific metadata for sequence information
+        query_start_loc = attn_metadata.query_start_loc
+        seq_lens = attn_metadata.seq_lens
+        max_query_len = attn_metadata.max_query_len
+
+        # Call flash attention directly on Q, K, V tensors
+        context_attention_fwd(
+            q=query,
+            k=key,
+            v=value,
+            o=output,
+            b_start_loc=query_start_loc,
+            b_seq_len=seq_lens,
+            max_input_len=max_query_len,
+            is_causal=False,  # Encoder attention is bidirectional
+            sliding_window_q=self.sliding_window[0],
+            sliding_window_k=self.sliding_window[1],
+        )
         return output

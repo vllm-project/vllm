@@ -26,6 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -776,7 +777,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     will not corrupt an attention block and vice versa
     """
 
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     update_environment_variables(
         {
@@ -1110,3 +1111,87 @@ def test_hybrid_cache_integration(model_runner, dist_init):
     runner._update_states(scheduler_output)
     assert _is_req_scheduled(runner, req_id)
     assert _is_req_state_block_table_match(runner, req_id)
+
+
+def test_is_uniform_decode() -> None:
+    # Normal
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+    )
+    # Spec decoding
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=30,
+        num_reqs=6,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=4,
+        num_tokens=30,
+        num_reqs=6,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=30,
+        num_reqs=7,
+    )
+    # Force uniform decode
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=True,
+    )
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=True,
+    )
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+        force_uniform_decode=True,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=False,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=2,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=16,
+        force_uniform_decode=False,
+    )
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=1,
+        uniform_decode_query_len=1,
+        num_tokens=16,
+        num_reqs=15,
+        force_uniform_decode=False,
+    )
