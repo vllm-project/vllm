@@ -1761,8 +1761,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-        else:
-            assert self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
+        elif self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS:
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
             # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
@@ -1783,6 +1782,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
             )
+        else:
+            raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
