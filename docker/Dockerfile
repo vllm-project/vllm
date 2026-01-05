@@ -183,7 +183,7 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
-ARG SCCACHE_DOWNLOAD_URL=https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz
+ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -201,10 +201,16 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
+        && case "${TARGETPLATFORM}" in \
+          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
+          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
+          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+        esac \
+        && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
+        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
         && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
         && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
         && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
@@ -609,6 +615,7 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG CUDA_VERSION
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -620,8 +627,26 @@ ENV UV_HTTP_TIMEOUT=500
 # install kv_connectors if requested
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
+    CUDA_HOME=/usr/local/cuda; \
+    # lmcache requires explicit specifying CUDA_HOME
+    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
+                libcublas-dev-${CUDA_VERSION_DASH} \
+                libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt || true; \
+        if [ "$CUDA_MAJOR" -ge 13 ]; then \
+            uv pip install --system nixl-cu13; \
+        fi; \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+            # if the above fails, install from source
+            apt-get update -y && \
+            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            apt-get purge -y ${BUILD_PKGS} && \
+            # clean up -dev packages, keep runtime libraries
+            rm -rf /var/lib/apt/lists/* \
+        ); \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
