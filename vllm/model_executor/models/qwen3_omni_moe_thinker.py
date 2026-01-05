@@ -118,7 +118,7 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     output_lengths = (
         ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
     )
-    return feat_lengths, output_lengths
+    return output_lengths
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -323,7 +323,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
 
-        # vit pos embeding, TODO: spatial_patch_size vs patch_size
+        # vit pos embedding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
             self.pos_embed = nn.Embedding(self.num_grid_per_side**2, self.hidden_size)
         else:
@@ -751,6 +751,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(mm_kwargs)
             tok_kwargs = dict(tok_kwargs)
             if Version(TRANSFORMERS_VERSION) < Version("4.58.0"):
+                # Extract audio_sample_rate before restructuring
+                audio_sample_rate = mm_kwargs.pop("audio_sample_rate", None)
+
                 # move truncation to audio_kwargs level to avoid conflict
                 # with tok_kwargs
                 mm_kwargs["audio_kwargs"] = {
@@ -759,6 +762,28 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 mm_kwargs["text_kwargs"] = {
                     "truncation": tok_kwargs.pop("truncation", False)
                 }
+
+                # Validate and conditionally pass audio_sample_rate
+                # WhisperFeatureExtractor has a fixed sampling rate, and vLLM's
+                # audio loader already resamples audio to the target rate.
+                # Only pass the value if it matches to avoid unexpected behavior.
+                if audio_sample_rate is not None:
+                    expected_sr = feature_extractor.sampling_rate
+                    if audio_sample_rate != expected_sr:
+                        logger.warning(
+                            "[%s] audio_sample_rate mismatch: user provided %dHz "
+                            "but model expects %dHz. Ignoring user value. "
+                            "vLLM's audio loader already resampled to %dHz.",
+                            self.__class__.__name__,
+                            audio_sample_rate,
+                            expected_sr,
+                            expected_sr,
+                        )
+                    else:
+                        # Sample rate matches, safe to pass
+                        mm_kwargs["audio_kwargs"]["audio_sample_rate"] = (
+                            audio_sample_rate
+                        )
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -921,13 +946,11 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         if audio_feature_lengths is None and feature_attention_mask is None:
             audio_output_lengths = []
         elif audio_feature_lengths is not None:
-            _, audio_output_lens = _get_feat_extract_output_lengths(
-                audio_feature_lengths
-            )
+            audio_output_lens = _get_feat_extract_output_lengths(audio_feature_lengths)
             audio_output_lengths = audio_output_lens.tolist()
         elif feature_attention_mask is not None:
             assert isinstance(feature_attention_mask, torch.Tensor)
-            _, audio_output_lens = _get_feat_extract_output_lengths(
+            audio_output_lens = _get_feat_extract_output_lengths(
                 feature_attention_mask.sum(-1)
             )
             audio_output_lengths = audio_output_lens.tolist()
@@ -1111,18 +1134,16 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         audio_input: Qwen2_5OmniAudioFeatureInputs,
         audio_hashes: list[str] | None = None,
         cached_audio_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
 
-        audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
-            audio_feature_lengths
-        )
+        audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
         audio_outputs = self.audio_tower(
             input_features.to(self.audio_tower.dtype),
             feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
+            aftercnn_lens=audio_output_lengths,
         )
         audio_features = audio_outputs.last_hidden_state
         return audio_features.split(audio_output_lengths.tolist())
@@ -1579,7 +1600,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     + st_idx
                 )
                 st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
-                _, audio_len = _get_feat_extract_output_lengths(
+                audio_len = _get_feat_extract_output_lengths(
                     audio_feature_lengths[audio_idx]
                 )
                 llm_pos_ids = (
@@ -1700,7 +1721,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 llm_pos_ids_list.append(bos_block)
                 llm_pos_ids_list.append(bos_block)
                 st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
-                _, audio_len = _get_feat_extract_output_lengths(
+                audio_len = _get_feat_extract_output_lengths(
                     audio_feature_lengths[audio_idx]
                 )
                 audio_llm_pos_ids = (

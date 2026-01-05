@@ -403,7 +403,7 @@ def _support_torch_compile(
             )
 
             rank = self.vllm_config.parallel_config.rank
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_index
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             try:
@@ -435,7 +435,10 @@ def _support_torch_compile(
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
         if self.compiled:
-            assert not envs.VLLM_USE_AOT_COMPILE
+            assert (
+                not envs.VLLM_USE_AOT_COMPILE
+                or self.vllm_config.compilation_config.backend == "eager"
+            )
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
 
         # This is the path for the first compilation.
@@ -508,7 +511,11 @@ def _support_torch_compile(
             _torch27_patch_tensor_subclasses(),
             torch._inductor.config.patch(**inductor_config_patches),
         ):
-            if envs.VLLM_USE_AOT_COMPILE:
+            use_aot_compile = envs.VLLM_USE_AOT_COMPILE
+            if self.vllm_config.compilation_config.backend == "eager":
+                logger.warning("Detected eager backend, disabling AOT compile.")
+                use_aot_compile = False
+            if use_aot_compile:
                 self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                 output = self.aot_compiled_fn(self, *args, **kwargs)
                 assert aot_compilation_path is not None
