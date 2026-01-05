@@ -120,7 +120,6 @@ class MiniCPM3Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
-            rotary_dim=self.qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )

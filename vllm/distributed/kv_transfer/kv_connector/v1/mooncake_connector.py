@@ -408,7 +408,13 @@ class MooncakeConnectorWorker:
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", "rdma", "")
+        protocol = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
+            "mooncake_protocol", "rdma"
+        )
+        logger.info(
+            "The Mooncake Transfer Engine is using %s as its protocol.", protocol
+        )
+        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -909,6 +915,6 @@ def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:
     # This logic is now centralized
     return (
         envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
-        + vllm_config.parallel_config.data_parallel_rank
+        + vllm_config.parallel_config.data_parallel_index
         * vllm_config.parallel_config.tensor_parallel_size
     )

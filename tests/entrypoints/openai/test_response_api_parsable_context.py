@@ -165,6 +165,7 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
         model=model_name,
         input="What is 13 * 24? Use python to calculate the result.",
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        extra_body={"enable_response_messages": True},
         temperature=0.0,
     )
 
@@ -178,3 +179,8 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
     # make sure the correct math is in the final output
     assert response.output[3].type == "message"
     assert "312" in response.output[3].content[0].text
+
+    # test raw input_messages / output_messages
+    assert len(response.input_messages) == 1
+    assert len(response.output_messages) == 3
+    assert "312" in response.output_messages[2]["message"]

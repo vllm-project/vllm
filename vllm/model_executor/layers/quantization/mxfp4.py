@@ -95,12 +95,12 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
         # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
         and (9, 0) <= current_platform.get_device_capability() < (11, 0)
     )
-    if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
-        logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
-        return Mxfp4Backend.MARLIN
+    if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+        return Mxfp4Backend.TRITON
 
-    logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
-    return Mxfp4Backend.TRITON
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+    return Mxfp4Backend.MARLIN
 
 
 def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
@@ -118,19 +118,19 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
             return Mxfp4Backend.SM90_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
         ):
             logger.info_once("Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         ):
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-        elif current_platform.is_device_capability(100) and has_flashinfer():
+        elif current_platform.is_device_capability_family(100) and has_flashinfer():
             logger.info_once(
                 "Using FlashInfer MXFP4 BF16 backend for SM100, "
                 "For faster performance on SM100, consider setting "
@@ -139,7 +139,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             )
             return Mxfp4Backend.SM100_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         ) and not has_flashinfer():
             logger.warning_once(
@@ -240,7 +240,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
         self.marlin_input_dtype = None
-        self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
@@ -896,7 +895,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -990,7 +989,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )

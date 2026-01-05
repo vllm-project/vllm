@@ -143,7 +143,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         query_start_loc = m.query_start_loc
         context_lens = m.num_computed_tokens_cpu
-        context_lens_tensor = context_lens.to(query_start_loc.device)
+        context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if (
@@ -211,7 +211,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks, query_lens
                 )
-                index = torch.argsort(spec_token_masks)
+                index = torch.argsort(spec_token_masks, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]

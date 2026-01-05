@@ -22,13 +22,14 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -363,7 +364,10 @@ def _test_deepep_deepgemm_moe(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ):
-    current_platform.seed_everything(pgi.rank)
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
+    set_random_seed(pgi.rank)
 
     w1 = w1.to(device=torch.cuda.current_device())
     w2 = w2.to(device=torch.cuda.current_device())
@@ -445,13 +449,14 @@ def test_ht_deepep_deepgemm_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     disable_deepgemm_ue8m0,
+    workspace_init,
 ):
     """
     Tests for High-Throughput DeepEP + DeepGemm integration.
     """
 
     m, n, k = mnk
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
@@ -518,6 +523,7 @@ def test_ll_deepep_deepgemm_moe(
     block_size: list[int],
     world_dp_size: tuple[int, int],
     disable_deepgemm_ue8m0,
+    workspace_init,
 ):
     """
     Tests for Low-Latency DeepEP + DeepGemm integration.
@@ -525,7 +531,7 @@ def test_ll_deepep_deepgemm_moe(
     assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
