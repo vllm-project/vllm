@@ -69,7 +69,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
-    prepare_moe_fp4_layer_for_marlin,
+    prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1617,7 +1617,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
-            prepare_moe_fp4_layer_for_marlin(layer)
+            a1_scale = None
+            a2_scale = None
+            (
+                w13,
+                w13_scale,
+                w13_scale_2,
+                w2,
+                w2_scale,
+                w2_scale_2,
+            ) = prepare_nvfp4_moe_layer_for_marlin(
+                layer=layer,
+                w13=layer.w13_weight,
+                w13_scale=layer.w13_weight_scale,
+                w13_scale_2=layer.w13_weight_scale_2,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                w2_scale_2=layer.w2_weight_scale_2,
+            )
         else:
             raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
 
