@@ -75,6 +75,12 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
 
+    # The user-provided request ID. This field is set internally,
+    # copied from the provided request_id that's originally assigned
+    # to the request_id field, see InputProcessor.assign_request_id().
+    # Used in outputs and to support abort(req_id, internal=False).
+    external_req_id: str | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

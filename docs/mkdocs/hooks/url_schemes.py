@@ -34,9 +34,10 @@ TITLE = r"(?P<title>[^\[\]<>]+?)"
 REPO = r"(?P<repo>.+?/.+?)"
 TYPE = r"(?P<type>issues|pull|projects)"
 NUMBER = r"(?P<number>\d+)"
+PATH = r"(?P<path>[^\s]+?)"
 FRAGMENT = r"(?P<fragment>#[^\s]+)?"
 URL = f"https://github.com/{REPO}/{TYPE}/{NUMBER}{FRAGMENT}"
-RELATIVE = r"(?!(https?|ftp)://|#)(?P<path>[^\s]+?)"
+RELATIVE = rf"(?!(https?|ftp)://|#){PATH}{FRAGMENT}"
 
 # Common titles to use for GitHub links when none is provided in the link.
 TITLES = {"issues": "Issue ", "pull": "Pull Request ", "projects": "Project "}
@@ -55,6 +56,7 @@ def on_page_markdown(
         title = match.group("title")
         path = match.group("path")
         path = (Path(page.file.abs_src_path).parent / path).resolve()
+        fragment = match.group("fragment") or ""
 
         # Check if the path exists and is outside the docs dir
         if not path.exists() or path.is_relative_to(DOC_DIR):
@@ -64,7 +66,7 @@ def on_page_markdown(
         slug = "tree/main" if path.is_dir() else "blob/main"
 
         path = path.relative_to(ROOT_DIR)
-        url = f"https://github.com/vllm-project/vllm/{slug}/{path}"
+        url = f"https://github.com/vllm-project/vllm/{slug}/{path}{fragment}"
         return f"[{gh_icon} {title}]({url})"
 
     def replace_github_link(match: re.Match) -> str:
@@ -88,8 +90,4 @@ def on_page_markdown(
 
     markdown = relative_link.sub(replace_relative_link, markdown)
     markdown = github_link.sub(replace_github_link, markdown)
-
-    if "interface" in str(page.file.abs_src_path):
-        print(markdown)
-
     return markdown

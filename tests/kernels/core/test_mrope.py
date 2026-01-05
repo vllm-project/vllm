@@ -10,6 +10,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
+from vllm.utils.torch_utils import set_random_seed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,7 +25,7 @@ def generate_test_data(
     device: torch.device,
 ):
     """Generate test data for given configuration."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     # Create 2D positions (3, num_tokens) for multimodal case
     positions = torch.randint(
         0, max_position_embeddings // 4, (3, num_tokens), device=device

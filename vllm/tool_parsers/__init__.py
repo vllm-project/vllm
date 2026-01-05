@@ -142,6 +142,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",
     ),
+    "functiongemma": (
+        "functiongemma_tool_parser",
+        "FunctionGemmaToolParser",
+    ),
 }
 
 

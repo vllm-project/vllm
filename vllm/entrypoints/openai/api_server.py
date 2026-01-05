@@ -870,6 +870,8 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
         )
+    elif args.enable_offline_docs:
+        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
@@ -909,6 +911,16 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        from vllm.entrypoints.openai.protocol import VLLMValidationError
+
+        param = None
+        for error in exc.errors():
+            if "ctx" in error and "error" in error["ctx"]:
+                ctx_error = error["ctx"]["error"]
+                if isinstance(ctx_error, VLLMValidationError):
+                    param = ctx_error.parameter
+                    break
+
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
@@ -922,6 +934,7 @@ def build_app(args: Namespace) -> FastAPI:
                 message=message,
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
+                param=param,
             )
         )
         return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
@@ -1068,6 +1081,7 @@ async def init_app_state(
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
+            default_chat_template_kwargs=args.default_chat_template_kwargs,
             trust_request_chat_template=args.trust_request_chat_template,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
@@ -1145,6 +1159,7 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)

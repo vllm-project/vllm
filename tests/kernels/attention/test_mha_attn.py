@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.fixture(autouse=True)
@@ -123,7 +124,7 @@ def test_mha_attn_forward(
     dtype: torch.dtype,
     device: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -168,7 +169,7 @@ def test_mha_attn_varlen_forward(
     dtype: torch.dtype,
     device: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 

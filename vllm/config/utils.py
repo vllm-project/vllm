@@ -9,7 +9,7 @@ import inspect
 import json
 import pathlib
 import textwrap
-from collections.abc import Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import MISSING, Field, dataclass, field, fields, is_dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
@@ -74,7 +74,11 @@ def get_field(cls: ConfigType, name: str) -> Field:
 
 
 def getattr_iter(
-    object: object, names: Iterable[str], default: Any, warn: bool = False
+    object: object,
+    names: Iterable[str],
+    default: Any | None = None,
+    default_factory: Callable[[], Any] | None = None,
+    warn: bool = False,
 ) -> Any:
     """
     A helper function that retrieves an attribute from an object which may
@@ -96,7 +100,7 @@ def getattr_iter(
                     names[0],
                 )
             return getattr(object, name)
-    return default
+    return default_factory() if default_factory is not None else default
 
 
 def contains_object_print(text: str) -> bool:

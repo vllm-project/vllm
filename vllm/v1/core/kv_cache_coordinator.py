@@ -60,6 +60,7 @@ class KVCacheCoordinator(ABC):
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
+                enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
@@ -73,6 +74,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
+        total_computed_tokens: int,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -85,9 +87,10 @@ class KVCacheCoordinator(ABC):
                 prefix caching.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            total_computed_tokens: Include both local and external tokens.
 
         Returns:
-            The number of blocks.
+            The number of blocks to allocate.
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
@@ -95,30 +98,48 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, []
+                    request_id, num_encoder_tokens, [], 0
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_tokens, new_computed_blocks[i]
+                    request_id,
+                    num_tokens,
+                    new_computed_blocks[i],
+                    total_computed_tokens,
                 )
         return num_blocks_to_allocate
 
-    def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    def allocate_new_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
     ) -> None:
         """
-        Add the new computed blocks to the request.
+        Add the new computed blocks to the request. Optionally allocate new
+            blocks for external computed tokens (if any).
 
         Args:
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
+            num_local_computed_tokens: The number of local computed tokens.
+            num_external_computed_tokens: The number of external computed tokens.
         """
         for i, manager in enumerate(self.single_type_managers):
-            manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
+            manager.allocate_new_computed_blocks(
+                request_id,
+                new_computed_blocks[i],
+                num_local_computed_tokens,
+                num_external_computed_tokens,
+            )
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -184,17 +205,20 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         ]
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
 
         Args:
             request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
+            total_computed_tokens: The total number of computed tokens, including
+                local computed tokens and external computed tokens.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, num_computed_tokens)
+            manager.remove_skipped_blocks(request_id, total_computed_tokens)
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

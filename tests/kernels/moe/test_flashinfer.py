@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 try:
     from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -158,7 +159,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
 ):
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=True)
@@ -222,7 +223,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
     monkeypatch,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(

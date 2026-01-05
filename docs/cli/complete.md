@@ -2,4 +2,4 @@
 
 ## Arguments
 
---8<-- "docs/argparse/complete.inc.md"
+--8<-- "docs/generated/argparse/complete.inc.md"

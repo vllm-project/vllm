@@ -80,17 +80,26 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass(frozen=True)
 class FullAttentionSpec(AttentionSpec):
-    sliding_window: int | None = None
-    attention_chunk_size: int | None = None
     """
-    When hybrid allocator is disabled and the model contains both full 
-    attention layers and sliding window attention layers, sliding 
-    window attention are regarded as full attention in KV cache manager 
-    (blocks are allocated for all tokens), while computed as sliding window 
+    When hybrid allocator is disabled and the model contains both full
+    attention layers and sliding window attention layers, sliding
+    window attention are regarded as full attention in KV cache manager
+    (blocks are allocated for all tokens), while computed as sliding window
     attention in model runner.
     In this case, we use FullAttentionSpec and record the sliding window size.
+    """
+
+    head_size_v: int | None = None
+
+    sliding_window: int | None = None
+    """
     Default to None for not using sliding window attention.
     """
+    attention_chunk_size: int | None = None
+
+    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -139,6 +148,7 @@ class FullAttentionSpec(AttentionSpec):
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -156,6 +166,15 @@ class FullAttentionSpec(AttentionSpec):
             "layers is not supported."
         )
         return merged_spec
+
+    @property
+    def page_size_bytes(self) -> int:
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size + self.head_size_v)
+            * get_dtype_size(self.dtype)
+        )
 
 
 @dataclass(frozen=True)
@@ -285,6 +304,56 @@ class CrossAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True)
+class SinkFullAttentionSpec(FullAttentionSpec):
+    sink_len: int | None = None
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullAttentionSpec objects into a single
+        FullAttentionSpec object.
+        """
+        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be FullAttentionSpec."
+        )
+
+        sliding_window = set(
+            spec.sliding_window for spec in specs if spec.sliding_window is not None
+        )
+        attention_chunk_size = set(
+            spec.attention_chunk_size
+            for spec in specs
+            if spec.attention_chunk_size is not None
+        )
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
+            sink_len=specs[0].sink_len,
+            dtype=specs[0].dtype,
+            sliding_window=cls.merge_window_sizes(sliding_window),
+            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+        )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        assert (merged_spec.sliding_window is not None) + (
+            merged_spec.attention_chunk_size is not None
+        ) <= 1, (
+            "Model with both sliding window layers and chunked local attention "
+            "layers is not supported."
+        )
+        return merged_spec
+
+
+@dataclass(frozen=True)
 class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
     A KV cache spec for multiple layers with the same type of attention. Here,
@@ -390,10 +459,11 @@ class KVCacheConfig:
     The KV cache configuration of a model.
     """
 
-    """The number of KV cache blocks"""
     num_blocks: int
-    """How should model runner initialize the KV cache tensors for each layer"""
+    """The number of KV cache blocks"""
     kv_cache_tensors: list[KVCacheTensor]
+    """How should model runner initialize the KV cache tensors for each layer"""
+    kv_cache_groups: list[KVCacheGroupSpec]
     """
     The kv cache groups of the model.
     For models with only one type of attention, there is only one group that
@@ -401,4 +471,3 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
-    kv_cache_groups: list[KVCacheGroupSpec]

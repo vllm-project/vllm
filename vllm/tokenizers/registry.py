@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import huggingface_hub
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -224,10 +224,3 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
-
-
-@deprecated(
-    "Renamed to `cached_tokenizer_from_config`. The old name will be removed in v0.14."
-)
-def init_tokenizer_from_config(model_config: "ModelConfig"):
-    return cached_tokenizer_from_config(model_config)
