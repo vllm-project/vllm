@@ -273,6 +273,7 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 ARG PPLX_COMMIT_HASH
 ARG DEEPEP_COMMIT_HASH
+ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
@@ -280,7 +281,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
         ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
-        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
+        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
+        ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 #################### EXTENSIONS BUILD IMAGE ####################
 
