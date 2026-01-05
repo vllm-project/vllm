@@ -658,7 +658,6 @@ class FusedMoE(CustomOp):
         prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
         )
-        print(f"{prepare_finalize=}!!!!")
         if prepare_finalize is not None:
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
