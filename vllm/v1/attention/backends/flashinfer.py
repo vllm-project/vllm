@@ -795,13 +795,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if not (has_zero_length or is_non_uniform):
             return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
 
-        # Find the first problematic request
-        if has_zero_length:
-            first_invalid = (decode_query_lens == 0).int().argmax(dim=-1).item()
-        else:
-            first_invalid = (
-                (decode_query_lens != decode_query_lens[0]).int().argmax(dim=-1).item()
-            )
+        # Find the first problematic request (zero-length or non-uniform)
+        first_invalid = (
+            (decode_query_lens == 0).int().argmax(dim=-1).item()
+            if has_zero_length
+            else (decode_query_lens != decode_query_lens[0]).int().argmax(dim=-1).item()
+        )
 
         # Recalculate with corrected num_decodes
         num_decodes = first_invalid
