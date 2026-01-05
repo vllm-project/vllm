@@ -103,9 +103,6 @@ class TestPauseStepIntegration:
         assert fast_response.status_code == 200
         current_step = fast_response.json()["step_counter"]
 
-        # Resume to allow stepping
-        requests.post(f"{server_url}/resume", timeout=30)
-
         # Now pause with custom barrier
         target = current_step + 1
         response = requests.post(
