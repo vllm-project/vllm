@@ -428,8 +428,7 @@ class Phi4MMImageEncoder(nn.Module):
                 output_imgs.append(torch.cat([sub_img, self.glb_GN, glb_img], dim=1))
             else:
                 raise NotImplementedError(
-                    f"hd_transform_order = {self.hd_transform_order}, "
-                    "not implemented"
+                    f"hd_transform_order = {self.hd_transform_order}, not implemented"
                 )
 
             # temp_len = int((h*w+1)*144 + 1 + (h+1)*12)
