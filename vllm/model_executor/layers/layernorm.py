@@ -320,6 +320,7 @@ class GemmaRMSNorm(CustomOp):
             self._is_compiled = True
         return self.forward_native(x, residual)
 
+
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
     """RMS Normalization with optional gating.
@@ -421,6 +422,7 @@ class RMSNormGated(CustomOp):
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
         )
+
 
 class LayerNorm(nn.Module):
     """
