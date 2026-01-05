@@ -1131,6 +1131,18 @@ class OpenAIServing:
             )
         return None
 
+    @staticmethod
+    def _prepare_extra_chat_template_kwargs(
+        request_chat_template_kwargs: dict[str, Any] | None = None,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Helper to merge server-default and request-specific chat template kwargs."""
+        request_chat_template_kwargs = request_chat_template_kwargs or {}
+        if default_chat_template_kwargs is None:
+            return request_chat_template_kwargs
+        # Apply server defaults first, then request kwargs override.
+        return default_chat_template_kwargs | request_chat_template_kwargs
+
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
@@ -1153,9 +1165,12 @@ class OpenAIServing:
             "continue_final_message": continue_final_message,
             "tools": tool_dicts,
             "documents": documents,
-            **(default_chat_template_kwargs or {}),
             **(chat_template_kwargs or {}),
         }
+        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+            chat_template_kwargs,
+            default_chat_template_kwargs,
+        )
 
         # Use the async tokenizer in `OpenAIServing` if possible.
         # Later we can move it into the renderer so that we can return both
@@ -1178,7 +1193,6 @@ class OpenAIServing:
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
-
             # Fill in other keys like MM data
             engine_prompt.update(extra_data)  # type: ignore
 
