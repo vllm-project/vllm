@@ -251,11 +251,27 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+
+        # Track module objects by id() to avoid activating the same object twice.
+        # The same module object can appear under multiple paths (aliases) in
+        # self.modules, and we should only call set_lora/reset_lora once per
+        # unique object to avoid redundant work and potential issues.
+        obj_matched: dict[int, bool] = {}
+
         for module_name, module in self.modules.items():
+            obj_id = id(module)
+
+            # Skip if this exact module object was already processed
+            if obj_id in obj_matched:
+                continue
+
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
+                obj_matched[obj_id] = False
                 continue
+
+            obj_matched[obj_id] = True
             # Note (gnovack) - If MOE lora weights are not split into
             # num_experts chunks, we split them here
             if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(

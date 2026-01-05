@@ -152,6 +152,10 @@ class LoRAModel:
                 # gate_up_proj and experts is the down_proj
                 if "base_layer" in lora_module:
                     continue
+                # Handle shared experts (e.g., shared_experts in DeepSeek/Kimi MoE).
+                # These are valid LoRA targets but use non-numeric expert paths.
+                if "shared_experts" in lora_module:
+                    continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Case for expert lora weights
                 if ".experts" in module_name:
