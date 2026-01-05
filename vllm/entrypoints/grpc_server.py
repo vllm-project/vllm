@@ -27,14 +27,12 @@ from collections.abc import AsyncGenerator
 import grpc
 from grpc_reflection.v1alpha import reflection
 
-from vllm import TokensPrompt
+from vllm import SamplingParams, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
-from vllm.grpc.grpc_request_manager import (
-    create_sampling_params_from_proto,
-)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -94,9 +92,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids}
 
             # Build sampling params with detokenize=False
-            sampling_params = create_sampling_params_from_proto(
-                request.sampling_params,
-                stream=request.stream,
+            sampling_params = self._sampling_params_from_proto(
+                request.sampling_params, stream=request.stream
             )
 
             async for output in self.async_llm.generate(
@@ -241,8 +238,88 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
     # ========== Helper methods ==========
 
+    @staticmethod
+    def _sampling_params_from_proto(
+        params: vllm_engine_pb2.SamplingParams, stream: bool = True
+    ) -> SamplingParams:
+        """
+        Convert protobuf SamplingParams to vLLM SamplingParams.
+
+        Args:
+            params: Protobuf SamplingParams message
+            stream: Whether streaming is enabled
+
+        Returns:
+            vLLM SamplingParams with detokenize=False and structured_outputs
+        """
+        # Build stop sequences
+        stop = list(params.stop) if params.stop else None
+        stop_token_ids = list(params.stop_token_ids) if params.stop_token_ids else None
+
+        # Handle structured outputs constraints
+        structured_outputs = None
+        constraint_field = params.WhichOneof("constraint")
+        if constraint_field:
+            if constraint_field == "json_schema":
+                structured_outputs = StructuredOutputsParams(json=params.json_schema)
+            elif constraint_field == "regex":
+                structured_outputs = StructuredOutputsParams(regex=params.regex)
+            elif constraint_field == "grammar":
+                structured_outputs = StructuredOutputsParams(grammar=params.grammar)
+            elif constraint_field == "structural_tag":
+                structured_outputs = StructuredOutputsParams(
+                    structural_tag=params.structural_tag
+                )
+            elif constraint_field == "json_object":
+                structured_outputs = StructuredOutputsParams(
+                    json_object=params.json_object
+                )
+            elif constraint_field == "choice":
+                structured_outputs = StructuredOutputsParams(
+                    choice=list(params.choice.choices)
+                )
+
+        # Create SamplingParams
+        # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
+        return SamplingParams(
+            temperature=params.temperature if params.temperature > 0 else 1.0,
+            top_p=params.top_p if params.top_p > 0 else 1.0,
+            top_k=params.top_k if params.top_k > 0 else -1,
+            min_p=params.min_p if params.min_p > 0 else 0.0,
+            frequency_penalty=params.frequency_penalty,
+            presence_penalty=params.presence_penalty,
+            repetition_penalty=params.repetition_penalty
+            if params.repetition_penalty > 0
+            else 1.0,
+            max_tokens=params.max_tokens if params.HasField("max_tokens") else None,
+            min_tokens=params.min_tokens if params.min_tokens > 0 else 0,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
+            skip_special_tokens=params.skip_special_tokens,
+            spaces_between_special_tokens=params.spaces_between_special_tokens,
+            ignore_eos=params.ignore_eos,
+            n=params.n if params.n > 0 else 1,
+            logprobs=params.logprobs if params.HasField("logprobs") else None,
+            prompt_logprobs=params.prompt_logprobs
+            if params.HasField("prompt_logprobs")
+            else None,
+            seed=params.seed if params.HasField("seed") else None,
+            include_stop_str_in_output=params.include_stop_str_in_output,
+            logit_bias=dict(params.logit_bias) if params.logit_bias else None,
+            truncate_prompt_tokens=params.truncate_prompt_tokens
+            if params.HasField("truncate_prompt_tokens")
+            else None,
+            structured_outputs=structured_outputs,
+            # detokenize must be True if stop strings are used
+            detokenize=bool(stop),
+            output_kind=RequestOutputKind.DELTA
+            if stream
+            else RequestOutputKind.FINAL_ONLY,
+        )
+
+    @staticmethod
     def _chunk_response(
-        self, request_id: str, output: RequestOutput
+        request_id: str, output: RequestOutput
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
@@ -285,8 +362,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             ),
         )
 
+    @staticmethod
     def _complete_response(
-        self, request_id: str, output: RequestOutput
+        request_id: str, output: RequestOutput
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
@@ -331,8 +409,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             ),
         )
 
+    @staticmethod
     def _error_response(
-        self, request_id: str, e: Exception
+        request_id: str, e: Exception
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build an error response.
@@ -345,12 +424,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GenerateResponse with error field set
         """
         status_code = "400" if isinstance(e, ValueError) else "500"
-        message = str(e)
 
         return vllm_engine_pb2.GenerateResponse(
             request_id=request_id,
             error=vllm_engine_pb2.GenerateError(
-                message=message,
+                message=str(e),
                 http_status_code=status_code,
                 details="",
             ),
