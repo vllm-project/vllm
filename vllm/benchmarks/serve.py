@@ -86,6 +86,75 @@ async def get_first_model_from_server(
             ) from e
 
 
+@dataclass
+class SpecDecodeMetrics:
+    """Speculative decoding metrics from the server's Prometheus endpoint."""
+
+    num_draft_tokens: int
+    num_accepted_tokens: int
+
+    @property
+    def acceptance_rate(self) -> float:
+        """Calculate the acceptance rate as a percentage."""
+        if self.num_draft_tokens == 0:
+            return float("nan")
+        return (self.num_accepted_tokens / self.num_draft_tokens) * 100
+
+
+async def fetch_spec_decode_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> SpecDecodeMetrics | None:
+    """Fetch speculative decoding metrics from the server's Prometheus endpoint.
+
+    Returns None if speculative decoding is not enabled or metrics are not available.
+    """
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+
+            # Parse Prometheus text format for spec decode metrics
+            num_draft_tokens = 0
+            num_accepted_tokens = 0
+            found_spec_decode = False
+
+            for line in text.split("\n"):
+                # Skip comments and empty lines
+                if line.startswith("#") or not line.strip():
+                    continue
+
+                # Parse metric lines: metric_name{labels} value
+                # or metric_name value
+                if line.startswith("vllm:spec_decode_num_draft_tokens"):
+                    found_spec_decode = True
+                    # Extract the value (last space-separated token)
+                    parts = line.split()
+                    if parts:
+                        with contextlib.suppress(ValueError):
+                            num_draft_tokens += int(float(parts[-1]))
+                elif line.startswith("vllm:spec_decode_num_accepted_tokens{") or (
+                    line.startswith("vllm:spec_decode_num_accepted_tokens ")
+                    and "_per_pos" not in line
+                ):
+                    found_spec_decode = True
+                    parts = line.split()
+                    if parts:
+                        with contextlib.suppress(ValueError):
+                            num_accepted_tokens += int(float(parts[-1]))
+
+            if not found_spec_decode:
+                return None
+
+            return SpecDecodeMetrics(
+                num_draft_tokens=num_draft_tokens,
+                num_accepted_tokens=num_accepted_tokens,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
 class TaskType(Enum):
     GENERATION = "generation"
     POOLING = "pooling"
@@ -679,6 +748,8 @@ async def benchmark(
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
+    spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
+
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     semaphore = (
@@ -762,6 +833,25 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
+    spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
+    spec_decode_stats: dict[str, float] | None = None
+    if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
+        delta_draft = (
+            spec_decode_metrics_after.num_draft_tokens
+            - spec_decode_metrics_before.num_draft_tokens
+        )
+        delta_accepted = (
+            spec_decode_metrics_after.num_accepted_tokens
+            - spec_decode_metrics_before.num_accepted_tokens
+        )
+        if delta_draft > 0:
+            acceptance_rate = (delta_accepted / delta_draft) * 100
+            spec_decode_stats = {
+                "draft_tokens": delta_draft,
+                "accepted_tokens": delta_accepted,
+                "acceptance_rate": acceptance_rate,
+            }
+
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -823,6 +913,24 @@ async def benchmark(
         )
     )
 
+    if spec_decode_stats is not None:
+        print("{s:{c}^{n}}".format(s=" Speculative Decoding ", n=50, c="-"))
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Draft tokens:", int(spec_decode_stats["draft_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
+
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -856,6 +964,13 @@ async def benchmark(
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
+
+    if spec_decode_stats is not None:
+        result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]
+        result["spec_decode_draft_tokens"] = int(spec_decode_stats["draft_tokens"])
+        result["spec_decode_accepted_tokens"] = int(
+            spec_decode_stats["accepted_tokens"]
+        )
 
     def process_one_metric(
         # E.g., "ttft"
