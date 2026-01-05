@@ -19,7 +19,11 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    is_torch_equal_or_newer,
+    set_random_seed,
+)
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -320,7 +324,7 @@ def _test_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     hf_config_override = None
     if tensor_parallel_size > 1:

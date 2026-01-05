@@ -8,6 +8,7 @@ import torch
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
@@ -113,7 +114,7 @@ def test_triton_unified_attn(
 ) -> None:
     torch.set_default_device("cuda")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
