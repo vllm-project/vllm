@@ -943,7 +943,6 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
