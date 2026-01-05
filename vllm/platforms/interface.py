@@ -11,13 +11,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.utils.system_utils import suppress_stdout
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
-    from torch.distributed import PrefixStore, ProcessGroup
-
     from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
@@ -125,8 +126,9 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
-    # The backend used for distributed communication.
-    dist_backend: str = ""
+    # The backend and device used for distributed communication.
+    dist_communicate_backend: str = "gloo"
+    dist_communicate_device: str = "cpu"
 
     supported_quantization: list[str] = []
 
@@ -616,16 +618,44 @@ class Platform:
     @classmethod
     def stateless_init_device_torch_dist_pg(
         cls,
-        backend: str,
         prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
         timeout: timedelta,
     ) -> "ProcessGroup":
         """
-        Init platform-specific torch distributed process group.
+        Init platform-specific torch distributed process group. Gloo is used
+        by default.
         """
-        raise NotImplementedError
+        with suppress_stdout():
+            if is_torch_equal_or_newer("2.6"):
+                pg = ProcessGroup(
+                    prefix_store,
+                    group_rank,
+                    group_size,
+                )
+            else:
+                options = ProcessGroup.Options(backend="gloo")
+                pg = ProcessGroup(
+                    prefix_store,
+                    group_rank,
+                    group_size,
+                    options,
+                )
+            from torch.distributed.distributed_c10d import ProcessGroupGloo
+
+            backend_class = ProcessGroupGloo(
+                prefix_store, group_rank, group_size, timeout=timeout
+            )
+            backend_type = ProcessGroup.BackendType.GLOO
+            device = torch.device("cpu")
+            if is_torch_equal_or_newer("2.6"):
+                # _set_default_backend is supported in torch >= 2.6
+                pg._set_default_backend(backend_type)
+            backend_class._set_sequence_number_for_group()
+
+            pg._register_backend(device, backend_type, backend_class)
+        return pg
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
