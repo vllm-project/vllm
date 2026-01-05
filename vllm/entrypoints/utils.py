@@ -232,15 +232,17 @@ def _validate_text_prompt_char_length(
 ) -> None:
     """Early-fail on extremely long text prompts before tokenization.
 
-    Per review guidance, skip this guard when `truncate_prompt_tokens == -1`.
+    This guard is only intended for requests that did NOT explicitly configure
+    truncation behavior. If the user sets `truncate_prompt_tokens`, we assume
+    they are aware of the trade-offs and skip this heuristic check.
     """
-    if truncate_prompt_tokens == -1:
+    if truncate_prompt_tokens is not None:
         return
 
     if len(prompt) > max_model_len * MAX_CHARS_PER_TOKEN:
         raise ValueError(
             "Input text is too long to tokenize safely. Please shorten it "
-            "or set truncate_prompt_tokens=-1."
+            "or set truncate_prompt_tokens."
         )
 
 

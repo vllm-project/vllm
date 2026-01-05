@@ -133,7 +133,23 @@ async def test_prompt_char_length_guard_skipped_for_minus_one(serving: OpenAISer
     tokenizer = DummyAsyncTokenizer(return_len=3)
     serving._get_async_tokenizer = Mock(return_value=tokenizer)
 
+    # Any explicit truncation setting should skip the heuristic char-length guard.
     request = SimpleNamespace(truncate_prompt_tokens=-1, max_tokens=None)
+    too_long = "x" * (serving.max_model_len * MAX_CHARS_PER_TOKEN + 1)
+    result = await serving._normalize_prompt_text_to_input(
+        request, prompt=too_long, tokenizer=object(), add_special_tokens=True
+    )
+    assert "prompt_token_ids" in result
+
+
+@pytest.mark.asyncio
+async def test_prompt_char_length_guard_skipped_when_truncation_is_set(
+    serving: OpenAIServing,
+):
+    tokenizer = DummyAsyncTokenizer(return_len=3)
+    serving._get_async_tokenizer = Mock(return_value=tokenizer)
+
+    request = SimpleNamespace(truncate_prompt_tokens=5, max_tokens=None)
     too_long = "x" * (serving.max_model_len * MAX_CHARS_PER_TOKEN + 1)
     result = await serving._normalize_prompt_text_to_input(
         request, prompt=too_long, tokenizer=object(), add_special_tokens=True
