@@ -358,7 +358,7 @@ def per_block_cast_to_fp8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    _, fp8_max = get_fp8_min_max(fp8_dtype)
+    _, fp8_max = get_fp8_min_max()
     sf = x_amax / fp8_max
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x_view * (1.0 / sf)).to(fp8_dtype)

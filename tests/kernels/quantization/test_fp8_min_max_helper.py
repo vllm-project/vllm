@@ -20,10 +20,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 class TestGetFp8MinMax:
     """Test cases for get_fp8_min_max() function."""
 
-    def test_standard_fp8_dtype(self):
-        """Test that standard FP8 dtype uses PyTorch's finfo values."""
-        # For standard float8_e4m3fn, should return finfo values
-        fp8_min, fp8_max = get_fp8_min_max(torch.float8_e4m3fn)
+    @patch("vllm.model_executor.layers.quantization.utils.quant_utils.current_platform")
+    def test_standard_fp8_platform(self, mock_platform):
+        """Test that standard FP8 platform uses PyTorch's finfo values."""
+        mock_platform.is_fp8_fnuz.return_value = False
+        mock_platform.fp8_dtype.return_value = torch.float8_e4m3fn
+
+        fp8_min, fp8_max = get_fp8_min_max()
         finfo = torch.finfo(torch.float8_e4m3fn)
 
         # Standard FP8 max is 448.0 for e4m3fn
@@ -31,45 +34,30 @@ class TestGetFp8MinMax:
         assert fp8_min == finfo.min, f"Expected finfo.min={finfo.min}, got {fp8_min}"
 
     @patch("vllm.model_executor.layers.quantization.utils.quant_utils.current_platform")
-    def test_fnuz_fp8_dtype_on_fnuz_platform(self, mock_platform):
-        """Test that fnuz dtype on fnuz platform returns 224.0."""
+    def test_fnuz_platform_returns_224(self, mock_platform):
+        """Test that fnuz platform returns 224.0."""
         mock_platform.is_fp8_fnuz.return_value = True
 
-        fp8_min, fp8_max = get_fp8_min_max(torch.float8_e4m3fnuz)
+        fp8_min, fp8_max = get_fp8_min_max()
 
         # fnuz on ROCm MI300 should return 224.0, not 240.0
-        assert fp8_max == 224.0, (
-            f"Expected 224.0 for fnuz on fnuz platform, got {fp8_max}"
-        )
-        assert fp8_min == -224.0, (
-            f"Expected -224.0 for fnuz on fnuz platform, got {fp8_min}"
-        )
+        assert fp8_max == 224.0, f"Expected 224.0 for fnuz platform, got {fp8_max}"
+        assert fp8_min == -224.0, f"Expected -224.0 for fnuz platform, got {fp8_min}"
 
     @patch("vllm.model_executor.layers.quantization.utils.quant_utils.current_platform")
-    def test_standard_dtype_on_fnuz_platform(self, mock_platform):
-        """Test that standard dtype on fnuz platform uses finfo values."""
-        mock_platform.is_fp8_fnuz.return_value = True
+    def test_non_fnuz_platform_uses_finfo(self, mock_platform):
+        """Test that non-fnuz platform uses finfo values."""
+        mock_platform.is_fp8_fnuz.return_value = False
+        mock_platform.fp8_dtype.return_value = torch.float8_e4m3fn
 
-        # Standard e4m3fn dtype should use finfo even on fnuz platform
-        fp8_min, fp8_max = get_fp8_min_max(torch.float8_e4m3fn)
+        fp8_min, fp8_max = get_fp8_min_max()
         finfo = torch.finfo(torch.float8_e4m3fn)
 
         assert fp8_max == finfo.max, (
-            f"Standard dtype should use finfo.max={finfo.max}, got {fp8_max}"
-        )
-
-    @patch("vllm.model_executor.layers.quantization.utils.quant_utils.current_platform")
-    def test_fnuz_dtype_on_non_fnuz_platform(self, mock_platform):
-        """Test that fnuz dtype on non-fnuz platform uses finfo values."""
-        mock_platform.is_fp8_fnuz.return_value = False
-
-        # fnuz dtype on non-fnuz platform should use finfo
-        fp8_min, fp8_max = get_fp8_min_max(torch.float8_e4m3fnuz)
-        finfo = torch.finfo(torch.float8_e4m3fnuz)
-
-        # Should be 240.0, not 224.0 (non-fnuz platform)
-        assert fp8_max == finfo.max, (
             f"Non-fnuz platform should use finfo.max={finfo.max}, got {fp8_max}"
+        )
+        assert fp8_min == finfo.min, (
+            f"Non-fnuz platform should use finfo.min={finfo.min}, got {fp8_min}"
         )
 
 

@@ -30,7 +30,7 @@ def ref_dynamic_per_token_quant(
         qtype_traits_min = qtype_traits.min
         qtype_traits_max = qtype_traits.max
     else:
-        qtype_traits_min, qtype_traits_max = get_fp8_min_max(quant_dtype)
+        qtype_traits_min, qtype_traits_max = get_fp8_min_max()
     qtype_max = as_float32_tensor(qtype_traits_max)
     s_1 = as_float32_tensor(1.0)
     s_512 = as_float32_tensor(512.0)
@@ -68,7 +68,7 @@ def ref_dynamic_per_token_quant(
 def ref_dynamic_per_tensor_fp8_quant(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    fp8_traits_min, fp8_traits_max = get_fp8_min_max(FP8_DTYPE)
+    fp8_traits_min, fp8_traits_max = get_fp8_min_max()
     fp8_max = as_float32_tensor(fp8_traits_max)
     one = as_float32_tensor(1.0)
 

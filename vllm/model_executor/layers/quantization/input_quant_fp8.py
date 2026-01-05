@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 _FP8_DTYPE = current_platform.fp8_dtype()
-_FP8_MIN, _FP8_MAX = get_fp8_min_max(_FP8_DTYPE)
+_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 

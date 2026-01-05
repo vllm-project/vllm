@@ -751,7 +751,7 @@ def per_token_group_quant_fp8(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    fp8_min, fp8_max = get_fp8_min_max(dtype)
+    fp8_min, fp8_max = get_fp8_min_max()
 
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
