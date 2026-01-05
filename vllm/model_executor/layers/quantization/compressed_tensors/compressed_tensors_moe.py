@@ -384,7 +384,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 a2_scale=(1.0 / layer.w2_input_global_scale),
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
-        elif self.nvfp4_backend in NvFp4MoeBackend.MARLIN:
+        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
             prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         else:
