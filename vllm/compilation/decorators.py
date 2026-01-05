@@ -13,6 +13,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from packaging import version
+from torch._dynamo.package import SourceInfo
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
