@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
+import anthropic
 import cloudpickle
 import httpx
 import openai
@@ -43,10 +44,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (
-    FlexibleArgumentParser,
-)
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -107,6 +106,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -120,7 +120,7 @@ class RemoteOpenAIServer:
         vllm_serve_args: list[str],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
@@ -248,6 +248,23 @@ class RemoteOpenAIServer:
             **kwargs,
         )
 
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
+        )
+
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     """Launch test server with custom child process"""
@@ -267,7 +284,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
     ) -> None:
@@ -660,7 +677,7 @@ def compare_all_settings(
                 results += _test_image_text(
                     client,
                     model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
@@ -985,6 +1002,11 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             # `cloudpickle` allows pickling complex functions directly
             input_bytes = cloudpickle.dumps((f, output_filepath))
 
+            repo_root = str(VLLM_PATH.resolve())
+
+            env = dict(env or os.environ)
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
             cmd = [sys.executable, "-m", f"{module_name}"]
 
             returned = subprocess.run(
@@ -1052,6 +1074,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
         memory_gb < min_gb,
         reason=f"Need at least {min_gb}GB GPU memory to run the test.",
     )
+
+
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
 
 
 def large_gpu_test(*, min_gb: int):
@@ -1197,9 +1226,9 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         try:
             import aiter  # noqa: F401
 
-            attn_backend_list.append("FLASH_ATTN")
+            attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():

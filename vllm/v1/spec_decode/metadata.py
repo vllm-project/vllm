@@ -14,6 +14,8 @@ class SpecDecodeMetadata:
     num_draft_tokens: list[int]
     # [batch_size]
     cu_num_draft_tokens: torch.Tensor
+    # [batch_size]
+    cu_num_sampled_tokens: torch.Tensor
     # [num_tokens]
     target_logits_indices: torch.Tensor
     # [batch_size]
@@ -32,6 +34,7 @@ class SpecDecodeMetadata:
     ) -> "SpecDecodeMetadata":
         batch_size = len(draft_token_ids)
         num_draft_tokens = [len(ids) for ids in draft_token_ids]
+        num_sampled_tokens = [len(ids) + 1 for ids in draft_token_ids]
         flattened_draft_token_ids = sum(draft_token_ids, [])
         num_tokens = len(flattened_draft_token_ids)
 
@@ -40,6 +43,10 @@ class SpecDecodeMetadata:
         )
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
         cu_num_draft_tokens_tensor = torch.from_numpy(cu_num_draft_tokens).to(device)
+        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
+        cu_num_sampled_tokens_tensor = torch.from_numpy(cu_num_sampled_tokens).to(
+            device
+        )
 
         target_logits_indices = torch.zeros(
             num_tokens, dtype=torch.int32, device=device
@@ -52,6 +59,7 @@ class SpecDecodeMetadata:
             draft_token_ids=draft_token_ids_tensor,
             num_draft_tokens=num_draft_tokens,
             cu_num_draft_tokens=cu_num_draft_tokens_tensor,
+            cu_num_sampled_tokens=cu_num_sampled_tokens_tensor,
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,

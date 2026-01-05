@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
@@ -41,7 +42,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -187,9 +187,8 @@ class MiniMaxText01Attention(nn.Module):
         num_heads: int,
         head_dim: int,
         num_kv_heads: int,
-        rotary_dim: int,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
+        rope_parameters: dict | None = None,
         sliding_window: int | None = None,
         quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
@@ -215,7 +214,6 @@ class MiniMaxText01Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.sliding_window = sliding_window
         self.prefix = prefix
 
@@ -246,9 +244,8 @@ class MiniMaxText01Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position,
-            base=int(rope_theta),
+            rope_parameters=rope_parameters,
             is_neox_style=True,
             dtype=torch.float32,
         )
@@ -288,11 +285,11 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.expert_num = expert_num
 
-        rope_theta = getattr(config, "rope_theta", 10000)
-
         head_dim = getattr(config, "head_dim", None)
         if head_dim is None:
             head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
             max_position_embeddings = min(
                 config.max_position_embeddings, config.max_model_len
@@ -324,12 +321,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
                 head_dim=head_dim,
-                rotary_dim=config.rotary_dim
-                if hasattr(config, "rotary_dim")
-                else head_dim,
                 num_kv_heads=config.num_key_value_heads,
                 max_position=max_position_embeddings,
-                rope_theta=rope_theta,
+                rope_parameters=config.rope_parameters,
                 sliding_window=config.sliding_window,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
@@ -621,7 +615,7 @@ class MiniMaxText01Model(nn.Module):
             )
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -669,16 +663,14 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
-        self.lora_config = lora_config
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
 
         self.CONCAT_FFN = True
 
-        self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxText01Model(
@@ -686,15 +678,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 self.config.hidden_size,
-                org_num_embeddings=self.config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
 
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size
+                config.vocab_size, self.config.vocab_size
             )
 
         else:
@@ -714,8 +704,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

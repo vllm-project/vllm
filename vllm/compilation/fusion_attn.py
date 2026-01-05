@@ -10,7 +10,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .fx_utils import is_func

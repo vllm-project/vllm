@@ -23,8 +23,13 @@ from vllm.entrypoints.openai.protocol import (
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
+    VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -33,9 +38,10 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -59,6 +65,10 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             log_error_stack=log_error_stack,
         )
+
+        # set up logits processors
+        self.logits_processors = self.model_config.logits_processors
+
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.enable_force_include_usage = enable_force_include_usage
@@ -141,6 +151,9 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -178,6 +191,10 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
                     )
+                    validate_logits_processors_parameters(
+                        self.logits_processors,
+                        sampling_params,
+                    )
 
                 request_id_item = f"{request_id}-{i}"
 
@@ -204,6 +221,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request_id=request_id,
                         params=sampling_params,
                         lora_request=lora_request,
+                        trace_headers=trace_headers,
                     )
                 else:
                     engine_request, tokenization_kwargs = await self._process_inputs(
@@ -213,6 +231,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                     generator = self.engine_client.generate(
@@ -224,26 +243,20 @@ class OpenAIServingCompletion(OpenAIServing):
                         priority=request.priority,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         result_generator = merge_async_iterators(*generators)
 
         model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
-        # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. Noting that best_of is only supported in V0. In addition,
-        # we do not stream the results when use beam search.
-        stream = (
-            request.stream
-            and (request.best_of is None or request.n == request.best_of)
-            and not request.use_beam_search
-        )
+        # We do not stream the results when using beam search.
+        stream = request.stream and not request.use_beam_search
 
         # Streaming response
         if stream:
@@ -292,9 +305,10 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -318,7 +332,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         num_prompts: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
@@ -399,7 +413,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 
@@ -428,6 +442,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
+
+                    self._raise_if_error(finish_reason, request_id)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -490,9 +506,11 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
-            data = self.create_streaming_error_response(str(e))
+            logger.exception("Error in completion stream generator.")
+            data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -503,7 +521,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
@@ -522,6 +540,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                self._raise_if_error(output.finish_reason, request_id)
+
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
@@ -614,7 +634,7 @@ class OpenAIServingCompletion(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -634,9 +654,18 @@ class OpenAIServingCompletion(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = tokenizer.decode(token_id)
                 if should_return_as_token_id:
                     token = f"token_id:{token_id}"
+                else:
+                    if tokenizer is None:
+                        raise VLLMValidationError(
+                            "Unable to get tokenizer because "
+                            "`skip_tokenizer_init=True`",
+                            parameter="skip_tokenizer_init",
+                            value=True,
+                        )
+
+                    token = tokenizer.decode(token_id)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
@@ -692,6 +721,15 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
         max_input_length: int | None = None,
     ) -> RenderConfig:
+        # Validate max_tokens before using it
+        if request.max_tokens is not None and request.max_tokens > self.max_model_len:
+            raise VLLMValidationError(
+                f"'max_tokens' ({request.max_tokens}) cannot be greater than "
+                f"the model's maximum context length ({self.max_model_len}).",
+                parameter="max_tokens",
+                value=request.max_tokens,
+            )
+
         max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
         return RenderConfig(
             max_length=max_input_tokens_len,

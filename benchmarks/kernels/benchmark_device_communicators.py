@@ -39,7 +39,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 )
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -293,7 +293,7 @@ class CommunicatorBenchmark:
                     graph = torch.cuda.CUDAGraph()
                     graph_pool = torch.cuda.graph_pool_handle()
                     set_graph_pool_id(graph_pool)
-                    with torch.cuda.graph(graph, pool=graph_pool):
+                    with torch.cuda.graph(graph, pool=graph_pool, stream=stream):
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 

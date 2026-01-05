@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass
 from typing import TypeAlias
 
+import numpy as np
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -342,6 +343,7 @@ class MockEngineCore:
         eos_token_id: int | None = None,
         stop_token_ids: list[int] | None = None,
         ignore_eos: bool = False,
+        request_ids: list[str] | None = None,
     ) -> None:
         self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
@@ -354,6 +356,11 @@ class MockEngineCore:
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
         self.ignore_eos = ignore_eos
+        self.request_ids = (
+            request_ids
+            if request_ids is not None
+            else [f"request-{i}" for i in range(self.num_requests)]
+        )
 
     def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
@@ -369,9 +376,9 @@ class MockEngineCore:
                         self.generated_logprobs_raw[req_idx][token_idx]
                     )
                     logprobs = LogprobsLists(
-                        [logprobs_token_ids_],
-                        [logprobs_],
-                        [sampled_token_ranks_],
+                        np.array([logprobs_token_ids_]),
+                        np.array([logprobs_]),
+                        np.array([sampled_token_ranks_]),
                     )
                 else:
                     logprobs = None
@@ -385,7 +392,7 @@ class MockEngineCore:
                     prompt_logprobs = None
                 new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
-                    request_id=f"request-{req_idx}",
+                    request_id=self.request_ids[req_idx],
                     new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -68,7 +69,11 @@ class All2AllManagerBase:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ):
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> Any:
+        # Subclasses should either:
+        # - implement handling for extra_tensors, or
+        # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -266,14 +271,14 @@ class DeviceCommunicatorBase:
             module
             for module in model.modules()
             # TODO(bnell): Should use isinstance but can't.  Maybe search for
-            # presence of quant_method.init_prepare_finalize?
+            # presence of quant_method.maybe_init_modular_kernel?
             if (
                 module.__class__.__name__ == "FusedMoE"
                 or module.__class__.__name__ == "SharedFusedMoE"
             )
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module)
+            module.maybe_init_modular_kernel()
 
     def dispatch(
         self,

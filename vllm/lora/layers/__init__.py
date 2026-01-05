@@ -11,14 +11,14 @@ from vllm.lora.layers.column_parallel_linear import (
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
 )
-from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
 from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
 from vllm.lora.layers.row_parallel_linear import (
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
 )
-from vllm.lora.layers.utils import LoRAMapping
+from vllm.lora.layers.utils import LoRAMapping, LoRAMappingType
 from vllm.lora.layers.vocal_parallel_embedding import VocabParallelEmbeddingWithLoRA
 
 __all__ = [
@@ -37,5 +37,7 @@ __all__ = [
     "RowParallelLinearWithShardedLoRA",
     "ReplicatedLinearWithLoRA",
     "LoRAMapping",
+    "LoRAMappingType",
     "FusedMoEWithLoRA",
+    "FusedMoE3DWithLoRA",
 ]

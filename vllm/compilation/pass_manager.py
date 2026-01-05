@@ -5,26 +5,38 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import set_env_var
+from vllm.utils.system_utils import set_env_var
 
 from .post_cleanup import PostCleanupPass
 from .vllm_inductor_pass import VllmInductorPass
+
+if rocm_aiter_ops.is_enabled():
+    from vllm.compilation.rocm_aiter_fusion import (
+        RocmAiterRMSNormFusionPass,
+        RocmAiterSiluMulFp8GroupQuantFusionPass,
+    )
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
+    from .qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
 from .fix_functionalization import FixFunctionalizationPass
-from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
+from .inductor_pass import (
+    CustomGraphPass,
+    InductorPass,
+    get_pass_context,
+)
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -69,13 +81,13 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
-        shape = get_pass_context().runtime_shape
+        compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
-            if pass_.is_applicable(shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
             else:
-                logger.debug("Skipping %s with shape %s", pass_, shape)
+                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
@@ -91,48 +103,37 @@ class PostGradPassManager(CustomGraphPass):
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
-            if self.pass_config.enable_noop:
+            if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sequence_parallelism:
+            if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.enable_async_tp:
+                if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
-            if self.pass_config.enable_fi_allreduce_fusion:
+            if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
-            if self.pass_config.enable_fusion:
+            if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [
+                        RocmAiterRMSNormFusionPass(config),
+                    ]
+            if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.enable_attn_fusion:
+            if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
+
+            if self.pass_config.enable_qk_norm_rope_fusion:
+                self.passes += [QKNormRoPEFusionPass(config)]
 
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
-
-        # [HACK: Bug with Inductor graph partition and torch.compile cache]
-        # In PyTorch 2.9, torch.compile has a bug where the graph
-        # partition is not taken into account during caching.
-        # Because vLLM's Mode.VLLM_COMPILE is the only mode that uses
-        # Inductor graph partition, and VLLM_COMPILE implies there
-        # is a PostGradPassManager, we put the list of operators to graph
-        # partition into the PostGradPassManager's uuid (which
-        # then gets incorporated into Inductor's FX graph cache key).
-        # Remove this hack whenever torch.compile fixes it.
-
-        # This is the list of operators that vLLM asks Inductor to split.
-        self.inductor_splitting_ops = []
-        if (
-            config.compilation_config.use_inductor_graph_partition
-            and config.compilation_config.splitting_ops is not None
-        ):
-            # Sort them so we're not dependent on the ordering.
-            self.inductor_splitting_ops = sorted(
-                config.compilation_config.splitting_ops
-            )
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
@@ -144,16 +145,13 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {
-            "pass_config": self.pass_config.uuid(),
-            "passes": [],
-            "inductor_splitting_ops": [],
-        }
+        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
 
-        # See [HACK: Bug with Inductor graph partition and torch.compile cache]
-        state["inductor_splitting_ops"].extend(self.inductor_splitting_ops)
+        # Include the compile range in the uuid to ensure that inductor
+        # recompiles the graph for the new dynamic compile range.
+        state["compile_range"] = str(get_pass_context().compile_range)
 
         return InductorPass.hash_dict(state)

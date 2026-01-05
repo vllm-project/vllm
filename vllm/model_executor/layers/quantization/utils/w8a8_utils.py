@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
+from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -117,8 +118,11 @@ def requantize_with_max_scale(
     # from disk in this case. Skip requantization in this case (since)
     # we already are quantized with the single scale.
     # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
+    #
+    # Extra note: upon weight reloading weight_scale.ndim == 0
     unfused_module_in_checkpoint = (
-        weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min
+        weight_scale.ndim != 0
+        and weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min
     )
 
     # If unfused checkpoint, need requanize with the single scale.
@@ -200,7 +204,7 @@ def rocm_per_tensor_w8a8_scaled_mm_impl(
             out_dtype,
             scale_a,
             scale_b,
-            current_platform.get_cu_count(),
+            get_cu_count(),
             bias,
         )
     else:
@@ -472,7 +476,7 @@ class Fp8LinearOp:
         # Example:
         # When the number of token is 1, per-token scale is [[1]]
         # When per-tensor scale is [1] or ().
-        per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
+        per_tensor_weights = weight_scale.numel() == 1
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)

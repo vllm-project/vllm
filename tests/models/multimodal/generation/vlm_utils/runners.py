@@ -117,6 +117,7 @@ def run_video_test(
         video_assets,
         test_case.size_wrapper,
         test_case.num_video_frames,
+        test_case.needs_video_metadata,
     )
 
     core.run_test(

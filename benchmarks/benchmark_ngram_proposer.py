@@ -19,7 +19,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -32,12 +32,11 @@ def benchmark_propose(args):
 
         model_config = ModelConfig(
             model="facebook/opt-125m",
-            task="generate",
             max_model_len=args.num_token + args.num_spec_token,
             tokenizer="facebook/opt-125m",
             tokenizer_mode="auto",
             dtype="auto",
-            seed=None,
+            seed=0,
             trust_remote_code=False,
         )
         proposer = NgramProposer(
@@ -108,7 +107,10 @@ def benchmark_batched_propose(args):
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
     )
 
     # monkey patch vllm.v1.worker.gpu_model_runner.get_pp_group

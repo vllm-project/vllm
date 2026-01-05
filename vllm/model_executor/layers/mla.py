@@ -26,6 +26,7 @@ class MLAModules:
     indexer: torch.nn.Module | None
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
+    indexer_rotary_emb: torch.nn.Module | None = None
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -80,6 +81,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
+        self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
         if self.indexer is not None:
@@ -109,6 +111,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -147,12 +150,18 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
+            _topk_indices = self.indexer(
+                hidden_states, q_c, positions, self.indexer_rope_emb
+            )
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
 
         attn_out = self.mla_attn(
             q,

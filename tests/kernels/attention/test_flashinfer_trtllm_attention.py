@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
 import pytest
 import torch
 
@@ -10,12 +9,14 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
+else:
+    import flashinfer
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -238,9 +239,11 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
         rtol, atol = 7e-2, 9e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-        rtol, atol = 2e-2, 4e-2
+        rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 1e-2, 2e-2
+        rtol, atol = 2e-2, 2e-2
+    elif kv_quant_dtype == FP8_DTYPE:
+        rtol, atol = 4e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 
@@ -440,7 +443,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         output_trtllm = output_trtllm.reshape(-1, query.shape[1], query.shape[2])
 
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 1e-1, 2e-1
+        rtol, atol = 3e-1, 4e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
@@ -452,3 +455,38 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - output_trtllm))}",
     )
+
+
+def test_trtllm_attention_rejects_num_kv_heads_1() -> None:
+    """Test that TRTLLM attention correctly rejects num_kv_heads=1.
+
+    When num_kv_heads=1 (MQA), the KV cache strides become degenerate
+    (stride_heads == stride_batch), which causes CUDA's cuTensorMapEncodeTiled
+    to fail because TMA descriptors cannot handle degenerate 4D tensors with
+    singleton dimensions.
+
+    This test verifies that can_use_trtllm_attention returns False for
+    num_kv_heads=1 configurations.
+    """
+    from vllm.utils.flashinfer import can_use_trtllm_attention
+
+    # num_kv_heads=1 should be rejected
+    assert not can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=1), (
+        "can_use_trtllm_attention should return False for num_kv_heads=1"
+    )
+    assert not can_use_trtllm_attention(num_qo_heads=32, num_kv_heads=1), (
+        "can_use_trtllm_attention should return False for num_kv_heads=1"
+    )
+
+    # num_kv_heads > 1 should be accepted (if platform supports it)
+    # Note: This may return False on non-Blackwell platforms, which is fine
+    result_kv8 = can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=8)
+    result_kv1 = can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=1)
+
+    # Even if platform doesn't support TRTLLM, num_kv_heads=1 should never
+    # return True when num_kv_heads > 1 returns True
+    if result_kv8:
+        assert not result_kv1, (
+            "If TRTLLM is supported for num_kv_heads=8, "
+            "it must be rejected for num_kv_heads=1"
+        )

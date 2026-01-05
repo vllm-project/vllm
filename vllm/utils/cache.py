@@ -3,7 +3,7 @@
 from collections import UserDict
 from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
 from types import MappingProxyType
-from typing import Generic, NamedTuple, TypeVar, cast, overload
+from typing import NamedTuple, TypeVar, cast, overload
 
 import cachetools
 
@@ -48,7 +48,7 @@ class CacheInfo(NamedTuple):
         )
 
 
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
+class LRUCache(cachetools.LRUCache[_K, _V]):
     def __init__(self, capacity: float, getsizeof: Callable[[_V], float] | None = None):
         super().__init__(capacity, getsizeof)
 

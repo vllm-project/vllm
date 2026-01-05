@@ -10,10 +10,10 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.model import ModelConfig, ModelDType, RunnerOption
+from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -292,7 +292,11 @@ def build_model_context(
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
@@ -309,7 +313,9 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
@@ -373,7 +379,10 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    default_pooling_type: str = ""
+    pooling_type: str | None = None
+    attn_type: AttnTypeStr | None = None
+    is_prefix_caching_supported: bool | None = None
+    is_chunked_prefill_supported: bool | None = None
     enable_test: bool = True
 
 
@@ -385,28 +394,9 @@ class EmbedModelInfo(ModelInfo):
 
 
 @dataclass
-class CLSPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "LAST"
-
-
-@dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
-
-
-@dataclass
-class CLSPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "LAST"
+    chat_template_name: str | None = None
 
 
 @dataclass

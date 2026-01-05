@@ -13,7 +13,6 @@ from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -118,11 +117,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
-            if is_global_first_rank():
-                logger.info(
-                    "Using %s all2all manager.",
-                    self.all2all_manager.__class__.__name__,
-                )
+            logger.info_once(
+                "Using %s all2all manager.",
+                self.all2all_manager.__class__.__name__,
+                scope="global",
+            )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
@@ -226,7 +225,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        if sizes is not None:
+        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
             pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
         else:
             pynccl_comm.reduce_scatter(output, input_tensor)
@@ -319,17 +318,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         return output_list
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         assert self.all2all_manager is not None
-        hidden_states, router_logits = self.all2all_manager.dispatch(
-            hidden_states, router_logits, is_sequence_parallel
+        return self.all2all_manager.dispatch(
+            hidden_states,
+            router_logits,
+            is_sequence_parallel,
+            extra_tensors,  # type: ignore[call-arg]
         )
-        return hidden_states, router_logits
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False

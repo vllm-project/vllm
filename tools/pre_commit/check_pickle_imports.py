@@ -27,8 +27,8 @@ ALLOWED_FILES = {
     "vllm/distributed/device_communicators/shm_broadcast.py",
     "vllm/distributed/device_communicators/shm_object_storage.py",
     "vllm/utils/hashing.py",
+    "tests/tokenizers_/test_hf.py",
     "tests/utils_/test_hashing.py",
-    "tests/tokenization/test_cached_tokenizer.py",
     "benchmarks/kernels/graph_machete_bench.py",
     "benchmarks/kernels/benchmark_lora.py",
     "benchmarks/kernels/benchmark_machete.py",
@@ -39,7 +39,6 @@ ALLOWED_FILES = {
     "vllm/v1/executor/multiproc_executor.py",
     "vllm/v1/executor/ray_executor.py",
     "vllm/entrypoints/llm.py",
-    "vllm/utils/__init__.py",
     "tests/utils.py",
     # pickle and cloudpickle
     "vllm/v1/serial_utils.py",

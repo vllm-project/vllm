@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     sort_weights,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-2-7b-hf/TP1"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
@@ -263,7 +263,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
+            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -273,7 +273,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
+            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, None, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,

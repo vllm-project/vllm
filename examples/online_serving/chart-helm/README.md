@@ -19,3 +19,15 @@ This directory contains a Helm chart for deploying the vllm application. The cha
 - templates/pvc.yaml: Template for Persistent Volume Claims.
 - templates/secrets.yaml: Template for Kubernetes Secrets.
 - templates/service.yaml: Template for creating Services.
+
+## Running Tests
+
+This chart includes unit tests using [helm-unittest](https://github.com/helm-unittest/helm-unittest). Install the plugin and run tests:
+
+```bash
+# Install plugin
+helm plugin install https://github.com/helm-unittest/helm-unittest
+
+# Run tests
+helm unittest .
+```
