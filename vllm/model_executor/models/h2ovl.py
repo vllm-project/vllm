@@ -552,3 +552,23 @@ class H2OVLChatModel(InternVLChatModel):
         else:
             msg = "Monolith mode is not applicable to H2OVL"
             raise NotImplementedError(msg)
+
+    def get_num_mm_encoder_tokens(self, encoder_budget: int) -> int:
+        # Get the base image size
+        image_size = self.config.vision_config.image_size
+
+        # Use the Info class to calculate the total tokens
+        # This calculates: (Number of Patches) * (Tokens per Patch)
+        info = H2OVLProcessingInfo(self.ctx)
+        tokens = info.get_num_image_tokens(
+            image_width=image_size,
+            image_height=image_size,
+            processor=None,
+            use_msac=getattr(self.config, "use_msac", False),
+        )
+
+        return min(tokens, encoder_budget)
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        # H2OVL connector is a simple MLP that doesn't reduce the token count
+        return num_encoder_tokens
