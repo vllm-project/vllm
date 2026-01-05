@@ -28,6 +28,7 @@ from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
     VllmConfig,
+    set_current_vllm_config,
     get_layers_from_vllm_config,
     update_config,
 )
@@ -553,7 +554,7 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_capture_sizes
             )
         # self.vit_cudagraph_batch_sizes sorts in ascending order.
-        self.vit_cudagraph_batch_sizes: list[int] | None
+        self.vit_cudagraph_batch_sizes: list[int] | None = None
         if (
             self.compilation_config.vit_cudagraph_capture_sizes
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -561,8 +562,6 @@ class GPUModelRunner(
             self.vit_cudagraph_batch_sizes = sorted(
                 self.compilation_config.vit_cudagraph_capture_sizes
             )
-        else:
-            self.vit_cudagraph_batch_sizes = None
 
         # Cache the device properties.
         self._init_device_properties()
@@ -2465,14 +2464,7 @@ class GPUModelRunner(
 
                                 # Treat padding as a new virtual image.
                                 # Assuming a fixed patch size where height is merge_size.
-                                merge_size = getattr(
-                                    self.model_config.hf_config.vision_config,
-                                    "spatial_merge_size",
-                                    1,
-                                )
-                                assert padding_amount % (merge_size * merge_size) == 0
-                                h_patches = merge_size
-                                w_patches = padding_amount // h_patches
+                                h_patches, w_patches = self._get_dummy_h_w_patches(padding_amount)
                                 padding_grid_info = torch.tensor(
                                     [[1, h_patches, w_patches]],
                                     dtype=image_grid_thw.dtype,
@@ -2499,11 +2491,11 @@ class GPUModelRunner(
                         should_time, mm_lora_refs, current_item_idx, num_items
                     ):
                         curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
-                        # Remove the padded items before sanity check
-                        if original_num_imgs != -1:
-                            curr_group_outputs = curr_group_outputs[:original_num_imgs]
+                    # Remove the padded items before sanity check
+                    if original_num_imgs != -1:
+                        curr_group_outputs = curr_group_outputs[:original_num_imgs]
                 else:
-                    with self.timed_encoder_operation(
+                    with set_current_vllm_config(self.vllm_config), self.timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx, num_items
                     ):
                         mm_kwargs_group["cudagraph_dispatcher"] = self.cudagraph_dispatcher
@@ -4651,44 +4643,34 @@ class GPUModelRunner(
             yield
             inputs_embeds.fill_(0)
 
+    def _get_dummy_h_w_patches(self, patches: int):
+        vision_config = self.model_config.hf_config.vision_config
+        if hasattr(vision_config, "spatial_merge_size"):
+            merge_size = vision_config.spatial_merge_size
+        elif hasattr(vision_config, "merge_kernel_size"):
+            merge_size = vision_config.merge_kernel_size[0]
+        else:
+            merge_size = 1
+
+        assert patches % (merge_size * merge_size) == 0, (
+            "Number of patches must be multiple of merge_size squared"
+        )
+        h_patches = merge_size
+        w_patches = patches // merge_size
+        return h_patches, w_patches
+
     def _get_dummy_vit_input(
         self, num_image_tokens: int, img_feature_dim: int
     ) -> BatchedTensorInputs:
-        """
-        Generates dummy multimodal inputs for a single image, with a controllable
-        number of resulting image tokens for a Vision Transformer (ViT) like model,
-        ensuring a square-like aspect ratio for the patch grid.
+        """Dummy data for profiling and precompiling ViT."""
 
-        This is useful for profiling or testing, allowing the creation of inputs
-        that result in a specific number of image tokens after vision encoding.
-
-        Args:
-            num_image_tokens: The desired number of image tokens after encoding.
-
-        Returns:
-            A BatchedTensorInputs dictionary containing `pixel_values` and
-            `image_grid_thw` that can be passed as kwargs to
-            `embed_multimodal`.
-        """
-
-        def _get_dummy_h_w_patches(patches: int):
-            merge_size = getattr(
-                self.model_config.hf_config.vision_config, "spatial_merge_size", 1
-            )
-            assert patches % (merge_size * merge_size) == 0, (
-                "Number of patches must be multiple of merge_size squared"
-            )
-            h_patches = merge_size
-            w_patches = patches // merge_size
-            return h_patches, w_patches
-
-        # The first dimension of pixel_values corresponds to the total number of
-        # tokens (patches).
+        # The first dimension of pixel_values corresponds 
+        # to the total number of patches.
         pixel_values = torch.zeros(
             (num_image_tokens, img_feature_dim), dtype=self.dtype, device=self.device
         )
 
-        h_patches, w_patches = _get_dummy_h_w_patches(num_image_tokens)
+        h_patches, w_patches = self._get_dummy_h_w_patches(num_image_tokens)
         image_grid_thw = torch.tensor(
             [[1, h_patches, w_patches]], dtype=torch.long, device=self.device
         )

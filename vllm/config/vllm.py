@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import bisect
 import copy
 import getpass
 import json
@@ -369,12 +368,16 @@ class VllmConfig:
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     def pad_for_vit_cudagraph(self, batch_size: int) -> int:
-        capture_sizes = self.compilation_config.vit_cudagraph_capture_sizes
-        # Find the insertion point for batch_size to maintain order.
-        # This gives the index of the first element >= batch_size.
-        idx = bisect.bisect_left(capture_sizes, batch_size)
-
-        return capture_sizes[idx] if idx < len(capture_sizes) else batch_size
+        if (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and hasattr(self.compilation_config, "max_vit_cudagraph_capture_size")
+            and self.compilation_config.max_vit_cudagraph_capture_size
+            and batch_size <= self.compilation_config.max_vit_cudagraph_capture_size
+        ):
+            # Use CUDA graphs.
+            # Add padding to the batch size.
+            return self.compilation_config.bs_to_padded_vit_graph_size[batch_size]
+        return batch_size
     
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1362,8 +1365,6 @@ class VllmConfig:
             - Eager mode is not enforced.
             - CUDA graph mode is enabled.
             - The multimodal encoder compilation is enabled.
-            - A multimodal config is present.
-            - The multimodal encoder tensor parallelism mode is not "data".
             If these conditions are not met, the list of capture sizes will be empty,
             effectively disabling ViT CUDA graphs.
 
@@ -1373,8 +1374,8 @@ class VllmConfig:
 
         3.  If no sizes are provided by the user, a default list of sizes is
             generated up to a maximum of 5120. The default sizes are:
-            [16, 32, 64, 128, 256] + list(range(512, 2048, 64)) + list(
-            range(2048, 5120 + 1, 128))
+            [512, 1024, 1536] + list(range(2048, 2048, 128)) + list(
+            range(4096, 8192 + 1, 256))
 
         The final list of sizes is stored in
         `self.compilation_config.vit_cudagraph_capture_sizes`.
@@ -1390,6 +1391,21 @@ class VllmConfig:
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.compile_mm_encoder
         ):
+            # determine the initial max_vit_cudagraph_capture_size
+            max_vit_cudagraph_capture_size = (
+                self.compilation_config.max_vit_cudagraph_capture_size
+            )
+            if max_vit_cudagraph_capture_size is None:
+                from vllm.multimodal import MULTIMODAL_REGISTRY
+                from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+
+                encoder_compute_budget, _ = compute_encoder_budget(
+                    model_config=self.model_config,
+                    scheduler_config=self.scheduler_config,
+                    mm_registry=MULTIMODAL_REGISTRY,
+                )
+                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 8192)
+
             # determine the vit_cudagraph_capture_sizes
             if self.compilation_config.vit_cudagraph_capture_sizes is not None:
                 # de-duplicate the sizes provided by the config
@@ -1400,15 +1416,6 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 vit_cudagraph_capture_sizes.sort()
             else:
-                from vllm.multimodal import MULTIMODAL_REGISTRY
-                from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-
-                encoder_compute_budget, _ = compute_encoder_budget(
-                    model_config=self.model_config,
-                    scheduler_config=self.scheduler_config,
-                    mm_registry=MULTIMODAL_REGISTRY,
-                )
-                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 8192)
                 vit_cudagraph_capture_sizes = [
                     i for i in [512, 1024, 1536] if i <= max_vit_cudagraph_capture_size
                 ]
@@ -1422,12 +1429,42 @@ class VllmConfig:
                     vit_cudagraph_capture_sizes += list(
                         range(4096, max_vit_cudagraph_capture_size + 1, 256)
                     )
+
+            # user-specific compilation_config.max_vit_cudagraph_capture_size get
+            # truncated to valid_max_size when they are inconsistent.
+            valid_max_size = (
+                vit_cudagraph_capture_sizes[-1] if vit_cudagraph_capture_sizes else 0
+            )
+            if (
+                self.compilation_config.max_vit_cudagraph_capture_size is not None
+                and self.compilation_config.max_vit_cudagraph_capture_size
+                != valid_max_size
+            ):
+                # raise error only when both two flags are user-specified
+                # and they are inconsistent with each other
+                if self.compilation_config.vit_cudagraph_capture_sizes is not None:
+                    raise ValueError(
+                        "customized max_vit_cudagraph_capture_size"
+                        f"(={self.compilation_config.max_vit_cudagraph_capture_size}) "
+                        "should be consistent with the max value of "
+                        f"vit_cudagraph_capture_sizes(={valid_max_size})"
+                    )
+
+                logger.warning(
+                    "Truncating max_vit_cudagraph_capture_size to %d",
+                    valid_max_size,
+                )
+            # always set the final max_vit_cudagraph_capture_size
+            self.compilation_config.max_vit_cudagraph_capture_size = valid_max_size
             self.compilation_config.vit_cudagraph_capture_sizes = (
                 vit_cudagraph_capture_sizes
             )
         else:
             # no cudagraph in use
+            self.compilation_config.max_vit_cudagraph_capture_size = 0
             self.compilation_config.vit_cudagraph_capture_sizes = []
+
+        self.compilation_config.compute_bs_to_padded_vit_graph_size()
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

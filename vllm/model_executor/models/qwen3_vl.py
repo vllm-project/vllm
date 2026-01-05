@@ -25,6 +25,7 @@
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from functools import lru_cache, partial
 from itertools import islice
 from typing import Any
@@ -49,7 +50,7 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
+from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, set_forward_context, is_forward_context_available
@@ -648,7 +649,8 @@ class Qwen3_VisionTransformer(nn.Module):
                         hidden_states
                 )
                     deepstack_feature_lists.append(deepstack_feature)
-        hidden_states = self.merger(hidden_states)
+        with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(True):
+            hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
@@ -1492,26 +1494,25 @@ class Qwen3VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            maybe_in_vit_cuda_graph_capture = is_forward_context_available()
-            if self.vllm_config.is_in_compile:
-                with set_forward_context(None, self.vllm_config):
-                    if self.use_data_parallel and not maybe_in_vit_cuda_graph_capture:
-                        return run_dp_sharded_mrope_vision_model(
-                            self.visual,
-                            pixel_values,
-                            grid_thw_list,
-                            rope_type="rope_3d",
-                            cudagraph_dispatcher=cudagraph_dispatcher,
-                        )
-                    else:
-                        image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
-            else:
+            maybe_in_vit_cuda_graph_capture = False
+            if is_forward_context_available():
+                ctx = get_forward_context()
+                if ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE:
+                    maybe_in_vit_cuda_graph_capture = True
+            context = (
+                set_forward_context(None, self.vllm_config)
+                if self.vllm_config.is_in_compile
+                else nullcontext()
+            )
+            with context:
                 if self.use_data_parallel and not maybe_in_vit_cuda_graph_capture:
-                    with set_current_vllm_config(self.vllm_config):
-                        return run_dp_sharded_mrope_vision_model(
-                            self.visual, pixel_values, grid_thw_list, rope_type="rope_3d",
-                            cudagraph_dispatcher=cudagraph_dispatcher,
-                        )
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values,
+                        grid_thw_list,
+                        rope_type="rope_3d",
+                        cudagraph_dispatcher=cudagraph_dispatcher,
+                    )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 

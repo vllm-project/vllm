@@ -31,8 +31,6 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
 
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
-    vllm_config.is_in_compile = False
-
     compilation_config: CompilationConfig = vllm_config.compilation_config
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         logger.info_once(
@@ -45,6 +43,7 @@ def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
             context_manager.__exit__(None, None, None)
             context_manager = None
 
+    vllm_config.is_in_compile = False
 
 cudagraph_capturing_enabled: bool = True
 
