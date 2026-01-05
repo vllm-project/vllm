@@ -1064,6 +1064,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     num_decode_tokens,
                 )
                 decode_use_trtllm = False
+                # After fallback, ensure seq_lens_cpu is available for FlashInfer
+                if seq_lens_cpu is None:
+                    seq_lens_cpu = seq_lens[:num_decodes].cpu()
 
             if decode_use_trtllm:
                 attn_metadata.decode = TRTLLMDecode(
