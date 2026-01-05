@@ -522,8 +522,6 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        # Cache GroupedTopk instance to avoid repeated CustomOp.__init__() calls
-        # which trigger get_current_vllm_config() on every forward pass
         self._grouped_topk_impl: GroupedTopk | None = None
         if self.use_grouped_topk:
             assert self.num_expert_group is not None
