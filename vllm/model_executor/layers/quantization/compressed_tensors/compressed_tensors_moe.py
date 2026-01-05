@@ -61,9 +61,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     expert_weight_is_col_major,
     requant_weight_ue8m0_inplace,
@@ -440,18 +437,21 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        return None
-        if self.use_marlin or (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        ):
+        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
+        if self.nvfp4_backend in UNSUPPORTED:
             return None
-        elif not self.allow_flashinfer:
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+            # For now, fp4 moe only works with the flashinfer dispatcher.
+            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+                self.moe
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        else:
             return super().maybe_make_prepare_finalize(routing_tables)
-
-        prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe)
-        logger.debug_once("%s", prepare_finalize.__class__.__name__)
-        return prepare_finalize
 
     def select_gemm_impl(
         self,
