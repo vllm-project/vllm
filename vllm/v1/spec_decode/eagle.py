@@ -27,7 +27,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
     TreeAttentionMetadataBuilder,
@@ -172,7 +171,6 @@ class EagleProposer:
 
             rocm_types = [
                 TritonAttentionMetadata,
-                FlashAttentionMetadata,
                 RocmAttentionMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
