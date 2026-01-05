@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -288,14 +287,6 @@ class RocmPlatform(Platform):
             ):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-
-            # Priority 5: If model is Encoder-only self-attention type
-            if (
-                attn_selector_config.attn_type is not None
-                and attn_selector_config.attn_type == AttentionType.ENCODER_ONLY
-            ):
-                logger.info("Using FlexAttention backend.")
-                return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend.")
