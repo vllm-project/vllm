@@ -429,11 +429,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = a2_scale
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        self.kernel = make_nvfp4_moe_kernel(
-            backend=self.nvfp4_backend,
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-        )
+        if self.moe_quant_config is not None:
+            self.kernel = make_nvfp4_moe_kernel(
+                backend=self.nvfp4_backend,
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+            )
 
     def maybe_make_prepare_finalize(
         self,
