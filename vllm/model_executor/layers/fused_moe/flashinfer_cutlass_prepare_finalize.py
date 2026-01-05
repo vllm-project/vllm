@@ -354,12 +354,11 @@ def create_flashinfer_prepare_finalize(
     use_deepseek_fp8_block_scale: bool = False,
 ) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
     """Factory function to create the appropriate FlashInfer implementation."""
-    # FP8 DP path currently supported via AllGather.
+
     if use_dp:
         if enable_alltoallv:
             assert use_nvfp4
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
-
         return FlashInferAllGatherMoEPrepareAndFinalize(
             use_dp=True,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,

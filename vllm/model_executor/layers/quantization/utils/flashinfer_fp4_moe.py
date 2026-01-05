@@ -287,10 +287,9 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        a1_gscale = layer.w13_input_scale_quant
         (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
             x,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
 
@@ -383,10 +382,9 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # Quantize input to FP4
-        a1_gscale = layer.w13_input_scale_quant
         (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
             x,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
 
@@ -435,10 +433,12 @@ def prepare_nvfp4_moe_layer_for_fi(
     a13_scale: torch.Tensor,
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
+    w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
     is_act_and_mul: bool,
     is_global_sf: bool,
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -490,6 +490,9 @@ def prepare_nvfp4_moe_layer_for_fi(
         # We do not need to make this a parameter, because
         # it is not used during the weight (re)-loading process.
         layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        layer.a1_gscale = 1.0 / a13_scale
+        layer.g1_alphas = a13_scale * w13_scale_2
+        layer.g2_alphas = a2_scale * w2_scale_2
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
@@ -509,4 +512,4 @@ def prepare_nvfp4_moe_layer_for_fi(
 
         w2_scale = swizzle_blockscale(w2_scale)
 
-    return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, a2_scale
+    return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale

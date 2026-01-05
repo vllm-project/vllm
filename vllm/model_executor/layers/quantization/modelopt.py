@@ -1597,6 +1597,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a13_scale,
                 w2,
                 w2_scale,
+                w2_scale_2,
                 a2_scale,
             ) = prepare_nvfp4_moe_layer_for_fi(
                 backend=self.nvfp4_backend,
@@ -1607,6 +1608,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a13_scale=layer.w13_input_scale,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
+                w2_scale_2=layer.w2_weight_scale_2,
                 a2_scale=layer.w2_input_scale,
                 is_act_and_mul=self.moe.is_act_and_mul,
                 is_global_sf=self.use_global_sf,
@@ -1621,9 +1623,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
+        replace_parameter(layer, "w13_input_scale", a13_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-        replace_parameter(layer, "w13_input_scale", a13_scale)
+        replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -1642,7 +1645,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
         import flashinfer
 
-        a1_gscale = layer.w13_input_scale_quant
+        assert self.moe_quant_config is not None
+        a1_gscale = self.moe_quant_config.a1_gscale
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
             hidden_states,
             a1_gscale,

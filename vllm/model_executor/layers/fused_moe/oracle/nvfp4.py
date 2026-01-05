@@ -119,8 +119,6 @@ def make_nvfp4_moe_kernel(
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         return mk.FusedMoEModularKernel(
-            # TODO(rob): make defer_input_quant an attr
-            # of FlashInferExperts for nvfp4.
             prepare_finalize=MoEPrepareAndFinalizeNoEP(
                 defer_input_quant=True,
             ),
