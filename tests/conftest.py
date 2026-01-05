@@ -189,6 +189,18 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    config = VllmConfig()
+    with set_current_vllm_config(config):
+        yield config
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.

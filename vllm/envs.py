@@ -108,7 +108,6 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
-    VLLM_ALLOW_DEFAULT_CONFIG: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
@@ -911,14 +910,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
-        in ("1", "true")
-    ),
-    # If set, allow get_current_vllm_config() to return a default VllmConfig
-    # when the global config is not set. This is useful for CI tests that
-    # directly test custom ops/modules without setting up a full vLLM config.
-    # In production, we assert to catch config propagation bugs early.
-    "VLLM_ALLOW_DEFAULT_CONFIG": lambda: (
-        os.environ.get("VLLM_ALLOW_DEFAULT_CONFIG", "0").strip().lower()
         in ("1", "true")
     ),
     # We assume drivers can report p2p status correctly.

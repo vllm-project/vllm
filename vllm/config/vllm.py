@@ -1441,20 +1441,13 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        import vllm.envs as envs
-
-        if envs.VLLM_ALLOW_DEFAULT_CONFIG:
-            # In CI, usually when we test custom ops/modules directly,
-            # we don't set the vllm config. In that case, we return a
-            # default config. Set VLLM_ALLOW_DEFAULT_CONFIG=1 to enable.
-            return VllmConfig()
         raise AssertionError(
             "Current vLLM config is not set. This typically means "
             "get_current_vllm_config() was called outside of a "
             "set_current_vllm_config() context, or a CustomOp was "
             "instantiated at module import time before config was set. "
-            "For CI tests that directly test custom ops/modules, set "
-            "VLLM_ALLOW_DEFAULT_CONFIG=1 to allow returning a default config."
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
         )
     return _current_vllm_config
 

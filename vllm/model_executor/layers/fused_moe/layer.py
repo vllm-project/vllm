@@ -526,6 +526,8 @@ class FusedMoE(CustomOp):
         # which trigger get_current_vllm_config() on every forward pass
         self._grouped_topk_impl: GroupedTopk | None = None
         if self.use_grouped_topk:
+            assert self.num_expert_group is not None
+            assert self.topk_group is not None
             self._grouped_topk_impl = GroupedTopk(
                 topk=self.top_k,
                 renormalize=self.renormalize,
