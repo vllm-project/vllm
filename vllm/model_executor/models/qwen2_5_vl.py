@@ -349,6 +349,7 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
+
     def forward(
         self,
         x: torch.Tensor,

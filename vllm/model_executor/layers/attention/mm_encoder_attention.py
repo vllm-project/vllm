@@ -65,6 +65,32 @@ class MMEncoderAttention(CustomOp):
             dtype=dtype,
         )
 
+        from vllm.platforms import current_platform
+        if (
+            current_platform.is_rocm()
+            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        ):
+            self.use_upstream_fa = True
+        if current_platform.is_xpu():
+            self.use_upstream_fa = False
+        
+        # Flash attention requires head_dim to be a multiple of 32
+        # Fall back to TORCH_SDPA if the head dimension is incompatible
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        } and self.hidden_size_per_attention_head % 32 != 0:
+            from vllm.logger import init_logger
+            logger = init_logger(__name__)
+            logger.warning(
+                f"Flash attention backend requires head_dim to be a multiple of 32, "
+                f"but got {self.hidden_size_per_attention_head}. "
+                f"Falling back to TORCH_SDPA backend."
+            )
+            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
+            self.flash_attn_varlen_func = None
+
+
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
