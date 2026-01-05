@@ -90,15 +90,10 @@ async def get_first_model_from_server(
 class SpecDecodeMetrics:
     """Speculative decoding metrics from the server's Prometheus endpoint."""
 
+    num_drafts: int
     num_draft_tokens: int
     num_accepted_tokens: int
-
-    @property
-    def acceptance_rate(self) -> float:
-        """Calculate the acceptance rate as a percentage."""
-        if self.num_draft_tokens == 0:
-            return float("nan")
-        return (self.num_accepted_tokens / self.num_draft_tokens) * 100
+    accepted_per_pos: dict[int, int]
 
 
 async def fetch_spec_decode_metrics(
@@ -115,8 +110,10 @@ async def fetch_spec_decode_metrics(
                 return None
             text = await response.text()
 
+            num_drafts = 0
             num_draft_tokens = 0
             num_accepted_tokens = 0
+            accepted_per_pos: dict[int, int] = {}
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -124,16 +121,32 @@ async def fetch_spec_decode_metrics(
                 if not line or line.startswith("#"):
                     continue
 
-                if line.startswith("vllm:spec_decode_num_draft_tokens"):
+                if line.startswith("vllm:spec_decode_num_drafts"):
+                    found_spec_decode = True
+                    parts = line.split()
+                    if parts:
+                        with contextlib.suppress(ValueError):
+                            num_drafts += int(float(parts[-1]))
+                elif line.startswith("vllm:spec_decode_num_draft_tokens"):
                     found_spec_decode = True
                     parts = line.split()
                     if parts:
                         with contextlib.suppress(ValueError):
                             num_draft_tokens += int(float(parts[-1]))
-                elif (
-                    line.startswith("vllm:spec_decode_num_accepted_tokens")
-                    and "_per_pos" not in line
-                ):
+                elif line.startswith("vllm:spec_decode_num_accepted_tokens_per_pos"):
+                    found_spec_decode = True
+                    if 'position="' in line:
+                        start = line.index('position="') + len('position="')
+                        end = line.index('"', start)
+                        pos = int(line[start:end])
+                        parts = line.split()
+                        if parts:
+                            with contextlib.suppress(ValueError):
+                                val = int(float(parts[-1]))
+                                accepted_per_pos[pos] = (
+                                    accepted_per_pos.get(pos, 0) + val
+                                )
+                elif line.startswith("vllm:spec_decode_num_accepted_tokens"):
                     found_spec_decode = True
                     parts = line.split()
                     if parts:
@@ -144,8 +157,10 @@ async def fetch_spec_decode_metrics(
                 return None
 
             return SpecDecodeMetrics(
+                num_drafts=num_drafts,
                 num_draft_tokens=num_draft_tokens,
                 num_accepted_tokens=num_accepted_tokens,
+                accepted_per_pos=accepted_per_pos,
             )
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
@@ -830,9 +845,12 @@ async def benchmark(
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
-    spec_decode_stats: dict[str, float] | None = None
+    spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
-        delta_draft = (
+        delta_drafts = (
+            spec_decode_metrics_after.num_drafts - spec_decode_metrics_before.num_drafts
+        )
+        delta_draft_tokens = (
             spec_decode_metrics_after.num_draft_tokens
             - spec_decode_metrics_before.num_draft_tokens
         )
@@ -840,12 +858,26 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
-        if delta_draft > 0:
-            acceptance_rate = (delta_accepted / delta_draft) * 100
+        # Calculate per-position acceptance rates
+        per_pos_rates: list[float] = []
+        if delta_drafts > 0:
+            positions = sorted(
+                set(spec_decode_metrics_before.accepted_per_pos.keys())
+                | set(spec_decode_metrics_after.accepted_per_pos.keys())
+            )
+            for pos in positions:
+                before_val = spec_decode_metrics_before.accepted_per_pos.get(pos, 0)
+                after_val = spec_decode_metrics_after.accepted_per_pos.get(pos, 0)
+                delta_pos = after_val - before_val
+                per_pos_rates.append(delta_pos / delta_drafts)
+
+        if delta_draft_tokens > 0:
+            acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
             spec_decode_stats = {
-                "draft_tokens": delta_draft,
+                "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
                 "acceptance_rate": acceptance_rate,
+                "per_position_acceptance_rates": per_pos_rates,
             }
 
     if task_type == TaskType.GENERATION:
@@ -949,6 +981,9 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
+        result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
+            "per_position_acceptance_rates", []
+        )
 
     def process_one_metric(
         # E.g., "ttft"
@@ -1013,6 +1048,11 @@ async def benchmark(
                 "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
             )
         )
+        per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])
+        if per_pos:
+            print("Per-position acceptance (%):")
+            for i, rate in enumerate(per_pos):
+                print("{:<40} {:<10.2f}".format(f"  Position {i}:", rate * 100))
 
     print("=" * 50)
 
