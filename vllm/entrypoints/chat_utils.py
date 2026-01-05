@@ -753,7 +753,7 @@ def build_video_prompts_from_mm_data(
                 video_prompts_dict[video_idx].append(prompt)
         elif hasattr(item, "type") and getattr(item, "type", None) == "video_chunk":
             video_idx = getattr(item, "video_idx", 0)
-            prompt = getattr(item, "prompt", None) or ""
+            prompt = getattr(item, "prompt", "")
             video_prompts_dict[video_idx].append(prompt)
 
     # Build prompts in video order
