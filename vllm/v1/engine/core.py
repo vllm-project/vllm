@@ -772,6 +772,7 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
