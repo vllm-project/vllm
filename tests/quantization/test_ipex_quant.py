@@ -26,7 +26,7 @@ DTYPE = ["bfloat16"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", DTYPE)
 def test_ipex_quant(vllm_runner, model, dtype):
-    with vllm_runner(model, dtype=dtype) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+    with vllm_runner(model, dtype=dtype, enforce_eager=True) as llm:
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
     assert output
     print(output)

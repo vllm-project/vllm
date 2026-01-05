@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Generic, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.pooling_params import PoolingParams

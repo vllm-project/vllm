@@ -1,0 +1,14 @@
+group: Samplers
+depends_on: 
+  - image-build
+steps:
+- label: Samplers Test
+  timeout_in_minutes: 75
+  source_file_dependencies:
+  - vllm/model_executor/layers
+  - vllm/sampling_metadata.py
+  - tests/samplers
+  - tests/conftest.py
+  commands:
+    - pytest -v -s samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers

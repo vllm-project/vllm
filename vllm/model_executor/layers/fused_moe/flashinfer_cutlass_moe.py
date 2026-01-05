@@ -148,8 +148,14 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ):
-        assert activation == "silu", (
-            "Only activation silu is supported in FlashInferExperts"
+        from flashinfer.fused_moe.core import ActivationType
+
+        activation_str_to_value_map = {
+            "silu": ActivationType.Swiglu,  # This is the default
+            "relu2_no_mul": ActivationType.Relu2,
+        }
+        assert activation in activation_str_to_value_map, (
+            f"{activation=} missing from {activation_str_to_value_map.keys()=}"
         )
 
         # Select quantization metadata based on FP8 format/path
@@ -215,6 +221,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             output=output,
+            activation_type=activation_str_to_value_map[activation],
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )

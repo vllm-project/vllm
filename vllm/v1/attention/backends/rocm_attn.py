@@ -152,7 +152,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -165,7 +169,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "Set --attention-backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 
@@ -238,12 +242,9 @@ class RocmAttentionImpl(AttentionImpl):
 
         RocmAttentionBackend.validate_head_size(head_size)
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "RocmAttentionImpl"
+                "Encoder self-attention is not implemented for RocmAttentionImpl"
             )
 
         self.fp8_dtype = current_platform.fp8_dtype()

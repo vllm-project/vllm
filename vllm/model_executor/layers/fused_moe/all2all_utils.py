@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 
@@ -67,6 +70,7 @@ def maybe_roundup_layer_hidden_size(
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
     if not moe.moe_parallel_config.use_all2all_kernels:
         return None
@@ -76,10 +80,17 @@ def maybe_make_prepare_finalize(
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
-    # TODO: could allow this now
-    assert not moe.use_flashinfer_cutlass_kernels, "Must be created in modelopt.py"
+    if moe.use_flashinfer_cutlass_kernels:
+        assert quant_config is not None
+        use_deepseek_fp8_block_scale = (
+            quant_config is not None and quant_config.is_block_quantized
+        )
+        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+            moe=moe,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+        )
 
-    if moe.use_pplx_kernels:
+    elif moe.use_pplx_kernels:
         assert quant_config is not None
 
         hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
@@ -134,6 +145,13 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_deepep_ll_kernels:
         assert quant_config is not None
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
@@ -155,6 +173,9 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
+            local_expert_global_ids=local_expert_global_ids,
         )
 
     return prepare_finalize
