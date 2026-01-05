@@ -503,31 +503,6 @@ def patch_merger(
     return outputs
 
 
-class MoonVitVLProjector(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        merge_kernel_size: list[int, int],
-        hidden_act: str = "gelu",
-        ln_eps: float = 1e-5,
-        out_dim: int = 4096,
-    ):
-        super().__init__()
-        self.hidden_size = in_channels * merge_kernel_size[0] * merge_kernel_size[1]
-
-        self.pre_norm = nn.nn.LayerNorm(in_channels, eps=ln_eps)
-        self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.act = ACT2FN[hidden_act]
-        self.linear_2 = nn.Linear(self.hidden_size, out_dim, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.pre_norm(hidden_states).view(-1, self.hidden_size)
-        hidden_states = self.linear_1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
-
-
 class MoonVitPretrainedModel(PreTrainedModel):
     config_class = MoonViTConfig
     model_type = "moonvit"
