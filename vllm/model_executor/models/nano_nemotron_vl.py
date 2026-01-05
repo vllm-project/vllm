@@ -1220,7 +1220,7 @@ class NemotronH_Nano_VL_V2(
         n = pixel_values.shape[0]
         vit_embeds_list = []
         for i in range(0, n, micro_batch_size):
-            vit_embeds = self.vision_model(pixel_values[i : i + micro_batch_size])
+            _, vit_embeds = self.vision_model(pixel_values[i : i + micro_batch_size])
             vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
             h = w = int(vit_embeds.shape[1] ** 0.5)
             vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
@@ -1695,12 +1695,7 @@ class NemotronH_Nano_VL_V2(
             patch_size=patch_size,
             norm_mean=hf_config.norm_mean,
             norm_std=hf_config.norm_std,
-            reg_tokens=(
-                hf_config_vision.args.get("register_multiple")
-                if hasattr(hf_config_vision, "args")
-                and isinstance(hf_config_vision.args, dict)
-                else None
-            ),
+            **hf_config_vision.args,
         )
 
         return RadioModel(config=radio_config)
