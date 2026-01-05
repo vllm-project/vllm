@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
+from vllm.utils.torch_utils import set_random_seed
 
 MNK_FACTORS = [
     (1, 128, 128),
@@ -115,7 +116,7 @@ def test_batched_mm(
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
@@ -252,7 +253,7 @@ def test_fused_moe_batched_experts(
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
