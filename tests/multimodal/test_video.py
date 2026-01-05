@@ -311,23 +311,23 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
     Test that frame recovery correctly uses the next valid frame when
     target frames fail to load.
 
-    Uses simulate_corruption.mp4 and mocks VideoCapture.grab() to fail
-    on specific frame indices, then verifies recovery produces more frames.
+    Uses corrupted.mp4 and mocks VideoCapture.grab() to fail on specific
+    frame indices (in addition to the real corruption at frame 17), then
+    verifies recovery produces more frames.
     """
     import cv2
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
 
-        # Load the test video
-        video_path = ASSETS_DIR / "simulate_corruption.mp4"
+        # Load corrupted.mp4 (26 frames, frame 17 is genuinely corrupted)
+        video_path = ASSETS_DIR / "corrupted.mp4"
         with open(video_path, "rb") as f:
             video_data = f.read()
 
-        # Get video info to determine which frames to fail
-        # We'll fail frames at indices that would be sampled
-        # For a video sampled at 10 frames, simulate failures on 2 of them
-        fail_on_frames = {5, 15, 25}  # Fail on these frame indices
+        # Simulate additional failures on frames 3 and 10
+        # (in addition to the real corruption at frame 17)
+        fail_on_frames = {3, 10}
 
         # Store original VideoCapture class
         original_video_capture = cv2.VideoCapture
@@ -362,17 +362,24 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv")
 
+        # Use num_frames=8 which samples: [0, 3, 7, 10, 14, 17, 21, 25]
+        # Frame 3: mocked failure, recovery window [3, 7) -> use frame 4
+        # Frame 10: mocked failure, recovery window [10, 14) -> use frame 11
+        # Frame 17: real corruption, recovery window [17, 21) -> use frame 18
+
         # Test WITHOUT recovery - should have fewer frames due to failures
         frames_no_recovery, meta_no = loader.load_bytes(
-            video_data, num_frames=30, frame_recovery=False
+            video_data, num_frames=8, frame_recovery=False
         )
 
         # Test WITH recovery - should recover using next valid frames
         frames_with_recovery, meta_yes = loader.load_bytes(
-            video_data, num_frames=30, frame_recovery=True
+            video_data, num_frames=8, frame_recovery=True
         )
 
         # With recovery should have MORE frames than without
+        # Without: 5 frames (3, 10, 17 all fail)
+        # With: 8 frames (all recovered)
         assert frames_with_recovery.shape[0] > frames_no_recovery.shape[0], (
             f"Recovery should produce more frames. "
             f"Without: {frames_no_recovery.shape[0]}, "
@@ -389,18 +396,18 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
 def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
     """
-    Test frame recovery with an actual corrupted video file.
+    Test frame recovery with an actual corrupted video file using sparse sampling.
 
-    This test uses corrupted.mp4 which has genuine H.264 codec errors.
-    The corruption affects frame 17 AND damages the H.264 reference frame
-    chain, making subsequent frames also unreadable (this is a characteristic
-    of real H.264 corruption vs simulated failures).
+    This test uses corrupted.mp4 which has genuine H.264 codec errors on
+    frame 17. With num_frames=8, the target frames are [0, 3, 7, 10, 14, 17, 21, 25].
+    Frame 17 is corrupted but frames 18-20 are readable, so recovery can use
+    frame 18 to fill in for the failed frame 17.
 
     This test verifies:
-    1. Both modes load the video without crashing
-    2. Recovery attempts don't make things worse (>= frames)
-    3. Metadata is consistent with loaded frames
-    4. Recovery correctly handles unrecoverable corruption gracefully
+    1. Without recovery: frame 17 is skipped (7 frames loaded)
+    2. With recovery: frame 18 fills in for frame 17 (8 frames loaded)
+    3. Recovery produces MORE frames than without recovery
+    4. Metadata is consistent with loaded frames
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
@@ -412,14 +419,18 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv")
 
-        # Test without recovery
+        # Use num_frames=8 which makes frame 17 a target with recovery window [17, 21)
+        # Target frames: [0, 3, 7, 10, 14, 17, 21, 25]
+        # Frame 17 is corrupted, but frames 18-20 are readable for recovery
+
+        # Test without recovery - frame 17 will be skipped
         frames_no_recovery, meta_no_recovery = loader.load_bytes(
-            video_data, num_frames=-1, frame_recovery=False
+            video_data, num_frames=8, frame_recovery=False
         )
 
-        # Test with recovery enabled
+        # Test with recovery - frame 18 should fill in for frame 17
         frames_with_recovery, meta_with_recovery = loader.load_bytes(
-            video_data, num_frames=-1, frame_recovery=True
+            video_data, num_frames=8, frame_recovery=True
         )
 
         # Verify metadata consistency for both modes
@@ -430,23 +441,25 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
             meta_with_recovery["frames_indices"]
         ), "Frame count must match indices with recovery"
 
-        # Recovery should never produce FEWER frames than no recovery
-        assert frames_with_recovery.shape[0] >= frames_no_recovery.shape[0], (
-            f"Recovery should not reduce frame count. "
+        # KEY ASSERTION: Recovery should produce MORE frames than without recovery
+        # Without recovery: 7 frames (frame 17 skipped)
+        # With recovery: 8 frames (frame 18 used for frame 17)
+        assert frames_with_recovery.shape[0] > frames_no_recovery.shape[0], (
+            f"Recovery should produce more frames with sparse sampling. "
             f"Got {frames_with_recovery.shape[0]} with recovery vs "
             f"{frames_no_recovery.shape[0]} without"
+        )
+
+        # Verify we got all 8 requested frames with recovery
+        assert frames_with_recovery.shape[0] == 8, (
+            f"With recovery, should load all 8 requested frames. "
+            f"Got {frames_with_recovery.shape[0]}"
         )
 
         # Verify the video metadata is correct
         expected_total_frames = 26
         assert meta_with_recovery["total_num_frames"] == expected_total_frames, (
             f"Expected {expected_total_frames} total frames in metadata"
-        )
-
-        min_expected_frames = int(expected_total_frames * 0.9)
-        assert frames_no_recovery.shape[0] >= min_expected_frames, (
-            f"Should load at least {min_expected_frames} frames, "
-            f"got {frames_no_recovery.shape[0]}"
         )
 
 
