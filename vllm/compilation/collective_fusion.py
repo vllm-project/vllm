@@ -30,9 +30,10 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+flashinfer_comm: ModuleType | None = None
 if find_spec("flashinfer"):
     try:
-        import flashinfer.comm as flashinfer_comm
+        import flashinfer.comm as flashinfer_comm  # type: ignore[no-redef, unused-ignore]
 
         flashinfer_comm: ModuleType | None = (  # type: ignore[no-redef]
             flashinfer_comm
@@ -40,9 +41,9 @@ if find_spec("flashinfer"):
             else None
         )
     except ImportError:
-        flashinfer_comm = None  # type: ignore[assignment]
+        flashinfer_comm = None
 else:
-    flashinfer_comm = None  # type: ignore[assignment]
+    flashinfer_comm = None
 
 logger = init_logger(__name__)
 
@@ -397,8 +398,10 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
         )
 
 
-class AsyncTPPass(VllmPatternMatcherPass):
-    @enable_fake_mode
+class AsyncTPPass(
+    VllmPatternMatcherPass  # type: ignore[misc, unused-ignore]
+):
+    @enable_fake_mode  # type: ignore[misc, unused-ignore]
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
@@ -441,9 +444,12 @@ class AsyncTPPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return compile_range.is_single_size() and compile_range.end % tp_size == 0
+        result: bool = (
+            compile_range.is_single_size() and compile_range.end % tp_size == 0
+        )
+        return result
 
-    @VllmInductorPass.time_and_log
+    @VllmInductorPass.time_and_log  # type: ignore[misc, unused-ignore]
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
@@ -516,7 +522,7 @@ if flashinfer_comm is not None:
         # Get one shot input size limit for the current world size
         # for the current device capability
         max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
-            device_capability,  # type: ignore[arg-type]
+            device_capability,  # type: ignore[arg-type, unused-ignore]
             {},
         ).get(world_size, None)
         # Use one shot if no max size is specified
@@ -675,7 +681,7 @@ class AllReduceRMSNormPattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,  # type: ignore[union-attr]
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             # rms_result, allreduce_in
@@ -731,7 +737,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,  # type: ignore[union-attr]
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             # allreduce_in, residual
@@ -811,7 +817,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
-                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant  # type: ignore[union-attr]
                 ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -886,7 +892,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
-                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant  # type: ignore[union-attr]
                 ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -971,7 +977,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
-                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant  # type: ignore[union-attr]
                 ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -1066,7 +1072,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
-                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant  # type: ignore[union-attr]
                 ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -1079,7 +1085,9 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         )
 
 
-class AllReduceFusionPass(VllmPatternMatcherPass):
+class AllReduceFusionPass(
+    VllmPatternMatcherPass  # type: ignore[misc, unused-ignore]
+):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
         self.disabled = True
@@ -1131,7 +1139,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         )
 
         self.ipc_handles, workspace_tensor = (
-            flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(  # type: ignore[misc]
+            flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
                 max_token_num=self.max_token_num,
@@ -1153,7 +1161,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         self.register_patterns()
         self.dump_patterns(config, self.patterns)
 
-    @enable_fake_mode
+    @enable_fake_mode  # type: ignore[misc, unused-ignore]
     def register_patterns(self) -> None:
         for epsilon in [1e-5, 1e-6]:
             AllReduceFusedRMSNormStaticQuantFP8Pattern(
@@ -1204,9 +1212,9 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         if self.disabled:
             logger.warning_once("AllReduce fusion pass is disabled.")
             return False
-        return compile_range.end <= self.max_token_num
+        return bool(compile_range.end <= self.max_token_num)
 
-    @VllmInductorPass.time_and_log
+    @VllmInductorPass.time_and_log  # type: ignore[misc, unused-ignore]
     def __call__(self, graph: fx.Graph) -> None:
         if self.disabled:
             logger.debug("AllReduceFusionPass disabled")

@@ -268,7 +268,9 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         )
 
 
-class SequenceParallelismPass(VllmPatternMatcherPass):
+class SequenceParallelismPass(
+    VllmPatternMatcherPass  # type: ignore[misc, unused-ignore]
+):
     """
     This pass enables sequence parallelism for models.
     It identifies patterns where an AllReduce operation is followed by
@@ -305,7 +307,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     Both approaches restore a correct graph once all patterns are matched.
     """
 
-    @enable_fake_mode
+    @enable_fake_mode  # type: ignore[misc, unused-ignore]
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
@@ -358,9 +360,12 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return (compile_range.is_single_size()) and (compile_range.end % tp_size == 0)
+        result: bool = (compile_range.is_single_size()) and (
+            compile_range.end % tp_size == 0
+        )
+        return result
 
-    @VllmInductorPass.time_and_log
+    @VllmInductorPass.time_and_log  # type: ignore[misc, unused-ignore]
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
