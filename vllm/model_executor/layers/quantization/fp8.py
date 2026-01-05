@@ -1005,6 +1005,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             AiterExperts,
         )
 
+        # Flashinfer TRTLLM does not use the modular kernel abstraction.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         self.use_inplace = True
