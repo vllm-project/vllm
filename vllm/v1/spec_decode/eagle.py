@@ -220,7 +220,7 @@ class EagleProposer:
         if (vllm_config.parallel_config.tensor_parallel_size > 1
                 and self.speculative_config.draft_tensor_parallel_size == 1):
             tp_group = init_model_parallel_group(
-                [[get_world_group().local_rank]],
+                [[get_world_group().rank]],
                 get_world_group().local_rank,
                 torch.distributed.get_backend(get_world_group().device_group),
                 use_message_queue_broadcaster=True,
