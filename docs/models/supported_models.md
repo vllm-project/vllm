@@ -555,7 +555,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
-!!! note 
+!!! note
     Some models require a specific prompt format to work correctly.
 
     You can find Example HF Models's corresponding score template in [examples/pooling/score/template/](../../examples/pooling/score/template)
