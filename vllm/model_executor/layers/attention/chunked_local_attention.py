@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
+    make_lazy_sync_tensor_property,
     subclass_attention_backend,
 )
 from vllm.v1.attention.backends.utils import (
@@ -339,31 +340,33 @@ def create_chunked_local_attention_backend(
             # We handle two cases differently to avoid CPU<>GPU sync:
             #
             # 1. Uniform single token decode case (max_q_len == 1):
-            #    Each request has exactly 1 query token, which means each request
-            #    produces exactly 1 virtual batch. Therefore num_vb == batch_size
-            #    and cu_virtual_seqlens = [0, 1, 2, ..., batch_size], which is
-            #    identical to the input query_start_loc_cpu. We can reuse it.
+            #    Each request has exactly 1 query token, so each produces exactly
+            #    1 virtual batch. Therefore cu_virtual_seqlens = [0, 1, 2, ..., N]
+            #    which is identical to input query_start_loc_cpu. Reuse it.
             #
             # 2. Spec-decode / Prefill case (max_q_len > 1):
-            #    Requests have varying query lengths and may span multiple chunks,
-            #    so we don't know the virtual batch boundaries without running the
-            #    Triton kernel. We use a non-blocking copy from GPU to pinned CPU
-            #    memory so backends like FlashAttn (which don't use query_start_loc_cpu)
-            #    can continue building metadata asynchronously.
+            #    Requests may span multiple chunks, so we need GPU-computed values.
+            #    We use non-blocking D2H copy + lazy sync: the CPU tensor is wrapped
+            #    so accessing it synchronizes exactly once on first access. This way
+            #    backends like FlashAttn (which don't use query_start_loc_cpu) never
+            #    block, while backends that do block only when actually accessing it.
             max_q_len = common_attn_metadata.max_query_len
-            if max_q_len == 1:
-                # Uniform single token decode: reuse input cu_seqlens directly
-                cu_virtual_seqlens_q_cpu = query_start_loc_cpu
-            else:
-                # Spec-decode / Prefill: async copy to pinned memory
-                self._cu_virtual_seqlens_q_cpu[: num_vb_ub + 1].copy_(
+            use_lazy_sync = max_q_len > 1
+
+            if use_lazy_sync:
+                # Async copy to pinned memory - will sync lazily on access
+                cpu_buf = self._cu_virtual_seqlens_q_cpu[: num_vb_ub + 1]
+                cpu_buf.copy_(
                     self._cu_virtual_seqlens_q[: num_vb_ub + 1], non_blocking=True
                 )
-                cu_virtual_seqlens_q_cpu = self._cu_virtual_seqlens_q_cpu[
-                    : num_vb_ub + 1
-                ]
+                sync_event = torch.cuda.Event()
+                sync_event.record()
+                cu_virtual_seqlens_q_cpu = cpu_buf
+            else:
+                # Uniform decode: reuse input directly (no copy needed)
+                cu_virtual_seqlens_q_cpu = query_start_loc_cpu
 
-            # Use dynamically sized tensors (sliced to actual virtual batch count)
+            # Build metadata with virtual batch tensors
             cm = CommonAttentionMetadata(
                 query_start_loc=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
                 query_start_loc_cpu=cu_virtual_seqlens_q_cpu,
@@ -376,6 +379,12 @@ def create_chunked_local_attention_backend(
                 slot_mapping=common_attn_metadata.slot_mapping,
                 causal=True,
             )
+
+            # Wrap CPU tensor with lazy sync if needed
+            if use_lazy_sync:
+                make_lazy_sync_tensor_property(
+                    cm, "query_start_loc_cpu", cpu_buf, sync_event
+                )
 
             metadata = super().build(common_prefix_len, cm, fast_build)
 
