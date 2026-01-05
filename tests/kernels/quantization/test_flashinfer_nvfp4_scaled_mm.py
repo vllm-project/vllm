@@ -12,6 +12,7 @@ from nvfp4_utils import (
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -72,7 +73,7 @@ def test_flashinfer_nvfp4_gemm(
     if backend == "trtllm" and dtype == torch.float16:
         pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     m, n, packed_k = shape
     k = packed_k * 2
     block_size = 16
