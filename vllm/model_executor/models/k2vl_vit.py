@@ -555,27 +555,20 @@ def tpool_patch_merger(
     merge_kernel_size: tuple[int, int] = (2, 2),
 ) -> list[torch.Tensor]:
     """Temporal pooling patch merger."""
-    d_model = x.size(-1)
+    kh, kw = merge_kernel_size
+    lengths = (grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2]).tolist()
+    seqs = x.split(lengths, dim=0)
 
     outputs = []
-    pre_sum = 0
-    for t, h, w in grid_thws.tolist():
-        # Get the current sequence
-        seq = x[pre_sum : pre_sum + t * h * w]
-        # Reshape along self.merge_kernel_size and concat to the last dimension
-        kernel_height, kernel_width = merge_kernel_size
-        new_height, new_width = h // kernel_height, w // kernel_width
-        reshaped_seq = seq.view(
-            t, new_height, kernel_height, new_width, kernel_width, d_model
-        )
-        reshaped_seq = (
-            reshaped_seq.permute(0, 1, 3, 2, 4, 5).contiguous().mean(dim=0)
-        )  # temporal pooling
-        padded_seq = reshaped_seq.view(
-            new_height * new_width, kernel_height * kernel_width, -1
-        )
-        outputs.append(padded_seq)
-        pre_sum += t * h * w
+    for seq, (t, h, w) in zip(seqs, grid_thws.tolist()):
+        nh, nw = h // kh, w // kw
+        # Reshape: (t*h*w, d) -> (t, nh, kh, nw, kw, d)
+        v = seq.view(t, nh, kh, nw, kw, -1)
+        # Temporal pooling first (reduces tensor size before permute)
+        v = v.mean(dim=0)  # (nh, kh, nw, kw, d)
+        # Spatial rearrangement: (nh, kh, nw, kw, d) -> (nh, nw, kh, kw, d)
+        out = v.permute(0, 2, 1, 3, 4).reshape(nh * nw, kh * kw, -1)
+        outputs.append(out)
 
     return outputs
 

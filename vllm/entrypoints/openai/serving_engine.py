@@ -1214,6 +1214,8 @@ class OpenAIServing:
 
         mm_data = await mm_data_future
 
+        # NOTE: use_unified_vision_chunk is currently specific to Kimi2VL (K2VL)
+        # model which uses unified vision chunks for both images and videos.
         if (
             getattr(model_config.hf_config, "use_unified_vision_chunk", False)
             and mm_uuids is not None

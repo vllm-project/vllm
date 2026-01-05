@@ -710,14 +710,10 @@ def rebuild_mm_uuids_from_mm_data(
     vision_chunk_uuids = []
 
     for item in vision_chunks:
-        if isinstance(item, dict):
-            uuid_val = item.get("uuid")
-            if uuid_val is not None:
-                vision_chunk_uuids.append(uuid_val)
-        elif hasattr(item, "uuid"):
-            uuid_val = getattr(item, "uuid", None)
-            if uuid_val is not None:
-                vision_chunk_uuids.append(uuid_val)
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        uuid_val = item.get("uuid")
+        if uuid_val is not None:
+            vision_chunk_uuids.append(uuid_val)
 
     if vision_chunk_uuids:
         new_uuids["vision_chunk"] = vision_chunk_uuids
@@ -746,14 +742,10 @@ def build_video_prompts_from_mm_data(
     video_prompts_dict: dict[int, list[str]] = defaultdict(list)
 
     for item in vision_chunks:
-        if isinstance(item, dict):
-            if item.get("type") == "video_chunk":
-                video_idx = item.get("video_idx", 0)
-                prompt = item.get("prompt", "")
-                video_prompts_dict[video_idx].append(prompt)
-        elif hasattr(item, "type") and getattr(item, "type", None) == "video_chunk":
-            video_idx = getattr(item, "video_idx", 0)
-            prompt = getattr(item, "prompt", "")
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        if item.get("type") == "video_chunk":
+            video_idx = item.get("video_idx", 0)
+            prompt = item.get("prompt", "")
             video_prompts_dict[video_idx].append(prompt)
 
     # Build prompts in video order

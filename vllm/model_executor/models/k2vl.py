@@ -42,7 +42,6 @@ from vllm.model_executor.models.k2vl_vit import (
     VisionTowerConfig,
     vision_tower_forward_auto,
 )
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -71,11 +70,11 @@ from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 logger = init_logger(__name__)
 
 
-# For dummy input only - use small size for profiling to avoid OOM
+# Dummy input dimensions for profiling.
 @dataclass
 class MaxImageTokenMeta:
-    width: int = 1024
-    height: int = 1024
+    width: int = 3000
+    height: int = 3000
 
 
 class MoonshotKimiVAutoProcessor(ProcessorMixin):
@@ -90,28 +89,27 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
     def __call__(
         self,
         vision_chunks: list[VisionChunk] | None = None,
-        text: list[int] | None = None,
+        *,
+        text: list[int],
         **kwargs,
     ) -> BatchFeature:
         """
         Args:
-            text: The text to be fed to a model.
-            media: list of dict, each {'type': str, 'xx': Any}
-                for image: type='image', image=base64
-                for video_chunk: type='video_chunk', pixel_values=torch.Tensor, grid_thws=torch.Tensor, num_tokens=int
+            vision_chunks: List of VisionChunk items to be processed.
+                For image: VisionChunkImage with type='image', image=PIL.Image
+                For video_chunk: VisionChunkVideo with type='video_chunk', video_chunk=list[PIL.Image]
+            text: The token ids to be fed to a model (required).
         Returns:
             [`BatchFeature`]: A [`BatchFeature`] with the following fields:
 
-            - **input_ids** -- list of token ids to be fed to a model. Returned when `text` is not `None`.
-            - **pixel_values** -- Pixel values to be fed to a model. Returned when `media` is not `None`.
-            - **grid_thws** -- list of image 3D grid in LLM. Returned when `media` is not `None`.
+            - **input_ids** -- list of token ids to be fed to a model.
+            - **pixel_values** -- Pixel values to be fed to a model. Returned when `vision_chunks` is not `None`.
+            - **grid_thws** -- list of image 3D grid in LLM. Returned when `vision_chunks` is not `None`.
         """
         mm_inputs = {}
         if vision_chunks is not None:
             assert isinstance(vision_chunks, list)
             mm_inputs = self.media_processor.preprocess(vision_chunks)
-        if not isinstance(text, list):
-            text = [text]
         # XXX: _apply_hf_processor_text_mm will call tolist() on input_ids
         return BatchFeature(
             data={
@@ -209,6 +207,7 @@ class K2VLDummyInputsBuilder(BaseDummyInputsBuilder[K2VLProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
+        # TODO: Support mm_options for vision_chunk to allow user configuration
         dummy_items = self.get_dummy_mm_items()
         return {"vision_chunk": dummy_items}
 
@@ -405,23 +404,6 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # Run multimodal inputs through encoder and projector
         vision_embeddings = self._process_media_input(media_input)
         return vision_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: NestedTensors | None = None,
-    ) -> torch.Tensor:
-        # `get_input_embeddings` should already be implemented for the language
-        # model as one of the requirements of basic vLLM model implementation.
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None:
-            is_multimodal = input_ids == self.media_placeholder
-            inputs_embeds = _merge_multimodal_embeddings(
-                inputs_embeds, multimodal_embeddings, is_multimodal
-            )
-
-        return inputs_embeds
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
