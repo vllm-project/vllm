@@ -47,6 +47,49 @@ def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
 
+
+def make_lazy_sync_tensor_property(
+    obj: object,
+    prop_name: str,
+    tensor: torch.Tensor,
+    event: torch.cuda.Event,
+) -> None:
+    """
+    Make a tensor property lazily sync on first access.
+
+    After a non-blocking D2H copy, call this to wrap the tensor so that
+    accessing obj.prop_name will synchronize on the CUDA event exactly
+    once (on first access), then return the tensor directly thereafter.
+
+    This avoids blocking the CPU until the tensor is actually needed.
+
+    Usage:
+        cpu_buf.copy_(gpu_tensor, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        make_lazy_sync_tensor_property(metadata, "query_start_loc_cpu", cpu_buf, event)
+    """
+    # Stash tensor and event under private names
+    val_slot = f"_lazy_{prop_name}_val"
+    ev_slot = f"_lazy_{prop_name}_ev"
+    setattr(obj, val_slot, tensor)
+    setattr(obj, ev_slot, event)
+
+    def getter(self):
+        ev = getattr(self, ev_slot, None)
+        if ev is not None:
+            ev.synchronize()
+            setattr(self, ev_slot, None)
+        return getattr(self, val_slot)
+
+    # Create one-off subclass with property override
+    obj.__class__ = type(
+        f"{obj.__class__.__name__}_LazySync",
+        (obj.__class__,),
+        {prop_name: property(getter)},
+    )
+
+
 @functools.lru_cache
 def get_kv_cache_layout():
     # Format specified by the code.
