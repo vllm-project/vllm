@@ -69,7 +69,7 @@ def run_test(
 @pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.1"])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_models(
     hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
