@@ -304,6 +304,7 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),  # noqa: E501
@@ -427,6 +428,10 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": (
+        "nemotron_parse",
+        "NemotronParseForConditionalGeneration",
+    ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
