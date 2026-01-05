@@ -51,117 +51,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import is_flash_attn_2_available
 
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
-
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_varlen_func
-elif current_platform.is_xpu():
-    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-else:
-    flash_attn_varlen_func = None
-
-
-def multihead_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_cu_seqlens: torch.Tensor | None = None,
-    k_cu_seqlens: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Multi-head attention using flash attention 2.
-
-    Args:
-        q: Query tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        k: Key tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        v: Value tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        q_cu_seqlens (torch.Tensor): cumulative sequence lengths of q.
-            The first element should be 0 and the last element should be q.shape[0].
-        k_cu_seqlens (torch.Tensor): cumulative sequence lengths of k.
-            The first element should be 0 and the last element should be k.shape[0].
-
-    Returns:
-        output: shape (batch_size, seqlen, dim) or (tot_seqlens, dim) if packing,
-            where dim = num_heads * head_dim
-    """
-    # Unified format legal check
-    assert q.dim() == k.dim() == v.dim() == 3, "q, k, v must have 3 dims"
-    assert q_cu_seqlens[-1] == q.shape[0], "q_cu_seqlens must sum to q.shape[0]"
-    assert k_cu_seqlens[-1] == k.shape[0] == v.shape[0], (
-        "k_cu_seqlens must sum to k.shape[0]"
-    )
-    assert q.dtype in [
-        torch.bfloat16,
-        torch.float16,
-    ], f"unsupported dtype {q.dtype} for multihead attn"
-
-    max_seqlen_q = (q_cu_seqlens[1:] - q_cu_seqlens[:-1]).max().item()
-    max_seqlen_k = (k_cu_seqlens[1:] - k_cu_seqlens[:-1]).max().item()
-    attn_out = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        cu_seqlens_q=q_cu_seqlens,
-        cu_seqlens_k=k_cu_seqlens,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        causal=False,
-    )
-    attn_out = attn_out.flatten(start_dim=-2)
-
-    return attn_out
-
-
-def sdpa_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_cu_seqlens: torch.Tensor | None = None,
-    k_cu_seqlens: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """SDPA attention.
-
-    Args:
-        q: Query tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        k: Key tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        v: Value tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        q_cu_seqlens: Optional cumulative sequence lengths of q.
-        k_cu_seqlens: Optional cumulative sequence lengths of k.
-    """
-    seq_length = q.shape[0]
-    attention_mask = torch.zeros(
-        [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-    )
-    for i in range(1, len(q_cu_seqlens)):
-        attention_mask[
-            ...,
-            q_cu_seqlens[i - 1] : q_cu_seqlens[i],
-            q_cu_seqlens[i - 1] : q_cu_seqlens[i],
-        ] = True
-    q = q.transpose(0, 1)
-    k = k.transpose(0, 1)
-    v = v.transpose(0, 1)
-    attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
-    attn_output = attn_output.transpose(0, 1)
-    attn_output = attn_output.reshape(seq_length, -1)
-    return attn_output
-
-
-VL_VISION_ATTENTION_FUNCTIONS = {
-    "flash_attention_2": multihead_attention,
-    "sdpa": sdpa_attention,
-}
 
 
 def _apply_rope_input_validation(x, freqs_cis):
@@ -435,7 +331,6 @@ class MoonVitEncoderLayer(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         *,
-        attn_implementation: str = "sdpa",
         activation=F.gelu,
         attn_bias: bool = False,
     ):
@@ -443,10 +338,6 @@ class MoonVitEncoderLayer(nn.Module):
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
         self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
-        self.attn_implementation = attn_implementation
-        # use fa2 in vllm by default
-        if is_flash_attn_2_available() or current_platform.is_xpu():
-            self.attn_implementation = "flash_attention_2"
 
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
@@ -462,6 +353,11 @@ class MoonVitEncoderLayer(nn.Module):
         )
         self.wo = ReplicatedLinear(
             hidden_dim, hidden_dim, bias=attn_bias, prefix=f"{prefix}.wo"
+        )
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_heads,
+            head_size=self.hidden_size_per_attention_head,
+            prefix=f"{prefix}.attn",
         )
 
     def attention_qkvpacked(
@@ -488,9 +384,11 @@ class MoonVitEncoderLayer(nn.Module):
 
         xq, xk = apply_rope(xq, xk, rope_freqs_cis)
 
-        attn_func = VL_VISION_ATTENTION_FUNCTIONS[self.attn_implementation]
-        attn_out = attn_func(
-            xq, xk, xv, q_cu_seqlens=cu_seqlens, k_cu_seqlens=cu_seqlens
+        attn_out = self.attn(
+            xq,
+            xk,
+            xv,
+            cu_seqlens=cu_seqlens,
         )
         attn_out, _ = self.wo(attn_out)
         return attn_out
@@ -662,7 +560,6 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "mlp_dim": config.intermediate_size,
                 "activation": ACT2FN["gelu_pytorch_tanh"],
                 "attn_bias": True,
-                "attn_implementation": config._attn_implementation,
             },
             prefix=f"{prefix}.encoder",
         )
