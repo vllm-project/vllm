@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ErrorResponse,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -954,7 +955,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
             ],
         )
@@ -982,7 +982,6 @@ class TestServingChatWithHarmony:
             input_messages_2,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user"},
                 # The analysis message should be dropped on subsequent inputs because
                 # of the subsequent assistant message to the final channel.
@@ -1042,7 +1041,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1123,7 +1122,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1204,7 +1203,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
@@ -1254,7 +1253,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the third turn's input
-        req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_3, _ = serving_chat._make_request_with_harmony(req_3)
         verify_harmony_messages(
             input_messages_3,
@@ -1317,7 +1316,7 @@ class TestServingChatWithHarmony:
         )
 
         # Test the Harmony messages for the fourth turn's input
-        req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
         input_messages_4, _ = serving_chat._make_request_with_harmony(req_4)
         verify_harmony_messages(
             input_messages_4,
@@ -1373,7 +1372,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 # The reasoning that would have resulted in an analysis message is
                 # dropped because of a later assistant message to the final channel.
@@ -1405,7 +1403,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 {
                     "role": "assistant",
@@ -1435,7 +1432,6 @@ class TestServingChatWithHarmony:
             input_messages,
             [
                 {"role": "system"},
-                {"role": "developer"},
                 {"role": "user", "content": messages[0]["content"]},
                 {
                     "role": "assistant",
@@ -1444,3 +1440,208 @@ class TestServingChatWithHarmony:
                 },
             ],
         )
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_validation_without_parser():
+    """Test that tool_choice='required' or named tool without tool_parser
+    returns an appropriate error message."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    # Create serving_chat without tool_parser (enable_auto_tools=False)
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=False,  # No tool parser
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+
+    # Test tool_choice="required" without tool_parser
+    req_required = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice="required",
+    )
+    response_required = await serving_chat.create_chat_completion(req_required)
+    assert isinstance(response_required, ErrorResponse)
+    assert "tool_choice" in response_required.error.message
+    assert "--tool-call-parser" in response_required.error.message
+
+    # Test named tool_choice without tool_parser
+    req_named = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    response_named = await serving_chat.create_chat_completion(req_named)
+    assert isinstance(response_named, ErrorResponse)
+    assert "tool_choice" in response_named.error.message
+    assert "--tool-call-parser" in response_named.error.message
+
+
+class TestCreateRemainingArgsDelta:
+    """Tests for _create_remaining_args_delta helper function.
+
+    This helper is used when streaming tool calls to preserve id/type/name
+    fields in the finish chunk, which would otherwise be lost.
+    """
+
+    def test_preserves_id_type_name(self):
+        """Test that id, type, and name are preserved from original delta."""
+        from vllm.entrypoints.openai.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_abc123",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="get_weather",
+                        arguments='{"location": "Paris"}',
+                    ),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '", "unit": "celsius"}', 0
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 0
+        assert tc.id == "call_abc123"
+        assert tc.type == "function"
+        assert tc.function.name == "get_weather"
+        assert tc.function.arguments == '", "unit": "celsius"}'
+
+    def test_matches_by_index(self):
+        """Test that the correct tool call is matched by index."""
+        from vllm.entrypoints.openai.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_first",
+                    type="function",
+                    function=DeltaFunctionCall(name="func_a", arguments="{}"),
+                ),
+                DeltaToolCall(
+                    index=1,
+                    id="call_second",
+                    type="function",
+                    function=DeltaFunctionCall(name="func_b", arguments="{}"),
+                ),
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"extra": true}', 1
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 1
+        assert tc.id == "call_second"
+        assert tc.function.name == "func_b"
+
+    def test_no_matching_tool_call(self):
+        """Test graceful handling when no matching tool call is found."""
+        from vllm.entrypoints.openai.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_zero",
+                    type="function",
+                    function=DeltaFunctionCall(name="func", arguments="{}"),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"arg": 1}', 5
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 5
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert tc.function.arguments == '{"arg": 1}'
+
+    def test_function_is_none(self):
+        """Test handling when original tool call has no function."""
+        from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_nofunc",
+                    type="function",
+                    function=None,
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"data": "value"}', 0
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 0
+        assert tc.id == "call_nofunc"
+        assert tc.type == "function"
+        assert tc.function.name is None
+        assert tc.function.arguments == '{"data": "value"}'

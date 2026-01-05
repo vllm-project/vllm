@@ -574,7 +574,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -964,12 +964,25 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(
-                layer, False, input_dtype=self.marlin_input_dtype
+            (
+                workspace,
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+            ) = prepare_moe_fp8_layer_for_marlin(
+                layer,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                input_dtype=self.marlin_input_dtype,
             )
-            # Activations not quantized for marlin.
-            del layer.w13_input_scale
-            del layer.w2_input_scale
+            layer.workspace = workspace
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w2_weight", w2_weight)
+            replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
 
         if self.use_cutlass:
             assert self.weight_quant.strategy != QuantizationStrategy.BLOCK
@@ -1166,7 +1179,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1403,7 +1416,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1765,7 +1778,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             f"{layer.activation} not supported for Marlin MoE."
         )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1983,6 +1996,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             block_shape=[0, self.group_size],
         )
 
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        layer: torch.nn.Module,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        if self.moe.is_lora_enabled:
+            assert self.moe_quant_config is not None
+            from vllm.triton_utils import HAS_TRITON
+
+            if HAS_TRITON:
+                from vllm.model_executor.layers.fused_moe import TritonExperts
+
+                layer.w13_weight = layer.w13_weight_packed
+                layer.w2_weight = layer.w2_weight_packed
+                return TritonExperts(quant_config=self.moe_quant_config)
+            else:
+                raise NotImplementedError(
+                    "TritonExperts requires Triton. "
+                    "Install triton or disable LoRA for MoE."
+                )
+
+        raise NotImplementedError
+
     def apply(
         self,
         layer: FusedMoE,
@@ -1991,7 +2027,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -2607,7 +2643,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
             )
         assert self.moe_quant_config is not None
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
