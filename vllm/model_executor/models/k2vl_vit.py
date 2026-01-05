@@ -34,7 +34,7 @@ from transformers.utils import is_flash_attn_2_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.configs.k2vl import K2VLConfig
+from vllm.transformers_utils.configs.k2vl import K2VLConfig, K2VLVisionConfig
 
 # Flash attention imports
 if is_flash_attn_2_available():
@@ -581,25 +581,30 @@ def tpool_patch_merger(
 
 
 class VisionTowerConfig(PretrainedConfig):
-    """Configuration for the vision tower."""
+    """Configuration for the vision tower.
+
+    Accepts K2VLVisionConfig directly now that we have a proper vision config.
+    """
 
     model_type = "moonvit3d"
 
-    def __init__(self, config: K2VLConfig, **kwargs):
+    def __init__(self, config: K2VLVisionConfig, **kwargs):
         super().__init__(**kwargs)
         self.patch_size = config.patch_size
         self.init_pos_emb_height = config.init_pos_emb_height
         self.init_pos_emb_width = config.init_pos_emb_width
         self.init_pos_emb_time = config.init_pos_emb_time
         self.pos_emb_type = config.pos_emb_type
-        self.num_attention_heads = config.vt_num_attention_heads
-        self.num_hidden_layers = config.vt_num_hidden_layers
-        self.hidden_size = config.vt_hidden_size
-        self.intermediate_size = config.vt_intermediate_size
+        self.num_attention_heads = config.num_attention_heads
+        self.num_hidden_layers = config.num_hidden_layers
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
         self.merge_kernel_size = config.merge_kernel_size
         self.video_attn_type = config.video_attn_type
         self.merge_type = config.merge_type
-        self._attn_implementation = config._attn_implementation
+        self._attn_implementation = getattr(
+            config, "_attn_implementation", "flash_attention_2"
+        )
 
 
 class ProjectorConfig:
@@ -751,18 +756,19 @@ class K2VLMultiModalProjector(nn.Module):
 
     def __init__(
         self,
-        config: VisionTowerConfig,
+        config: K2VLConfig,
         use_data_parallel: bool = False,
         prefix: str = "",
     ):
         super().__init__()
         self.use_data_parallel = use_data_parallel
+        vc = config.vision_config
 
         # Hidden size after patch merging
-        merge_h, merge_w = config.merge_kernel_size
-        self.hidden_size = config.vt_hidden_size * merge_h * merge_w
+        merge_h, merge_w = vc.merge_kernel_size
+        self.hidden_size = vc.hidden_size * merge_h * merge_w
 
-        self.pre_norm = torch.nn.LayerNorm(config.vt_hidden_size, eps=1e-5)
+        self.pre_norm = torch.nn.LayerNorm(vc.hidden_size, eps=1e-5)
         self.linear_1 = ReplicatedLinear(
             self.hidden_size,
             self.hidden_size,

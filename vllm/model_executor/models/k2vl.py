@@ -313,8 +313,8 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = torch.cuda.current_device()
-        # Build vision tower config from K2VLConfig
-        vision_config = VisionTowerConfig(config)
+        # Build vision tower config from K2VLConfig.vision_config
+        vision_config = VisionTowerConfig(config.vision_config)
         self.vision_tower = MoonViT3dPretrainedModel(
             vision_config,
             self.use_data_parallel,
