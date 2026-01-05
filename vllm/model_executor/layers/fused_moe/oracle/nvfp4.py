@@ -75,12 +75,10 @@ def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
         raise ValueError("No NvFp4 kernel backend available for NvFp4 MoE.")
 
     # Log warning if FI backend requested but not available.
-    fi_backends = [
-        NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-    ]
-    if backend not in fi_backends and envs.VLLM_USE_FLASHINFER_MOE_FP4:
+    if (
+        backend not in FLASHINFER_NVFP4_MOE_BACKENDS
+        and envs.VLLM_USE_FLASHINFER_MOE_FP4
+    ):
         logger.warning_once(
             "Requested FlashInfer backend for NvFp4 MoE, but it's not available. "
             "Falling back to %s for NvFp4 MoE",
