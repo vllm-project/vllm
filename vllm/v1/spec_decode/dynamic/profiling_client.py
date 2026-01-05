@@ -12,12 +12,6 @@ from vllm.v1.spec_decode.dynamic.profiling_server import (
 )
 
 
-@dataclass
-class Dataset:
-    name: str
-    config: list
-
-
 NGRAM_FMT = "min-{min}-max-{max}-k-{k}"
 EAGLE_FMT = "k-{k}"
 
@@ -38,9 +32,24 @@ def run_command(command):
         print(e.stderr)
 
 
-def run_benchmarks(dry_run, model_dir, draft_dir, method,
-                   num_speculative_tokens_list, batch_size_list,
-                   max_vllm_batch_size, tp, result_dir, extra_log_arg):
+def run_benchmarks(dry_run, 
+                   model_dir, 
+                   draft_dir, 
+                   method,
+                   prompt_lookup_max,
+                   prompt_lookup_min,
+                   num_speculative_tokens_list, 
+                   batch_size_list,
+                   max_vllm_batch_size, 
+                   tp, 
+                   temp, 
+                   top_p, 
+                   top_k, 
+                   num_batches,
+                   dataset_name,
+                   dataset_path,
+                   result_dir, 
+                   extra_log_arg):
 
     assert method in ["vanilla", "ngram", "eagle", "eagle3"], (
         "invalid method specified"
@@ -54,48 +63,24 @@ def run_benchmarks(dry_run, model_dir, draft_dir, method,
     setup_server()
 
     port = 9001
-    all_sampling_profile = [
-        {"temperature": 0, "topp": 1},  # greedy
-    ]
-
-    # `num_batches` decides how many batches are sent for each concurrency.
-    # E.g., num_batches=20 and concurrency=4 means total 80 prompts are sent
-    # such that we send 20 batches of 4 prompts each. This ensures a consistent
-    # number of batches across different concurrencies. For e.g., if total
-    # samples is 80 then concurrency 1 will send 80 batches while concurrency 64
-    # will send 2 batches only.
-    MTBENCH_CONFIG = [{"num_batches": 20}]
-
-    all_bench_dataset = [
-        Dataset(name="philschmid/mt-bench", config=MTBENCH_CONFIG),
-    ]
-
-    assert all(len(ds.config) > 0 for ds in all_bench_dataset), (
-        "Each dataset must have at least one config"
-    )
-
-    all_ngram_params = [
-        {"min": 2, "max": 5, "k": k} for k in num_speculative_tokens_list
-    ]
-    all_eagle_params = num_speculative_tokens_list
 
     # ablation
     num_exp_run = 0
-    spec_method = method
+
     # collate all spec configs to run for a given method
     all_spec_config = []
-    if spec_method == "ngram":
-        for ngram_params in all_ngram_params:
+    if method == "ngram":
+        for ngram_k in num_speculative_tokens_list:
             all_spec_config.append(
                 {
                     "method": "ngram",
-                    "num_speculative_tokens": ngram_params["k"],
-                    "prompt_lookup_max": ngram_params["max"],
-                    "prompt_lookup_min": ngram_params["min"],
+                    "num_speculative_tokens": ngram_k,
+                    "prompt_lookup_max": prompt_lookup_max,
+                    "prompt_lookup_min": prompt_lookup_min,
                 }
             )
-    elif spec_method == "eagle":
-        for eagle_k in all_eagle_params:
+    elif method == "eagle":
+        for eagle_k in num_speculative_tokens_list:
             all_spec_config.append(
                 {
                     "method": "eagle",
@@ -109,6 +94,7 @@ def run_benchmarks(dry_run, model_dir, draft_dir, method,
         all_spec_config.append(None)
 
     for spec_config in all_spec_config:
+        
         # start server
         server_process = start_server(
             port=port,
@@ -121,59 +107,53 @@ def run_benchmarks(dry_run, model_dir, draft_dir, method,
 
         # start client
         for bench_concurrency in batch_size_list:
-            for bench_dataset_object in all_bench_dataset:
-                bench_dataset = bench_dataset_object.name
-                for bench_config in bench_dataset_object.config:
-                    for sampling_profile in all_sampling_profile:
-                        bench_temperature = sampling_profile["temperature"]
-                        bench_topp = sampling_profile["topp"]
+            spec_config_str = "vanilla"
+            if method == "ngram":
+                spec_config_str = NGRAM_FMT.format(
+                    min=spec_config["prompt_lookup_min"],
+                    max=spec_config["prompt_lookup_max"],
+                    k=spec_config["num_speculative_tokens"],
+                )
+            elif method == "eagle":
+                spec_config_str = EAGLE_FMT.format(
+                    k=spec_config["num_speculative_tokens"]
+                )
 
-                        spec_config_str = "vanilla"
-                        if spec_method == "ngram":
-                            spec_config_str = NGRAM_FMT.format(
-                                min=spec_config["prompt_lookup_min"],
-                                max=spec_config["prompt_lookup_max"],
-                                k=spec_config["num_speculative_tokens"],
-                            )
-                        elif spec_method == "eagle":
-                            spec_config_str = EAGLE_FMT.format(
-                                k=spec_config["num_speculative_tokens"]
-                            )
+            # dataset specific config
+            if "philschmid/mt-bench" in dataset_path:
+                bench_config_str = "mt_bench"
+            
+            num_prompts = num_batches * bench_concurrency
+            bench_vllm_config = f"--dataset-name {dataset_name} --dataset-path {dataset_path} --num-prompts {num_prompts}"
 
-                        # dataset specific config
-                        if "philschmid/mt-bench" in bench_dataset:
-                            bench_config_str = "mt_bench"
-                            num_prompts = (
-                                bench_config["num_batches"] * bench_concurrency
-                            )
-                            bench_vllm_serve_config = f"--dataset-name hf --dataset-path {bench_dataset} --num-prompts {num_prompts}"  # noqa E501
+            print(
+                f"Number of prompts in {dataset_path}: {num_prompts}"
+            )
 
-                        print(
-                            f"Number of prompts in {bench_dataset}: {num_prompts}"
-                        )
+            # create dir if not exists
+            # TODO: make the path shared with generate_config.py
+            # result_dir = f"{result_dir}/tp-{tp}_temp-{temp}_top_p-{top_p}_top_k-{top_k}/{bench_dataset}/{method}/"  # noqa E501
+            final_result_dir = f"{result_dir}/{method}/"  # noqa E501
+            if not os.path.exists(final_result_dir):
+                os.makedirs(final_result_dir)
 
-                        # create dir if not exists
-                        # TODO: make the path shared with generate_config.py
-                        result_dir = f"{result_dir}/tp-{tp}_temp-{bench_temperature}_top_p-{bench_topp}/{bench_dataset}/{spec_method}/"  # noqa E501
-                        if not os.path.exists(result_dir):
-                            os.makedirs(result_dir)
+            cmd = f'''time vllm bench serve --port {port} --save-result --save-detailed \
+            --model {model_dir} \
+            --backend openai-chat \
+            --endpoint /v1/chat/completions \
+            {bench_vllm_config} \
+            --max-concurrency {bench_concurrency} \
+            --temperature={temp} \
+            --top-p={top_p} \
+            --top-k={top_k} \
+            --result-dir "{final_result_dir}" \
+            --result-filename "{spec_config_str}_{bench_config_str}_bs-{bench_concurrency}_{extra_log_arg}.txt"'''
 
-                        cmd = f'''time vllm bench serve --port {port} --save-result --save-detailed \
-                        --model {model_dir} \
-                        --backend openai-chat \
-                        --endpoint /v1/chat/completions \
-                        {bench_vllm_serve_config} \
-                        --max-concurrency {bench_concurrency} \
-                        --temperature={bench_temperature} \
-                        --top-p={bench_topp} \
-                        --result-dir "{result_dir}" \
-                        --result-filename "{spec_config_str}_{bench_config_str}_bs-{bench_concurrency}_{extra_log_arg}.txt"'''
+            print(cmd)
+            num_exp_run += 1
 
-                        print(cmd)
-                        num_exp_run += 1
-
-                        if not dry_run:
-                            run_command(cmd)
+            if not dry_run:
+                run_command(cmd)
 
         # server teardown: kill server and any gpu processes
         kill_server(port, server_process)
@@ -206,8 +186,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--draft-dir", type=str, default=None)
-    # parser.add_argument("--method-list", nargs='*', type=str, default=["vanilla", "eagle"])
     parser.add_argument("--method", type=str, default="vanilla")
+    parser.add_argument("--prompt-lookup-max", type=int, default=5)
+    parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument(
         "--num-speculative-tokens-list", nargs="*", type=int, default=[1, 3, 5]
     )
@@ -220,6 +201,12 @@ if __name__ == "__main__":
         help="Max vllm server batch size (max concurrency)",
     )
     parser.add_argument("--tp", type=int, default=1)
+    parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=-1)
+    parser.add_argument("--num-batches", type=int, default=20, help="Number of batches to run for each benchmark.")
+    parser.add_argument("--dataset-name", type=str, default="hf")
+    parser.add_argument("--dataset-path", type=str, default="philschmid/mt-bench")
     parser.add_argument("--result-dir", type=str, default="./log/dynamic_sd")
     parser.add_argument("--extra-log-arg", type=str, default="")
     args = parser.parse_args()
@@ -229,9 +216,17 @@ if __name__ == "__main__":
         model_dir = args.model_dir,
         draft_dir = args.draft_dir,
         method = args.method,
+        prompt_lookup_max = args.prompt_lookup_max,
+        prompt_lookup_min = args.prompt_lookup_min,
         num_speculative_tokens_list = args.num_speculative_tokens_list,
         batch_size_list = args.batch_size_list,
         max_vllm_batch_size = args.max_vllm_batch_size,
         tp = args.tp,
+        temp = args.temp,
+        top_p = args.top_p,
+        top_k = args.top_k,
+        num_batches = args.num_batches,
+        dataset_name = args.dataset_name,
+        dataset_path = args.dataset_path,
         result_dir = args.result_dir,
         extra_log_arg = args.extra_log_arg)

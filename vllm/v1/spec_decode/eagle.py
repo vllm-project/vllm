@@ -223,7 +223,7 @@ class EagleProposer:
 
     def propose(
         self,
-        optimal_num_speculative_tokens: Optional[int],
+        optimal_num_speculative_tokens: int | None,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled

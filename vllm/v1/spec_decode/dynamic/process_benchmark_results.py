@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from vllm.v1.spec_decode.dynamic.online_profiling_client import EAGLE_FMT, NGRAM_FMT
+from vllm.v1.spec_decode.dynamic.profiling_client import EAGLE_FMT, NGRAM_FMT
 
 
 def reverse_fmt(fmt_str):
@@ -20,7 +20,7 @@ NGRAM_FMT_REVERSE = reverse_fmt(NGRAM_FMT)
 EAGLE_FMT_REVERSE = reverse_fmt(EAGLE_FMT)
 
 
-def parse_itl(args):
+def parse_itl(method, benchmark_path_parent):
     """
     DynamicSpeculativeConfig.batch_stats: dict
     The structure is as follows:
@@ -32,13 +32,13 @@ def parse_itl(args):
     """
     batch_stats = {}
 
-    for method in ["vanilla", args.sd_method]:
+    for method in ["vanilla", method]:
         # find the names of all log files in this folder
-        args.benchmark_path = os.path.join(args.benchmark_path_parent, method)
+        benchmark_path = os.path.join(benchmark_path_parent, method)
         all_log_files = [
             f
-            for f in os.listdir(args.benchmark_path)
-            if os.path.isfile(os.path.join(args.benchmark_path, f))
+            for f in os.listdir(benchmark_path)
+            if os.path.isfile(os.path.join(benchmark_path, f))
             and f.endswith(".txt")
         ]
 
@@ -57,7 +57,7 @@ def parse_itl(args):
                 k = re.match(EAGLE_FMT_REVERSE, spec_config_str).groups()[0]
 
             # read the log file to get the itl
-            with open(os.path.join(args.benchmark_path, log_file)) as f:
+            with open(os.path.join(benchmark_path, log_file)) as f:
                 data = json.load(f)
                 itl = data["median_itl_ms"]
 
@@ -67,17 +67,18 @@ def parse_itl(args):
 
             batch_stats[int(bs)][int(k)] = itl
 
+    print(json.dumps(batch_stats, indent=4))
     return batch_stats
 
 
 """
 python3 vllm/v1/spec_decode/process_benchmark_results.py \
-    --sd-method eagle \
+    --method eagle \
     --benchmark-path-parent 'log/dynamic_sd/tp-1_temp-0_top_p-1/philschmid/mt-bench/'
 """
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sd-method", type=str, default=None)
+    parser.add_argument("--method", type=str, default=None)
     parser.add_argument(
         "--benchmark-path-parent",
         type=str,
@@ -86,7 +87,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    assert args.sd_method in ["ngram", "eagle"], "Invalid method specified."
+    assert args.method in ["ngram", "eagle", "eagle3", "mtp"], "Invalid method specified."
 
-    batch_stats = parse_itl(args)
-    print(json.dumps(batch_stats, indent=4))
+    batch_stats = parse_itl(method=args.method, 
+                            benchmark_path_parent=args.benchmark_path_parent)

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.config.speculative import DynamicSpeculativeConfig
+import json
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # _DYNAMIC_STATS = {
 #     "max_num_speculative_tokens": 7,
@@ -220,15 +222,35 @@ class DynamicSpeculativeDecodingManager:
         return chosen_num_drafts
 
 
-# python3 vllm/v1/spec_decode/dynamic.py
+# python3 vllm/v1/spec_decode/dynamic/manager.py --dynamic-config-path log/dynamic_sd_test_2/tp-1_temp-0.0_top_p-1.0_top_k--1/philschmid/mt-bench/dynamic_speculative_config.json
 if __name__ == "__main__":
-    MAX_TEST_BS = 128
-    dynamic_sd = DynamicSpeculativeDecodingManager(
-        dynamic_config=_DYNAMIC_STATS,
-        vllm_max_batch_size=MAX_TEST_BS,
-        vllm_num_speculative_tokens=7,
+    parser = FlexibleArgumentParser()
+    parser.add_argument(
+        "--dynamic-config-path",
+        type=str,
+        default=None,
+        help="Path to the dynamic speculative decoding config json file.",
     )
-    for i in range(4, MAX_TEST_BS + 1, 4):
+    args = parser.parse_args()
+
+    MAX_TEST_BS = 128
+    if args.dynamic_config_path:
+        with open(args.dynamic_config_path) as f:
+            data = json.load(f)
+
+        dynamic_config = DynamicSpeculativeConfig.model_validate(data)
+        dynamic_sd = DynamicSpeculativeDecodingManager(
+            dynamic_config=dynamic_config,
+            vllm_max_batch_size=max(dynamic_config.batch_stats.keys()),
+            vllm_num_speculative_tokens=dynamic_config.max_num_speculative_tokens,
+        )
+    else:
+        dynamic_sd = DynamicSpeculativeDecodingManager(
+            dynamic_config=_DYNAMIC_STATS,
+            vllm_max_batch_size=MAX_TEST_BS,
+            vllm_num_speculative_tokens=7,
+        )
+    for i in range(1, dynamic_sd.vllm_max_batch_size + 1, 4):
         print("\n====================================")
         print(
             f"bs: {i}, optimal num drafts: {dynamic_sd.get_optimal_num_speculative_tokens(i)}"
