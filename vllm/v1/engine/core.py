@@ -1390,16 +1390,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
-                    # If we have a target_steps barrier, still advance
-                    # step_counter so the barrier can be reached.
-                    if self.target_steps is not None:
-                        self.step_counter = self.target_steps
-                    continue
-
-                # If we have a target_steps barrier and we're idle, just
-                # advance step_counter without the all-reduce (which can block).
+                # If we have a target_steps barrier and are locally idle, advance
+                # step_counter without the all-reduce (which can block) so the
+                # barrier can be reached.
                 if self.target_steps is not None and not local_unfinished_reqs:
                     self.step_counter = self.target_steps
                     continue
@@ -1407,9 +1400,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
                 self.execute_dummy_batch()
-
-            # Increment step counter for each loop iteration where we did work.
-            self.step_counter += 1
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
