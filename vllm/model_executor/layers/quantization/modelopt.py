@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
@@ -750,6 +751,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe, use_deepseek_fp8_block_scale=self.block_quant
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(

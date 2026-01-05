@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
@@ -1102,6 +1103,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            if self.moe.dp_size == 1:
+                return None
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=self.block_quant,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
