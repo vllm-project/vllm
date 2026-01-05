@@ -135,6 +135,16 @@ class LogprobsProcessor:
         # Recover shapes.
         num_prompt_tokens, num_logprobs = logprobs.shape
 
+        # Detokenize non-incrementally.
+        # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
+        all_decoded_tokens: list[str] | None = (
+            None
+            if self.tokenizer is None
+            else convert_ids_list_to_tokens(
+                self.tokenizer, token_ids.flatten().tolist()
+            )
+        )
+
         # Pythonize the torch tensors.
         prompt_token_ranks = ranks.tolist()
         prompt_logprobs = logprobs.tolist()
@@ -142,18 +152,19 @@ class LogprobsProcessor:
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
-            # Detokenize for this position
-            token_ids_for_pos = token_ids_list[pos]
+            # Handle flattening and UTF-8 correction per position
+            offset = pos * num_logprobs
+            offset_end = offset + num_logprobs
+
             decoded_tokens_for_pos: list[str] | Iterable[None]
-            if self.tokenizer is None:
+            if all_decoded_tokens is None:
                 decoded_tokens_for_pos = NONES
             else:
-                decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids_for_pos
-                )
-                # Apply UTF-8 correction for this position
+                # Extract decoded tokens for this position
+                decoded_tokens_slice = all_decoded_tokens[offset:offset_end]
+                # Apply UTF-8 correction within this position's token boundaries
                 decoded_tokens_for_pos = self._verify_tokens(
-                    decoded_tokens_list=decoded_tokens_list, tokens=token_ids_for_pos
+                    decoded_tokens_list=decoded_tokens_slice, tokens=token_ids_list[pos]
                 )
 
             # Update with the Logprob container for this pos.
