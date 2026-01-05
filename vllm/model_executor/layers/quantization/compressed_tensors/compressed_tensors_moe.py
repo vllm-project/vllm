@@ -58,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
+    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -75,7 +76,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    prepare_moe_fp4_layer_for_marlin,
+    prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
@@ -354,9 +355,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
-        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-            prepare_nvfp4_moe_layer_for_fi_or_cutlass,
-        )
 
         if (
             self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
@@ -386,8 +384,23 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
-            prepare_moe_fp4_layer_for_marlin(
-                layer, input_dtype=get_marlin_input_dtype("")
+            a13_scale = None
+            a2_scale = None
+            (
+                w13,
+                w13_scale,
+                w13_scale_2,
+                w2,
+                w2_scale,
+                w2_scale_2,
+            ) = prepare_nvfp4_moe_layer_for_marlin(
+                layer=layer,
+                w13=layer.w13_weight_packed,
+                w13_scale=layer.w13_weight_scale,
+                w13_scale_2=(1.0 / layer.w13_weight_global_scale[:, 0]),
+                w2=layer.w2_weight_packed,
+                w2_scale=layer.w2_weight_scale,
+                w2_scale_2=(1.0 / layer.w2_weight_global_scale),
             )
         else:
             raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")

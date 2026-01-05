@@ -264,8 +264,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     # WEIGHT
     # Repack weights to marlin format
-    def repack_weight(w: torch.Tensor, name: str) -> torch.Tensor:
-        weight = getattr(layer, name)
+    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
         if "w13" in name:
             size_n, size_k = N * 2, K
@@ -275,7 +274,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
         assert weight.shape == (E, size_n, size_k // 2)
 
         for i in range(E):
-            qweight = w[i].view(torch.int32).T.contiguous()
+            qweight = weight[i].view(torch.int32).T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight,
@@ -295,7 +294,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
     # WEIGHT SCALES
     # Permute scales
     def premute_scales(
-        scales: torch.Tensor, g_scales: torch.Tensors, name: str
+        scales: torch.Tensor, g_scales: torch.Tensor, name: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         scales = scales.to(param_dtype)
         g_scales = g_scales.to(param_dtype)
