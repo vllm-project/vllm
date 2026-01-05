@@ -5,7 +5,7 @@
 import functools
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
@@ -539,6 +539,55 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+@triton.jit
+def _silu_and_mul_kernel(
+    o_ptr,
+    o_stride,
+    x_ptr,
+    x_stride,
+    d: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    i = tl.program_id(axis=0).to(tl.int64)
+    j = tl.program_id(axis=1)
+
+    o_row_ptr = o_ptr + o_stride * i
+    x_row_ptr = x_ptr + x_stride * i
+
+    offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < d
+
+    a = tl.load(x_row_ptr + offsets, mask=mask).to(tl.float32)
+    b = tl.load(x_row_ptr + offsets + d, mask=mask).to(tl.float32)
+
+    result = tl.sigmoid(a) * a * b
+    result = result.to(x_ptr.dtype.element_ty)
+    tl.store(o_row_ptr + offsets, result, mask=mask)
+
+
+def _silu_and_mul(
+    output: torch.Tensor,
+    input: torch.Tensor,
+) -> None:
+    b, n = input.shape
+
+    assert output.size(-1) * 2 == input.size(-1)
+    assert n % 2 == 0
+    d = n // 2
+
+    def grid(meta: Mapping[str, int]) -> tuple[int, int]:
+        return (b, triton.cdiv(d, meta["BLOCK_SIZE"]))
+
+    _silu_and_mul_kernel[grid](
+        o_ptr=output,
+        o_stride=output.stride(0),
+        x_ptr=input,
+        x_stride=input.stride(0),
+        d=d,
+        BLOCK_SIZE=1024,
+    )
 
 
 # NOTE(zyongye): we can remove all the wna16 kernel
@@ -2438,6 +2487,20 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
+
+    def activation(
+        self, activation: str, output: torch.Tensor, input: torch.Tensor
+    ) -> None:
+        assert output.size(-1) * 2 == input.size(-1)
+        if activation == "silu":
+            _silu_and_mul(output, input)
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(output, input)
+        elif activation == "swigluoai":
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(output, input)
+        else:
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
 
 def modular_triton_fused_moe(
