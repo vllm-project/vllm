@@ -86,7 +86,13 @@ class Zamba2LoRA(nn.Module):
             B_class = MergedColumnParallelLinear
         else:
             B_class = ColumnParallelLinear
-        self.B = B_class(rank, output_dim, bias=False, quant_config=quant_config)
+        self.B = B_class(
+            rank,
+            output_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.B",
+        )
 
     def forward(
         self,
@@ -346,6 +352,7 @@ class Zamba2MLP(nn.Module):
                     config.adapter_rank,
                     2 * [self.intermediate_size],
                     quant_config,
+                    prefix=f"{prefix}.gate_up_proj_adapter_list.{block_idx}",
                 )
             else:
                 gate_up_proj_adapter = nn.Identity()
