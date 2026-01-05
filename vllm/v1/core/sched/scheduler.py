@@ -805,6 +805,15 @@ class Scheduler(SchedulerInterface):
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
+        # If no tokens were scheduled this step, make sure to free encoder inputs.
+        # There is a corner case when encoder cache is full and every request want a
+        # furture encoder space, but no one is scheduled so no one is going to free
+        # their encoder cache. And Finally, it will cause a deadlock in scheduling.
+        if not num_scheduled_tokens:
+            for request in self.running:
+                if request.has_encoder_inputs:
+                    self._free_encoder_inputs(request)
+
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
