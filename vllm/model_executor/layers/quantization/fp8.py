@@ -150,7 +150,7 @@ def get_fp8_moe_backend(
             if block_quant and current_platform.is_device_capability_family(100):
                 raise ValueError(
                     "FlashInfer FP8 MoE throughput backend does not "
-                    "support block quantization. Please use "
+                    "support block quantization on SM100. Please use "
                     "VLLM_FLASHINFER_MOE_BACKEND=latency "
                     "instead."
                 )
