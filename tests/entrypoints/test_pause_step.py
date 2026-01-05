@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Integration tests for step-barrier pause endpoints.
+Tests for step-barrier pause endpoints.
 
-These tests require a running vLLM server. Run with:
+This file contains:
+- Lightweight unit tests (no engine running).
+- Server-backed integration tests (require a running vLLM server).
+
+Run integration tests with:
 
     # Start server first:
     python -m vllm.entrypoints.openai.api_server \
         --model Qwen/Qwen2.5-7B-Instruct \
         --tensor-parallel-size 4
 
-    # Then run tests:
-    pytest tests/entrypoints/test_pause_step_integration.py -v \
-        --server-url http://localhost:8000
-
-Or use the convenience script:
-    ./scripts/test_pause_endpoints.sh
+    pytest tests/entrypoints/test_pause_step.py -v --server-url http://localhost:8000
 """
 
 import concurrent.futures
@@ -23,6 +22,34 @@ import time
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from vllm.entrypoints.serve.pause.api_router import attach_router
+
+
+@pytest.fixture
+def app():
+    app = FastAPI()
+    attach_router(app)
+    return app
+
+
+def test_pause_step_rejects_conflicting_params(app):
+    app.state.engine_client = object()
+    client = TestClient(app)
+    resp = client.post("/pause/step?no_barrier=true&barrier=50")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "Cannot specify both no_barrier=true and barrier=<value>"
+    )
+
+
+def test_pause_step_requires_async_llm(app):
+    app.state.engine_client = object()
+    client = TestClient(app)
+    resp = client.post("/pause/step")
+    assert resp.status_code == 501
 
 
 class TestPauseStepIntegration:
@@ -51,9 +78,7 @@ class TestPauseStepIntegration:
         requests.post(f"{server_url}/resume", timeout=30)
 
         start = time.time()
-        response = requests.post(
-            f"{server_url}/pause/step?no_barrier=true", timeout=30
-        )
+        response = requests.post(f"{server_url}/pause/step?no_barrier=true", timeout=30)
         elapsed = time.time() - start
 
         assert response.status_code == 200
@@ -141,9 +166,7 @@ class TestPauseStepIntegration:
 
         print("Weights updated and engine resumed!")
 
-    def test_advanced_workflow_with_custom_barrier(
-        self, server_url, skip_if_no_server
-    ):
+    def test_advanced_workflow_with_custom_barrier(self, server_url, skip_if_no_server):
         """
         Advanced workflow for when user needs control over barrier target.
 
@@ -243,4 +266,3 @@ class TestPauseStepWithInference:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
