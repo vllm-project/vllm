@@ -604,6 +604,7 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    addresses: EngineZmqAddresses
 
     def __init__(
         self,
