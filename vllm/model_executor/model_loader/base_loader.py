@@ -51,23 +51,21 @@ class BaseModelLoader(ABC):
                     vllm_config=vllm_config, model_config=model_config
                 )
 
+            log_model_inspection(model)
+
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
 
-        # Log model inspection if enabled
-        log_model_inspection(model)
-
         return model.eval()
 
 
 def log_model_inspection(model: nn.Module) -> None:
-    """Log model inspection if VLLM_LOG_MODEL_INSPECTION=1."""
+    """Log model structure if VLLM_LOG_MODEL_INSPECTION=1."""
     if not envs.VLLM_LOG_MODEL_INSPECTION:
         return
 
     from vllm.model_inspection import format_model_inspection
 
-    output = format_model_inspection(model)
-    logger.info("vLLM model inspection:\n%s", output)
+    logger.info("vLLM model structure:\n%s", format_model_inspection(model))
