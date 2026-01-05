@@ -753,7 +753,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe, use_deepseek_fp8_block_scale=self.block_quant
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
