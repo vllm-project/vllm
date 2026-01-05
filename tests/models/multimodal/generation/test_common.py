@@ -121,10 +121,6 @@ VLM_TEST_SETTINGS = {
         ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[
-            pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")
-        ],
     ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],

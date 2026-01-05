@@ -1097,9 +1097,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
-            # TODO(Isotr0py): Disable paligemma for now before
-            # we supports soft cap attention for FlexAttention
-            # "paligemma",
+            "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
