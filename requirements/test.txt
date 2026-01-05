@@ -27,7 +27,9 @@ aiosignal==1.4.0
 albucore==0.0.16
     # via terratorch
 albumentations==1.4.6
-    # via terratorch
+    # via
+    #   -r requirements/test.in
+    #   terratorch
 alembic==1.16.4
     # via mlflow
 annotated-types==0.7.0
