@@ -114,7 +114,7 @@ def check_model_available(model: str) -> None:
 @pytest.mark.core_model
 @pytest.mark.cpu_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @create_new_process_for_each_test("spawn")
