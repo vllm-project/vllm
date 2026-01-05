@@ -306,7 +306,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )
-        if self.vllm_config.cache_config.mamba_cache_mode in ("all", "none"):
+        if self.vllm_config.cache_config.mamba_cache_mode in ("none", "align"):
             # Only needs the block that saves the running state
             state_indices_t = state_indices_t[:, 0]
 
