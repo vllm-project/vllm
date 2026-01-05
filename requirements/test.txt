@@ -1275,7 +1275,7 @@ tzdata==2024.2
     # via pandas
 uri-template==1.3.0
     # via jsonschema
-urllib3==2.2.3
+urllib3==2.6.0
     # via
     #   blobfile
     #   botocore

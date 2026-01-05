@@ -45,7 +45,7 @@ python-json-logger # Used by logging as per examples/others/logging_configuratio
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 pybase64 # fast base64 implementation
-cbor2 # Required for cross-language serialization of hashable objects
+cbor2>=5.8.0 # Required for cross-language serialization of hashable objects
 ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
