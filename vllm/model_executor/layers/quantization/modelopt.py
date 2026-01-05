@@ -1160,7 +1160,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
@@ -1173,40 +1172,33 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
-        if self.backend.startswith("flashinfer-"):
-            backend_name = self.backend[len("flashinfer-") :]
+        # Match packed-K bytes between activations and weights using
+        # pre-calculated padding
+        pad_k_bytes = getattr(layer, "weights_padding_cols", 0)
+        output_shape = [x.shape[0], layer.output_size_per_partition]
 
-            # Match packed-K bytes between activations and weights using
-            # pre-calculated padding
-            pad_k_bytes = getattr(layer, "weights_padding_cols", 0)
-            output_shape = [x.shape[0], layer.output_size_per_partition]
-
+        if pad_k_bytes > 0:
             x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
 
-            mm_args = (
-                x_fp4,
-                layer.weight,
-                x_blockscale,
-                layer.weight_scale,
-                layer.alpha,
-                output_dtype,
-            )
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
+        mm_args = (
+            x_fp4,
+            layer.weight,
+            x_blockscale,
+            layer.weight_scale,
+            layer.alpha,
+            output_dtype,
+        )
 
-            # Slice output to remove padding if weight was padded in N dimension
-            if out.shape[1] != output_shape[1]:
-                out = out[:, : output_shape[1]].contiguous()
+        if self.backend.startswith("flashinfer-"):
+            backend_name = self.backend[len("flashinfer-") :]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
             assert self.backend == "cutlass"
-            mm_args = (
-                x_fp4,
-                layer.weight,
-                x_blockscale,
-                layer.weight_scale,
-                layer.alpha,
-                output_dtype,
-            )
             out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove padding if weight was padded in N dimension
+        if out.shape[1] != output_shape[1]:
+            out = out[:, : output_shape[1]].contiguous()
 
         if bias is not None:
             out = out + bias
