@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -21,9 +23,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
-from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-    NvFp4MoeBackend,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
 )
@@ -32,6 +31,11 @@ from vllm.utils.flashinfer import (
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
 
 logger = init_logger(__name__)
 
@@ -423,7 +427,7 @@ def flashinfer_trtllm_fp4_routed_moe(
 
 
 def prepare_nvfp4_moe_layer_for_fi(
-    backend: NvFp4MoeBackend,
+    backend: "NvFp4MoeBackend",
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -443,6 +447,11 @@ def prepare_nvfp4_moe_layer_for_fi(
     torch.Tensor,
     torch.Tensor,
 ]:
+    # Delayed import for circular dependency avoidance.
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
+
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
     if is_act_and_mul and backend in [
         NvFp4MoeBackend.FLASHINFER_CUTLASS,

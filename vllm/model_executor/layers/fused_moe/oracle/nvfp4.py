@@ -115,6 +115,6 @@ def make_nvfp4_moe_quant_config(
         g2_alphas=g2_alphas,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
-        w13_scale=w13_scale,
+        w1_scale=w13_scale,
         w2_scale=w2_scale,
     )
