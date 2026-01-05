@@ -681,16 +681,13 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
 
 
 @torch.inference_mode()
-def mm_projection_auto(
-    mm_projector: torch.nn.Module | None, vt_output: list[torch.Tensor]
+def mm_projector_forward(
+    mm_projector: torch.nn.Module, vt_output: list[torch.Tensor]
 ):
     """Apply MM projector to vision tower outputs."""
-    if mm_projector is None:
-        return vt_output
-
     num_embedding_list = [x.shape[0] for x in vt_output]
     batched = torch.cat(vt_output, dim=0)
-    proj_out = mm_projector(batched) if mm_projector else batched
+    proj_out = mm_projector(batched)
     proj_out = proj_out.reshape(-1, proj_out.shape[-1])
     proj_out = torch.split(proj_out, num_embedding_list)
     return proj_out
