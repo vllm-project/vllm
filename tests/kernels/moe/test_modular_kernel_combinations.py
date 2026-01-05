@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from .modular_kernel_tools.common import (
@@ -82,7 +82,7 @@ def rank_worker(
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
 
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs

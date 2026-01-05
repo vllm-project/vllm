@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import (
@@ -301,7 +302,7 @@ def async_tp_pass_on_test_model(
     dtype: torch.dtype,
     dynamic: bool,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)

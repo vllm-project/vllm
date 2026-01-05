@@ -15,6 +15,7 @@ import torch_xla.core.xla_model
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +64,7 @@ def test_mha_attn_forward(
     head_size: int,
     device: str,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     # These are expected to be f32
     q = torch.randn(batch_size, seq_len, num_heads * head_size, device=device)
     k = torch.randn(batch_size, seq_len, num_kv_heads * head_size, device=device)

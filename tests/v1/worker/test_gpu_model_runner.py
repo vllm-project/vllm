@@ -26,6 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -776,7 +777,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     will not corrupt an attention block and vice versa
     """
 
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     update_environment_variables(
         {

@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_grouped_topk,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.mark.skipif(
@@ -52,7 +53,7 @@ def test_grouped_topk(
     )
     get_cached_compilation_config.cache_clear()
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="cuda")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="cuda")
     e_score_correction_bias = torch.randn(

@@ -43,8 +43,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
     get_masked_input_and_mask,
 )
-from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .utils import DummyLoRAManager
 

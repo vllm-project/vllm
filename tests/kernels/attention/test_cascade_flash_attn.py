@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.flash_attn import cascade_attention, merge_attn_states
 
 try:
@@ -39,7 +40,7 @@ def test_merge_kernel(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
@@ -103,7 +104,7 @@ def test_cascade(
             f'to: "{fa_version_unsupported_reason(fa_version)}"'
         )
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     window_size = (-1, -1)
     scale = head_size**-0.5
