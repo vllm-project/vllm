@@ -18,6 +18,7 @@ For advanced use cases:
 
 import asyncio
 from http import HTTPStatus
+from typing import cast
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +26,7 @@ from fastapi.responses import JSONResponse
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core_client import AsyncMPClient
 
 logger = init_logger(__name__)
 
@@ -47,17 +49,28 @@ def _require_async_llm(client: EngineClient) -> AsyncLLM:
 
 async def _pause_all_engines(client: AsyncLLM) -> int:
     """Pause all engine cores, return the step counter from the first core."""
-    step_counters = await client.engine_core.call_utility_async("pause")
-    if isinstance(step_counters, list):
-        return step_counters[0]
-    return step_counters
+    engine_core = cast(AsyncMPClient, client.engine_core)
+    step_counters = await asyncio.gather(
+        *[
+            engine_core._call_utility_async("pause", engine=engine)
+            for engine in engine_core.core_engines
+        ]
+    )
+    return step_counters[0]
 
 
 async def _wait_for_barrier(client: AsyncLLM, target: int) -> int:
     """Wait until all engines reach the target step. Returns final step."""
+    engine_core = cast(AsyncMPClient, client.engine_core)
+
     # Broadcast run_until_target_step_count to all engines
-    await client.engine_core.call_utility_async(
-        "run_until_target_step_count", target
+    await asyncio.gather(
+        *[
+            engine_core._call_utility_async(
+                "run_until_target_step_count", target, engine=engine
+            )
+            for engine in engine_core.core_engines
+        ]
     )
 
     # Poll until all engines have reached the target step
@@ -68,14 +81,13 @@ async def _wait_for_barrier(client: AsyncLLM, target: int) -> int:
     last_log_time = 0.0
 
     while waited < max_wait_seconds:
-        step_counters = await client.engine_core.call_utility_async(
-            "get_step_counter"
+        step_counters = await asyncio.gather(
+            *[
+                engine_core._call_utility_async("get_step_counter", engine=engine)
+                for engine in engine_core.core_engines
+            ]
         )
-        # Handle both single value and list of values (multi-engine)
-        if isinstance(step_counters, list):
-            min_step = min(step_counters)
-        else:
-            min_step = step_counters
+        min_step = min(step_counters)
 
         if min_step >= target:
             logger.info(

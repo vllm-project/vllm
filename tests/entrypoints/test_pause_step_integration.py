@@ -11,7 +11,7 @@ These tests require a running vLLM server. Run with:
         --tensor-parallel-size 4
 
     # Then run tests:
-    pytest tests/entrypoints/pause/test_pause_integration.py -v \
+    pytest tests/entrypoints/test_pause_step_integration.py -v \
         --server-url http://localhost:8000
 
 Or use the convenience script:
@@ -23,6 +23,7 @@ import time
 
 import pytest
 import requests
+
 
 class TestPauseStepIntegration:
     """Integration tests for step-barrier pause endpoints."""
@@ -241,5 +242,5 @@ class TestPauseStepWithInference:
 
 
 if __name__ == "__main__":
-    # Run with: python -m pytest test_pause_integration.py -v
     pytest.main([__file__, "-v"])
+
