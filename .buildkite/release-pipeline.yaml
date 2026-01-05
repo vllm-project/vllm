@@ -86,7 +86,7 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   # Build release images (12.9)
-  - label: "Build release image (x86_64)"
+  - label: "Build release image - x86_64 - CUDA 12.9"
     depends_on: ~
     id: build-release-image-x86
     agents:
@@ -99,7 +99,7 @@ steps:
       - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
-  - label: "Build release image (aarch64)"
+  - label: "Build release image - aarch64 - CUDA 12.9"
     depends_on: ~
     id: build-release-image-arm64
     agents:
@@ -116,18 +116,59 @@ steps:
       - build-release-image-arm64
     id: create-multi-arch-manifest
     agents:
-      queue: cpu_queue_postmerge
+      queue: small_cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
       - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+  - block: "Build CUDA 13.0 release image"
+    key: block-release-image-build-cuda-13-0
+    depends_on: ~
+
+  # Build release images (13.0)
+  - label: "Build release image - x86_64 - CUDA 13.0"
+    depends_on: block-release-image-build-cuda-13-0
+    id: build-release-image-x86-cuda-13-0
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+      # re-tag to default image tag and push, just in case arm64 build fails
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
+
+  - label: "Build release image - aarch64 - CUDA 13.0"
+    depends_on: block-release-image-build-cuda-13-0
+    id: build-release-image-arm64-cuda-13-0
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130 --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu130"
+
+  # Add job to create multi-arch manifest (CUDA 13.0)
+  - label: "Create multi-arch manifest"
+    depends_on:
+      - build-release-image-x86-cuda-13-0
+      - build-release-image-arm64-cuda-13-0
+    id: create-multi-arch-manifest-cuda-13-0
+    agents:
+      queue: small_cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu130 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu130 --amend"
+      - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130"
 
   - label: "Annotate release workflow"
     depends_on:
       - create-multi-arch-manifest
     id: annotate-release-workflow
     agents:
-      queue: cpu_queue_postmerge
+      queue: small_cpu_queue_postmerge
     commands:
       - "bash .buildkite/scripts/annotate-release.sh"
 
@@ -189,7 +230,7 @@ steps:
       - create-multi-arch-manifest
     if: build.env("NIGHTLY") == "1"
     agents:
-      queue: cpu_queue_postmerge
+      queue: small_cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
