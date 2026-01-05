@@ -78,7 +78,9 @@ def maybe_make_prepare_finalize(
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
     # TODO(rob): update this as part of the MoE refactor.
-    assert not moe.use_flashinfer_cutlass_kernels, "Must be created in modelopt.py"
+    assert not moe.use_flashinfer_cutlass_kernels, (
+        "Must be created in modelopt.py or fp8.py"
+    )
 
     if moe.use_pplx_kernels:
         assert quant_config is not None
