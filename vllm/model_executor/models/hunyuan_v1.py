@@ -427,6 +427,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_mlp",
             )
         else:
             self.shared_mlp = None
