@@ -419,7 +419,7 @@ class MoonVitEncoderLayer(nn.Module):
 
         xq, xk = apply_rope(xq, xk, rope_freqs_cis)
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         attn_out = self.attn(
             xq.unsqueeze(0),
             xk.unsqueeze(0),
