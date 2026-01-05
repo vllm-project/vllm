@@ -1434,6 +1434,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
+        return None
         if self.nvfp4_backend in UNSUPPORTED:
             return None
         elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
@@ -1722,7 +1723,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 input_dtype=self.marlin_input_dtype,
             )
-        elif self.nvfp4_backend == FlashinferMoeBackend.CUTLASS:
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4,
             )
@@ -1742,7 +1743,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        elif self.nvfp4_backend == FlashinferMoeBackend.CUTEDSL:
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (  # noqa: E501
                 flashinfer_cutedsl_moe_fp4,
             )
