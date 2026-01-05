@@ -688,10 +688,6 @@ class ModelConfig:
         return me_models.ModelRegistry
 
     @property
-    def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures
-
-    @property
     def architecture(self) -> str:
         """The architecture vllm actually used."""
         return self._architecture
