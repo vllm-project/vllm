@@ -686,9 +686,7 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
 
 
 @torch.inference_mode()
-def mm_projector_forward(
-    mm_projector: torch.nn.Module, vt_output: list[torch.Tensor]
-):
+def mm_projector_forward(mm_projector: torch.nn.Module, vt_output: list[torch.Tensor]):
     """Apply MM projector to vision tower outputs."""
     num_embedding_list = [x.shape[0] for x in vt_output]
     batched = torch.cat(vt_output, dim=0)
@@ -732,7 +730,7 @@ def vision_tower_forward(
                 group_n_patches = n_patches_each_media[current_group_start:i].sum()
                 group_input = pixel_values[pre_sum : pre_sum + group_n_patches]
                 group_output = vision_tower(group_input, group_grid_thw)
-                proj_out = mm_projection_auto(mm_projector, group_output)
+                proj_out = mm_projector_forward(mm_projector, group_output)
                 tensors.extend(proj_out)
                 pre_sum += group_n_patches
 
@@ -745,7 +743,7 @@ def vision_tower_forward(
         group_n_patches = n_patches_each_media[current_group_start:n].sum()
         group_input = pixel_values[pre_sum : pre_sum + group_n_patches]
         group_output = vision_tower(group_input, group_grid_thw)
-        proj_out = mm_projection_auto(mm_projector, group_output)
+        proj_out = mm_projector_forward(mm_projector, group_output)
         tensors.extend(proj_out)
 
     return tensors
