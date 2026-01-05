@@ -681,7 +681,7 @@ def safetensors_weights_iterator(
             # instead we reconstruct the subclasses here before returning
             if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
-                    "Please use torchao version >= 0.15.0"
+                    "Please use torchao version >= 0.15.0 "
                     "to load torchao safetensors checkpoint"
                 )
             from torchao.prototype.safetensors.safetensors_support import (
