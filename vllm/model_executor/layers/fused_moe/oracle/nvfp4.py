@@ -85,9 +85,10 @@ def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
             "Requested FlashInfer backend for NvFp4 MoE, but it's not available. "
             "Falling back to %s for NvFp4 MoE",
             backend.value,
+            scope="local",
         )
     else:
-        logger.info_once(_make_log_backend(backend))
+        logger.info_once(_make_log_backend(backend), scope="local")
     return backend
 
 
