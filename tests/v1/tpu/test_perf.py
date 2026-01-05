@@ -14,7 +14,7 @@ import pytest
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner

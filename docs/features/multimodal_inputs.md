@@ -443,7 +443,9 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
         print(generated_text)
     ```
 
-#### Audio Embeddings
+For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
+
+#### Audio Embedding Inputs
 
 You can pass pre-computed audio embeddings similar to image embeddings:
 
@@ -504,6 +506,7 @@ Then, you can use the OpenAI client as follows:
 ??? code
 
     ```python
+    import os
     from openai import OpenAI
 
     openai_api_key = "EMPTY"
@@ -515,8 +518,11 @@ Then, you can use the OpenAI client as follows:
     )
 
     # Single-image input inference
+
+    # Public image URL for testing remote image processing
     image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
+    # Create chat completion with remote image
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
         messages=[
@@ -539,6 +545,35 @@ Then, you can use the OpenAI client as follows:
         ],
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
+
+    # Local image file path (update this to point to your actual image file)
+    image_file = "/path/to/image.jpg"
+
+    # Create chat completion with local image file
+    # Launch the API server/engine with the --allowed-local-media-path argument.
+    if os.path.exists(image_file):
+        chat_completion_from_local_image_url = client.chat.completions.create(
+            model="microsoft/Phi-3.5-vision-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What’s in this image?",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{image_file}"},
+                        },
+                    ],
+                }
+            ],
+        )
+        result = chat_completion_from_local_image_url.choices[0].message.content
+        print("Chat completion output from local image file:\n", result)
+    else:
+        print(f"Local image file not found at {image_file}, skipping local file test.")
 
     # Multi-image input inference
     image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
@@ -795,14 +830,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    from vllm.utils.serial_utils import tensor2base64
+
     image_embedding = torch.load(...)
     grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
 
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = tensor2base64(image_embedding)
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
@@ -892,5 +925,11 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
     ```
 
 !!! note
-    Only one message can contain `{"type": "image_embeds"}`.
+    Multiple messages can now contain `{"type": "image_embeds"}`, enabling you to pass multiple image embeddings in a single request (similar to regular images). The number of embeddings is limited by `--limit-mm-per-prompt`.
+
+    **Important**: The embedding shape format differs based on the number of embeddings:
+
+    - **Single embedding**: 3D tensor of shape `(1, feature_size, hidden_size)`
+    - **Multiple embeddings**: List of 2D tensors, each of shape `(feature_size, hidden_size)`
+
     If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.

@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -140,6 +141,7 @@ class BlockPool:
             where different KV cache groups have different block sizes, the
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
+        metrics_collector: Optional metrics collector for tracking block residency.
     """
 
     def __init__(
@@ -148,6 +150,7 @@ class BlockPool:
         enable_caching: bool,
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -173,6 +176,8 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+
+        self.metrics_collector = metrics_collector
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -249,6 +254,10 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
+            # Some blocks may be null blocks when enabling sparse attention like
+            # sliding window attention. We skip null blocks here.
+            if blk.is_null:
+                continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
@@ -265,10 +274,8 @@ class BlockPool:
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
-                parent_block = blocks[num_cached_blocks - 1]
-                assert parent_block.block_hash is not None
                 parent_block_hash = maybe_convert_block_hash(
-                    get_block_hash(parent_block.block_hash)
+                    block_hashes[num_cached_blocks - 1]
                 )
 
             self.kv_event_queue.append(
@@ -283,6 +290,9 @@ class BlockPool:
                     if request.lora_request
                     else None,
                     medium=MEDIUM_GPU,
+                    lora_name=request.lora_request.name
+                    if request.lora_request
+                    else None,
                 )
             )
 
@@ -308,10 +318,14 @@ class BlockPool:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -325,6 +339,10 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        # Clean up metrics tracking first to prevent leaks
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
+
         block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
@@ -350,7 +368,7 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -358,13 +376,14 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
-        for blocks_per_group in blocks:
-            for block in blocks_per_group:
-                # ref_cnt=0 means this block is in the free list (i.e. eviction
-                # candidate), so remove it.
-                if block.ref_cnt == 0 and not block.is_null:
-                    self.free_block_queue.remove(block)
-                block.ref_cnt += 1
+        for block in blocks:
+            # ref_cnt=0 means this block is in the free list (i.e. eviction
+            # candidate), so remove it.
+            if block.ref_cnt == 0 and not block.is_null:
+                self.free_block_queue.remove(block)
+            block.ref_cnt += 1
+            if self.metrics_collector:
+                self.metrics_collector.on_block_accessed(block)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
@@ -381,6 +400,25 @@ class BlockPool:
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
+
+    def evict_blocks(self, block_ids: set[int]) -> None:
+        """evict blocks from the prefix cache by their block IDs.
+
+        only evicts blocks that are currently cached (have a hash). blocks
+        with ref_cnt > 0 are not freed from the block pool, only evicted
+        from the prefix cache hash table.
+
+        Args:
+            block_ids: Set of block IDs to evict from cache.
+        """
+        for block_id in block_ids:
+            assert block_id < len(self.blocks), (
+                f"Invalid block_id {block_id} >= {len(self.blocks)}. "
+                f"This indicates a bug in the KV connector - workers should "
+                f"only report block IDs that were allocated by the scheduler."
+            )
+            block = self.blocks[block_id]
+            self._maybe_evict_cached_block(block)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -406,6 +444,9 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+
+        if self.metrics_collector:
+            self.metrics_collector.reset()
 
         logger.info("Successfully reset prefix cache")
 

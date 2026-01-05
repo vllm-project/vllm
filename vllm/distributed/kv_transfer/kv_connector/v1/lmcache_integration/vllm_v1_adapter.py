@@ -27,8 +27,16 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
+try:
+    from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
+except ImportError:
+    # Backwards compatibility for lmcache <= 0.3.10-post1
+    from lmcache.v1.plugin.plugin_launcher import (
+        PluginLauncher as RuntimePluginLauncher,
+    )
+
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -50,7 +58,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -683,7 +690,7 @@ class LMCacheConnectorV1Impl:
             self.api_server = InternalAPIServer(self)
             self.api_server.start()
             # Launch plugins
-            self.plugin_launcher = PluginLauncher(
+            self.plugin_launcher = RuntimePluginLauncher(
                 self.config,
                 role,
                 self.worker_count,
@@ -775,6 +782,16 @@ class LMCacheConnectorV1Impl:
     ####################
     # Worker side APIs
     ####################
+    @_lmcache_nvtx_annotate
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.info("Registering KV caches")
+        # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
+        #  not called, we should consider removing it.
+        assert len(self.kv_caches) == 0 and len(kv_caches) > 0
+        self.kv_caches = kv_caches
+        if self.lmcache_engine is not None:
+            kvcaches = list(self.kv_caches.values())
+            self.lmcache_engine.post_init(kvcaches=kvcaches)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -915,7 +932,7 @@ class LMCacheConnectorV1Impl:
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """Start saving the a layer of KV cache from vLLM's paged buffer

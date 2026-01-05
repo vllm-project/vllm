@@ -413,7 +413,7 @@ class RayDistributedExecutor(Executor):
         self,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         """Execute the model on the Ray workers.
 
         The scheduler output to use should have been provided in
@@ -428,7 +428,7 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None
 
         self.scheduler_output = None
 
@@ -439,7 +439,7 @@ class RayDistributedExecutor(Executor):
         scheduler_output: SchedulerOutput,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)

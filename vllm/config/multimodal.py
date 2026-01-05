@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
-else:
-    AttentionBackendEnum = Any
+from vllm.utils.hashing import safe_hash
 
 
 @dataclass
@@ -170,9 +166,6 @@ class MultiModalConfig:
     def _validate_mm_encoder_attn_backend(
         cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
-        # We need to import the real type here (deferred to avoid circular import).
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         if isinstance(value, str) and value.upper() == "XFORMERS":
             raise ValueError(
                 "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
@@ -216,7 +209,7 @@ class MultiModalConfig:
             if self.mm_encoder_attn_backend is not None
             else None
         ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:

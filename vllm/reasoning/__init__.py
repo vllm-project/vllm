@@ -44,6 +44,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "holo2": (
+        "holo2_reasoning_parser",
+        "Holo2ReasoningParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_reasoning_parser",
         "HunyuanA13BReasoningParser",

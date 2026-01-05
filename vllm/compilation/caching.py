@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import inspect
 import os
 import pickle
@@ -14,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable
@@ -37,12 +37,15 @@ class VllmSerializableFunction(SerializableCallable):
     serializing the Dynamo fx graph plus example inputs.
     """
 
-    def __init__(self, graph_module, example_inputs, prefix, optimized_call):
+    def __init__(
+        self, graph_module, example_inputs, prefix, optimized_call, is_encoder=False
+    ):
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
         self.example_inputs = example_inputs
         self.prefix = prefix
         self.optimized_call = optimized_call
+        self.is_encoder = is_encoder
         self.shape_env = None
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
@@ -104,8 +107,12 @@ class VllmSerializableFunction(SerializableCallable):
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
         state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
-        vllm_backend = VllmBackend(get_current_vllm_config(), state["prefix"])
+        is_encoder = state.get("is_encoder", False)
+        vllm_backend = VllmBackend(
+            get_current_vllm_config(), state["prefix"], is_encoder
+        )
 
         def optimized_call(*example_inputs):
             """
@@ -160,7 +167,7 @@ def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
             # e.g. exec(). We can't actually check these.
             continue
         hash_content.append(content)
-    return hashlib.md5(
+    return safe_hash(
         "\n".join(hash_content).encode(), usedforsecurity=False
     ).hexdigest()
 

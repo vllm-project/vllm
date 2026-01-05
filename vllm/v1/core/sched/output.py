@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING
-
-from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
 
@@ -68,7 +65,9 @@ class NewRequestData:
         )
 
     def __repr__(self) -> str:
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
@@ -88,7 +87,9 @@ class NewRequestData:
         prompt_token_ids_len = (
             len(self.prompt_token_ids) if self.prompt_token_ids is not None else None
         )
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
@@ -124,19 +125,6 @@ class CachedRequestData:
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
-
-    @cached_property
-    @deprecated("use resumed_req_ids field")
-    def resumed_from_preemption(self) -> list[bool]:
-        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
-
-    @cached_property
-    @deprecated("use all_token_ids field")
-    def resumed_req_token_ids(self) -> list[list[int] | None]:
-        return [
-            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
-            for req_id in self.req_ids
-        ]
 
     @classmethod
     def make_empty(cls) -> "CachedRequestData":

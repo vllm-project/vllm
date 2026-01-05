@@ -21,7 +21,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.5, GLM-4.6 model compatible with HuggingFace weights."""
+"""Inference-only GLM-4.5, GLM-4.6, GLM-4.7 model
+compatible with HuggingFace weights."""
 
 import typing
 from collections.abc import Callable, Iterable
@@ -31,7 +32,7 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -282,13 +283,11 @@ class Glm4MoeAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=partial_rotary_factor,
         )
         self.attn = Attention(
             self.num_heads,

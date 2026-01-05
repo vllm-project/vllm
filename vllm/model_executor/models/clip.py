@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Annotated, Literal
 
@@ -14,8 +14,8 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention import Attention
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layer import Attention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -355,7 +355,7 @@ class CLIPAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[Attention] | type[MultiHeadAttention],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -450,7 +450,7 @@ class CLIPEncoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[Attention] | type[MultiHeadAttention],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
         self.self_attn = CLIPAttention(
@@ -494,7 +494,7 @@ class CLIPEncoder(nn.Module):
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[Attention] | type[MultiHeadAttention],
+        attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -639,7 +639,7 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
+            attn_cls=MMEncoderAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -785,7 +785,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -904,6 +903,41 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_language_model(self) -> torch.nn.Module:
         return self.text_model
 
+    def _embed_text_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        is_multimodal: torch.Tensor | None,
+        handle_oov_mm_token: bool,
+    ) -> torch.Tensor:
+        inputs_embeds = super()._embed_text_input_ids(
+            input_ids,
+            embed_input_ids,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        inputs_embeds_size = self.projection_dim
+        if inputs_embeds.shape[1] < inputs_embeds_size:
+            inputs_embeds = torch.cat(
+                [
+                    inputs_embeds,
+                    inputs_embeds.new_empty(
+                        inputs_embeds.shape[0],
+                        inputs_embeds_size - inputs_embeds.shape[1],
+                    ),
+                ],
+                dim=1,
+            )
+        elif inputs_embeds.shape[1] > inputs_embeds_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return inputs_embeds
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -950,10 +984,16 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # Text inputs
-        return self.get_text_features(
-            input_ids=input_ids, position_ids=positions, inputs_embeds=inputs_embeds
-        )
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        hidden_size = self.text_embed_dim
+        if inputs_embeds.shape[1] > hidden_size:
+            inputs_embeds = inputs_embeds[:, :hidden_size]
+        elif inputs_embeds.shape[1] < hidden_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return self.get_text_features(input_ids, positions, inputs_embeds)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(

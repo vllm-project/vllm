@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 from ...utils import has_module_attribute, multi_gpu_test
 from ..backend import TestBackend
@@ -263,7 +264,7 @@ def all_reduce_fusion_pass_on_test_model(
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
@@ -295,7 +296,7 @@ def all_reduce_fusion_pass_on_test_model(
         )
     )
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True, enable_noop=True
+        fuse_allreduce_rms=True, eliminate_noops=True
     )
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path

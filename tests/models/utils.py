@@ -10,10 +10,10 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.model import ModelConfig, ModelDType, RunnerOption
+from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -292,7 +292,11 @@ def build_model_context(
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
@@ -375,7 +379,10 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    default_pooling_type: str = ""
+    pooling_type: str | None = None
+    attn_type: AttnTypeStr | None = None
+    is_prefix_caching_supported: bool | None = None
+    is_chunked_prefill_supported: bool | None = None
     enable_test: bool = True
 
 
@@ -387,28 +394,9 @@ class EmbedModelInfo(ModelInfo):
 
 
 @dataclass
-class CLSPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "LAST"
-
-
-@dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
-
-
-@dataclass
-class CLSPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "LAST"
+    chat_template_name: str | None = None
 
 
 @dataclass
@@ -483,12 +471,16 @@ def dummy_hf_overrides(
         "num_kv_shared_layers": 1,
     }
 
+    _hf_config = hf_config
+
     class DummyConfig:
+        hf_config = _hf_config
         hf_text_config = text_config
 
+    model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
-    if ModelConfig.get_num_experts(DummyConfig) > 0:
+    if model_arch_config.num_experts > 0:
         update_dict.update(
             {
                 "num_experts": num_experts,

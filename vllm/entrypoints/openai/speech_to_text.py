@@ -10,6 +10,7 @@ from typing import Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
+from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -20,18 +21,24 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata,
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
+    TranscriptionResponseVerbose,
+    TranscriptionSegment,
     TranscriptionStreamResponse,
     TranslationResponse,
     TranslationResponseStreamChoice,
+    TranslationResponseVerbose,
+    TranslationSegment,
     TranslationStreamResponse,
     UsageInfo,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.models import SupportsTranscription
+from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -40,7 +47,20 @@ except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
+SpeechToTextResponseVerbose: TypeAlias = (
+    TranscriptionResponseVerbose | TranslationResponseVerbose
+)
+SpeechToTextSegment: TypeAlias = TranscriptionSegment | TranslationSegment
 T = TypeVar("T", bound=SpeechToTextResponse)
+V = TypeVar("V", bound=SpeechToTextResponseVerbose)
+S = TypeVar("S", bound=SpeechToTextSegment)
+
+ResponseType: TypeAlias = (
+    TranscriptionResponse
+    | TranslationResponse
+    | TranscriptionResponseVerbose
+    | TranslationResponseVerbose
+)
 
 logger = init_logger(__name__)
 
@@ -78,11 +98,145 @@ class OpenAISpeechToText(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        if self.model_cls.supports_segment_timestamp:
+            self.tokenizer = cast(
+                PreTrainedTokenizerBase,
+                get_tokenizer(
+                    tokenizer_name=self.model_config.tokenizer,
+                    tokenizer_mode=self.model_config.tokenizer_mode,
+                ),
+            )
 
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params,
+            )
+
+        # Warm up audio preprocessing to avoid first-request latency
+        self._warmup_audio_preprocessing()
+        # Warm up input processor with dummy audio
+        self._warmup_input_processor()
+
+    def _warmup_audio_preprocessing(self) -> None:
+        """Warm up audio processing libraries to avoid first-request latency.
+
+        The first call to librosa functions (load, get_duration, mel-spectrogram)
+        triggers JIT compilation and library initialization which can take ~7s.
+        This method warms up these operations during server initialization.
+        """
+        # Skip warmup if librosa is not installed (optional dependency)
+        if isinstance(librosa, PlaceholderModule):
+            return
+
+        # Skip warmup if model doesn't support transcription
+        if not supports_transcription(self.model_cls):
+            return
+
+        try:
+            warmup_start = time.perf_counter()
+            logger.info("Warming up audio preprocessing libraries...")
+
+            # Create a minimal dummy audio (1 second of silence at target sample rate)
+            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
+
+            # Warm up librosa.load by using librosa functions on the dummy data
+            # This initializes FFTW, numba JIT, and other audio processing libraries
+            _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
+
+            # Warm up mel-spectrogram computation with model-specific parameters
+            from vllm.transformers_utils.processor import (
+                cached_processor_from_config,
+            )
+
+            processor = cached_processor_from_config(self.model_config)
+            feature_extractor = None
+            if hasattr(processor, "feature_extractor"):
+                feature_extractor = processor.feature_extractor
+            elif hasattr(processor, "audio_processor"):
+                # For models like GraniteSpeech that use audio_processor
+                audio_proc = processor.audio_processor
+                if hasattr(audio_proc, "feature_extractor"):
+                    feature_extractor = audio_proc.feature_extractor
+                # If audio_processor doesn't have feature_extractor,
+                # skip mel-spectrogram warmup for these models
+
+            if feature_extractor is not None:
+                _ = librosa.feature.melspectrogram(
+                    y=dummy_audio,
+                    sr=self.asr_config.sample_rate,
+                    n_mels=getattr(feature_extractor, "n_mels", 128),
+                    n_fft=getattr(feature_extractor, "n_fft", 400),
+                    hop_length=getattr(feature_extractor, "hop_length", 160),
+                )
+
+            warmup_elapsed = time.perf_counter() - warmup_start
+            logger.info("Audio preprocessing warmup completed in %.2fs", warmup_elapsed)
+        except Exception:
+            # Don't fail initialization if warmup fails - log exception and continue
+            logger.exception(
+                "Audio preprocessing warmup failed (non-fatal): %s. "
+                "First request may experience higher latency.",
+            )
+
+    def _warmup_input_processor(self) -> None:
+        """Warm up input processor with dummy audio to avoid first-request latency.
+
+        The first call to input_processor.process_inputs() with multimodal audio
+        triggers multimodal processing initialization which can take ~2.5s.
+        This method processes a dummy audio request to warm up the pipeline.
+        """
+        # Skip warmup if model doesn't support transcription
+        if not supports_transcription(self.model_cls):
+            return
+
+        # Only warm up if model supports transcription methods
+        if not hasattr(self.model_cls, "get_generation_prompt"):
+            return
+
+        try:
+            from vllm.sampling_params import SamplingParams
+
+            warmup_start = time.perf_counter()
+            logger.info("Warming up multimodal input processor...")
+
+            # Create minimal dummy audio (1 second of silence)
+            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
+
+            # Use the same method that _preprocess_speech_to_text uses
+            # to create the prompt
+            dummy_prompt = self.model_cls.get_generation_prompt(
+                audio=dummy_audio,
+                stt_config=self.asr_config,
+                model_config=self.model_config,
+                language="en",
+                task_type=self.task_type,
+                request_prompt="",
+                to_language=None,
+            )
+
+            # Create minimal sampling params
+            dummy_params = SamplingParams(
+                max_tokens=1,
+                temperature=0.0,
+                skip_clone=True,  # Internal warmup, safe to skip clone
+            )
+
+            # Process the dummy input through the input processor
+            # This will trigger all the multimodal processing initialization
+            _ = self.input_processor.process_inputs(
+                request_id="warmup",
+                prompt=dummy_prompt,
+                params=dummy_params,
+            )
+
+            warmup_elapsed = time.perf_counter() - warmup_start
+            logger.info("Input processor warmup completed in %.2fs", warmup_elapsed)
+        except Exception:
+            # Don't fail initialization if warmup fails - log warning and continue
+            logger.exception(
+                "Input processor warmup failed (non-fatal): %s. "
+                "First request may experience higher latency."
             )
 
     @cached_property
@@ -107,7 +261,11 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise ValueError("Maximum file size exceeded.")
+            raise VLLMValidationError(
+                "Maximum file size exceeded",
+                parameter="audio_filesize_mb",
+                value=len(audio_data) / 1024**2,
+            )
 
         with io.BytesIO(audio_data) as bytes_:
             # NOTE resample to model SR here for efficiency. This is also a
@@ -133,17 +291,93 @@ class OpenAISpeechToText(OpenAIServing):
                 request_prompt=request.prompt,
                 to_language=to_language,
             )
+            if request.response_format == "verbose_json":
+                if not isinstance(prompt, dict):
+                    raise VLLMValidationError(
+                        "Expected prompt to be a dict",
+                        parameter="prompt",
+                        value=type(prompt).__name__,
+                    )
+                prompt_dict = cast(dict, prompt)
+                decoder_prompt = prompt.get("decoder_prompt")
+                if not isinstance(decoder_prompt, str):
+                    raise VLLMValidationError(
+                        "Expected decoder_prompt to be str",
+                        parameter="decoder_prompt",
+                        value=type(decoder_prompt).__name__,
+                    )
+                prompt_dict["decoder_prompt"] = decoder_prompt.replace(
+                    "<|notimestamps|>", "<|0.00|>"
+                )
             prompts.append(prompt)
         return prompts, duration
+
+    def _get_verbose_segments(
+        self,
+        tokens: tuple,
+        request: SpeechToTextRequest,
+        segment_class: type[SpeechToTextSegment],
+        start_time: float = 0,
+    ) -> list[SpeechToTextSegment]:
+        """
+        Convert tokens to verbose segments.
+
+        This method expects the model to produce
+        timestamps as tokens (similar to Whisper).
+        If the tokens do not include timestamp information,
+        the segments may not be generated correctly.
+
+        Note: Fields like avg_logprob, compression_ratio,
+        and no_speech_prob are not supported
+        in this implementation and will be None. See docs for details.
+        """
+        BASE_OFFSET = 0.02
+        init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
+        if tokens[-1] == self.tokenizer.eos_token_id:
+            tokens = tokens[:-1]
+
+        tokens_with_start = (init_token,) + tokens
+        segments: list[SpeechToTextSegment] = []
+        last_timestamp_start = 0
+
+        if tokens_with_start[-2] < init_token and tokens_with_start[-1] >= init_token:
+            tokens_with_start = tokens_with_start + (tokens_with_start[-1],)
+        for idx, token in enumerate(tokens_with_start):
+            # Timestamp tokens (e.g., <|0.00|>) are assumed to be sorted.
+            # If the ordering is violated, this slicing may produce incorrect results.
+            if (
+                token >= init_token
+                and idx != 0
+                and tokens_with_start[idx - 1] >= init_token
+            ):
+                sliced_timestamp_tokens = tokens_with_start[last_timestamp_start:idx]
+                start_timestamp = sliced_timestamp_tokens[0] - init_token
+                end_timestamp = sliced_timestamp_tokens[-1] - init_token
+
+                casting_segment = cast(
+                    SpeechToTextSegment,
+                    segment_class(
+                        id=len(segments),
+                        seek=start_time,
+                        start=start_time + BASE_OFFSET * start_timestamp,
+                        end=start_time + BASE_OFFSET * end_timestamp,
+                        temperature=request.temperature,
+                        text=self.tokenizer.decode(sliced_timestamp_tokens[1:-1]),
+                        tokens=sliced_timestamp_tokens[1:-1],
+                    ),
+                )
+                segments.append(casting_segment)
+                last_timestamp_start = idx
+        return segments
 
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
         request: SpeechToTextRequest,
         raw_request: Request,
-        response_class: type[T],
+        response_class: type[T | V],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> T | AsyncGenerator[str, None] | ErrorResponse:
+    ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         error_check_ret = await self._check_model(request)
@@ -156,11 +390,24 @@ class OpenAISpeechToText(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json"]:
+        if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(
-                "Currently only support response_format `text` or `json`"
+                ("Currently only support response_format")
+                + ("`text`, `json` or `verbose_json`")
             )
 
+        if (
+            request.response_format == "verbose_json"
+            and not self.model_cls.supports_segment_timestamp
+        ):
+            return self.create_error_response(
+                f"Currently do not support verbose_json for {request.model}"
+            )
+
+        if request.response_format == "verbose_json" and request.stream:
+            return self.create_error_response(
+                "verbose_json format doesn't support streaming case"
+            )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
@@ -177,14 +424,20 @@ class OpenAISpeechToText(OpenAIServing):
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
-            # fixed-size log-mel-spectogram.
-            default_max_tokens = self.model_config.max_model_len
+            # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
+            # generated by respecting the extra completion tokens arg.
+            if request.max_completion_tokens is None:
+                default_max_tokens = self.model_config.max_model_len
+            else:
+                default_max_tokens = min(
+                    self.model_config.max_model_len, request.max_completion_tokens
+                )
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
@@ -207,39 +460,81 @@ class OpenAISpeechToText(OpenAIServing):
                 for i, prompt in enumerate(prompts)
             ]
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         if request.stream:
             return stream_generator_method(
                 request, list_result_generator, request_id, request_metadata, duration_s
             )
         # Non-streaming response.
+        total_segments = []
+        text_parts = []
         try:
             assert list_result_generator is not None
+            segments_types: dict[str, type[SpeechToTextSegment]] = {
+                "transcribe": TranscriptionSegment,
+                "translate": TranslationSegment,
+            }
+            segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
-            for result_generator in list_result_generator:
+            for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
-                    text += op.outputs[0].text
+                    if request.response_format == "verbose_json":
+                        segments: list[SpeechToTextSegment] = (
+                            self._get_verbose_segments(
+                                tokens=tuple(op.outputs[0].token_ids),
+                                segment_class=segment_class,
+                                request=request,
+                                start_time=idx * self.asr_config.max_audio_clip_s,
+                            )
+                        )
 
+                        total_segments.extend(segments)
+                        text_parts.extend([seg.text for seg in segments])
+                    else:
+                        text_parts.append(op.outputs[0].text)
+            text = "".join(text_parts)
             if self.task_type == "transcribe":
+                final_response: ResponseType
                 # add usage in TranscriptionResponse.
                 usage = {
                     "type": "duration",
                     # rounded up as per openAI specs
                     "seconds": int(math.ceil(duration_s)),
                 }
-                final_response = cast(T, response_class(text=text, usage=usage))
+                if request.response_format != "verbose_json":
+                    final_response = cast(
+                        T, TranscriptionResponse(text=text, usage=usage)
+                    )
+                else:
+                    final_response = cast(
+                        V,
+                        TranscriptionResponseVerbose(
+                            text=text,
+                            language=request.language,
+                            duration=str(duration_s),
+                            segments=total_segments,
+                        ),
+                    )
             else:
                 # no usage in response for translation task
-                final_response = cast(T, response_class(text=text))  # type: ignore[call-arg]
-
+                if request.response_format != "verbose_json":
+                    final_response = cast(T, TranslationResponse(text=text))
+                else:
+                    final_response = cast(
+                        V,
+                        TranslationResponseVerbose(
+                            text=text,
+                            language=request.language,
+                            duration=str(duration_s),
+                            segments=total_segments,
+                        ),
+                    )
             return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _speech_to_text_stream_generator(
         self,
@@ -349,9 +644,8 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in %s stream generator.", self.task_type)
-            data = self.create_streaming_error_response(str(e))
+            data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"

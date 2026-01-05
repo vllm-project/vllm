@@ -5,11 +5,7 @@ nav:
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
-    - Examples:
-      - examples/README.md
-      - Offline Inference: examples/offline_inference
-      - Online Serving: examples/online_serving
-      - Others: examples/others
+      - Examples: examples
     - General:
       - usage/v1_guide.md
       - usage/*
@@ -52,12 +48,18 @@ nav:
       - Plugins:
         - design/*plugin*.md
       - design/*
+  - Benchmarking:
+      - benchmarking/README.md
+      - benchmarking/cli.md
+      - benchmarking/sweeps.md
+      - benchmarking/dashboard.md
   - API Reference:
     - api/README.md
     - api/vllm
   - CLI Reference: cli
   - Community:
     - community/*
+    - Governance: governance
     - Blog: https://blog.vllm.ai
     - Forum: https://discuss.vllm.ai
     - Slack: https://slack.vllm.ai
