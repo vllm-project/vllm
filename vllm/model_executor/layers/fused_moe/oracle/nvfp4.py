@@ -116,7 +116,6 @@ def make_nvfp4_moe_kernel(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
     ]
 
-    # TRTLLM backend does not support the mk abstraction.
     if backend in UNSUPPORTED_BACKENDS:
         return None
 
