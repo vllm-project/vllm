@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
@@ -125,7 +125,7 @@ def test_contexted_kv_attention(
     ):
         pytest.skip("ROCm custom paged attention does not support fp8_e5m2 KV cache")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process
@@ -346,7 +346,7 @@ def test_contexted_kv_attention_alibi(
     ):
         pytest.skip("ROCm custom paged attention does not support fp8_e5m2 KV cache")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process

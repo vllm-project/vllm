@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import random
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
@@ -278,6 +279,13 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
+def set_random_seed(seed: int | None) -> None:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
@@ -290,9 +298,7 @@ def create_kv_caches_with_random_flash(
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    from vllm.platforms import current_platform
-
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -335,9 +341,8 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-    from vllm.platforms import current_platform
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
