@@ -254,6 +254,48 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
+class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        raw_pooler_output: PoolerOutput,
+        finished_mask: list[bool],
+        async_output_copy_stream: torch.cuda.Stream,
+    ):
+        self._model_runner_output = model_runner_output
+
+        # Event on the copy stream so we can synchronize the non-blocking copy.
+        self.async_copy_ready_event = torch.Event()
+
+        # Keep a reference to the device tensors to avoid them being
+        # deallocated until we finish copying it to the host.
+        self._raw_pooler_output = raw_pooler_output
+
+        # Initiate the copy on a separate stream, but do not synchronize it.
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(async_output_copy_stream):
+            async_output_copy_stream.wait_stream(default_stream)
+            raw_pooler_output_cpu = json_map_leaves(
+                lambda x: None if x is None else x.to("cpu", non_blocking=True),
+                self._raw_pooler_output,
+            )
+            self.async_copy_ready_event.record()
+            self._model_runner_output.pooler_output = [
+                out if include else None
+                for out, include in zip(raw_pooler_output_cpu, finished_mask)
+            ]
+
+    def get_output(self) -> ModelRunnerOutput:
+        """Copy the device tensors to the host and return a ModelRunnerOutput.
+        This function blocks until the copy is finished.
+        """
+        self.async_copy_ready_event.synchronize()
+
+        # Release the device tensors once the copy has completed.
+        del self._raw_pooler_output
+        return self._model_runner_output
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -326,7 +368,7 @@ class GPUModelRunner(
         # https://github.com/vllm-project/vllm/issues/18019
         self.broadcast_pp_output = (
             self.parallel_config.distributed_executor_backend == "external_launcher"
-            and len(get_pp_group().ranks) > 0
+            and len(get_pp_group().ranks) > 1
         )
 
         # Model-related.
@@ -686,7 +728,7 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
-    def _init_model_kwargs(self, num_tokens: int):
+    def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
 
         if not self.is_pooling_model:
@@ -1028,7 +1070,7 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        if not self.model_config.is_hybrid or not self.speculative_config:
+        if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
         # Find the number of accepted tokens for each sequence.
@@ -2495,45 +2537,60 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == len(self.input_batch.pooling_params), (
+        kv_connector_output: KVConnectorOutput | None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs == len(self.input_batch.pooling_params), (
             "Either all or none of the requests in a batch must be pooling request"
         )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
+        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np.tolist(), seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
         )
 
         model = cast(VllmModelForPooling, self.model)
         raw_pooler_output: PoolerOutput = model.pooler(
-            hidden_states=hidden_states,
-            pooling_metadata=pooling_metadata,
+            hidden_states=hidden_states, pooling_metadata=pooling_metadata
         )
+
+        finished_mask = [
+            seq_len == prompt_len
+            for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
+        ]
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids.copy(),
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
+            kv_connector_output=kv_connector_output,
+        )
+
+        if raw_pooler_output is None or not any(finished_mask):
+            model_runner_output.pooler_output = [None] * num_reqs
+            return model_runner_output
+
+        if self.use_async_scheduling:
+            return AsyncGPUPoolingModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                raw_pooler_output=raw_pooler_output,
+                finished_mask=finished_mask,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
+
         raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True) if x is not None else x,
+            lambda x: None if x is None else x.to("cpu", non_blocking=True),
             raw_pooler_output,
         )
+        model_runner_output.pooler_output = [
+            out if include else None
+            for out, include in zip(raw_pooler_output, finished_mask)
+        ]
         self._sync_device()
 
-        pooler_output: list[torch.Tensor | None] = []
-        for raw_output, seq_len, prompt_len in zip(
-            raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens
-        ):
-            output = raw_output if seq_len == prompt_len else None
-            pooler_output.append(output)
-
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-        )
+        return model_runner_output
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -2598,7 +2655,7 @@ class GPUModelRunner(
 
             input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
-                **self._init_model_kwargs(num_scheduled_tokens),
+                **self._init_model_kwargs(),
                 **self._extract_mm_kwargs(scheduler_output),
             }
         elif self.enable_prompt_embeds and is_first_rank:
@@ -2626,7 +2683,7 @@ class GPUModelRunner(
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            model_kwargs = self._init_model_kwargs()
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
@@ -2635,7 +2692,7 @@ class GPUModelRunner(
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
-            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            model_kwargs = self._init_model_kwargs()
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
@@ -3055,7 +3112,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3077,131 +3134,129 @@ class GPUModelRunner(
             scheduler_output = deepcopy(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        with record_function_or_nullcontext("gpu_model_runner: preprocess"):
-            with self.synchronize_input_prep():
-                # Update persistent batch states.
-                self._update_states(scheduler_output)
+        with (
+            record_function_or_nullcontext("gpu_model_runner: preprocess"),
+            self.synchronize_input_prep(),
+        ):
+            # Update persistent batch states.
+            self._update_states(scheduler_output)
 
-                if has_ec_transfer() and get_ec_transfer().is_producer:
-                    with self.maybe_get_ec_connector_output(
-                        scheduler_output,
-                        encoder_cache=self.encoder_cache,
-                    ) as ec_connector_output:
-                        self._execute_mm_encoder(scheduler_output)
-                        return make_empty_encoder_model_runner_output(scheduler_output)
-
-                if not num_scheduled_tokens:
-                    if (
-                        self.parallel_config.distributed_executor_backend
-                        == "external_launcher"
-                        and self.parallel_config.data_parallel_size > 1
-                    ):
-                        # this is a corner case when both external launcher
-                        # and DP are enabled, num_scheduled_tokens could be
-                        # 0, and has_unfinished_requests in the outer loop
-                        # returns True. before returning early here we call
-                        # dummy run to ensure coordinate_batch_across_dp
-                        # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
-                    if not has_kv_transfer_group():
-                        # Return empty ModelRunnerOutput if no work to do.
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(
-                        scheduler_output, self.vllm_config
-                    )
-                if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.num_prompt_logprobs, (
-                        "--kv-sharing-fast-prefill produces incorrect "
-                        "logprobs for prompt tokens, tokens, please disable "
-                        "it when the requests need prompt logprobs"
-                    )
-
-                num_reqs = self.input_batch.num_reqs
-                req_ids = self.input_batch.req_ids
-                tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-
-                (
-                    logits_indices,
-                    spec_decode_metadata,
-                ) = self._prepare_inputs(
+            if has_ec_transfer() and get_ec_transfer().is_producer:
+                with self.maybe_get_ec_connector_output(
                     scheduler_output,
-                    num_scheduled_tokens_np,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    return make_empty_encoder_model_runner_output(scheduler_output)
+
+            if not num_scheduled_tokens:
+                if (
+                    self.parallel_config.distributed_executor_backend
+                    == "external_launcher"
+                    and self.parallel_config.data_parallel_size > 1
+                ):
+                    # this is a corner case when both external launcher
+                    # and DP are enabled, num_scheduled_tokens could be
+                    # 0, and has_unfinished_requests in the outer loop
+                    # returns True. before returning early here we call
+                    # dummy run to ensure coordinate_batch_across_dp
+                    # is called into to avoid out of sync issues.
+                    self._dummy_run(1)
+                if not has_kv_transfer_group():
+                    # Return empty ModelRunnerOutput if no work to do.
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
+            if self.cache_config.kv_sharing_fast_prefill:
+                assert not self.num_prompt_logprobs, (
+                    "--kv-sharing-fast-prefill produces incorrect "
+                    "logprobs for prompt tokens, tokens, please disable "
+                    "it when the requests need prompt logprobs"
                 )
 
-                cascade_attn_prefix_lens = None
-                # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
-                    # Pre-compute cascade attention prefix lengths
-                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                        num_scheduled_tokens_np,
-                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                        scheduler_output.num_common_prefix_blocks,
-                    )
+            num_reqs = self.input_batch.num_reqs
+            req_ids = self.input_batch.req_ids
+            tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+            num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+            max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+            num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-                (
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                    cudagraph_stats,
-                ) = self._determine_batch_execution_and_padding(
+            logits_indices, spec_decode_metadata = self._prepare_inputs(
+                scheduler_output,
+                num_scheduled_tokens_np,
+            )
+
+            cascade_attn_prefix_lens = None
+            # Disable cascade attention when using microbatching (DBO)
+            if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
+                # Pre-compute cascade attention prefix lengths
+                cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                    num_scheduled_tokens_np,
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                    scheduler_output.num_common_prefix_blocks,
+                )
+
+            (
+                cudagraph_mode,
+                batch_desc,
+                should_ubatch,
+                num_tokens_across_dp,
+                cudagraph_stats,
+            ) = self._determine_batch_execution_and_padding(
+                num_tokens=num_tokens_unpadded,
+                num_reqs=num_reqs,
+                num_scheduled_tokens_np=num_scheduled_tokens_np,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                use_cascade_attn=cascade_attn_prefix_lens is not None,
+                num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+            )
+
+            logger.debug(
+                "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                "should_ubatch: %s, num_tokens_across_dp: %s",
+                cudagraph_mode,
+                batch_desc,
+                should_ubatch,
+                num_tokens_across_dp,
+            )
+
+            num_tokens_padded = batch_desc.num_tokens
+            num_reqs_padded = (
+                batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+            )
+            ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+                should_ubatch,
+                num_scheduled_tokens_np,
+                num_tokens_padded,
+                num_reqs_padded,
+                self.parallel_config.num_ubatches,
+            )
+
+            logger.debug(
+                "ubatch_slices: %s, ubatch_slices_padded: %s",
+                ubatch_slices,
+                ubatch_slices_padded,
+            )
+
+            pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+            ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+            attn_metadata, spec_decode_common_attn_metadata = (
+                self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
+                    num_tokens_padded=num_tokens_padded if pad_attn else None,
                     num_reqs=num_reqs,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    max_num_scheduled_tokens=max_num_scheduled_tokens,
-                    use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                    num_reqs_padded=num_reqs_padded if pad_attn else None,
+                    max_query_len=max_num_scheduled_tokens,
+                    ubatch_slices=ubatch_slices_attn,
+                    logits_indices=logits_indices,
+                    use_spec_decode=use_spec_decode,
+                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
-
-                logger.debug(
-                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                    "should_ubatch: %s, num_tokens_across_dp: %s",
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                )
-
-                num_tokens_padded = batch_desc.num_tokens
-                num_reqs_padded = (
-                    batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
-                )
-                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-                    should_ubatch,
-                    num_scheduled_tokens_np,
-                    num_tokens_padded,
-                    num_reqs_padded,
-                    self.parallel_config.num_ubatches,
-                )
-
-                logger.debug(
-                    "ubatch_slices: %s, ubatch_slices_padded: %s",
-                    ubatch_slices,
-                    ubatch_slices_padded,
-                )
-
-                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
-
-                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-
-                (attn_metadata, spec_decode_common_attn_metadata) = (
-                    self._build_attention_metadata(
-                        num_tokens=num_tokens_unpadded,
-                        num_tokens_padded=num_tokens_padded if pad_attn else None,
-                        num_reqs=num_reqs,
-                        num_reqs_padded=num_reqs_padded if pad_attn else None,
-                        max_query_len=max_num_scheduled_tokens,
-                        ubatch_slices=ubatch_slices_attn,
-                        logits_indices=logits_indices,
-                        use_spec_decode=use_spec_decode,
-                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                        cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                    )
-                )
+            )
 
             (
                 input_ids,
@@ -3265,11 +3320,12 @@ class GPUModelRunner(
 
                 if self.is_pooling_model:
                     # Return the pooling output.
-                    output = self._pool(
-                        hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
+                    return self._pool(
+                        hidden_states,
+                        num_scheduled_tokens,
+                        num_scheduled_tokens_np,
+                        kv_connector_output,
                     )
-                    output.kv_connector_output = kv_connector_output
-                    return output
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
@@ -3458,7 +3514,6 @@ class GPUModelRunner(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
@@ -3528,14 +3583,13 @@ class GPUModelRunner(
     def _get_valid_sampled_token_count(self) -> list[int]:
         # Wait until valid_sampled_tokens_count is copied to cpu,
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        if (
-            self.valid_sampled_token_count_event is None
-            or prev_sampled_token_ids is None
-        ):
+        sampled_count_event = self.valid_sampled_token_count_event
+        if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
 
         counts_cpu = self.valid_sampled_token_count_cpu
-        self.valid_sampled_token_count_event.synchronize()
+        assert counts_cpu is not None
+        sampled_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
@@ -4294,7 +4348,7 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs(num_tokens_padded)
+            model_kwargs = self._init_model_kwargs()
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
@@ -4305,7 +4359,7 @@ class GPUModelRunner(
             elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
-                model_kwargs = self._init_model_kwargs(num_tokens_padded)
+                model_kwargs = self._init_model_kwargs()
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
@@ -4509,17 +4563,14 @@ class GPUModelRunner(
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
-        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
-        assert sum(num_scheduled_tokens_list) == num_tokens
-        assert len(num_scheduled_tokens_list) == num_reqs
+        num_scheduled_tokens_np = np.full(num_reqs, min_tokens_per_req)
+        num_scheduled_tokens_np[-1] += num_tokens % num_reqs
+        assert np.sum(num_scheduled_tokens_np) == num_tokens
+        assert len(num_scheduled_tokens_np) == num_reqs
 
         req_num_tokens = num_tokens // num_reqs
 
-        dummy_prompt_lens = torch.tensor(
-            num_scheduled_tokens_list,
-            device="cpu",
-        )
+        dummy_prompt_lens = torch.from_numpy(num_scheduled_tokens_np)
         dummy_token_ids = torch.zeros(
             (num_reqs, req_num_tokens), dtype=torch.int32, device=self.device
         )
@@ -4538,7 +4589,7 @@ class GPUModelRunner(
         )
 
         dummy_metadata.build_pooling_cursor(
-            num_scheduled_tokens_list,
+            num_scheduled_tokens_np,
             seq_lens_cpu=dummy_prompt_lens,
             device=hidden_states.device,
         )

@@ -85,10 +85,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
-    ) -> None:
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
         """Update the draft token ids for the scheduled requests."""
         raise NotImplementedError
 

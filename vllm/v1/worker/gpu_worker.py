@@ -32,7 +32,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -40,6 +39,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -179,22 +179,20 @@ class Worker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        device = self.device_config.device
-        if isinstance(device, torch.device) and device.type == "cuda":
+        if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            parallel_config = self.parallel_config
             if (
-                self.parallel_config.data_parallel_size > 1
-                and self.parallel_config.data_parallel_size_local > 0
-                and self.parallel_config.distributed_executor_backend
-                not in ["ray", "external_launcher"]
-                and self.vllm_config.parallel_config.data_parallel_backend != "ray"
-                and self.vllm_config.parallel_config.nnodes_within_dp == 1
+                parallel_config.distributed_executor_backend
+                not in ("ray", "external_launcher")
+                and parallel_config.data_parallel_backend != "ray"
+                and parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
                 if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_rank
+                    dp_local_rank = self.parallel_config.data_parallel_index
 
                 tp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
@@ -592,7 +590,7 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -641,7 +639,9 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(output, ModelRunnerOutput | NoneType):
+            if isinstance(
+                output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
+            ):
                 return output
 
         assert isinstance(output, IntermediateTensors)

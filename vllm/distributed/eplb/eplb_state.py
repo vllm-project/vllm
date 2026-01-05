@@ -428,7 +428,7 @@ class EplbState:
 
         policy_type = self.parallel_config.eplb_config.policy
         self.policy = EPLB_POLICIES[policy_type]
-        logger.debug("Selected EPLB policy: %d", policy_type)
+        logger.debug("Selected EPLB policy: %s", policy_type)
 
         model.set_eplb_state(
             expert_load_pass,

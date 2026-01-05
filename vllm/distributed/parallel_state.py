@@ -1118,7 +1118,11 @@ _EP: "GroupCoordinator | StatelessGroupCoordinator | None" = None
 
 
 def get_ep_group() -> "GroupCoordinator | StatelessGroupCoordinator":
-    assert _EP is not None, "expert parallel group is not initialized"
+    assert _EP is not None, (
+        "expert parallel group is not initialized. "
+        "EP group is only created for MoE models with num_experts > 0. "
+        "This function should only be called for MoE models."
+    )
     return _EP
 
 
@@ -1554,39 +1558,42 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = (
-        all_ranks.transpose(1, 2)
-        .reshape(
-            -1,
-            data_parallel_size
-            * prefill_context_model_parallel_size
-            * tensor_model_parallel_size,
+    # Don't create EP group for dense models.
+    if config is None or config.model_config is None or config.model_config.is_moe:
+        group_ranks = (
+            all_ranks.transpose(1, 2)
+            .reshape(
+                -1,
+                data_parallel_size
+                * prefill_context_model_parallel_size
+                * tensor_model_parallel_size,
+            )
+            .unbind(0)
         )
-        .unbind(0)
-    )
-    group_ranks = [x.tolist() for x in group_ranks]
-    if enable_elastic_ep:
-        from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+        group_ranks = [x.tolist() for x in group_ranks]
+        if enable_elastic_ep:
+            from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
-        parallel_config = config.parallel_config
-        group_ports = [
-            parallel_config.get_next_stateless_ep_group_port() for _ in group_ranks
-        ]
-        _EP = StatelessGroupCoordinator(
-            group_ranks=group_ranks,
-            local_rank=get_world_group().local_rank,
-            torch_distributed_backend=backend,
-            use_device_communicator=True,
-            group_name="ep",
-            host=parallel_config.data_parallel_master_ip,
-            group_ports=group_ports,
-            global_rank=get_world_group().rank,
-            global_world_size=get_world_group().world_size,
-        )
-    else:
-        _EP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="ep"
-        )
+            parallel_config = config.parallel_config
+            group_ports = [
+                parallel_config.get_next_stateless_ep_group_port() for _ in group_ranks
+            ]
+            _EP = StatelessGroupCoordinator(
+                group_ranks=group_ranks,
+                local_rank=get_world_group().local_rank,
+                torch_distributed_backend=backend,
+                use_device_communicator=True,
+                group_name="ep",
+                host=parallel_config.data_parallel_master_ip,
+                group_ports=group_ports,
+                global_rank=get_world_group().rank,
+                global_world_size=get_world_group().world_size,
+            )
+        else:
+            _EP = init_model_parallel_group(
+                group_ranks, get_world_group().local_rank, backend, group_name="ep"
+            )
+    # If no EP group needed, _EP remains None
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
@@ -1598,7 +1605,7 @@ def initialize_model_parallel(
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
-        _EP.rank_in_group,
+        _EP.rank_in_group if _EP is not None else "N/A",
     )
 
 
