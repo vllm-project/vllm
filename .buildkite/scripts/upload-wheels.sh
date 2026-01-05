@@ -102,6 +102,7 @@ if [[ "$version" != *"dev"* ]]; then
     echo "Re-generating indices for /$pure_version/"
     rm -rf "$INDICES_OUTPUT_DIR/*"
     mkdir -p "$INDICES_OUTPUT_DIR"
-    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
+    # wheel-dir is overridden to be the commit directory, so that the indices point to the correct wheel path
+    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi
