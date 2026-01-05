@@ -464,7 +464,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,
-            allow_flashinfer=self.allow_flashinfer,
+            allow_flashinfer=(self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS),
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
