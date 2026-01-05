@@ -233,6 +233,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
 
         super().__init__(moe)
+        self.group_size = 16
         self.nvfp4_backend = select_nvfp4_moe_backend()
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
@@ -376,7 +377,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 w13=layer.w13_weight_packed,
                 w13_scale=layer.w13_weight_scale,
                 w13_scale_2=(1.0 / layer.w13_weight_global_scale),
-                a13_scale=(1.0 / layer.w13_input_scale),
+                a13_scale=(1.0 / layer.w13_input_global_scale),
                 w2=layer.w2_weight_packed,
                 w2_scale=layer.w2_weight_scale,
                 w2_scale_2=(1.0 / layer.w2_weight_global_scale),
@@ -397,8 +398,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         # NOTE(rob): these are not used in the weight re-loading
         # process, and therefore do not need to be Parameters.
         # Should I delete the old ones?
-        layer.w13_scale_2 = w13_scale_2
-        layer.w2_scale_2 = w2_scale_2
+        layer.w13_weight_scale_2 = w13_scale_2
+        layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
