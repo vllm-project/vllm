@@ -659,9 +659,14 @@ class OpenAIServingChat(OpenAIServing):
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
 
+                # Pass the same chat template kwargs as used in tokenization
+                chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                    request.chat_template_kwargs,
+                    self.default_chat_template_kwargs,
+                )
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
-                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -1437,9 +1442,14 @@ class OpenAIServingChat(OpenAIServing):
                             "Tokenizer not available when `skip_tokenizer_init=True`"
                         )
 
+                    # Pass the same chat template kwargs as used in tokenization
+                    chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                        request.chat_template_kwargs,
+                        self.default_chat_template_kwargs,
+                    )
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
-                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                        chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                     )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
