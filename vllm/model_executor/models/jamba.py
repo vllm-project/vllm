@@ -78,6 +78,7 @@ class JambaMoE(nn.Module):
                 bias=False,
                 quant_config=None,
                 params_dtype=params_dtype,
+                prefix=f"{prefix}.router",
             )
 
         self.experts = FusedMoE(

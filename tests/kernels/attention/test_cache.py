@@ -9,6 +9,7 @@ import torch
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -64,7 +65,7 @@ def test_reshape_and_cache(
 ) -> None:
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     # Create a random slot mapping.
@@ -185,7 +186,7 @@ def test_reshape_and_cache_flash(
     kv_cache_layout: str,
     implementation: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     assert implementation in ["cuda", "triton"]
@@ -355,7 +356,7 @@ def test_swap_blocks(
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     src_device = device if direction[0] == "cuda" else "cpu"
     dst_device = device if direction[1] == "cuda" else "cpu"
@@ -444,7 +445,7 @@ def test_fp8_e4m3_conversion(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     low = -224.0
     high = 224.0
@@ -507,7 +508,7 @@ def test_concat_and_cache_mla(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -584,7 +585,7 @@ def test_concat_and_cache_ds_mla(
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     kv_cache_dtype = "fp8_ds_mla"
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -695,7 +696,7 @@ def test_swap_blocks_mla(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -947,7 +948,7 @@ def test_concat_and_cache_mla_cpu(
 ) -> None:
     device = "cpu"
     kv_cache_dtype = "auto"
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     total_slots = num_blocks * block_size

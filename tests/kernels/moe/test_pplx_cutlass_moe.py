@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_random_seed
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -290,7 +291,7 @@ def test_cutlass_moe_pplx(
     world_dp_size: tuple[int, int],
     use_internode: bool,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
