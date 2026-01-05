@@ -262,14 +262,16 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 name = f"model.layers.{spec_layer}.shared_head.head.weight"
             elif name == "model.embed_tokens.weight":
                 spec_layer = self.model.mtp_start_layer_idx
-            elif name == "lm_head.weight_scale":
-                spec_layer = self.model.mtp_start_layer_idx
-                name = f"model.layers.{spec_layer}.shared_head.head.weight_scale"
             else:
                 spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
                 if spec_layer is None:
                     continue
                 name = self._rewrite_spec_layer_name(spec_layer, name)
+            # Some checkpoints include weight scale tensors for the LM head even
+            # when the quantized head isn't built. Skip them if the model does
+            # not expose a matching parameter to avoid KeyError during load.
+            if name.endswith(".weight_scale") and name not in params_dict:
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
