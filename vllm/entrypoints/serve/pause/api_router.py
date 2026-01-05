@@ -141,8 +141,6 @@ async def pause_step(
         POST /pause/step?no_barrier=true    → fast pause, no waiting
         POST /pause/step?barrier=50         → pause + wait until step 50
     """
-    client = _require_async_llm(engine_client(raw_request))
-
     logger.info(
         "API server (/pause/step) received request: no_barrier=%s, barrier=%s",
         no_barrier,
@@ -154,6 +152,8 @@ async def pause_step(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Cannot specify both no_barrier=true and barrier=<value>",
         )
+
+    client = _require_async_llm(engine_client(raw_request))
 
     # 1. Pause immediately, get step_counter from first engine
     step_counter = await _pause_all_engines(client)
