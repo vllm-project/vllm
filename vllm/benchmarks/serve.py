@@ -135,8 +135,9 @@ async def fetch_spec_decode_metrics(
                             num_draft_tokens += int(float(parts[-1]))
                 elif line.startswith("vllm:spec_decode_num_accepted_tokens_per_pos"):
                     found_spec_decode = True
-                    if 'position="' in line:
-                        start = line.index('position="') + len('position="')
+                    pos_label = 'position="'
+                    if pos_label in line:
+                        start = line.index(pos_label) + len(pos_label)
                         end = line.index('"', start)
                         pos = int(line[start:end])
                         parts = line.split()
