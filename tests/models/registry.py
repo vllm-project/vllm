@@ -907,6 +907,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},
