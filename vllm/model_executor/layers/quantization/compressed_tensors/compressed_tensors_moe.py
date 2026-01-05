@@ -527,30 +527,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 weight_attr_name="weight_packed",
             )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight_packed,
-                layer.w2_weight_packed,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=get_marlin_input_dtype(""),
-            )
-        elif self.nvfp4_backend in [
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.VLLM_CUTLASS,
-        ]:
+        else:
             assert self.kernel is not None
             return self.kernel(
                 x,
@@ -564,8 +541,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-        else:
-            raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
