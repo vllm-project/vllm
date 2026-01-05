@@ -103,12 +103,13 @@ def make_nvfp4_moe_kernel(
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
 ) -> mk.FusedMoEModularKernel | None:
-    assert moe_config.dp_size == 1
+    assert moe_config.dp_size == 1.0
 
-    # TRTLLM does not support the modular kernel abstraction.
-    # CUTEDSL is used BATCHED (masked) format only.
     UNSUPPORTED_BACKENDS = [
+        # TRTLLM does not use the modular kernl abstraction.
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        # CUTEDSL is used with BATCHED (masked) format only.
+        # TODO: add here once we support dp/ep via the oracle.
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
     ]
 

@@ -1746,25 +1746,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (  # noqa: E501
-                flashinfer_cutedsl_moe_fp4,
-            )
-
-            assert self.moe_quant_config is not None
-            return flashinfer_cutedsl_moe_fp4(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                quant_config=self.moe_quant_config,
-                inplace=False,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
         elif self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS:
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
             # only (no EP).
