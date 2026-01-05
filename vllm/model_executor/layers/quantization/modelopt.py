@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     is_global_sf_supported_for_nvfp4_backend,
+    make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
@@ -1624,6 +1625,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w13_input_scale", a13_scale)
         replace_parameter(layer, "w2_input_scale", a2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self.kernel = make_nvfp4_moe_kernel(
+            backend=self.nvfp4_backend,
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+        )
 
     def prepare_dp_allgather_tensor(
         self,
