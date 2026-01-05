@@ -3103,16 +3103,27 @@ class GPUModelRunner(
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
-        # use deepcopy to avoid the modification has influence on the
+        # use selective copy to avoid the modification has influence on the
         # scheduler_output in engine core process.
-        # TODO(Ronald1995): deepcopy is expensive when there is a large
-        # number of requests, optimize it later.
+        # Optimized: Instead of expensive deepcopy, we shallow copy the dataclass
+        # and only deep copy the mutable dict fields that will be modified.
         if (
             self.use_async_scheduling
             and self.num_spec_tokens
             and self._draft_token_ids is None
         ):
-            scheduler_output = deepcopy(scheduler_output)
+            # Shallow copy the dataclass (copies all fields but not nested
+            # mutable objects)
+            scheduler_output = copy(scheduler_output)
+            # Deep copy only the mutable dict fields that will be modified:
+            # - num_scheduled_tokens: modified via dict[key] -= value
+            # - scheduled_spec_decode_tokens: modified via dict.pop()
+            scheduler_output.num_scheduled_tokens = (
+                scheduler_output.num_scheduled_tokens.copy()
+            )
+            scheduler_output.scheduled_spec_decode_tokens = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
