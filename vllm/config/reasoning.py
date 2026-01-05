@@ -6,7 +6,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import cached_tokenizer_from_config
 
 
 @config
