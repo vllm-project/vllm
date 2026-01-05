@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
+from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
-from transformers.models.glmasr import GlmAsrConfig, GlmAsrEncoder, GlmAsrProcessor
+from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -35,6 +37,7 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -47,7 +50,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .audioflamingo3 import (
     AudioFlamingo3MultiModalDataParser,
-    AudioFlamingo3MultiModalProcessor,
     AudioFlamingo3ProcessingInfo,
 )
 from .audioflamingo3 import (
@@ -57,6 +59,7 @@ from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
+    GlmAsrEncoder,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _get_num_features_for_item,
@@ -72,6 +75,240 @@ from .interfaces import (
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# GPU-accelerated Whisper Feature Extractor
+# =============================================================================
+
+
+@lru_cache(maxsize=1)
+def _get_mel_filters(
+    n_fft: int = 400,
+    n_mels: int = 80,
+    sampling_rate: int = 16000,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """
+    Compute mel filterbank matrix (cached).
+    Matches WhisperFeatureExtractor's mel_filter_bank with slaney norm/scale.
+    """
+    if device is None:
+        device = torch.device("cpu")
+    # Frequency bins
+    n_freqs = n_fft // 2 + 1
+    all_freqs = torch.linspace(0, sampling_rate // 2, n_freqs, device=device)
+
+    # Mel scale conversion (slaney)
+    min_mel = 0.0
+    max_mel = 2595.0 * np.log10(1.0 + (sampling_rate / 2) / 700.0)
+    mels = torch.linspace(min_mel, max_mel, n_mels + 2, device=device)
+    mel_freqs = 700.0 * (10.0 ** (mels / 2595.0) - 1.0)
+
+    # Create filterbank
+    mel_filters = torch.zeros(n_mels, n_freqs, device=device)
+    for i in range(n_mels):
+        lower = mel_freqs[i]
+        center = mel_freqs[i + 1]
+        upper = mel_freqs[i + 2]
+
+        # Lower slope
+        lower_slope = (all_freqs - lower) / (center - lower + 1e-10)
+        # Upper slope
+        upper_slope = (upper - all_freqs) / (upper - center + 1e-10)
+
+        mel_filters[i] = torch.maximum(
+            torch.zeros_like(all_freqs),
+            torch.minimum(lower_slope, upper_slope),
+        )
+
+    # Slaney normalization
+    enorm = 2.0 / (mel_freqs[2 : n_mels + 2] - mel_freqs[:n_mels])
+    mel_filters *= enorm.unsqueeze(1)
+
+    return mel_filters
+
+
+class GPUWhisperFeatureExtractor:
+    """
+    GPU-accelerated Whisper feature extractor using PyTorch.
+    Computes log-mel spectrogram matching WhisperFeatureExtractor output.
+
+    Key parameters (Whisper defaults):
+        - n_fft: 400 (25ms window at 16kHz)
+        - hop_length: 160 (10ms hop at 16kHz)
+        - n_mels: 80
+        - chunk_length: 30 seconds
+        - sampling_rate: 16000
+    """
+
+    def __init__(
+        self,
+        feature_size: int = 80,
+        sampling_rate: int = 16000,
+        hop_length: int = 160,
+        chunk_length: int = 30,
+        n_fft: int = 400,
+        padding_value: float = 0.0,
+        device: str | torch.device = "cuda",
+    ):
+        self.feature_size = feature_size
+        self.sampling_rate = sampling_rate
+        self.hop_length = hop_length
+        self.chunk_length = chunk_length
+        self.n_fft = n_fft
+        self.padding_value = padding_value
+        self.device = torch.device(device) if isinstance(device, str) else device
+
+        # Derived parameters
+        self.n_samples = chunk_length * sampling_rate  # 480000 for 30s
+        self.nb_max_frames = self.n_samples // hop_length  # 3000 frames
+
+        # Pre-compute window and mel filters on device
+        self._window: torch.Tensor | None = None
+        self._mel_filters: torch.Tensor | None = None
+
+    def _ensure_buffers(self, device: torch.device) -> None:
+        """Lazily initialize buffers on the target device."""
+        if self._window is None or self._window.device != device:
+            self._window = torch.hann_window(self.n_fft, device=device)
+
+        if self._mel_filters is None or self._mel_filters.device != device:
+            self._mel_filters = _get_mel_filters(
+                n_fft=self.n_fft,
+                n_mels=self.feature_size,
+                sampling_rate=self.sampling_rate,
+                device=device,
+            )
+
+    def __call__(
+        self,
+        raw_speech: list[np.ndarray] | np.ndarray | torch.Tensor,
+        sampling_rate: int | None = None,
+        padding: str = "max_length",
+        max_length: int | None = None,
+        return_attention_mask: bool = True,
+        return_tensors: str = "pt",
+        device: str | torch.device | None = None,
+    ) -> BatchFeature:
+        """
+        Extract log-mel spectrogram features from audio.
+
+        Args:
+            raw_speech: Audio waveform(s), can be list of arrays or batched
+            sampling_rate: Expected sample rate (must match self.sampling_rate)
+            padding: Padding strategy ('max_length' or 'longest')
+            max_length: Max samples (default: self.n_samples = 30s * 16kHz)
+            return_attention_mask: Whether to return attention mask
+            return_tensors: Output format ('pt' for PyTorch)
+            device: Device for computation (default: self.device)
+
+        Returns:
+            BatchFeature with 'input_features' and optionally 'attention_mask'
+        """
+        if sampling_rate is not None and sampling_rate != self.sampling_rate:
+            raise ValueError(
+                f"Expected sampling_rate={self.sampling_rate}, got {sampling_rate}"
+            )
+
+        device = torch.device(device) if device else self.device
+        max_length = max_length or self.n_samples
+
+        # Convert inputs to list of 1D tensors
+        if isinstance(raw_speech, np.ndarray):
+            raw_speech = [raw_speech] if raw_speech.ndim == 1 else list(raw_speech)
+        elif isinstance(raw_speech, torch.Tensor):
+            raw_speech = (
+                [raw_speech.numpy()]
+                if raw_speech.ndim == 1
+                else [s.numpy() for s in raw_speech]
+            )
+
+        batch_size = len(raw_speech)
+
+        # Get actual lengths before padding
+        lengths = [len(s) for s in raw_speech]
+
+        # Pad/truncate to max_length
+        if padding == "max_length":
+            target_length = max_length
+        else:  # 'longest'
+            target_length = min(max(lengths), max_length)
+
+        # Create padded batch tensor
+        padded_waveforms = torch.zeros(
+            batch_size, target_length, dtype=torch.float32, device=device
+        )
+        attention_mask = torch.zeros(
+            batch_size, target_length, dtype=torch.int32, device=device
+        )
+
+        for i, waveform in enumerate(raw_speech):
+            if isinstance(waveform, np.ndarray):
+                waveform = torch.from_numpy(waveform)
+            waveform = waveform.to(device=device, dtype=torch.float32)
+
+            # Truncate if needed
+            actual_len = min(len(waveform), target_length)
+            padded_waveforms[i, :actual_len] = waveform[:actual_len]
+            attention_mask[i, :actual_len] = 1
+
+        # Extract features on GPU
+        input_features = self._extract_fbank_features(padded_waveforms)
+
+        # Rescale attention mask from samples to frames
+        # STFT produces L//hop_length + 1 frames, but we drop the last one
+        frame_attention_mask = attention_mask[:, :: self.hop_length]
+        # Trim to match actual frame count (we drop last frame in _extract)
+        if attention_mask.shape[1] % self.hop_length != 0:
+            frame_attention_mask = frame_attention_mask[:, :-1]
+
+        result: dict[str, Any] = {"input_features": input_features}
+        if return_attention_mask:
+            result["attention_mask"] = frame_attention_mask
+
+        return BatchFeature(data=result, tensor_type=return_tensors)
+
+    def _extract_fbank_features(self, waveforms: torch.Tensor) -> torch.Tensor:
+        """
+        Compute log-mel spectrogram for batched waveforms.
+
+        Args:
+            waveforms: [batch, samples] float32 tensor on target device
+
+        Returns:
+            [batch, n_mels, frames] float32 tensor (log-mel spectrogram)
+        """
+        device = waveforms.device
+        self._ensure_buffers(device)
+
+        # STFT: [batch, samples] -> [batch, n_fft//2+1, frames] complex
+        stft = torch.stft(
+            waveforms,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=self._window,
+            return_complex=True,
+        )
+
+        # Power spectrogram, drop last frame (matching HF implementation)
+        magnitudes = stft[..., :-1].abs() ** 2  # [batch, n_freqs, frames]
+
+        # Apply mel filterbank: [n_mels, n_freqs] @ [batch, n_freqs, frames]
+        # -> [batch, n_mels, frames]
+        mel_spec = torch.matmul(self._mel_filters, magnitudes)
+
+        # Log scale with floor
+        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+
+        # Per-sample normalization (max - 8.0 floor, then scale)
+        max_val = log_spec.amax(dim=(1, 2), keepdim=True)
+        log_spec = torch.maximum(log_spec, max_val - 8.0)
+        log_spec = (log_spec + 4.0) / 4.0
+
+        return log_spec
 
 
 class GlmAsrFeatureInputs(TensorSchema):
@@ -203,7 +440,35 @@ class GlmAsrMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
         return super()._parse_audio_data(data)
 
 
-class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
+class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"]):
+    """
+    GLM-ASR processor that inherits directly from BaseMultiModalProcessor
+    for better performance and cleaner implementation.
+    Uses GPU-accelerated feature extraction for improved throughput.
+    """
+
+    # Shared GPU feature extractor instance (lazy initialized)
+    _gpu_feature_extractor: GPUWhisperFeatureExtractor | None = None
+
+    @classmethod
+    def _get_gpu_feature_extractor(
+        cls,
+        hf_feature_extractor: WhisperFeatureExtractor,
+        device: str = "cuda",
+    ) -> GPUWhisperFeatureExtractor:
+        """Get or create GPU feature extractor matching HF config."""
+        if cls._gpu_feature_extractor is None:
+            cls._gpu_feature_extractor = GPUWhisperFeatureExtractor(
+                feature_size=hf_feature_extractor.feature_size,
+                sampling_rate=hf_feature_extractor.sampling_rate,
+                hop_length=hf_feature_extractor.hop_length,
+                chunk_length=hf_feature_extractor.chunk_length,
+                n_fft=hf_feature_extractor.n_fft,
+                padding_value=hf_feature_extractor.padding_value,
+                device=device,
+            )
+        return cls._gpu_feature_extractor
+
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return GlmAsrMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
@@ -228,6 +493,7 @@ class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
+    # @torch.compile(fullgraph=True)
     def _call_hf_processor(
         self,
         prompt: str,
@@ -235,6 +501,9 @@ class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        """
+        Call processor with GPU-accelerated feature extraction.
+        """
         # Normalize input: handle deprecated key and list conversion.
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
@@ -248,26 +517,131 @@ class GlmAsrMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        # Get processor for chunk counts calculation
+        # Get processor for tokenizer and config
         processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_feature_extractor = processor.feature_extractor
+        tokenizer = processor.tokenizer
 
-        # Call parent method (it will handle sampling_rate)
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        # ===== Audio chunking (CPU, fast) =====
+        sampling_rate = hf_feature_extractor.sampling_rate
+        chunk_length = hf_feature_extractor.chunk_length
+        max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
+        window_size = int(sampling_rate * chunk_length)
+        max_windows = int(max_audio_len // chunk_length)
+
+        per_sample_windows: list[int] = []
+        flat_chunks: list[np.ndarray] = []
+
+        for audio_el in audio_list:
+            # Convert to numpy if needed
+            if isinstance(audio_el, torch.Tensor):
+                audio_el = audio_el.numpy()
+            elif isinstance(audio_el, list):
+                audio_el = np.array(audio_el, dtype=np.float32)
+
+            n_samples = int(audio_el.shape[0])
+            n_win = max(1, (n_samples + window_size - 1) // window_size)
+            if n_win > max_windows:
+                n_win = max_windows
+
+            per_sample_windows.append(n_win)
+            time_cap = min(n_samples, n_win * window_size)
+
+            for i in range(n_win):
+                start = i * window_size
+                end = min((i + 1) * window_size, time_cap)
+                flat_chunks.append(audio_el[start:end])
+
+        # ===== GPU Feature Extraction =====
+        # Check if CUDA is available, fallback to CPU if not
+        use_gpu = torch.cuda.is_available()
+        device = "cuda" if use_gpu else "cpu"
+
+        if use_gpu:
+            # Use GPU-accelerated feature extractor
+            gpu_extractor = self._get_gpu_feature_extractor(
+                hf_feature_extractor, device=device
+            )
+            audio_inputs = gpu_extractor(
+                flat_chunks,
+                sampling_rate=sampling_rate,
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+        else:
+            # Fallback to HF CPU implementation
+            audio_inputs = hf_feature_extractor(
+                flat_chunks,
+                sampling_rate=sampling_rate,
+                return_tensors="pt",
+                padding=True,
+                return_attention_mask=True,
+            )
+
+        # ===== Process attention mask =====
+        padding_mask = audio_inputs.pop("attention_mask")
+        input_features_mask = padding_mask
+
+        # ===== Compute audio token lengths =====
+        chunk_lengths = padding_mask.sum(-1)  # [num_chunks]
+        audio_lengths = torch.stack(
+            [
+                chunk_lengths[
+                    sum(per_sample_windows[:i]) : sum(per_sample_windows[: i + 1])
+                ].sum()
+                for i in range(len(per_sample_windows))
+            ]
         )
 
-        # Postprocess: rename mask and add chunk counts.
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+        # Apply convolution formula to get token counts
+        merge_factor = 4
+        for padding, kernel_size, stride in [(1, 3, 1), (1, 3, 2)]:
+            audio_lengths = (
+                audio_lengths + 2 * padding - (kernel_size - 1) - 1
+            ) // stride + 1
+        audio_tokens_lengths = (audio_lengths - merge_factor) // merge_factor + 1
 
-        # Override chunk counts calculation with GLM-ASR specific logic
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, processor.feature_extractor, processor
+        # ===== Expand audio tokens in text =====
+        import regex as re
+
+        audio_token = getattr(processor, "audio_token", "<|pad|>")
+        text_list = [prompt]
+
+        for i, audio_length in enumerate(audio_tokens_lengths):
+            if i < len(text_list):
+                expanded = re.sub(
+                    re.escape(audio_token),
+                    audio_token * int(audio_length),
+                    text_list[i],
+                )
+                text_list[i] = expanded
+
+        # ===== Tokenize text =====
+        text_inputs = tokenizer(
+            text_list,
+            return_tensors="pt",
+            padding=True,
+            **tok_kwargs,
         )
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+
+        # ===== Combine outputs =====
+        # Move input_features to CPU for compatibility
+        input_features = audio_inputs["input_features"]
+        if input_features.device.type != "cpu":
+            input_features = input_features.cpu()
+        if input_features_mask.device.type != "cpu":
+            input_features_mask = input_features_mask.cpu()
+
+        outputs = BatchFeature(
+            data={
+                **text_inputs,
+                "input_features": input_features,
+                "feature_attention_mask": input_features_mask,
+            },
+            tensor_type="pt",
+        )
+
+        outputs["chunk_counts"] = torch.tensor(per_sample_windows, dtype=torch.long)
 
         return outputs
 
@@ -352,7 +726,12 @@ class GlmAsrForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.audio_tower = GlmAsrEncoder(config.audio_config)
+        # Use optimized vLLM native encoder
+        self.audio_tower = GlmAsrEncoder(
+            config.audio_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "audio_tower"),
+        )
         self.multi_modal_projector = GlmAsrMultiModalProjector(
             config,
             quant_config=quant_config,
@@ -419,12 +798,31 @@ class GlmAsrForConditionalGeneration(
             audio_input.get("chunk_counts"), num_chunks=num_chunks
         )
 
+        # Convert input_features to model dtype (e.g., bfloat16) to match model weights
+        input_features = input_features.to(dtype=self.audio_tower.conv1.weight.dtype)
+
+        # audio_tower returns [batch_size, seq_len, hidden_size] where hidden_size=1280
         audio_hidden_states = self.audio_tower(input_features).last_hidden_state
+
+        # GLM-ASR merges consecutive frames: 4 frames with hidden_size=1280
+        # -> 1 frame with intermediate_size=5120
+        hidden_size = self.config.audio_config.hidden_size
+        intermediate_size = self.config.audio_config.intermediate_size
+        merge_ratio = intermediate_size // hidden_size
+
+        # Truncate sequence length to be divisible by merge_ratio
+        seq_len = audio_hidden_states.shape[1]
+        seq_len_truncated = (seq_len // merge_ratio) * merge_ratio
+        if seq_len_truncated < seq_len:
+            audio_hidden_states = audio_hidden_states[:, :seq_len_truncated, :]
+
+        # Reshape to merge consecutive frames
         audio_hidden_states = audio_hidden_states.reshape(
             num_chunks,
             -1,
-            self.config.audio_config.intermediate_size,
+            intermediate_size,
         )
+
         audio_features = self.multi_modal_projector(audio_hidden_states)
 
         merge_factor = getattr(self.config, "merge_factor", DEFAULT_MERGE_FACTOR)
@@ -444,7 +842,9 @@ class GlmAsrForConditionalGeneration(
         chunk_embeddings = torch.split(
             masked_audio_features, audio_output_lengths.flatten().tolist()
         )
-        return _group_audio_embeddings(chunk_embeddings, chunk_counts)
+        result = _group_audio_embeddings(chunk_embeddings, chunk_counts)
+
+        return result
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
@@ -453,7 +853,9 @@ class GlmAsrForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
+
         masked_audio_features = self._process_audio_input(audio_input)
+
         return masked_audio_features
 
     def forward(
