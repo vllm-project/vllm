@@ -1146,6 +1146,18 @@ class OpenAIServing:
             )
         return None
 
+    @staticmethod
+    def _prepare_extra_chat_template_kwargs(
+        request_chat_template_kwargs: dict[str, Any] | None = None,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Helper to merge server-default and request-specific chat template kwargs."""
+        request_chat_template_kwargs = request_chat_template_kwargs or {}
+        if default_chat_template_kwargs is None:
+            return request_chat_template_kwargs
+        # Apply server defaults first, then request kwargs override.
+        return default_chat_template_kwargs | request_chat_template_kwargs
+
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
@@ -1184,9 +1196,10 @@ class OpenAIServing:
             tools=tool_dicts,
             documents=documents,
         )
-        if default_chat_template_kwargs:
-            _chat_template_kwargs.update(default_chat_template_kwargs)
-        _chat_template_kwargs.update(chat_template_kwargs or {})
+        _chat_template_kwargs |= self._prepare_extra_chat_template_kwargs(
+            chat_template_kwargs,
+            default_chat_template_kwargs,
+        )
 
         request_prompt: str | list[int]
 
