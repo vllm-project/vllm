@@ -106,7 +106,7 @@ def make_nvfp4_moe_kernel(
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
 ) -> mk.FusedMoEModularKernel | None:
-    assert moe_config.dp_size == 1.0
+    assert moe_config.dp_size == 1
 
     UNSUPPORTED_BACKENDS = [
         # TRTLLM does not use the modular kernl abstraction.
