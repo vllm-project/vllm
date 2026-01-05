@@ -11,7 +11,7 @@ temporal pooling for video chunks.
 import math
 from collections.abc import Sequence
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import torch
@@ -425,14 +425,12 @@ class MoonViTEncoderLayer(nn.Module):
         attn_implementation: str = "flash_attention_2",
         activation=F.gelu,
         attn_bias: bool = False,
-        use_deterministic_attn: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
         self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
         self.attn_implementation = attn_implementation
-        self.use_deterministic_attn = use_deterministic_attn
 
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
@@ -470,7 +468,6 @@ class MoonViTEncoderLayer(nn.Module):
             k_cu_seqlens=cu_seqlens,
             max_seqlen_k=max_seqlen,
             max_seqlen_q=max_seqlen,
-            deterministic=self.use_deterministic_attn,
         )
 
         attn_out = self.wo(attn_out)
@@ -508,22 +505,8 @@ class MoonViT3dEncoder(nn.Module):
         num_layers: int,
         block_cfg: dict,
         video_attn_type: str = "spatial_temporal",
-        recompute_method: Literal["uniform", "block", None] = "uniform",
-        recompute_num_layers: int = 1,
-        activation_cpu_offload: bool = False,
-        use_deterministic_attn: bool = False,
     ) -> None:
         super().__init__()
-
-        if recompute_method is None:
-            recompute_method = "uniform"
-        assert recompute_method in ["uniform", "block"], (
-            f'recompute_method must be in ["uniform", "block"], got {recompute_method}'
-        )
-        self.recompute_method = recompute_method
-        self.recompute_num_layers = recompute_num_layers
-        self.activation_cpu_offload = activation_cpu_offload
-        self.use_deterministic_attn = use_deterministic_attn
 
         assert video_attn_type == "spatial_temporal", (
             f'video_attn_type must be "spatial_temporal", got {video_attn_type}'
@@ -533,12 +516,7 @@ class MoonViT3dEncoder(nn.Module):
             block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512
         )
         self.blocks = nn.ModuleList(
-            [
-                MoonViTEncoderLayer(
-                    **block_cfg, use_deterministic_attn=self.use_deterministic_attn
-                )
-                for _ in range(num_layers)
-            ]
+            [MoonViTEncoderLayer(**block_cfg) for _ in range(num_layers)]
         )
         self.final_layernorm = nn.LayerNorm(hidden_dim)
 
@@ -672,10 +650,6 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
                 "attn_bias": True,
                 "attn_implementation": config._attn_implementation,
             },
-            recompute_method=kwargs.get("recompute_method"),
-            recompute_num_layers=kwargs.get("recompute_num_layers", 1),
-            activation_cpu_offload=kwargs.get("activation_cpu_offload", False),
-            use_deterministic_attn=kwargs.get("use_deterministic_attn", False),
             video_attn_type=config.video_attn_type,
         )
 

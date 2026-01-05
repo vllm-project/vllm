@@ -30,8 +30,6 @@ class KimiK2ReasoningParser(ReasoningParser):
         chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
         # Key difference: default to True instead of False
         thinking = bool(chat_kwargs.pop("thinking", True))
-        enable_thinking = bool(chat_kwargs.pop("enable_thinking", True))
-        thinking = thinking or enable_thinking
 
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
