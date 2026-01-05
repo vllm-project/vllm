@@ -240,9 +240,7 @@ async def build_async_engine_client_from_engine_args(
         logger.warning(
             "V1 is enabled, but got --disable-frontend-multiprocessing.")
 
-    from vllm.v1.engine.async_llm import AsyncLLM
-
-    async_llm: AsyncLLM | None = None
+    async_llm = None
 
     # Don't mutate the input client_config
     client_config = dict(client_config) if client_config else {}
@@ -252,24 +250,25 @@ async def build_async_engine_client_from_engine_args(
     try:
         # Check for WorkerController queues in args
         if hasattr(engine_args, 'request_queue') and hasattr(engine_args, 'response_queue'):
+            # Use in-process AsyncLLM to avoid subprocess overhead
+            logger.info(
+                "Using IN-PROCESS EngineCore (avoiding subprocess overhead)")
+            from vllm.worker_controller.engine.async_llm import AsyncLLM as InprocAsyncLLM
             from vllm.worker_controller.executor.remote_executor import RemoteExecutor
 
             class RemoteExecutorFactory(RemoteExecutor):
                 def __init__(self, config):
                     super().__init__(config, engine_args.request_queue, engine_args.response_queue)
 
-            async_llm = AsyncLLM(
+            async_llm = InprocAsyncLLM(
                 vllm_config=vllm_config,
                 executor_class=RemoteExecutorFactory,
                 log_stats=not engine_args.disable_log_stats,
                 usage_context=usage_context,
                 log_requests=engine_args.enable_log_requests,
-                aggregate_engine_logging=engine_args.aggregate_engine_logging,
-                client_addresses=client_config,
-                client_count=client_count,
-                client_index=client_index,
             )
         else:
+            from vllm.v1.engine.async_llm import AsyncLLM
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,

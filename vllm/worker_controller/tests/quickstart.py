@@ -9,7 +9,7 @@ prompts = [
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-llm = LLM(model="facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.5)
+llm = LLM(model="Qwen/Qwen3-1.7B", enforce_eager=True, gpu_memory_utilization=0.5)
 outputs = llm.generate(prompts, sampling_params)
 
 for output in outputs:

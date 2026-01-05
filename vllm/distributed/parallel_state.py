@@ -350,8 +350,7 @@ class GroupCoordinator:
         elif current_platform.is_xpu():
             self.device = torch.device(f"xpu:{local_rank}")
         elif current_platform.is_out_of_tree():
-            self.device = torch.device(
-                f"{current_platform.device_name}:{local_rank}")
+            self.device = torch.device(f"{current_platform.device_name}:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
@@ -661,12 +660,10 @@ class GroupCoordinator:
 
         # Send object size
 
-        torch.distributed.send(
-            size_tensor, dst=self.ranks[dst], group=self.cpu_group)
+        torch.distributed.send(size_tensor, dst=self.ranks[dst], group=self.cpu_group)
 
         # Send object
-        torch.distributed.send(
-            object_tensor, dst=self.ranks[dst], group=self.cpu_group)
+        torch.distributed.send(object_tensor, dst=self.ranks[dst], group=self.cpu_group)
 
         return None
 
@@ -846,8 +843,7 @@ class GroupCoordinator:
         # all happening on CPU. Therefore, we can use the CPU group.
         self.send_object(metadata_list, dst=dst)
 
-        tensor_keys = [k for k, v in tensor_dict.items()
-                       if isinstance(v, torch.Tensor)]
+        tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
         for key, tensor in zip(tensor_keys, tensor_list):
@@ -874,8 +870,7 @@ class GroupCoordinator:
                 )
             else:
                 # use group for GPU tensors
-                torch.distributed.send(
-                    tensor, dst=self.ranks[dst], group=group)
+                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
         return None
 
     def recv_tensor_dict(
@@ -928,8 +923,7 @@ class GroupCoordinator:
         tensor_dict: dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
-                tensor = torch.empty(
-                    value.size, dtype=value.dtype, device=value.device)
+                tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
                     tensor_dict[key] = tensor
@@ -948,8 +942,7 @@ class GroupCoordinator:
 
                 if use_all_gather:
                     orig_shape = tensor.shape
-                    tensor = tensor.reshape(
-                        all_gather_size, -1)[all_gather_rank]
+                    tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -958,8 +951,7 @@ class GroupCoordinator:
                     )
                 else:
                     # use group for GPU tensors
-                    torch.distributed.recv(
-                        tensor, src=self.ranks[src], group=group)
+                    torch.distributed.recv(tensor, src=self.ranks[src], group=group)
                 if use_all_gather:
                     # do the allgather
                     tensor = all_gather_group.all_gather(  # type: ignore
@@ -1011,8 +1003,7 @@ class GroupCoordinator:
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
         if self.device_communicator is not None:
-            self.device_communicator.prepare_communication_buffer_for_model(
-                model)
+            self.device_communicator.prepare_communication_buffer_for_model(model)
 
     def dispatch(
         self,
@@ -1262,8 +1253,7 @@ def init_distributed_environment(
             _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
-        logger.debug(
-            "Detected %d nodes in the distributed environment", _NODE_COUNT)
+        logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
@@ -1272,8 +1262,7 @@ def init_distributed_environment(
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [
-                [dp_rank * world_size_inner_dp +
-                    i for i in range(world_size_inner_dp)]
+                [dp_rank * world_size_inner_dp + i for i in range(world_size_inner_dp)]
                 for dp_rank in range(parallel_config.data_parallel_size)
             ]
             _INNER_DP_WORLD = init_model_parallel_group(
@@ -1321,8 +1310,7 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     rank = torch.distributed.get_rank()
-    backend = backend or torch.distributed.get_backend(
-        get_world_group().device_group)
+    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     data_parallel_size = 1
     from vllm.config import get_current_vllm_config
@@ -1366,8 +1354,7 @@ def initialize_model_parallel(
     # dcp_size must not exceed tp_size, because the world size does not
     # change by DCP, it simply reuses the GPUs of TP group, and split one
     # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1,
-                                    decode_context_model_parallel_size).unbind(0)
+    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
@@ -1381,8 +1368,7 @@ def initialize_model_parallel(
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(
-            2, 3).reshape(-1, pipeline_model_parallel_size).unbind(0)
+        all_ranks.transpose(2, 3).reshape(-1, pipeline_model_parallel_size).unbind(0)
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
@@ -1391,8 +1377,7 @@ def initialize_model_parallel(
 
     global _DP
     assert _DP is None, "data parallel group is already initialized"
-    group_ranks = all_ranks.transpose(
-        1, 3).reshape(-1, data_parallel_size).unbind(0)
+    group_ranks = all_ranks.transpose(1, 3).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(
         group_ranks, get_world_group().local_rank, backend, group_name="dp"
@@ -1432,8 +1417,7 @@ def ensure_model_parallel_initialized(
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
-    backend = backend or torch.distributed.get_backend(
-        get_world_group().device_group)
+    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(
             tensor_model_parallel_size,
@@ -1591,8 +1575,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         if not current_platform.is_cpu():
             torch._C._host_emptyCache()
     except AttributeError:
-        logger.warning(
-            "torch._C._host_emptyCache() only available in Pytorch >=2.5")
+        logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
 def in_the_same_node_as(
