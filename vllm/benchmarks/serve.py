@@ -1031,7 +1031,7 @@ async def benchmark(
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
     if spec_decode_stats is not None:
-        print("{s:{c}^{n}}".format(s=" Speculative Decoding ", n=50, c="-"))
+        print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
         print(
             "{:<40} {:<10.2f}".format(
                 "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
