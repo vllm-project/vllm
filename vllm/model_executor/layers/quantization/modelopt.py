@@ -1589,6 +1589,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+
+        # Use a single gscale for w13.
+        if self.moe.is_act_and_mul and not torch.allclose(
+            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
+        ):
+            logger.warning_once(
+                "w13_weight_scale_2 must match w13_weight_scale_2. "
+                "Accuracy may be affected.",
+                scope="local",
+            )
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
+
         if (
             self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
             or self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -1607,7 +1619,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 layer=layer,
                 w13=layer.w13_weight,
                 w13_scale=layer.w13_weight_scale,
-                w13_scale_2=layer.w13_weight_scale_2,
+                w13_scale_2=w13_weight_scale_2,
                 a13_scale=layer.w13_input_scale,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
@@ -1617,7 +1629,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             # TODO(rob): update marlin prepare to match fp8 moe.
-            a1_scale = None
+            a13_scale = None
             a2_scale = None
             (
                 w13,
@@ -1630,7 +1642,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 layer=layer,
                 w13=layer.w13_weight,
                 w13_scale=layer.w13_weight_scale,
-                w13_scale_2=layer.w13_weight_scale_2,
+                w13_scale_2=w13_weight_scale_2,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
                 w2_scale_2=layer.w2_weight_scale_2,
@@ -1638,15 +1650,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         else:
             raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
 
-        if not self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            replace_parameter(layer, "w13_weight", w13)
-            replace_parameter(layer, "w13_weight_scale", w13_scale)
-            replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-            replace_parameter(layer, "w13_input_scale", a13_scale)
-            replace_parameter(layer, "w2_weight", w2)
-            replace_parameter(layer, "w2_weight_scale", w2_scale)
-            replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-            replace_parameter(layer, "w2_input_scale", a2_scale)
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
+        replace_parameter(layer, "w13_input_scale", a13_scale)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
+        replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.kernel = make_nvfp4_moe_kernel(

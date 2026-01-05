@@ -356,6 +356,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
+        # Use a single gscale for w13.
+        if self.moe.is_act_and_mul and not torch.allclose(
+            layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
+        ):
+            logger.warning_once(
+                "w13_weight_global_scale must match w13_weight_global_scale. "
+                "Accuracy may be affected.",
+                scope="local",
+            )
+        w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
+
         if (
             self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
             or self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -374,7 +385,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 layer=layer,
                 w13=layer.w13_weight_packed,
                 w13_scale=layer.w13_weight_scale,
-                w13_scale_2=(1.0 / layer.w13_weight_global_scale),
+                w13_scale_2=(1.0 / w13_weight_global_scale),
                 a13_scale=(1.0 / layer.w13_input_global_scale),
                 w2=layer.w2_weight_packed,
                 w2_scale=layer.w2_weight_scale,
@@ -397,7 +408,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 layer=layer,
                 w13=layer.w13_weight_packed,
                 w13_scale=layer.w13_weight_scale,
-                w13_scale_2=(1.0 / layer.w13_weight_global_scale[:, 0]),
+                w13_scale_2=(1.0 / w13_weight_global_scale),
                 w2=layer.w2_weight_packed,
                 w2_scale=layer.w2_weight_scale,
                 w2_scale_2=(1.0 / layer.w2_weight_global_scale),
