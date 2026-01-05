@@ -558,10 +558,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
         if self.quant_config.use_int4_w4a16:
             return scalar_types.uint4b8.id
-        elif self.quant_config.use_nvfp4_w4a16:
+        elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
-        elif self.quant_config.use_nvfp4_w4a16:
-            return scalar_types.calar_types.float4_e2m1f.id
         elif (
             self.quant_config.use_fp8_w8a16
             and current_platform.fp8_dtype() == torch.float8_e4m3fn
