@@ -889,7 +889,7 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     # Shard hybrid language model tests
     - pytest -v -s models/language/generation \
@@ -910,7 +910,7 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
