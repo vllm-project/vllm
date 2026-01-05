@@ -32,8 +32,9 @@ logger = init_logger(__name__)
 
 def in_wsl() -> bool:
     # (Old) Reference: https://github.com/microsoft/WSL/issues/4071
-    # (New) Now checks only for WSL1 as WSL2 has full Linux kernel support.
-    return "wsl1" in " ".join(platform.uname()).lower()
+    # (New) We now check for "microsoft" and exclude "wsl2" to detect WSL1 only.
+    uname = " ".join(platform.uname()).lower()
+    return "microsoft" in uname and "wsl2" not in uname
 
 
 class PlatformEnum(enum.Enum):
