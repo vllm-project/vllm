@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -89,7 +88,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -1660,11 +1658,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        self.kernel = make_nvfp4_moe_kernel(
-            backend=self.nvfp4_backend,
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-        )
+        if self.moe_quant_config is not None:
+            self.kernel = make_nvfp4_moe_kernel(
+                backend=self.nvfp4_backend,
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+            )
 
     def prepare_dp_allgather_tensor(
         self,
@@ -1745,30 +1744,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
             )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=get_marlin_input_dtype(""),
-            )
-        elif self.nvfp4_backend in [
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.VLLM_CUTLASS,
-        ]:
+        else:
             assert self.kernel is not None
             return self.kernel(
                 x,
@@ -1782,8 +1758,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-        else:
-            raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
