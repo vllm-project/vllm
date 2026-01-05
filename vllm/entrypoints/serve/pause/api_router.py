@@ -48,7 +48,9 @@ def _require_async_llm(client: EngineClient) -> AsyncLLM:
 async def _pause_all_engines(client: AsyncLLM) -> int:
     """Pause all engine cores, return the step counter from the first core."""
     step_counters = await client.engine_core.call_utility_async("pause")
-    return step_counters[0]
+    if isinstance(step_counters, list):
+        return step_counters[0]
+    return step_counters
 
 
 async def _wait_for_barrier(client: AsyncLLM, target: int) -> int:
