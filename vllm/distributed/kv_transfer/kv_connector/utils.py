@@ -4,6 +4,7 @@
 KV cache helper for store.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -201,6 +202,26 @@ def copy_kv_blocks(
         src_tensor = src_kv_caches[layer_name]
         dst_tensor = dst_kv_caches[layer_name]
         copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+
+
+def yield_req_data(
+    scheduler_output,
+) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
+    """
+    Yields:
+        (req_id, new_block_id_groups, preempted)
+    """
+    # new requests
+    for req_data in scheduler_output.scheduled_new_reqs:
+        yield req_data.req_id, req_data.block_ids, False
+
+    # cached requests
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    yield from zip(
+        cached_reqs.req_ids,
+        cached_reqs.new_block_ids,
+        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
+    )
 
 
 @dataclass
