@@ -14,15 +14,18 @@ def check_sequence_repetition(
     """Check if a sequence of token IDs has a repetition pattern.
     Args:
         token_ids: List of token IDs
-        repetition_pattern_size: Size of the repetition pattern to check
-        min_repetitions: Minimum number of repetitions to consider a pattern
+        max_repetition_pattern_size: Maximum size of the repetition pattern.
+        min_repetition_pattern_size: Minimum size of the repetition pattern.
+        repetition_min_count: Minimum number of repetitions to detect.
     Returns:
-        True if a repetition pattern is found, False otherwise
+        True if a repetition pattern is found, False otherwise.
     """
+    if min_repetition_pattern_size <= 0:
+        min_repetition_pattern_size = 1
+
     if (
         max_repetition_pattern_size <= 0
         or repetition_min_count < 2
-        or min_repetition_pattern_size < 2
         or min_repetition_pattern_size > max_repetition_pattern_size
     ):
         return False

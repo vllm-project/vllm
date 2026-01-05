@@ -248,7 +248,7 @@ class SamplingParams(
 
     # Sequence/N-gram repetition detection parameters
     max_repetition_pattern_size: int = 0
-    """Size of N-gram pattern to detect for sequence repetition.
+    """Maximum size of N-gram pattern to detect for sequence repetition.
     Set to 0 to disable. Example: 3 for detecting 'this is fun' repeated.
     Must be used together with repetition_min_count."""
 
@@ -259,7 +259,7 @@ class SamplingParams(
 
     min_repetition_pattern_size: int = 0
     """Minimum N-gram pattern size to check for sequence repetition.
-    Set to 0 to disable minimum (start checking from size 1).
+    If set to 0, it defaults to 1.
     Must be <= max_repetition_pattern_size."""
 
     @staticmethod
