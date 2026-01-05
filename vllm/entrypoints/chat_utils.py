@@ -749,7 +749,7 @@ def build_video_prompts_from_mm_data(
         if isinstance(item, dict):
             if item.get("type") == "video_chunk":
                 video_idx = item.get("video_idx", 0)
-                prompt = item.get("prompt") or ""
+                prompt = item.get("prompt", "")
                 video_prompts_dict[video_idx].append(prompt)
         elif hasattr(item, "type") and getattr(item, "type", None) == "video_chunk":
             video_idx = getattr(item, "video_idx", 0)
