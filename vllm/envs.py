@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_EXPOSED_SPLIT: bool = False
     VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -1064,6 +1065,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    # If set, vLLM will expose the MLA prefill/decode split to torch.compile,
+    # enabling fusion opportunities for surrounding GEMMs/pointwise ops.
+    # disabled by default.
+    "VLLM_MLA_EXPOSED_SPLIT": lambda: bool(
+        int(os.getenv("VLLM_MLA_EXPOSED_SPLIT", "0"))
+    ),
     # If set, vLLM will pick up the provided Flash Attention MLA
     # max number splits for cuda graph decode
     "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": lambda: int(
