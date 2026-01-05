@@ -19,7 +19,11 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    is_torch_equal_or_newer,
+    set_random_seed,
+)
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -320,7 +324,7 @@ def _test_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     hf_config_override = None
     if tensor_parallel_size > 1:
@@ -557,9 +561,21 @@ def test_causal_backend_correctness(
         if is_torch_equal_or_newer("2.9.0.dev0")
         else []
     )
-    SMALL_BLOCK_BACKENDS = [
-        x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
-    ]
+
+    if current_platform.is_rocm():
+        SMALL_BLOCK_BACKENDS = [
+            x
+            for x in BACKENDS_TO_TEST
+            if (
+                x not in LARGE_BLOCK_BACKENDS
+                and x is not AttentionBackendEnum.FLASH_ATTN
+            )
+        ]
+    else:
+        SMALL_BLOCK_BACKENDS = [
+            x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+        ]
+
     _test_backend_correctness(
         batch_spec,
         model,
@@ -580,12 +596,20 @@ def test_causal_backend_correctness(
         )
 
 
-SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    AttentionBackendEnum.FLASH_ATTN,
-    AttentionBackendEnum.FLEX_ATTENTION,
-    AttentionBackendEnum.TRITON_ATTN,
-    "FLEX_ATTENTION_SLOW",
-]
+if current_platform.is_rocm():
+    # FLASH_ATTN is not supported on ROCm
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
+else:
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
 
 
 @pytest.mark.parametrize(
