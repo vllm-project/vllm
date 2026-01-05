@@ -1415,6 +1415,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
+        if (
+            not self.moe.is_act_and_mul
+            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
+        ):
+            raise NotImplementedError(
+                "Non-gated activations are only supported by FlashInfer "
+                "CUTLASS NvFP4 MoE backend."
+            )
+
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
@@ -1656,15 +1665,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if not self.moe.is_act_and_mul:
-            assert (
-                self.allow_flashinfer
-                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            ), (
-                "Non-gated activations are only supported by the"
-                " flashinfer CUTLASS backend for modelopt checkpoints"
-            )
-
         if (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
