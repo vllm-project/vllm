@@ -68,7 +68,7 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
     This is defined as a convenience and should work in most cases.
     """
 
-    def uuid(self) -> Any:
+    def uuid(self) -> str:
         """
         Provide a unique identifier for the pass, used in Inductor code cache.
         This should depend on the pass implementation, so that changes to the
