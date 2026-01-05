@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-import torch
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
@@ -75,11 +74,9 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+# Requires Cuda and 8 gpus as well
 @pytest.mark.forked
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 8, reason="Need at least 8 GPUs to run the test."
-)
+@pytest.mark.skip(reason="Skipping due to CI resource constraints")
 def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
     """Test that Mllama4 vision submodules are compiled.
 
@@ -89,8 +86,6 @@ def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
 
     However since we are using TP=8, we compilation_counter will not
     work properly so we will just check the run succeeds rn
-
-    TODO: Figure out how to fix compilation_counter for TP > 1
     """
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
