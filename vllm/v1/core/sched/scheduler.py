@@ -220,23 +220,20 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        self.perf_metrics: ModelMetrics | None = None
-        if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
-            self.perf_metrics = ModelMetrics(vllm_config)
-
         def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
-            has_mamba: bool = any(
+            return any(
                 isinstance(group_spec.kv_cache_spec, MambaSpec)
                 for group_spec in kv_cache_config.kv_cache_groups
             )
-            if vllm_config.model_config.is_hybrid:
-                assert has_mamba, "Hybrid models must have mamba layers"
-            return has_mamba
 
+        self.has_mamba_layers = has_mamba_layers(kv_cache_config)
         self.need_mamba_block_aligned_split = (
-            has_mamba_layers(self.kv_cache_config)
-            and self.cache_config.mamba_cache_mode == "align"
+            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+
+        self.perf_metrics: ModelMetrics | None = None
+        if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
+            self.perf_metrics = ModelMetrics(vllm_config)
 
     def _mamba_block_aligned_split(
         self,
@@ -334,24 +331,23 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            # TODO: merge PR#30618
+            num_tokens_to_compute = (
+                request.num_tokens_with_spec + request.num_output_placeholders
+            )
             # Ensure new tokens for a request in the prefill phase do not contain
             # draft tokens, especially in the last prefill chunk. For a hybrid-model,
             # extra draft tokens would corrupt the generated Mamba state.
             # TODO: This logic does not yet handle resumed requests.
-            if request.num_computed_tokens < request.num_prompt_tokens:
-                num_new_tokens = (
-                    min(
-                        request.num_tokens_with_spec + request.num_output_placeholders,
-                        request.num_prompt_tokens,
-                    )
-                    - request.num_computed_tokens
+            if (
+                self.has_mamba_layers
+                and request.num_computed_tokens < request.num_prompt_tokens
+            ):
+                num_tokens_to_compute = min(
+                    num_tokens_to_compute, request.num_prompt_tokens
                 )
-            else:
-                num_new_tokens = (
-                    request.num_tokens_with_spec
-                    + request.num_output_placeholders
-                    - request.num_computed_tokens
-                )
+            num_new_tokens = num_tokens_to_compute - request.num_computed_tokens
+
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
