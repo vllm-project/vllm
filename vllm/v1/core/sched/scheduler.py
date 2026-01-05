@@ -1349,6 +1349,58 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # If reasoning ends in this step and content tokens were emitted,
+            # drop those content tokens so constrained decoding can start
+            # in the next step. This prevents unconstrained prefixes like
+            # markdown fences when structured output is requested.
+            if (
+                new_token_ids
+                and request.use_structured_output
+                and self.structured_output_manager.reasoner is not None
+                and not self.structured_output_manager.enable_in_reasoning
+            ):
+                structured_req = request.structured_output_request
+                if structured_req is not None and not structured_req.reasoning_ended:
+                    reasoner = self.structured_output_manager.reasoner
+                    full_ids = list(request.all_token_ids) + list(new_token_ids)
+                    delta_ids = list(new_token_ids)
+                    if reasoner.is_reasoning_end_streaming(full_ids, delta_ids):
+                        content_ids = reasoner.extract_content_ids(delta_ids)
+                        if (
+                            content_ids
+                            and len(content_ids) <= len(new_token_ids)
+                            and new_token_ids[-len(content_ids) :] == content_ids
+                        ):
+                            new_token_ids = new_token_ids[: -len(content_ids)]
+
+            # Fallback: if reasoning end tokens are missing but structured
+            # output is requested, detect the first grammar-valid token
+            # sequence in the delta and drop any leading garbage such as
+            # markdown fences.
+            if (
+                new_token_ids
+                and request.use_structured_output
+                and self.structured_output_manager.reasoner is not None
+                and not self.structured_output_manager.enable_in_reasoning
+            ):
+                structured_req = request.structured_output_request
+                if (
+                    structured_req is not None
+                    and not structured_req.reasoning_ended
+                    and structured_req.grammar is not None
+                ):
+                    delta_ids = list(new_token_ids)
+                    grammar = structured_req.grammar
+                    for start_idx in range(len(delta_ids)):
+                        valid_tokens = grammar.validate_tokens(delta_ids[start_idx:])
+                        if valid_tokens:
+                            structured_req.reasoning_ended = True
+                            structured_req.reasoning_ended_by_fallback = True
+                            new_token_ids = delta_ids[
+                                start_idx : start_idx + len(valid_tokens)
+                            ]
+                            break
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
