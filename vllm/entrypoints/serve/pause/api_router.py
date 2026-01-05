@@ -45,17 +45,10 @@ def _require_async_llm(client: EngineClient) -> AsyncLLM:
     return client
 
 
-async def _pause_first_engine(client: AsyncLLM) -> int:
-    """Broadcast pause to all engine cores, return step_counter from first reply."""
-    futures = [
-        client.engine_core._call_utility_async("pause", engine=engine)
-        for engine in client.engine_core.core_engines
-    ]
-    for coro in asyncio.as_completed(futures):
-        step_counter = await coro
-        return step_counter
-    # Should never reach here if there is at least one engine
-    raise RuntimeError("No engine cores available")
+async def _pause_all_engines(client: AsyncLLM) -> int:
+    """Pause all engine cores, return the step counter from the first core."""
+    step_counters = await client.engine_core.call_utility_async("pause")
+    return step_counters[0]
 
 
 async def _wait_for_barrier(client: AsyncLLM, target: int) -> int:
@@ -142,8 +135,14 @@ async def pause_step(
         barrier,
     )
 
+    if no_barrier and barrier is not None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Cannot specify both no_barrier=true and barrier=<value>",
+        )
+
     # 1. Pause immediately, get step_counter from first engine
-    step_counter = await _pause_first_engine(client)
+    step_counter = await _pause_all_engines(client)
 
     # 2. Handle no_barrier case - fast return
     if no_barrier:

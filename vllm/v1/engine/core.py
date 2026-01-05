@@ -921,19 +921,20 @@ class EngineCoreProc(EngineCore):
                 continue
 
             # If we have a target_steps barrier but no work to do, still
-            # increment step_counter so the barrier can be reached.
+            # advance step_counter so the barrier can be reached.
             # This mirrors the DP engine behavior.
             has_work = (self.scheduler.has_requests() or self.batch_queue
                         or self.engines_running)
             if self.target_steps is not None and not has_work:
+                target_steps = self.target_steps
                 logger.debug(
                     "No work but target_steps=%d set, advancing step_counter "
                     "from %d to %d",
-                    self.target_steps,
+                    target_steps,
                     self.step_counter,
-                    self.step_counter + 1,
+                    target_steps,
                 )
-                self.step_counter += 1
+                self.step_counter = target_steps
                 continue
 
             # 2) Step the engine core and return the outputs.
@@ -1391,16 +1392,16 @@ class DPEngineCoreProc(EngineCoreProc):
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
-                    # If we have a target_steps barrier, still increment
+                    # If we have a target_steps barrier, still advance
                     # step_counter so the barrier can be reached.
                     if self.target_steps is not None:
-                        self.step_counter += 1
+                        self.step_counter = self.target_steps
                     continue
 
                 # If we have a target_steps barrier and we're idle, just
-                # increment step_counter without the all-reduce (which can block).
+                # advance step_counter without the all-reduce (which can block).
                 if self.target_steps is not None and not local_unfinished_reqs:
-                    self.step_counter += 1
+                    self.step_counter = self.target_steps
                     continue
 
                 # We are in a running state and so must execute a dummy pass

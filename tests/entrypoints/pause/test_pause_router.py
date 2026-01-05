@@ -116,3 +116,30 @@ class TestPauseStepEndpoint:
         mock_engine_core.call_utility_async.assert_any_call(
             "run_until_target_step_count", 50
         )
+
+    def test_pause_step_multi_engine_returns_first_step(
+        self, client, mock_engine_core
+    ):
+        """
+        If engine utilities return lists, /pause/step uses the first engine's step.
+        """
+
+        async def call_utility_async(method, *args, **kwargs):
+            if method == "pause":
+                return [7, 9]
+            if method == "run_until_target_step_count":
+                return None
+            if method == "get_step_counter":
+                # Make barrier succeed immediately across engines.
+                return [100, 100]
+            raise ValueError(f"Unknown utility method: {method}")
+
+        mock_engine_core.call_utility_async = AsyncMock(side_effect=call_utility_async)
+
+        response = client.post("/pause/step?no_barrier=true")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["paused"] is True
+        assert data["step_counter"] == 7
+
+        mock_engine_core.call_utility_async.assert_any_call("pause")
