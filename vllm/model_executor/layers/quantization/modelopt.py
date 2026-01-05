@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-    FLASHINFER_NVFP4_BACKENDS,
+    FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_quant_config,
@@ -1455,7 +1455,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,
-            allow_flashinfer=self.nvfp4_backend in FLASHINFER_NVFP4_BACKENDS,
+            allow_flashinfer=self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
@@ -1587,7 +1587,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
-        if self.nvfp4_backend in FLASHINFER_NVFP4_BACKENDS:
+        if self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS:
             (
                 w13,
                 w13_scale,
