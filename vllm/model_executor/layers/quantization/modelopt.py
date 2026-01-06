@@ -1623,7 +1623,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        assert not isinstance(x, tuple)
         # Hidden_states in select_experts is only used to extract metadata
         if isinstance(x, tuple):
             x_routing, _ = x
