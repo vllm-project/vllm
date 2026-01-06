@@ -28,24 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 VERSIONS_JSON = REPO_ROOT / "docker" / "versions.json"
 
-# ARGs to extract (these are the key version pins we want to track)
-TRACKED_ARGS = [
-    "CUDA_VERSION",
-    "PYTHON_VERSION",
-    "torch_cuda_arch_list",
-    "max_jobs",
-    "nvcc_threads",
-    "FLASHINFER_VERSION",
-    "BITSANDBYTES_VERSION_X86",
-    "BITSANDBYTES_VERSION_ARM64",
-    "TIMM_VERSION",
-    "RUNAI_MODEL_STREAMER_VERSION",
-    "GDRCOPY_CUDA_VERSION",
-    "DEEPGEMM_GIT_REF",
-    "PPLX_COMMIT_HASH",
-    "DEEPEP_COMMIT_HASH",
-]
-
 # Map Dockerfile ARG names (lowercase) to bake variable names (uppercase)
 # This matches docker-bake.hcl variable naming convention
 BAKE_VAR_NAMES = {
@@ -56,7 +38,7 @@ BAKE_VAR_NAMES = {
 
 
 def parse_dockerfile_args(dockerfile_path: Path) -> dict[str, str]:
-    """Extract ARG defaults from Dockerfile using dockerfile-parse."""
+    """Extract all ARG defaults from Dockerfile using dockerfile-parse."""
     parser = DockerfileParser(path=str(dockerfile_path))
 
     # Extract ARGs from structure (more reliable for multi-stage Dockerfiles)
@@ -73,8 +55,6 @@ def parse_dockerfile_args(dockerfile_path: Path) -> dict[str, str]:
         name, _, default = value.partition("=")
         name = name.strip()
 
-        if name not in TRACKED_ARGS:
-            continue
         if name in args:
             # Keep first occurrence
             continue
@@ -89,17 +69,27 @@ def parse_dockerfile_args(dockerfile_path: Path) -> dict[str, str]:
         if default:
             args[name] = default
 
-    return args
+    # Resolve variable interpolation (e.g., ${CUDA_VERSION} -> 12.9.1)
+    resolved = {}
+    for name, value in args.items():
+        if "${" in value:
+            # Substitute ${VAR} references with their values
+            for ref_name, ref_value in args.items():
+                value = value.replace(f"${{{ref_name}}}", ref_value)
+        # Skip if still has unresolved references (no default available)
+        if "${" not in value:
+            resolved[name] = value
+
+    return resolved
 
 
 def generate_bake_native_json(args: dict[str, str]) -> dict:
     """Generate bake-native JSON structure."""
     variables = {}
-    for name in TRACKED_ARGS:
-        if name in args:
-            # Use uppercase bake variable name if mapped, otherwise keep as-is
-            bake_name = BAKE_VAR_NAMES.get(name, name)
-            variables[bake_name] = {"default": args[name]}
+    for name, value in args.items():
+        # Use uppercase bake variable name if mapped, otherwise keep as-is
+        bake_name = BAKE_VAR_NAMES.get(name, name)
+        variables[bake_name] = {"default": value}
 
     return {
         "_comment": (
