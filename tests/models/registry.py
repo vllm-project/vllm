@@ -189,6 +189,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ArcticForCausalLM": _HfExamplesInfo(
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
+    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo(
         "baichuan-inc/Baichuan-7B", trust_remote_code=True
     ),
