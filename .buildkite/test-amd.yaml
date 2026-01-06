@@ -1356,9 +1356,7 @@ steps:
   # end platform plugin tests
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  # Need tf32 to avoid conflicting precision issue with terratorch on ROCm.
-  # TODO: Remove after next torch update
-  - VLLM_FLOAT32_MATMUL_PRECISION="tf32" pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
