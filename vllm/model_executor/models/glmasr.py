@@ -71,7 +71,6 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
 
 
-# Optimized vLLM Native GlmAsrEncoder Implementation
 class GlmAsrRotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding for GLM-ASR encoder.
@@ -185,14 +184,14 @@ class GlmAsrAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: [batch_size, seq_len, hidden_size]
-            cos: [seq_len, rotary_dim/2] - cosine part of rotary embeddings
-            sin: [seq_len, rotary_dim/2] - sine part of rotary embeddings
+            rotary_pos_emb_cos: [seq_len, rotary_dim/2] - cosine of rotary embeddings
+            rotary_pos_emb_sin: [seq_len, rotary_dim/2] - sine of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
@@ -215,8 +214,8 @@ class GlmAsrAttention(nn.Module):
         # Apply rotary position embeddings using vLLM's ApplyRotaryEmb
         # ApplyRotaryEmb expects x: [batch, seq, heads, head_dim]
         # cos/sin: [seq_len, rotary_dim/2]
-        q = self.apply_rotary_emb(q, cos, sin)
-        k = self.apply_rotary_emb(k, cos, sin)
+        q = self.apply_rotary_emb(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
+        k = self.apply_rotary_emb(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
 
         # Transpose to [batch, num_heads, seq, head_dim] for attention
         q = q.transpose(1, 2)
@@ -330,14 +329,14 @@ class GlmAsrEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: [batch_size, seq_len, hidden_size]
-            cos: [seq_len, rotary_dim/2] - cosine part of rotary embeddings
-            sin: [seq_len, rotary_dim/2] - sine part of rotary embeddings
+            rotary_pos_emb_cos: [seq_len, rotary_dim/2] - cosine of rotary embeddings
+            rotary_pos_emb_sin: [seq_len, rotary_dim/2] - sine of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
@@ -347,8 +346,8 @@ class GlmAsrEncoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            cos=cos,
-            sin=sin,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
         )
         hidden_states = residual + hidden_states
 
@@ -482,13 +481,15 @@ class GlmAsrEncoder(nn.Module):
         output_seq_len = hidden_states.shape[1]
 
         # Compute rotary position embeddings on-demand
-        freqs = self.rotary_emb(output_seq_len)
-        cos = freqs.cos().to(dtype=hidden_states.dtype)
-        sin = freqs.sin().to(dtype=hidden_states.dtype)
+        rotary_pos_emb = self.rotary_emb(output_seq_len)
+        rotary_pos_emb_cos = rotary_pos_emb.cos().to(dtype=hidden_states.dtype)
+        rotary_pos_emb_sin = rotary_pos_emb.sin().to(dtype=hidden_states.dtype)
 
         # Apply transformer layers
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, cos, sin)
+            hidden_states = encoder_layer(
+                hidden_states, rotary_pos_emb_cos, rotary_pos_emb_sin
+            )
 
         # Final layer norm
         hidden_states = self.norm(hidden_states)
