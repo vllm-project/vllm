@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import random
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
@@ -278,6 +279,13 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
+def set_random_seed(seed: int | None) -> None:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
@@ -290,9 +298,7 @@ def create_kv_caches_with_random_flash(
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    from vllm.platforms import current_platform
-
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -335,9 +341,8 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-    from vllm.platforms import current_platform
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -465,9 +470,13 @@ def current_stream() -> torch.cuda.Stream:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
+        # is hurting performance.
+        # On CUDA, we capture and replay cudagraph on the same stream,
+        # so we need to avoid using the default stream as well. The default
+        # stream cannot be used for cudagraph capture, see
+        # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
+        # for more details. Therefore, we create a dedicated stream per process.
+        if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
