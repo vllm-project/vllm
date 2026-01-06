@@ -1695,10 +1695,8 @@ def scaled_fp8_quant(
             in the dynamic quantization case.
         group_shape: Optional tuple (group_m, group_n) specifying the group
             shape for static quantization. Use -1 for "full extent" (e.g.,
-            (-1, -1) for per-tensor, (-1, 1) for per-channel, (1, -1) for
-            per-token, (1, 128) for DeepSeek-style activation quant).
-            Required for 1D scales; optional for 2D scales (will validate
-            against inferred shape if provided).
+            (-1, -1) for per-tensor, (-1, 1) for per-channel, etc.)
+            Required for 1D scales; optional for 2D scales.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and

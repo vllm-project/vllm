@@ -12,11 +12,11 @@ from tests.kernels.quant_utils import (
     ref_dynamic_per_token_quant,
 )
 from tests.kernels.utils import opcheck
-from vllm.utils.torch_utils import set_random_seed
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
 HIDDEN_SIZES = [17, 1024, 1025, 1026, 5137, 8193]
@@ -192,7 +192,6 @@ def test_fp8_quant_large(seed: int) -> None:
 
 
 # Test static FP8 quantization with 2D group scales
-# This tests the new scaled_fp8_quant_kernel_strided_group_shape kernel
 GROUP_SHAPES_2D = [
     (-1, -1),  # Per-tensor
     (-1, 1),  # Per-channel
@@ -243,12 +242,6 @@ def test_static_fp8_quant_group_2d(
     ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
     torch.testing.assert_close(scale, ops_scale)
-
-    # Compare FP8 outputs directly.
-    # ~0.001% of values may differ by 1 FP8 ULP (~10% relative) due to:
-    # - scaled_quantize uses: x * (finfo.max / amax)
-    # - kernel uses: x * (1 / scale) where scale = amax / finfo.max
-    # These are NOT equal in float32 at exact FP8 boundaries.
     torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
 
     opcheck_fp8_quant(ops_out, x, scale=scale)
@@ -282,12 +275,6 @@ def test_static_fp8_quant_1d_scale(
     )
 
     torch.testing.assert_close(scale_1d, ops_scale)
-
-    # Compare FP8 outputs directly.
-    # ~0.001% of values may differ by 1 FP8 ULP (~10% relative) due to:
-    # - scaled_quantize uses: x * (finfo.max / amax)
-    # - kernel uses: x * (1 / scale) where scale = amax / finfo.max
-    # These are NOT equal in float32 at exact FP8 boundaries.
     torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
 
     opcheck_fp8_quant(ops_out, x, scale=scale_1d, group_shape=group_shape)
