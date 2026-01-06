@@ -305,18 +305,19 @@ __global__ void __launch_bounds__(512, 1)
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
 
-  constexpr int mask = ngpus - 1;  // Power-of-2 mask
   const P* rotated_ptrs[ngpus];
-  #pragma unroll
+
+#pragma unroll
   for (int i = 0; i < ngpus; i++) {
-    rotated_ptrs[i] = (const P*)dp.ptrs[(rank + i) & mask];
+    int idx = rank + i;
+    idx -= (idx >= ngpus) * ngpus;
+    rotated_ptrs[i] = (const P*)dp.ptrs[idx];
   }
 
   barrier_at_start<ngpus>(sg, self_sg, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
-    // ((P*)result)[idx] = packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
     ((P*)result)[idx] = packed_reduce<P, ngpus, A>(rotated_ptrs, idx);
   }
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
