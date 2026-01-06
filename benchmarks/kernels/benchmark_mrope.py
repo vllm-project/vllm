@@ -99,7 +99,6 @@ def benchmark_mrope(
     # the parameters to compute the q k v size based on tp_size
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=head_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=rope_parameters,
