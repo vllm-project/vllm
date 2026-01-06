@@ -478,14 +478,10 @@ class OpenAISpeechToText(OpenAIServing):
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
+            if chunk_size_in_s is None:
+                assert len(list_result_generator) == 1, f"`max_audio_clip_s` is set to None, audio cannot be chunked"
             for idx, result_generator in enumerate(list_result_generator):
-                start_time: float
-                if chunk_size_in_s is not None:
-                    start_time = float(idx * chunk_size_in_s)
-                else:
-                    assert idx == 0, f"Cannot chunk audio input for {chunk_size_in_s=}"
-                    start_time = 0.0
-
+                start_time = float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         segments: list[SpeechToTextSegment] = (
