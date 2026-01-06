@@ -325,7 +325,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.hidden_size = config.text_config.hidden_size
         self.vision_tower = MoonVitPretrainedModel(
             config.vision_config,
-            self.use_data_parallel,
+            multimodal_config=model_config.multimodal_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
 
