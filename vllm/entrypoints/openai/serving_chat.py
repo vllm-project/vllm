@@ -82,6 +82,26 @@ from vllm.v1.sample.logits_processor import validate_logits_processors_parameter
 logger = init_logger(__name__)
 
 
+def _build_json_schema_prompt(schema: dict[str, Any]) -> str:
+    """Build prompt from JSON schema to guide model output format."""
+    parts = [
+        "## Response Format",
+        f"```json\n{json.dumps(schema, indent=2)}\n```",
+    ]
+
+    # Extract field descriptions
+    props = schema.get("properties", {})
+    descs = [
+        f"- {k}: {v['description']}"
+        for k, v in props.items()
+        if isinstance(v, dict) and "description" in v
+    ]
+    if descs:
+        parts.append("Field requirements:\n" + "\n".join(descs))
+
+    return "\n\n".join(parts)
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -304,10 +324,28 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
+
+                # Inject JSON schema into prompt so model can follow field descriptions
+                messages_for_template = list(request.messages)
+                if (
+                    request.response_format is not None
+                    and hasattr(request.response_format, "type")
+                    and request.response_format.type == "json_schema"
+                    and request.response_format.json_schema is not None
+                ):
+                    schema = request.response_format.json_schema.json_schema
+                    if schema is not None:
+                        schema_prompt = _build_json_schema_prompt(schema)
+                        schema_message = {
+                            "role": "system",
+                            "content": schema_prompt,
+                        }
+                        messages_for_template.insert(0, schema_message)
+
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
-                    request.messages,
+                    messages_for_template,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
                     add_generation_prompt=request.add_generation_prompt,

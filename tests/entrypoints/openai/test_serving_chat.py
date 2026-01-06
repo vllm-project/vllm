@@ -1645,3 +1645,58 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestJsonSchemaPromptInjection:
+    """Tests for JSON schema prompt injection (Issue #31804)."""
+
+    def test_build_json_schema_prompt_basic(self):
+        from vllm.entrypoints.openai.serving_chat import _build_json_schema_prompt
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+            },
+        }
+        result = _build_json_schema_prompt(schema)
+
+        assert "Response Format" in result
+        assert '"name"' in result
+        assert '"age"' in result
+
+    def test_build_json_schema_prompt_with_descriptions(self):
+        from vllm.entrypoints.openai.serving_chat import _build_json_schema_prompt
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "Country of origin in UPPERCASE",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model name in lowercase",
+                },
+            },
+        }
+        result = _build_json_schema_prompt(schema)
+
+        assert "Country of origin in UPPERCASE" in result
+        assert "Model name in lowercase" in result
+        assert "Field requirements" in result
+
+    def test_build_json_schema_prompt_no_descriptions(self):
+        from vllm.entrypoints.openai.serving_chat import _build_json_schema_prompt
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+            },
+        }
+        result = _build_json_schema_prompt(schema)
+
+        assert "Field requirements" not in result
