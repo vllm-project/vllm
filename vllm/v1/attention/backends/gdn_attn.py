@@ -142,9 +142,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        query_lens = m.query_start_loc_cpu[1:] - m.query_start_loc_cpu[:-1]
-        context_lens = m.seq_lens.cpu() - query_lens
-        context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
+        context_lens_tensor = m.compute_num_computed_tokens()
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if (
