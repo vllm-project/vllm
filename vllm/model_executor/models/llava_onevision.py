@@ -33,13 +33,19 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (
     BaseLlavaNextMultiModalProcessor,
     LlavaNextLikeConfig,
     LlavaNextProcessingInfo,
 )
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -478,7 +484,9 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     info=LlavaOnevisionProcessingInfo,
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
-class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaOnevisionForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -919,3 +927,25 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Map multimodal submodules for LoRA targeting.
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        return num_vision_tokens
