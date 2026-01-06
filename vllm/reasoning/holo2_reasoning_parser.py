@@ -48,7 +48,7 @@ class Holo2ReasoningParser(ReasoningParser):
 
         thinking = bool(chat_kwargs.get("thinking", True))
         enable_thinking = bool(chat_kwargs.get("enable_thinking", True))
-        thinking = thinking or enable_thinking
+        thinking = thinking and enable_thinking
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
