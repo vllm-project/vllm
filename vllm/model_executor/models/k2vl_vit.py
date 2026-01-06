@@ -17,21 +17,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import activations
-
-try:
-    from transformers.activations import PytorchGELUTanh
-except ImportError:
-    from transformers.activations import GELUTanh
-
-    activations.PytorchGELUTanh = GELUTanh
-    PytorchGELUTanh = GELUTanh
-from transformers.activations import GELUActivation, PytorchGELUTanh
+from transformers.activations import GELUActivation
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.configs.k2vl import K2VLConfig, K2VLVisionConfig
@@ -573,50 +565,14 @@ def tpool_patch_merger(
     return outputs
 
 
-class VisionTowerConfig(PretrainedConfig):
-    """Configuration for the vision tower.
+class MoonViT3dPretrainedModel(PreTrainedModel):
+    """Main vision tower model.
 
-    Accepts K2VLVisionConfig directly now that we have a proper vision config.
+    Uses K2VLVisionConfig directly from transformers_utils/configs/k2vl.py.
     """
 
-    model_type = "moonvit3d"
-
-    def __init__(self, config: K2VLVisionConfig, **kwargs):
-        super().__init__(**kwargs)
-        self.patch_size = config.patch_size
-        self.init_pos_emb_height = config.init_pos_emb_height
-        self.init_pos_emb_width = config.init_pos_emb_width
-        self.init_pos_emb_time = config.init_pos_emb_time
-        self.pos_emb_type = config.pos_emb_type
-        self.num_attention_heads = config.num_attention_heads
-        self.num_hidden_layers = config.num_hidden_layers
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.merge_kernel_size = config.merge_kernel_size
-        self.video_attn_type = config.video_attn_type
-        self.merge_type = config.merge_type
-        self._attn_implementation = getattr(
-            config, "_attn_implementation", "flash_attention_2"
-        )
-
-
-class ProjectorConfig:
-    """Configuration for the MM projector."""
-
-    def __init__(self, config: K2VLConfig):
-        self.mm_projector_type = config.mm_projector_type
-        self.mm_hidden_size = config.mm_hidden_size
-        self.hidden_size = config.text_config.hidden_size
-        self.merge_kernel_size = config.merge_kernel_size
-        self.projector_hidden_act = config.projector_hidden_act
-        self.projector_ln_eps = config.projector_ln_eps
-
-
-class MoonViT3dPretrainedModel(PreTrainedModel):
-    """Main vision tower model."""
-
-    config_class = None  # Will be set by K2VL dynamically
-    model_type = "moonvit3d"
+    config_class = K2VLVisionConfig
+    model_type = "k2_vl_vision"
     _no_split_modules = ["PackingTransformer"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
@@ -644,9 +600,11 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
                 "num_heads": config.num_attention_heads,
                 "hidden_dim": config.hidden_size,
                 "mlp_dim": config.intermediate_size,
-                "activation": PytorchGELUTanh(),
+                "activation": get_act_fn("gelu_pytorch_tanh"),
                 "attn_bias": True,
-                "attn_implementation": config._attn_implementation,
+                "attn_implementation": getattr(
+                    config, "_attn_implementation", "flash_attention_2"
+                ),
             },
             video_attn_type=config.video_attn_type,
         )

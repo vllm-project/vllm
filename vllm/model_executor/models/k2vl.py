@@ -16,7 +16,7 @@ This module defines:
 import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import PIL
 import torch
@@ -39,7 +39,6 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.k2vl_vit import (
     K2VLMultiModalProjector,
     MoonViT3dPretrainedModel,
-    VisionTowerConfig,
     vision_tower_forward_auto,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -64,6 +63,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseDummyOptions
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import K2VLConfig
 from vllm.transformers_utils.processor import cached_get_image_processor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
@@ -75,6 +75,26 @@ logger = init_logger(__name__)
 class MaxImageTokenMeta:
     width: int = 3000
     height: int = 3000
+
+
+class K2VLMediaPixelInputs(TensorSchema):
+    """
+    Media input schema for K2-VL model.
+
+    Dimensions:
+        - np: Number of patches (flattened from all media items)
+        - ps: Patch size
+        - nm: Number of media items
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+
+    pixel_values: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("np", 3, "ps", "ps"),
+    ]
+
+    grid_thws: Annotated[torch.Tensor, TensorShape("nm", 3)]
 
 
 class MoonshotKimiVAutoProcessor(ProcessorMixin):
@@ -312,10 +332,9 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = torch.cuda.current_device()
-        # Build vision tower config from K2VLConfig.vision_config
-        vision_config = VisionTowerConfig(config.vision_config)
+        # Build vision tower directly with K2VLVisionConfig
         self.vision_tower = MoonViT3dPretrainedModel(
-            vision_config,
+            config.vision_config,
             self.use_data_parallel,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
@@ -356,7 +375,9 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
-    def _parse_and_validate_media_input(self, **kwargs: object) -> BatchFeature | None:
+    def _parse_and_validate_media_input(
+        self, **kwargs: object
+    ) -> K2VLMediaPixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         grid_thws = kwargs.pop("grid_thws", None)
         if pixel_values is None:
@@ -375,17 +396,19 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, get {type(grid_thws)}"
         )
-        # In some cases (e.g. with merger), image_grid_thw has an extra middle dimension, so reshape is needed
+        # In some cases (e.g. with merger), grid_thws has an extra middle dimension
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
         assert grid_thws.ndim == 2, f"unexpected shape for grid_thws: {grid_thws.shape}"
-        return BatchFeature(
-            data={
-                "pixel_values": pixel_values,
-                "grid_thws": grid_thws,
-            }
+
+        return K2VLMediaPixelInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+            grid_thws=grid_thws,
         )
 
-    def _process_media_input(self, media_input: BatchFeature) -> list[torch.Tensor]:
+    def _process_media_input(
+        self, media_input: K2VLMediaPixelInputs
+    ) -> list[torch.Tensor]:
         # NOTE(moyan): This forward will automatically batch the forward pass internally
         media_features = vision_tower_forward_auto(
             self.vision_tower,

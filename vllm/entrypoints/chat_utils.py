@@ -711,6 +711,7 @@ def rebuild_mm_uuids_from_mm_data(
 
     for item in vision_chunks:
         # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        assert isinstance(item, dict)
         uuid_val = item.get("uuid")
         if uuid_val is not None:
             vision_chunk_uuids.append(uuid_val)
@@ -743,6 +744,7 @@ def build_video_prompts_from_mm_data(
 
     for item in vision_chunks:
         # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        assert isinstance(item, dict)
         if item.get("type") == "video_chunk":
             video_idx = item.get("video_idx", 0)
             prompt = item.get("prompt", "")
