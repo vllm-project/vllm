@@ -437,7 +437,10 @@ class OpenAIServingResponses(OpenAIServing):
                             chat_template_content_format=self.chat_template_content_format,
                         )
                     else:
-                        context = SimpleContext()
+                        context = SimpleContext(
+                            reasoning_parser_cls=self.reasoning_parser,
+                            tokenizer=tokenizer,
+                        )
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
