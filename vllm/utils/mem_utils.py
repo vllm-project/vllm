@@ -159,7 +159,7 @@ class MemoryProfilingResult:
     profile_time: float = 0.0
 
     def __post_init__(self) -> None:
-        device = self.before_create.device
+        device = self.before_create.device_
 
         self.before_profile = MemorySnapshot(device=device, auto_measure=False)
         self.after_profile = MemorySnapshot(device=device, auto_measure=False)
