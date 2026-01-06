@@ -812,7 +812,7 @@ class NixlConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
-        print(f"block_ids: {block_ids}\n\n", flush=True)
+        print(f"request_finished block_ids: {block_ids}\n\n", flush=True)
         if isinstance(block_ids, tuple):
             delay_free_blocks = any(len(group) > 0 for group in block_ids)
         else:
@@ -830,11 +830,11 @@ class NixlConnectorScheduler:
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
-            # trimming down after allocating for the whole sequence length. 
+            # trimming down after allocating for the whole sequence length. Empty 
+            # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
-            # Equal to `get_sw_clippped_blocks` in functionality but for P, after 
-            # manager has cleaned up blocks and marked them as null.
-            block_ids = tuple([block for block in group if block != 0] for group in block_ids)
+            block_ids = self.get_sw_clippped_blocks(block_ids)
+            print(f"request_finished unpadded block_ids: {block_ids}\n\n", flush=True)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
