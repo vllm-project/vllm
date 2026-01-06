@@ -22,7 +22,7 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     max_shared_mem = ops.get_max_shared_memory_per_block_device_attribute(gpu)
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
-    assert max_shared_mem > 0, "max_shared_mem can not be zero"
+    assert max_shared_mem > 0, "max_shared_mem cannot be zero"
     return int(max_shared_mem)
 
 
@@ -159,7 +159,7 @@ class MemoryProfilingResult:
     profile_time: float = 0.0
 
     def __post_init__(self) -> None:
-        device = self.before_create.device
+        device = self.before_create.device_
 
         self.before_profile = MemorySnapshot(device=device, auto_measure=False)
         self.after_profile = MemorySnapshot(device=device, auto_measure=False)
@@ -182,7 +182,9 @@ def memory_profiling(
     baseline_snapshot: MemorySnapshot,
     weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
-    """Memory profiling context manager.
+    """
+    Memory profiling context manager.
+
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.
         Note that, before loading the model weights, we also initialize the device
@@ -222,15 +224,18 @@ def memory_profiling(
     b. 2 GiB reserved for the peak activation tensors (category 2)
     c. 1 GiB used by non-torch components (category 3)
 
-    The memory used for loading weights (a.) is directly given from the argument `weights_memory`.
+    The memory used for loading weights (a.) is directly given from the
+    argument `weights_memory`.
 
-    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
+    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]`
+    during profiling gives (b.).
 
-    The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """  # noqa
+    The increase of `non_torch_memory` from creating the current vLLM instance
+    until after profiling to get (c.).
+    """
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device)
+    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device_)
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,
@@ -257,4 +262,4 @@ def memory_profiling(
     peak_activation_memory = result.torch_peak_increase
     result.non_kv_cache_memory = (
         non_torch_memory + peak_activation_memory + result.weights_memory
-    )  # noqa
+    )
