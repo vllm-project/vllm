@@ -6,7 +6,8 @@ from vllm.reasoning.holo2_reasoning_parser import Holo2ReasoningParser
 
 class Glm4MoeModelReasoningParser(Holo2ReasoningParser):
     """
-    Reasoning parser for the Glm4MoeModel model is same as DeepSeekR1ReasoningParser.
+    Reasoning parser for the Glm4MoeModel model,which inherits from
+    `Holo2ReasoningParser`.
     """
 
     pass
