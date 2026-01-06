@@ -265,11 +265,12 @@ def make_fp8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
-            a2_scale=(1.0 / a2_scale),
+            a2_scale=a2_scale,
+            a1_gscale=(1.0 / a1_scale),
+            a2_gscale=(1.0 / a2_scale),
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
         )
-
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
