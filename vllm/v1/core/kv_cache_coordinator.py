@@ -473,7 +473,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # Full attention: reuse cached blocks (downward-closed property)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if is_full_attn and cached_blocks is not None:
-                    curr_hit_length = len(cached_blocks) * spec.block_size
+                    # Full attention is downward-closed; if the candidate
+                    # `hit_length` was reduced by other groups, trim cached blocks
+                    # so subsequent reuse reflects the current candidate length.
+                    num_blocks = hit_length // spec.block_size
+                    for group_id in group_ids:
+                        blocks = hit_blocks_by_group[group_id]
+                        assert blocks is not None
+                        del blocks[num_blocks:]
+                    curr_hit_length = num_blocks * spec.block_size
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
@@ -495,15 +503,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
             if not reduced:
                 break
-
-        # Trim full attention blocks to final length (downward-closed property)
-        for spec, group_ids, _ in self.attention_groups:
-            if isinstance(spec, FullAttentionSpec):
-                num_blocks = hit_length // spec.block_size
-                for group_id in group_ids:
-                    group_blocks = hit_blocks_by_group[group_id]
-                    if group_blocks is not None:
-                        del group_blocks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
