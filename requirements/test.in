@@ -24,7 +24,7 @@ sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
-timm >=1.0.17 # required for internvl and gemma3n-mm test
+timm==1.0.17 # required for internvl and gemma3n-mm test
 torch==2.9.1
 torchaudio==2.9.1
 torchvision==0.24.1
@@ -37,7 +37,6 @@ opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.9.2 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-timm==1.0.17 # in cpu ci, this can get set to newer, incompatible version
 transformers==4.57.3
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
