@@ -460,7 +460,7 @@ class GlmAsrEncoder(nn.Module):
 
         return input_lengths, output_lengths
 
-    def forward(self, input_features: torch.Tensor):
+    def forward(self, input_features: torch.Tensor) -> _GlmAsrEncoderOutput:
         """
         Forward pass through the encoder.
 
@@ -680,7 +680,9 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         }
 
 
-def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+def _glmasr_field_config(
+    hf_inputs: Mapping[str, torch.Tensor],
+) -> dict[str, MultiModalFieldConfig]:
     """
     Configure multimodal field batching strategy for GLM-ASR.
 
@@ -692,8 +694,8 @@ def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         hf_inputs: Dictionary of preprocessed inputs from HuggingFace processor.
 
     Returns:
-        Dictionary mapping field names to MultiModalFieldConfig objects
-        that specify batching behavior.
+        Dictionary mapping field names to MultiModalFieldConfig objects \
+            that specify batching behavior.
     """
     chunk_counts = hf_inputs.get("chunk_counts")
     if chunk_counts is not None:
