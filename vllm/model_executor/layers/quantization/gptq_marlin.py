@@ -276,7 +276,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
 
-        if not current_platform.is_cuda():
+        if not (current_platform.is_cuda() or current_platform.is_cpu()):
             return False
 
         if quant_method != "gptq":
