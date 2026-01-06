@@ -495,9 +495,9 @@ class GlmAsrEncoder(nn.Module):
             input_features: [batch_size, num_mel_bins, seq_len]
 
         Returns:
-            Object with .last_hidden_state attribute containing
-            [batch_size, seq_len', hidden_size] where seq_len' is
-            the sequence length after convolutions
+            _GlmAsrEncoderOutput: Object with .last_hidden_state attribute \
+                containing [batch_size, seq_len', hidden_size] where seq_len' \
+                is the sequence length after convolutions
         """
         # Apply convolutional layers with GELU activation
         hidden_states = torch.nn.functional.gelu(self.conv1(input_features))
