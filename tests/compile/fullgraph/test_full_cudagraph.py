@@ -71,7 +71,7 @@ def llm_pair(request):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
 
     # FlashInfer is not supported on ROCm
-    if backend_config.name == "FlashInfer" and current_platform.is_rocm():
+    if backend_config == AttentionBackendEnum.FLASHINFER and current_platform.is_rocm():
         pytest.skip("FlashInfer is not supported on ROCm")
 
     env_vars = {
