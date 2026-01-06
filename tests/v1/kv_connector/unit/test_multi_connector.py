@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import builtins
 import filecmp
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiConnectorKVEvents,
     MultiKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
@@ -775,3 +779,294 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+# Mock KVConnectorKVEvents implementation for testing
+class MockKVConnectorKVEvents(KVConnectorKVEvents):
+    """Mock implementation of KVConnectorKVEvents for testing."""
+
+    def __init__(self, events: list[KVCacheEvent] | None = None):
+        self._events = events or []
+        self._num_workers = 1
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        self._events.extend(events)
+
+    def aggregate(self) -> KVConnectorKVEvents:
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        self._num_workers += count
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return self._events
+
+    def get_number_of_workers(self) -> int:
+        return self._num_workers
+
+    def clear_events(self) -> None:
+        self._events.clear()
+
+
+class TestMultiConnectorKVEvents:
+    """Tests for MultiConnectorKVEvents class."""
+
+    def test_init_with_none(self):
+        """Test initialization with None creates empty data dict."""
+        events = MultiConnectorKVEvents(data=None)
+
+        assert events._data == {}
+
+    def test_init_with_data(self):
+        """Test initialization with data dict."""
+        mock_events_1 = MockKVConnectorKVEvents()
+        mock_events_2 = MockKVConnectorKVEvents()
+
+        data = {
+            "connector1": mock_events_1,
+            "connector2": mock_events_2,
+        }
+
+        events = MultiConnectorKVEvents(data=data)
+
+        assert events._data == data
+        assert len(events._data) == 2
+
+    def test_get_connector_events(self):
+        """Test get_connector_events returns the correct events for a connector."""
+        mock_events_1 = MockKVConnectorKVEvents()
+        mock_events_2 = MockKVConnectorKVEvents()
+
+        data = {
+            "connector1": mock_events_1,
+            "connector2": mock_events_2,
+        }
+
+        events = MultiConnectorKVEvents(data=data)
+
+        assert events.get_connector_events("connector1") is mock_events_1
+        assert events.get_connector_events("connector2") is mock_events_2
+
+    def test_get_connector_events_raises_key_error(self):
+        """Test get_connector_events raises KeyError for non-existent connector."""
+        events = MultiConnectorKVEvents(data={"connector1": MockKVConnectorKVEvents()})
+
+        with pytest.raises(KeyError):
+            events.get_connector_events("non_existent")
+
+
+class TestMultiConnectorGetKVCacheEvents:
+    """Tests for MultiConnector.get_kv_connector_kv_cache_events method."""
+
+    def create_mock_multi_connector(self, connectors: list[KVConnectorBase_V1]):
+        """Helper to create a MultiConnector with mock connectors."""
+
+        from vllm.config import VllmConfig
+
+        multi_connector = MultiConnector.__new__(MultiConnector)
+        multi_connector._connectors = connectors
+        # Mock other required attributes
+        multi_connector._requests_to_connector = {}
+        multi_connector._extra_async_saves = {}
+        multi_connector._vllm_config = MagicMock(spec=VllmConfig)
+        return multi_connector
+
+    def test_get_kv_connector_kv_cache_events_returns_none_when_no_connectors(self):
+        """Test returns None when there are no connectors."""
+        multi_connector = self.create_mock_multi_connector([])
+
+        result = multi_connector.get_kv_connector_kv_cache_events()
+
+        assert result is None
+
+    def test_get_kv_connector_kv_cache_events_returns_none_when_no_events(self):
+        """Test returns None when connectors have no events."""
+
+        # Create mock connectors that are not instances of KVConnectorKVEvents
+        mock_connector = MagicMock(spec=KVConnectorBase_V1)
+
+        multi_connector = self.create_mock_multi_connector([mock_connector])
+
+        result = multi_connector.get_kv_connector_kv_cache_events()
+
+        assert result is None
+
+    def test_get_kv_connector_kv_cache_events_returns_none_when_events_are_empty(
+        self,
+    ):
+        """Test returns None when connectors return None for events."""
+
+        # Create a mock connector that is an instance of KVConnectorKVEvents
+        # but returns None
+        mock_connector = MagicMock(spec=KVConnectorBase_V1)
+        mock_connector.__class__.__name__ = "MockConnector"
+
+        # Make it appear as instance of KVConnectorKVEvents
+        def isinstance_override(obj, cls):
+            if cls == KVConnectorKVEvents and obj is mock_connector:
+                return True
+            return object.__instancecheck__(obj)
+
+        original_isinstance = builtins.isinstance
+
+        def patched_isinstance(obj, cls):
+            if cls == KVConnectorKVEvents and obj is mock_connector:
+                return True
+            return original_isinstance(obj, cls)
+
+        builtins.isinstance = patched_isinstance
+
+        try:
+            mock_connector.get_kv_connector_kv_cache_events.return_value = None
+
+            multi_connector = self.create_mock_multi_connector([mock_connector])
+
+            result = multi_connector.get_kv_connector_kv_cache_events()
+
+            assert result is None
+        finally:
+            builtins.isinstance = original_isinstance
+
+    def test_get_kv_connector_kv_cache_events_returns_multi_connector_kv_events(
+        self,
+    ):
+        """Test returns MultiConnectorKVEvents when connectors have events."""
+
+        # Create mock connector with events
+        mock_events = MockKVConnectorKVEvents()
+        mock_connector = MagicMock(spec=[*dir(KVConnectorBase_V1)])
+        mock_connector.__class__.__name__ = "TestConnector"
+
+        # Properly set up isinstance check
+        original_isinstance = builtins.isinstance
+
+        def patched_isinstance(obj, cls):
+            if cls == KVConnectorKVEvents and obj is mock_connector:
+                return True
+            return original_isinstance(obj, cls)
+
+        builtins.isinstance = patched_isinstance
+
+        try:
+            mock_connector.get_kv_connector_kv_cache_events.return_value = mock_events
+
+            multi_connector = self.create_mock_multi_connector([mock_connector])
+
+            result = multi_connector.get_kv_connector_kv_cache_events()
+
+            assert result is not None
+            assert isinstance(original_isinstance(result, MultiConnectorKVEvents), bool)
+            assert original_isinstance(result, MultiConnectorKVEvents)
+            assert "TestConnector" in result._data
+            assert result._data["TestConnector"] is mock_events
+        finally:
+            builtins.isinstance = original_isinstance
+
+    def test_get_kv_connector_kv_cache_events_groups_by_connector_class_name(self):
+        """Test that events are grouped by connector class name."""
+
+        # Create multiple mock connectors with different class names
+        mock_events_1 = MockKVConnectorKVEvents()
+        mock_events_2 = MockKVConnectorKVEvents()
+
+        mock_connector_1 = MagicMock()
+        mock_connector_1.__class__.__name__ = "Connector1"
+        mock_connector_1.get_kv_connector_kv_cache_events.return_value = mock_events_1
+
+        mock_connector_2 = MagicMock()
+        mock_connector_2.__class__.__name__ = "Connector2"
+        mock_connector_2.get_kv_connector_kv_cache_events.return_value = mock_events_2
+
+        original_isinstance = builtins.isinstance
+
+        def patched_isinstance(obj, cls):
+            if cls == KVConnectorKVEvents and obj in [
+                mock_connector_1,
+                mock_connector_2,
+            ]:
+                return True
+            return original_isinstance(obj, cls)
+
+        builtins.isinstance = patched_isinstance
+
+        try:
+            multi_connector = self.create_mock_multi_connector(
+                [mock_connector_1, mock_connector_2]
+            )
+
+            result = multi_connector.get_kv_connector_kv_cache_events()
+
+            assert result is not None
+            assert original_isinstance(result, MultiConnectorKVEvents)
+            assert len(result._data) == 2
+            assert "Connector1" in result._data
+            assert "Connector2" in result._data
+            assert result._data["Connector1"] is mock_events_1
+            assert result._data["Connector2"] is mock_events_2
+        finally:
+            builtins.isinstance = original_isinstance
+
+    def test_get_kv_connector_kv_cache_events_handles_mixed_connectors(self):
+        """Test handling connectors where some have events and some don't."""
+
+        # Connector with events
+        mock_events = MockKVConnectorKVEvents()
+        mock_connector_with_events = MagicMock()
+        mock_connector_with_events.__class__.__name__ = "ConnectorWithEvents"
+        mock_connector_with_events.get_kv_connector_kv_cache_events.return_value = (
+            mock_events
+        )
+
+        # Connector without events (not KVConnectorKVEvents)
+        mock_connector_without_events = MagicMock(spec=KVConnectorBase_V1)
+
+        original_isinstance = builtins.isinstance
+
+        def patched_isinstance(obj, cls):
+            if cls == KVConnectorKVEvents and obj is mock_connector_with_events:
+                return True
+            return original_isinstance(obj, cls)
+
+        builtins.isinstance = patched_isinstance
+
+        try:
+            multi_connector = self.create_mock_multi_connector(
+                [mock_connector_with_events, mock_connector_without_events]
+            )
+
+            result = multi_connector.get_kv_connector_kv_cache_events()
+
+            assert result is not None
+            assert original_isinstance(result, MultiConnectorKVEvents)
+            assert len(result._data) == 1
+            assert "ConnectorWithEvents" in result._data
+            assert result._data["ConnectorWithEvents"] is mock_events
+        finally:
+            builtins.isinstance = original_isinstance
+
+    def test_get_kv_connector_kv_cache_events_handles_connector_returning_none(self):
+        """Test handling connectors that return None from
+        get_kv_connector_kv_cache_events."""
+
+        # Connector that implements interface but returns None
+        mock_connector = MagicMock()
+        mock_connector.__class__.__name__ = "ConnectorReturningNone"
+        mock_connector.get_kv_connector_kv_cache_events.return_value = None
+
+        original_isinstance = builtins.isinstance
+
+        def patched_isinstance(obj, cls):
+            if cls == KVConnectorKVEvents and obj is mock_connector:
+                return True
+            return original_isinstance(obj, cls)
+
+        builtins.isinstance = patched_isinstance
+
+        try:
+            multi_connector = self.create_mock_multi_connector([mock_connector])
+
+            result = multi_connector.get_kv_connector_kv_cache_events()
+
+            assert result is None
+        finally:
+            builtins.isinstance = original_isinstance

@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -100,6 +101,42 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
                 f"with Prometheus metrics support: {self._prom_metrics.keys()}"
             )
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
+
+
+class MultiConnectorKVEvents(KVConnectorKVEvents):
+    """KV events container for multiple connectors."""
+
+    def __init__(self, data: dict[str, KVConnectorKVEvents] | None = None):
+        self._data = data or {}
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        raise NotImplementedError
+
+    def aggregate(self) -> KVConnectorKVEvents:
+        raise NotImplementedError
+
+    def increment_workers(self, count: int = 1) -> None:
+        raise NotImplementedError
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        raise NotImplementedError
+
+    def get_number_of_workers(self) -> int:
+        raise NotImplementedError
+
+    def clear_events(self) -> None:
+        raise NotImplementedError
+
+    def get_connector_events(self, connector_name: str) -> KVConnectorKVEvents:
+        return self._data[connector_name]
+
+    def get_all_connector_events(self) -> dict[str, KVConnectorKVEvents]:
+        return self._data
+
+    def add_connector_events(
+        self, connector_name: str, connector_kv_cache_events: KVConnectorKVEvents
+    ):
+        self._data[connector_name] = connector_kv_cache_events
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -289,11 +326,22 @@ class MultiConnector(KVConnectorBase_V1):
         # Currently no connectors return non-None
         return None
 
-    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
-    # method for the MultiConnector. It should be able to get events from
-    # multiple connectors, handling the case where only a subset of the
-    # requested connectors implements the 'get_kv_connector_kv_cache_events'
-    # WIP: https://github.com/vllm-project/vllm/pull/31811
+    def get_kv_connector_kv_cache_events(self) -> KVConnectorKVEvents | None:
+        """
+        Get KV connector events grouped by connector type.
+        Returns None if no connectors have events.
+        """
+        events_by_connector: dict[str, KVConnectorKVEvents] = {}
+
+        for c in self._connectors:
+            connector_events = c.get_kv_connector_kv_cache_events()
+            if connector_events is not None:
+                events_by_connector[c.__class__.__name__] = connector_events
+
+        if not events_by_connector:
+            return None
+
+        return MultiConnectorKVEvents(data=events_by_connector)
 
     # ==============================
     # Scheduler-side methods
@@ -346,8 +394,23 @@ class MultiConnector(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
+        multi_connector_kv_cache_events = None
+        if connector_output.kv_cache_events is not None:
+            multi_connector_kv_cache_events = copy.deepcopy(
+                connector_output.kv_cache_events
+            )
         for c in self._connectors:
+            if multi_connector_kv_cache_events is not None:
+                try:
+                    connector_output.kv_cache_events = (
+                        multi_connector_kv_cache_events.get_connector_events(
+                            c.__class__.__name__
+                        )
+                    )
+                except KeyError:
+                    connector_output.kv_cache_events = None
             c.update_connector_output(connector_output)
+        connector_output.kv_cache_events = multi_connector_kv_cache_events
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
