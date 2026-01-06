@@ -362,7 +362,11 @@ def prepare_fp8_moe_layer_for_fi(
 
         rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
         register_scales_for_trtllm_fp8_per_tensor_moe(
-            layer, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+            layer,
+            w13_scale=w13_scale,
+            w13_input_scale=w13_input_scale,
+            w2_scale=w2_scale,
+            w2_input_scale=w2_input_scale,
         )
 
     return w13, w2, w13_scale

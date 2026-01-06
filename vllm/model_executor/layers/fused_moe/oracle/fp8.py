@@ -204,7 +204,6 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        is_trtllm = fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
             layer=layer,
             w13=w13,
@@ -213,7 +212,7 @@ def convert_to_fp8_moe_kernel_format(
             w13_input_scale=w13_input_scale,
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
-            is_trtllm=is_trtllm,
+            is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
 
     return w13, w2, w13_scale, w2_scale
