@@ -104,7 +104,7 @@ class SchedulerInterface(ABC):
         Args:
             draft_token_ids: The input draft token ids for each request.
             scheduler_output: Update the given scheduler_output
-            with the corresponding draft token ids.
+                with the corresponding draft token ids.
         """
         raise NotImplementedError
 
