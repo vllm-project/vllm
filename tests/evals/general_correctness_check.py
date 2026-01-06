@@ -183,7 +183,7 @@ async def evaluate_sampling_diversity(
             if result.get("verification_failures", 0) > 0:
                 print(f"  ⚠ {result['verification_failures']} prompts failed")
 
-    return {"test_name": "sampling_diversity", "configs": results}
+    return {"test_name": "sampling_diversity", "configs": results, "num_prompts": len(prompts)}
 
 
 async def test_sampling_config(
@@ -585,7 +585,7 @@ def print_summary(results: dict[str, Any]) -> None:
         test = tests["sampling_diversity"]
         if "configs" in test:
             failures = sum(c.get("verification_failures", 0) for c in test["configs"])
-            total = len(test["configs"]) * len(VERIFICATION_PROMPTS)
+            total = len(test["configs"]) * test.get("num_prompts", len(VERIFICATION_PROMPTS))
             status = "✓" if failures == 0 else "⚠"
             print(f"\n{status} Sampling: {total - failures}/{total} prompts passed")
         else:
