@@ -1,8 +1,13 @@
 #include "cuda_compat.h"
-#include "dispatch_utils.h"
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/util/Exception.h>
 
-#include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
+
+#include "dispatch_utils.h"
+#include "torch_utils.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -603,14 +608,14 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
 }  // namespace vllm
 
 void apply_repetition_penalties_(
-    torch::Tensor& logits,             // [num_seqs, vocab_size], in-place
-    const torch::Tensor& prompt_mask,  // [num_seqs, vocab_size]
-    const torch::Tensor& output_mask,  // [num_seqs, vocab_size]
-    const torch::Tensor& repetition_penalties) {  // [num_seqs]
-  TORCH_CHECK(logits.is_contiguous());
-  TORCH_CHECK(prompt_mask.is_contiguous());
-  TORCH_CHECK(output_mask.is_contiguous());
-  TORCH_CHECK(repetition_penalties.is_contiguous());
+    torch::stable::Tensor& logits,             // [num_seqs, vocab_size]
+    const torch::stable::Tensor& prompt_mask,  // [num_seqs, vocab_size]
+    const torch::stable::Tensor& output_mask,  // [num_seqs, vocab_size]
+    const torch::stable::Tensor& repetition_penalties) {  // [num_seqs]
+  STD_TORCH_CHECK(logits.is_contiguous());
+  STD_TORCH_CHECK(prompt_mask.is_contiguous());
+  STD_TORCH_CHECK(output_mask.is_contiguous());
+  STD_TORCH_CHECK(repetition_penalties.is_contiguous());
 
   int vocab_size = logits.size(-1);
   int num_seqs = logits.size(0);
@@ -620,7 +625,7 @@ void apply_repetition_penalties_(
   // Get number of SMs on the current device
   int sms = 0;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
-                         logits.get_device());
+                         logits.get_device_index());
 
   // Compute tile_num and tile_size
   int tile_num =
@@ -630,99 +635,113 @@ void apply_repetition_penalties_(
   // Each block handles one sequence and a tile of vocab
   dim3 grid(num_seqs, tile_num);
   dim3 block(std::min(tile_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(logits));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(logits.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       logits.scalar_type(), "apply_repetition_penalties_kernel", [&] {
         vllm::apply_repetition_penalties_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
-                logits.data_ptr<scalar_t>(), prompt_mask.data_ptr<bool>(),
-                output_mask.data_ptr<bool>(),
-                repetition_penalties.data_ptr<scalar_t>(), num_seqs, vocab_size,
-                tile_size);
+                logits.mutable_data_ptr<scalar_t>(),
+                prompt_mask.const_data_ptr<bool>(),
+                output_mask.const_data_ptr<bool>(),
+                repetition_penalties.const_data_ptr<scalar_t>(), num_seqs,
+                vocab_size, tile_size);
       });
 }
 
-void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
-                          const torch::Tensor& seqLens, torch::Tensor& indices,
-                          int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t topK) {
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK) {
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kSplitWorkThreshold = 200 * 1000;
   constexpr int kNumThreadsPerBlock = 512;
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(logits.get_device_index());
   const auto numColumns = logits.size(1);
 
   if (numColumns < kSortingAlgorithmThreshold) {
     // Use insertion sort
     vllm::topKPerRowDecode<kNumThreadsPerBlock, false>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
-            logits.data_ptr<float>(), seqLens.data_ptr<int>(),
-            indices.data_ptr<int>(), static_cast<int>(stride0),
+            logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+            indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
             static_cast<int>(next_n));
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
-            logits.data_ptr<float>(), seqLens.data_ptr<int>(),
-            indices.data_ptr<int>(), static_cast<int>(stride0),
+            logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+            indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
             static_cast<int>(next_n));
   } else {
     // Long sequences are run in two steps
     constexpr auto multipleBlocksPerRowConfig = 10;
 
-    const auto outIndicesAux =
-        torch::empty({numRows, multipleBlocksPerRowConfig, topK},
-                     torch::dtype(torch::kInt32).device(logits.device()));
-    const auto outLogitsAux =
-        torch::empty({numRows, multipleBlocksPerRowConfig, topK},
-                     torch::dtype(torch::kFloat).device(logits.device()));
+    // Create intermediate tensors using stable API
+    const auto outIndicesAux = torch::stable::empty(
+        {numRows, multipleBlocksPerRowConfig, topK},
+        torch::headeronly::ScalarType::Int, torch::headeronly::Layout::Strided,
+        logits.device(), false);
+    const auto outLogitsAux = torch::stable::empty(
+        {numRows, multipleBlocksPerRowConfig, topK},
+        torch::headeronly::ScalarType::Float,
+        torch::headeronly::Layout::Strided, logits.device(), false);
 
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
         <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
            2 * topK * sizeof(int32_t), stream>>>(
-            logits.data_ptr<float>(), seqLens.data_ptr<int>(),
-            outIndicesAux.data_ptr<int>(), static_cast<int>(stride0),
+            logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+            outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
-            static_cast<int>(next_n), outLogitsAux.data_ptr<float>());
+            static_cast<int>(next_n), outLogitsAux.mutable_data_ptr<float>());
 
     constexpr int kNumThreadsPerBlockMerge = 1024;
     vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true>
         <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
-            outLogitsAux.data_ptr<float>(), seqLens.data_ptr<int>(),
-            indices.data_ptr<int>(), multipleBlocksPerRowConfig * topK, 1,
-            static_cast<int>(topK), static_cast<int>(next_n), nullptr,
-            multipleBlocksPerRowConfig, outIndicesAux.data_ptr<int>());
+            outLogitsAux.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+            indices.mutable_data_ptr<int>(), multipleBlocksPerRowConfig * topK,
+            1, static_cast<int>(topK), static_cast<int>(next_n), nullptr,
+            multipleBlocksPerRowConfig, outIndicesAux.const_data_ptr<int>());
   }
 }
 
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& rowStarts,
-                           const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1,
-                           int64_t topK) {
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK) {
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kNumThreadsPerBlock = 512;
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(logits.get_device_index());
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
   vllm::topKPerRowPrefill<kNumThreadsPerBlock, false>
       <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-         stream>>>(logits.data_ptr<float>(), rowStarts.data_ptr<int>(),
-                   rowEnds.data_ptr<int>(), indices.data_ptr<int>(),
-                   static_cast<int>(stride0), static_cast<int>(stride1),
-                   static_cast<int>(topK), 0);
+         stream>>>(logits.const_data_ptr<float>(),
+                   rowStarts.const_data_ptr<int>(),
+                   rowEnds.const_data_ptr<int>(),
+                   indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
+                   static_cast<int>(stride1), static_cast<int>(topK), 0);
 
   if (numRows > kSortingAlgorithmThreshold) {
     int numRadixBlocks = numRows - kSortingAlgorithmThreshold;
     vllm::topKPerRowPrefill<kNumThreadsPerBlock, true>
         <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-           stream>>>(logits.data_ptr<float>(), rowStarts.data_ptr<int>(),
-                     rowEnds.data_ptr<int>(), indices.data_ptr<int>(),
-                     static_cast<int>(stride0), static_cast<int>(stride1),
-                     static_cast<int>(topK), kSortingAlgorithmThreshold);
+           stream>>>(
+            logits.const_data_ptr<float>(), rowStarts.const_data_ptr<int>(),
+            rowEnds.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
+            static_cast<int>(stride0), static_cast<int>(stride1),
+            static_cast<int>(topK), kSortingAlgorithmThreshold);
   }
 }

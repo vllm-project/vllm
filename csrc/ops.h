@@ -92,28 +92,6 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
-                        int64_t num_heads_k, int64_t num_heads_v,
-                        int64_t head_dim, double eps, torch::Tensor& q_weight,
-                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
-                        bool is_neox, torch::Tensor& position_ids);
-
-void apply_repetition_penalties_(torch::Tensor& logits,
-                                 const torch::Tensor& prompt_mask,
-                                 const torch::Tensor& output_mask,
-                                 const torch::Tensor& repetition_penalties);
-
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& rowStarts,
-                           const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1,
-                           int64_t topK);
-
-void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
-                          const torch::Tensor& seqLens, torch::Tensor& indices,
-                          int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t topK);
-
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);

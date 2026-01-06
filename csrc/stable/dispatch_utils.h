@@ -30,6 +30,15 @@
   THO_DISPATCH_SWITCH(TYPE, NAME,                            \
                       VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+// Half types dispatch (FP16, BF16 only)
+#define VLLM_STABLE_DISPATCH_CASE_HALF_TYPES(...)                     \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Half, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::BFloat16, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_HALF_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(TYPE, NAME,                        \
+                      VLLM_STABLE_DISPATCH_CASE_HALF_TYPES(__VA_ARGS__))
+
 // FP8 type dispatch - ROCm uses FNUZ format, CUDA uses OCP format
 #ifdef USE_ROCM
   #define VLLM_STABLE_DISPATCH_CASE_FP8_TYPES(...)                 \

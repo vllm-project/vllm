@@ -287,9 +287,6 @@ set(VLLM_EXT_SRC
   "csrc/attention/paged_attention_v2.cu"
   "csrc/attention/merge_attn_states.cu"
   "csrc/attention/vertical_slash_index.cu"
-  "csrc/pos_encoding_kernels.cu"
-  "csrc/fused_qknorm_rope_kernel.cu"
-  "csrc/sampler.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
@@ -942,8 +939,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_STABLE_EXT_SRC
     "csrc/stable/activation_kernels.cu"
     "csrc/stable/cuda_view.cu"
+    "csrc/stable/fused_qknorm_rope_kernel.cu"
     "csrc/stable/layernorm_kernels.cu"
     "csrc/stable/layernorm_quant_kernels.cu"
+    "csrc/stable/pos_encoding_kernels.cu"
+    "csrc/stable/sampler.cu"
     "csrc/stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
     "csrc/stable/torch_bindings.cpp")
 
