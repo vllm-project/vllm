@@ -199,14 +199,14 @@ def get_score_prompt(
             full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
             prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
         else:
-            if model_config.use_pad_token:
-                # cross_encoder models defaults to using pad_token.
+            if model_config.use_sep_token:
+                # cross_encoder models defaults to using separating token.
                 prompt_inputs = tokenizer(
                     text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
                 )
                 full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
             else:
-                # `llm as reranker` models defaults to not using pad_token.
+                # `llm as reranker` defaults to not using separating token.
                 full_prompt = prompt_1 + prompt_2
                 prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
         return full_prompt, prompt_inputs
