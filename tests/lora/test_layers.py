@@ -854,7 +854,7 @@ def test_column_parallel_packed(
 @pytest.mark.parametrize(
     "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS))
 )
-def test_vocab_parallel_embedding_indices(tp_size, seed):
+def test_vocab_parallel_embedding_indices(tp_size, seed, default_vllm_config):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
     added_vocab_size = random.randint(0, 1024)
