@@ -31,7 +31,8 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
@@ -969,8 +970,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            merge_by_field_config=model.merge_by_field_config,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1285,7 +1284,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
-                self.input_batch.num_tokens[i] += 1
+                self.input_batch.num_tokens_no_spec[i] += 1
 
         else:
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
@@ -1293,7 +1292,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_sampled_token_ids = [
                 seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
-            self.input_batch.num_tokens[:num_reqs] += gen_lens
+            self.input_batch.num_tokens_no_spec[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
                 target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
                 self.input_batch.token_ids_cpu[i, target_slice] = (
@@ -1470,11 +1469,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._hidden_states_dtype = out.dtype
 
     def _set_active_loras(
-        self, prompt_lora_mapping, token_lora_mapping, lora_requests
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         torch_xla.sync(wait=False)  # Captures input updates
         super()._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests
+            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
         torch_xla.sync(wait=False)  # Captures metadata updates
 
@@ -2051,15 +2054,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
-        model = cast(SupportsMultiModal, self.model)
         return next(
             grouped_mm_kwargs
             for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                merge_by_field_config=model.merge_by_field_config,
-                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 

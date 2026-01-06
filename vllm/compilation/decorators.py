@@ -28,7 +28,7 @@ from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_dynamo
+from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
 
@@ -316,7 +316,13 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(mod, type, *args, **kwargs):
         def mark_dynamic(arg, dims):
             if type == DynamicShapesType.UNBACKED:
-                torch._dynamo.decorators.mark_unbacked(arg, dims)
+                if is_torch_equal_or_newer("2.10.0.dev"):
+                    for dim in dims:
+                        torch._dynamo.decorators.mark_unbacked(
+                            arg, dim, hint_override=arg.size()[dim]
+                        )
+                else:
+                    torch._dynamo.decorators.mark_unbacked(arg, dims)
             else:
                 torch._dynamo.mark_dynamic(arg, dims)
 
@@ -350,7 +356,13 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        torch._dynamo.decorators.mark_unbacked(arg, dims)
+                        if is_torch_equal_or_newer("2.10.0.dev"):
+                            for dim in dims:
+                                torch._dynamo.decorators.mark_unbacked(
+                                    arg, dim, hint_override=arg.size()[dim]
+                                )
+                        else:
+                            torch._dynamo.decorators.mark_unbacked(arg, dims)
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -378,21 +390,12 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            # Validate that AOT compile is not used with unbacked dynamic
-            # shapes. aot_compile re-allocates backed symbols post dynamo!
-            if ds_type == DynamicShapesType.UNBACKED:
-                raise ValueError(
-                    "AOT compilation is not compatible with UNBACKED dynamic shapes. "
-                    "Please use BACKED or BACKED_SIZE_OBLIVIOUS dynamic shapes type "
-                    "when VLLM_USE_AOT_COMPILE is enabled."
-                )
             from .caching import compilation_config_hash_factors
 
             factors: list[str] = compilation_config_hash_factors(self.vllm_config)
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
-
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
                 "torch_aot_compile",
@@ -400,7 +403,7 @@ def _support_torch_compile(
             )
 
             rank = self.vllm_config.parallel_config.rank
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_index
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             try:
@@ -409,9 +412,12 @@ def _support_torch_compile(
                     open(aot_compilation_path, "rb") as f,
                 ):
                     start_monitoring_torch_compile(self.vllm_config)
-                    loaded_fn = torch.compiler.load_compiled_function(f)
+                    loaded_fn = torch.compiler.load_compiled_function(
+                        f, f_globals=self.forward.__globals__
+                    )
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                loaded_fn.disable_guard_check()
+                if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
+                    loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
@@ -429,11 +435,13 @@ def _support_torch_compile(
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
         if self.compiled:
-            assert not envs.VLLM_USE_AOT_COMPILE
+            assert (
+                not envs.VLLM_USE_AOT_COMPILE
+                or self.vllm_config.compilation_config.backend == "eager"
+            )
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
 
         # This is the path for the first compilation.
-
         # the first compilation needs to have dynamic shapes marked
         _mark_dynamic_inputs(
             self,
@@ -487,6 +495,12 @@ def _support_torch_compile(
         if ds_type == DynamicShapesType.BACKED_SIZE_OBLIVIOUS:
             fx_config_patches["backed_size_oblivious"] = True
 
+        # Prepare inductor config patches
+        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        inductor_config_patches = {}
+        if is_torch_equal_or_newer("2.10.0.dev"):
+            inductor_config_patches["assume_32bit_indexing"] = True
+
         with (
             patch.object(
                 InliningInstructionTranslator, "inline_call_", patched_inline_call
@@ -495,8 +509,13 @@ def _support_torch_compile(
             maybe_use_cudagraph_partition_wrapper(self.vllm_config),
             torch.fx.experimental._config.patch(**fx_config_patches),
             _torch27_patch_tensor_subclasses(),
+            torch._inductor.config.patch(**inductor_config_patches),
         ):
-            if envs.VLLM_USE_AOT_COMPILE:
+            use_aot_compile = envs.VLLM_USE_AOT_COMPILE
+            if self.vllm_config.compilation_config.backend == "eager":
+                logger.warning("Detected eager backend, disabling AOT compile.")
+                use_aot_compile = False
+            if use_aot_compile:
                 self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                 output = self.aot_compiled_fn(self, *args, **kwargs)
                 assert aot_compilation_path is not None

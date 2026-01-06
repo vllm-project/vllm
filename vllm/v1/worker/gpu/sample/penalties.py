@@ -62,6 +62,7 @@ def _penalties_and_temperature_kernel(
                 mask=packed_block < tl.cdiv(vocab_size, 32),
             )
             prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
+            prompt_bin_mask = prompt_bin_mask.to(tl.int1)
             prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
 
             # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.

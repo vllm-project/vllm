@@ -108,7 +108,7 @@ This command will do the following:
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
 ```bash
-export VLLM_PRECOMPILED_WHEEL_COMIMT=$(git rev-parse HEAD~1) # or earlier commit on main
+export VLLM_PRECOMPILED_WHEEL_COMMIT=$(git rev-parse HEAD~1) # or earlier commit on main
 export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 ```

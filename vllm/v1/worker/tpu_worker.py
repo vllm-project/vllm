@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -20,12 +20,11 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -98,10 +97,10 @@ class TPUWorker:
         # MP runtime is initialized.
         self.profiler = None
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if vllm_config.profiler_config.profiler == "torch" and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
-            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            self.profile_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s", self.profile_dir
             )
@@ -207,7 +206,8 @@ class TPUWorker:
         # one compiled bytecode. Having one FX graph/cached bytecode per
         # compiled model is required for `support_torch_compile` decorator to
         # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
@@ -303,6 +303,13 @@ class TPUWorker:
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def check_health(self) -> None:
@@ -334,8 +341,6 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size
         )
-
-        ensure_kv_transfer_initialized(vllm_config)
 
     def shutdown(self) -> None:
         self.model_runner.ensure_kv_transfer_shutdown()

@@ -55,6 +55,26 @@ class ObservabilityConfig:
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
     """Sampling rate for KV cache metrics (0.0, 1.0]. Default 0.01 = 1% of blocks."""
 
+    cudagraph_metrics: bool = False
+    """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
+    dispatch modes, and their observed frequencies at every logging interval)."""
+
+    enable_layerwise_nvtx_tracing: bool = False
+    """Enable layerwise NVTX tracing. This traces the execution of each layer or
+    module in the model and attach informations such as input/output shapes to
+    nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
+
+    enable_mfu_metrics: bool = False
+    """Enable Model FLOPs Utilization (MFU) metrics."""
+
+    enable_mm_processor_stats: bool = False
+    """Enable collection of timing statistics for multimodal processor operations.
+    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
+    argument."""
+
+    enable_mfu_metrics: bool = False
+    """Enable Model FLOPs Utilization (MFU) metrics."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

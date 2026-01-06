@@ -10,8 +10,10 @@ On the client side, run:
     vllm bench serve \
         --backend <backend or endpoint type. Default 'openai'> \
         --label <benchmark result label. Default using backend> \
-        --model <your_model> \
+        --model <your_model. Optional, defaults to first model from server> \
         --dataset-name <dataset_name. Default 'random'> \
+        --input-len <general input length. Optional, maps to dataset-specific args> \
+        --output-len <general output length. Optional, maps to dataset-specific args> \
         --request-rate <request_rate. Default inf> \
         --num-prompts <num_prompts. Default 1000>
 """
@@ -36,7 +38,6 @@ from typing import Any, Literal
 import aiohttp
 import numpy as np
 from tqdm.asyncio import tqdm
-from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samples
 from vllm.benchmarks.lib.endpoint_request_func import (
@@ -47,7 +48,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
@@ -56,6 +57,33 @@ MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
+
+
+async def get_first_model_from_server(
+    base_url: str, headers: dict | None = None
+) -> tuple[str, str]:
+    """Fetch the first model from the server's /v1/models endpoint."""
+    models_url = f"{base_url}/v1/models"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(models_url, headers=headers) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if "data" in data and len(data["data"]) > 0:
+                    return data["data"][0]["id"], data["data"][0]["root"]
+                else:
+                    raise ValueError(
+                        f"No models found on the server at {base_url}. "
+                        "Make sure the server is running and has models loaded."
+                    )
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to fetch models from server at {models_url}. "
+                "Check that:\n"
+                "1. The server is running\n"
+                "2. The server URL is correct\n"
+                f"Error: {e}"
+            ) from e
 
 
 class TaskType(Enum):
@@ -236,7 +264,9 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput], dur_s: float, selected_percentiles: list[float]
+    outputs: list[RequestFuncOutput],
+    dur_s: float,
+    selected_percentiles: list[float],
 ) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
@@ -286,7 +316,7 @@ def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -489,7 +519,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -789,7 +819,7 @@ async def benchmark(
         )
     print(
         "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
+            "Total token throughput (tok/s):", metrics.total_token_throughput
         )
     )
 
@@ -1024,13 +1054,44 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
-        help="Name of the model.",
+        required=False,
+        default=None,
+        help="Name of the model. If not specified, will fetch the first model "
+        "from the server's /v1/models endpoint.",
+    )
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None,
+        help="General input length for datasets. Maps to dataset-specific "
+        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        "If not specified, uses dataset defaults.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="General output length for datasets. Maps to dataset-specific "
+        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
         "--tokenizer",
         type=str,
         help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--tokenizer-mode",
+        type=str,
+        default="auto",
+        help="""Tokenizer mode:\n
+        - "auto" will use the tokenizer from `mistral_common` for Mistral models
+        if available, otherwise it will use the "hf" tokenizer.\n
+        - "hf" will use the fast tokenizer if available.\n
+        - "slow" will always use the slow tokenizer.\n
+        - "mistral" will always use the tokenizer from `mistral_common`.\n
+        - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -1085,8 +1146,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--save-result",
@@ -1097,7 +1157,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--save-detailed",
         action="store_true",
         help="When saving the results, whether to include per request "
-        "information such as response, error, ttfs, tpots, etc.",
+        "information such as response, error, ttfts, tpots, etc.",
     )
     parser.add_argument(
         "--append-result",
@@ -1223,18 +1283,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--tokenizer-mode",
-        type=str,
-        default="auto",
-        choices=["auto", "slow", "mistral", "custom"],
-        help='The tokenizer mode.\n\n* "auto" will use the '
-        'fast tokenizer if available.\n* "slow" will '
-        "always use the slow tokenizer. \n* "
-        '"mistral" will always use the `mistral_common` tokenizer. \n*'
-        '"custom" will use --tokenizer to select the preregistered tokenizer.',
-    )
-
-    parser.add_argument(
         "--served-model-name",
         type=str,
         default=None,
@@ -1325,10 +1373,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
 
     label = args.label
-    model_id = args.model
-    model_name = args.served_model_name
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
-    tokenizer_mode = args.tokenizer_mode
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -1349,6 +1393,18 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
+    # Fetch model from server if not specified
+    if args.model is None:
+        print("Model not specified, fetching first model from server...")
+        model_name, model_id = await get_first_model_from_server(base_url, headers)
+        print(f"First model name: {model_name}, first model id: {model_id}")
+    else:
+        model_name = args.served_model_name
+        model_id = args.model
+
+    tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
+    tokenizer_mode = args.tokenizer_mode
+
     tokenizer = get_tokenizer(
         tokenizer_id,
         tokenizer_mode=tokenizer_mode,
@@ -1360,6 +1416,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # Map general --input-len and --output-len to all dataset-specific arguments
+    if args.input_len is not None:
+        args.random_input_len = args.input_len
+        args.sonnet_input_len = args.input_len
+
+    if args.output_len is not None:
+        args.random_output_len = args.output_len
+        args.sonnet_output_len = args.output_len
+        args.sharegpt_output_len = args.output_len
+        args.custom_output_len = args.output_len
+        args.hf_output_len = args.output_len
+        args.spec_bench_output_len = args.output_len
+        args.prefix_repetition_output_len = args.output_len
 
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length

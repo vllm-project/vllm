@@ -34,7 +34,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, Qwen2ForCausalLM
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
@@ -42,13 +42,9 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
-from vllm.attention.ops.vit_attn_wrappers import (
-    vit_flash_attn_wrapper,
-    vit_torch_sdpa_wrapper,
-)
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
@@ -64,6 +60,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.vision import should_torch_compile_mm_vit
@@ -77,7 +76,7 @@ from vllm.multimodal.evs import (
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
@@ -99,7 +98,6 @@ from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
-    apply_rotary_pos_emb_vision,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -267,10 +265,15 @@ class Qwen2_5_VisionMLP(nn.Module):
         bias: bool = False,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
@@ -304,13 +307,16 @@ class Qwen2_5_VisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.tp_size = (
             1
             if use_data_parallel
@@ -342,18 +348,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
-        self.attn_backend = attn_backend
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
+
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
+            head_size=self.hidden_size_per_attention_head,
+            multimodal_config=multimodal_config,
         )
 
-        self.is_flash_attn_backend = self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,
@@ -380,8 +382,10 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_reshaped = einops.rearrange(
                 qk, "b s two head head_dim -> (two b) s head head_dim", two=2
             )
-            qk_rotated = apply_rotary_pos_emb_vision(
-                qk_reshaped, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin
+            qk_rotated = self.apply_rotary_emb(
+                qk_reshaped,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
             )
             qk_rotated = qk_rotated.view(
                 2,
@@ -394,32 +398,17 @@ class Qwen2_5_VisionAttention(nn.Module):
         else:
             q, k, v = qkv.unbind(dim=2)
 
-        if self.is_flash_attn_backend:
-            context_layer = vit_flash_attn_wrapper(
-                q,
-                k,
-                v,
-                cu_seqlens,
-                max_seqlen,
-                batch_size,
-                self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-            )
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            # Execute attention entry by entry for speed & less VRAM.
-            from vllm.platforms import current_platform
+        context_layer = self.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
 
-            # Never remove the next contiguous logic
-            # Without it, hallucinations occur with the backend
-            if current_platform.is_rocm():
-                q = q.contiguous()
-                k = k.contiguous()
-                v = v.contiguous()
-            context_layer = vit_torch_sdpa_wrapper(
-                q,
-                k,
-                v,
-                cu_seqlens,
-            )
+        context_layer = einops.rearrange(
+            context_layer, "b s h d -> s b (h d)", b=batch_size
+        ).contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -443,10 +432,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -458,10 +445,8 @@ class Qwen2_5_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2_5_VisionMLP(
             dim,
@@ -469,8 +454,8 @@ class Qwen2_5_VisionBlock(nn.Module):
             act_fn=act_fn,
             bias=True,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -542,10 +527,15 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         spatial_merge_size: int = 2,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -586,9 +576,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -598,7 +587,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         depth = vision_config.depth
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
-        self.use_data_parallel = use_data_parallel
         self.out_hidden_size = vision_config.out_hidden_size
 
         # args for get_window_index_thw
@@ -612,7 +600,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # DO NOT MOVE THIS IMPORT
         from vllm.compilation.backends import set_model_tag
 
-        with set_model_tag("Qwen2_5_VisionPatchEmbed"):
+        with set_model_tag("Qwen2_5_VisionPatchEmbed", is_encoder=True):
             self.patch_embed = Qwen2_5_VisionPatchEmbed(
                 patch_size=patch_size,
                 temporal_patch_size=temporal_patch_size,
@@ -624,22 +612,20 @@ class Qwen2_5_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
-        )
-
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
         )
 
         if self.attn_backend not in {
@@ -651,7 +637,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
 
-        with set_model_tag("Qwen2_5_VisionBlock"):
+        with set_model_tag("Qwen2_5_VisionBlock", is_encoder=True):
             self.blocks = nn.ModuleList(
                 [
                     Qwen2_5_VisionBlock(
@@ -661,24 +647,22 @@ class Qwen2_5_VisionTransformer(nn.Module):
                         act_fn=get_act_and_mul_fn(vision_config.hidden_act),
                         norm_layer=norm_layer,
                         quant_config=quant_config,
+                        multimodal_config=multimodal_config,
                         prefix=f"{prefix}.blocks.{layer_idx}",
-                        use_data_parallel=use_data_parallel,
-                        attn_backend=self.attn_backend,
-                        attn_backend_override=attn_backend_override,
                     )
                     for layer_idx in range(depth)
                 ]
             )
 
-        with set_model_tag("Qwen2_5_VisionPatchMerger"):
+        with set_model_tag("Qwen2_5_VisionPatchMerger", is_encoder=True):
             self.merger = Qwen2_5_VisionPatchMerger(
                 d_model=vision_config.out_hidden_size,
                 context_dim=self.hidden_size,
                 norm_layer=norm_layer,
                 spatial_merge_size=self.spatial_merge_size,
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=f"{prefix}.merger",
-                use_data_parallel=use_data_parallel,
             )
 
     @property
@@ -973,7 +957,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
@@ -1039,12 +1023,10 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsMultiModalPruning,
     SupportsMRoPE,
 ):
-    merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     # To ensure correct weight loading and mapping.
@@ -1203,18 +1185,12 @@ class Qwen2_5_VLForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
-            attn_backend_override = (
-                multimodal_config.mm_encoder_attn_backend
-                if multimodal_config is not None
-                else None
-            )
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
-                attn_backend_override=attn_backend_override,
+                multimodal_config=multimodal_config,
             )
         else:
             self.visual = None
@@ -1592,3 +1568,30 @@ class Qwen2_5_VLForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
+
+    @classmethod
+    def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:
+        """
+        Return the language model spec:
+        (language model class, language model attr)
+        """
+        return Qwen2ForCausalLM, "language_model"

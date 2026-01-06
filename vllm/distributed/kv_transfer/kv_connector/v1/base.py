@@ -49,7 +49,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -239,7 +239,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
     ):
         """
         Initialize with a single KV cache tensor used by all layers.
@@ -376,6 +376,14 @@ class KVConnectorBase_V1(ABC):
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """
         Get the KV connector stats collected during the last interval.
+        """
+        return None
+
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        This function should be called by the model runner every time after the
+        model execution and before cleanup.
         """
         return None
 
@@ -572,4 +580,18 @@ class KVConnectorBase_V1(ABC):
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
+        return None
+
+    def reset_cache(self) -> bool | None:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        logger.debug(
+            "Connector cache reset requested, but %s does not implement reset_cache().",
+            type(self).__name__,
+        )
+
         return None

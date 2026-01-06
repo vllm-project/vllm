@@ -7,7 +7,7 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
@@ -37,7 +37,7 @@ def default_server_args(qwen3_lora_files):
 
 
 @pytest.fixture(scope="module")
-def server_fixture(request, default_server_args):  # noqa: F811
+def server_fixture(request, default_server_args):
     use_server_flag = request.param
     if use_server_flag:
         args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]

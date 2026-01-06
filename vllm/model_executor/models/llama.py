@@ -57,7 +57,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -149,8 +155,6 @@ class LlamaAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -197,8 +201,8 @@ class LlamaAttention(nn.Module):
                 # This is a target model, use layer_idx directly
                 effective_layer_idx = layer_idx
             assert effective_layer_idx < len(layer_types), (
-                f"effective_layer_idx: {effective_layer_idx} \
-                is out of bounds for layer_types: {layer_types}"
+                f"effective_layer_idx: {effective_layer_idx} "
+                f"is out of bounds for layer_types: {layer_types}"
             )
 
             is_sliding = layer_types[effective_layer_idx] == "sliding_attention"
@@ -261,11 +265,9 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -702,3 +704,15 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
+
+
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass

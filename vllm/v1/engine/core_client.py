@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -138,7 +139,9 @@ class EngineCoreClient(ABC):
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
-    def reset_prefix_cache(self) -> None:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     def sleep(self, level: int = 1) -> None:
@@ -208,7 +211,9 @@ class EngineCoreClient(ABC):
     async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def reset_prefix_cache_async(self) -> None:
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1) -> None:
@@ -264,7 +269,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step_fn()
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -287,8 +293,12 @@ class InprocClient(EngineCoreClient):
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self) -> None:
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -492,7 +502,7 @@ class MPClient(EngineCoreClient):
 
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
-            dp_rank = parallel_config.data_parallel_rank
+            dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
@@ -519,7 +529,9 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+                ):
                     raise TimeoutError(
                         "Timed out waiting for engines to send"
                         "initial message on input socket."
@@ -751,8 +763,12 @@ class SyncMPClient(MPClient):
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
-    def reset_prefix_cache(self) -> None:
-        self.call_utility("reset_prefix_cache")
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.call_utility(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
@@ -955,8 +971,12 @@ class AsyncMPClient(MPClient):
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
 
-    async def reset_prefix_cache_async(self) -> None:
-        await self.call_utility_async("reset_prefix_cache")
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.call_utility_async(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
@@ -1323,7 +1343,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
-            if not sync_input_socket.poll(timeout=600_000):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
                     "message on input socket."

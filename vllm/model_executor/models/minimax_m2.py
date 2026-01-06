@@ -199,9 +199,13 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        if (
+            rope_parameters is not None
+            and "partial_rotary_factor" not in rope_parameters
+        ):
+            rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -230,8 +234,9 @@ class MiniMaxM2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q, k = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

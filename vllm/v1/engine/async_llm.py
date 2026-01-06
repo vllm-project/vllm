@@ -4,13 +4,13 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
 
 import numpy as np
 import torch
-from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -26,10 +26,9 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
@@ -112,7 +111,7 @@ class AsyncLLM(EngineClient):
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_configs(self.model_config)
+            tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -167,44 +166,28 @@ class AsyncLLM(EngineClient):
             pass
 
         if (
-            envs.VLLM_TORCH_PROFILER_DIR
-            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+            vllm_config.profiler_config.profiler == "torch"
+            and not vllm_config.profiler_config.ignore_frontend
         ):
+            profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                envs.VLLM_TORCH_PROFILER_DIR,
+                profiler_dir,
             )
-            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
-                logger.warning_once(
-                    "Torch profiler received max_iters or delay_iters setting. These "
-                    "are not compatible with the AsyncLLM profiler and will be ignored "
-                    "for the AsyncLLM process. Engine process profiling will still "
-                    "respect these settings. Consider setting "
-                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
-                    "AsyncLLM profiling."
-                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR,
+                    profiler_dir,
                     worker_name=worker_name,
-                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
+                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
                 ),
             )
         else:
             self.profiler = None
-
-    @property
-    @deprecated(
-        "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
-        "The old name will be removed in v0.13."
-    )
-    def processor(self):
-        return self.input_processor
 
     @classmethod
     def from_vllm_config(
@@ -298,14 +281,39 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and not is_pooling
+            and params.prompt_logprobs
+        ):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
+            )
+
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+        _validate_truncation_size(
+            self.model_config.max_model_len,
+            params.truncate_prompt_tokens,
+            tokenization_kwargs,
+        )
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
-            assert prompt_text is None
+            if prompt_text is not None:
+                raise ValueError(
+                    "should only provide prompt_text with EngineCoreRequest"
+                )
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
@@ -322,6 +330,20 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        self.input_processor.assign_request_id(request)
+
+        # We start the output_handler on the first call to add_request() so
+        # we can call __init__ before the event loop, which enables us
+        # to handle startup failure gracefully in the OpenAI server.
+        self._run_output_handler()
+
+        # Respect pause state before accepting new requests.
+        async with self._pause_cond:
+            await self._pause_cond.wait_for(lambda: not self._paused)
+
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(params.output_kind, request.request_id)
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -333,7 +355,7 @@ class AsyncLLM(EngineClient):
         assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, parent_params)
+        parent_request = ParentRequest(request)
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
@@ -394,36 +416,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and sampling_params.prompt_logprobs
-        ):
-            raise ValueError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
-
+        q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            # Wait until generation is resumed if the engine is paused.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-                _validate_truncation_size(
-                    self.model_config.max_model_len,
-                    truncate_prompt_tokens,
-                    tokenization_kwargs,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -454,7 +448,8 @@ class AsyncLLM(EngineClient):
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -473,7 +468,8 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -549,13 +545,15 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str | Iterable[str]) -> None:
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -589,7 +587,7 @@ class AsyncLLM(EngineClient):
         if not wait_for_inflight_requests:
             request_ids = list(self.output_processor.request_states.keys())
             if request_ids:
-                await self.abort(request_ids)
+                await self.abort(request_ids, internal=True)
 
         # Wait for running requests to drain before clearing cache.
         if self.output_processor.has_unfinished_requests():
@@ -636,25 +634,21 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
+        q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            # Respect pause state before accepting new requests.
-            async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._paused)
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+            if truncate_prompt_tokens is not None:
+                warnings.warn(
+                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
+                    "is deprecated and will be removed in v0.15. "
+                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
             q = await self.add_request(
                 request_id,
@@ -682,7 +676,8 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -701,7 +696,8 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -709,10 +705,6 @@ class AsyncLLM(EngineClient):
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
@@ -750,8 +742,12 @@ class AsyncLLM(EngineClient):
         self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self) -> None:
-        await self.engine_core.reset_prefix_cache_async()
+    async def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.engine_core.reset_prefix_cache_async(
+            reset_running_requests, reset_connector
+        )
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()

@@ -82,6 +82,7 @@ class MambaMixer(MambaBase, CustomOp):
             input_size=conv_kernel_size,
             output_size=intermediate_size,
             bias=use_conv_bias,
+            prefix=f"{prefix}.conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -90,7 +91,10 @@ class MambaMixer(MambaBase, CustomOp):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         self.in_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=use_bias
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=use_bias,
+            prefix=f"{prefix}.in_proj",
         )
 
         # selective projection used to make dt, B and C input dependent
@@ -98,12 +102,17 @@ class MambaMixer(MambaBase, CustomOp):
             intermediate_size,
             time_step_rank + ssm_state_size * 2,
             bias=False,
+            prefix=f"{prefix}.x_proj",
         )
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
         # as the bias is added in the selective scan kernel.
         self.dt_proj = ColumnParallelLinear(
-            time_step_rank, intermediate_size, bias=True, skip_bias_add=True
+            time_step_rank,
+            intermediate_size,
+            bias=True,
+            skip_bias_add=True,
+            prefix=f"{prefix}.dt_proj",
         )
 
         def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
@@ -136,6 +145,7 @@ class MambaMixer(MambaBase, CustomOp):
             hidden_size,
             bias=use_bias,
             input_is_parallel=True,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.dt_layernorm = (
@@ -252,7 +262,6 @@ class MambaMixer(MambaBase, CustomOp):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
-            num_padded_decodes = attn_metadata.num_padded_decodes
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -281,7 +290,7 @@ class MambaMixer(MambaBase, CustomOp):
             state_indices_tensor,
             num_prefill_tokens,
             num_prefills,
-            num_padded_decodes,
+            num_decode_tokens,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
@@ -470,24 +479,24 @@ def split_batch_to_prefill_and_decode(
     state_indices_tensor: torch.Tensor,
     num_prefill_tokens: int,
     num_prefills: int,
-    num_padded_decodes: int,
+    num_decode_tokens: int,
 ) -> PrefillDecodeSplit:
-    num_actual_tokens = num_prefill_tokens + num_padded_decodes
+    num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
     # In v1, decode tokens come first, then prefill tokens.
     hidden_states_BC_d, hidden_states_BC_p = torch.split(
         hidden_states_BC[..., :num_actual_tokens],
-        [num_padded_decodes, num_prefill_tokens],
+        [num_decode_tokens, num_prefill_tokens],
         dim=-1,
     )
     gate_d, gate_p = torch.split(
-        gate[..., :num_actual_tokens], [num_padded_decodes, num_prefill_tokens], dim=-1
+        gate[..., :num_actual_tokens], [num_decode_tokens, num_prefill_tokens], dim=-1
     )
 
-    # num_padded_decodes accounts for CUDA graph padding when applicable
+    # num_decode_tokens accounts for CUDA graph padding when applicable
     state_indices_tensor_d, state_indices_tensor_p = torch.split(
-        state_indices_tensor[: num_padded_decodes + num_prefills],
-        [num_padded_decodes, num_prefills],
+        state_indices_tensor[: num_decode_tokens + num_prefills],
+        [num_decode_tokens, num_prefills],
         dim=0,
     )
 

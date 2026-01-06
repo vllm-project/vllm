@@ -50,6 +50,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -60,10 +61,12 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -75,7 +78,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -85,22 +87,27 @@ from vllm.entrypoints.openai.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseInProgressEvent,
+    ResponseInputOutputMessage,
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    VLLMValidationError,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
-    convert_tool_responses_to_completions_format,
+    construct_tool_dicts,
     extract_tool_types,
 )
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -228,7 +235,6 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_parser = self._get_tool_parser(
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
-        self.exclude_tools_when_tool_choice_none = False
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -252,7 +258,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_server = tool_server
 
     def _validate_generator_input(
-        self, engine_prompt: EngineTokensPrompt
+        self, engine_prompt: TokensPrompt
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
@@ -266,6 +272,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message=error_message,
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="input",
             )
         return None
 
@@ -277,6 +284,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message="logprobs are not supported with gpt-oss models",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="logprobs",
             )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
@@ -289,6 +297,7 @@ class OpenAIServingResponses(OpenAIServing):
                     "the vLLM server."
                 ),
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="background",
             )
         if request.previous_input_messages and request.previous_response_id:
             return self.create_error_response(
@@ -296,6 +305,7 @@ class OpenAIServingResponses(OpenAIServing):
                 message="Only one of `previous_input_messages` and "
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="previous_response_id",
             )
         return None
 
@@ -347,11 +357,11 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer()
 
             if self.use_harmony:
-                messages, request_prompts, engine_prompts = (
-                    self._make_request_with_harmony(request, prev_response)
+                messages, engine_prompts = self._make_request_with_harmony(
+                    request, prev_response
                 )
             else:
-                messages, request_prompts, engine_prompts = await self._make_request(
+                messages, engine_prompts = await self._make_request(
                     request, prev_response, tokenizer
                 )
 
@@ -373,7 +383,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -387,7 +397,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
-            for i, engine_prompt in enumerate(engine_prompts):
+            for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
                 if maybe_error is not None:
                     return maybe_error
@@ -413,7 +423,21 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is a feature in development for parsing
+                        # tokens during generation instead of at the end
+                        context = ParsableContext(
+                            response_messages=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser_cls=self.reasoning_parser,
+                            request=request,
+                            tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
+                        )
+                    else:
+                        context = SimpleContext()
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -429,7 +453,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
-                    request_prompt=request_prompts[i],
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
                     context=context,
@@ -439,8 +462,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -525,8 +547,10 @@ class OpenAIServingResponses(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _make_request(
         self,
@@ -534,15 +558,7 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
         tokenizer: TokenizerLike,
     ):
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [
-                convert_tool_responses_to_completions_format(tool.model_dump())
-                for tool in request.tools
-            ]
+        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -550,7 +566,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-        _, request_prompts, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
             messages,
@@ -559,7 +575,7 @@ class OpenAIServingResponses(OpenAIServing):
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
         )
-        return messages, request_prompts, engine_prompts
+        return messages, engine_prompts
 
     def _make_request_with_harmony(
         self,
@@ -572,13 +588,13 @@ class OpenAIServingResponses(OpenAIServing):
             )
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
-        return messages, [prompt_token_ids], [engine_prompt]
+        return messages, [engine_prompt]
 
     async def _initialize_tool_sessions(
         self,
@@ -618,16 +634,15 @@ class OpenAIServingResponses(OpenAIServing):
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
+                return self.create_error_response(e)
 
         # NOTE: Implementation of stauts is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        input_messages = None
-        output_messages = None
+        input_messages: ResponseInputOutputMessage | None = None
+        output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
@@ -640,28 +655,42 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
+                else:
+                    self._raise_if_error(context.finish_reason, request.request_id)
             else:
                 status = "incomplete"
+        elif isinstance(context, ParsableContext):
+            output = context.parser.make_response_output_items_from_parsable_context()
+
+            if request.enable_response_messages:
+                input_messages = context.input_messages
+                output_messages = context.output_messages
+
+            # TODO: Calculate usage.
+            # assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
-            final_res = context.last_output
+            # Use final_output which has accumulated text/token_ids/logprobs
+            final_res = context.final_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
 
+            # finish_reason='error' indicates retryable internal error
+            self._raise_if_error(final_output.finish_reason, request.request_id)
+
             output = self._make_response_output_items(request, final_output, tokenizer)
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
             if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
-                )
+                input_messages = context.input_messages
+                output_messages = context.output_messages
+
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -1044,9 +1073,11 @@ class OpenAIServingResponses(OpenAIServing):
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
+        except GenerationError as e:
+            response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
 
@@ -1067,9 +1098,11 @@ class OpenAIServingResponses(OpenAIServing):
     ):
         try:
             response = await self.responses_full_generator(request, *args, **kwargs)
+        except GenerationError as e:
+            response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
@@ -1086,7 +1119,11 @@ class OpenAIServingResponses(OpenAIServing):
         starting_after: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         if response_id not in self.event_store:
-            raise ValueError(f"Unknown response_id: {response_id}")
+            raise VLLMValidationError(
+                f"Unknown response_id: {response_id}",
+                parameter="response_id",
+                value=response_id,
+            )
 
         event_deque, new_event_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
@@ -1142,6 +1179,7 @@ class OpenAIServingResponses(OpenAIServing):
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message="Cannot cancel a synchronous response.",
+                    param="response_id",
                 )
 
             # Update the status to "cancelled".
@@ -1161,6 +1199,7 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+            param="response_id",
         )
 
     def _make_store_not_supported_error(self) -> ErrorResponse:
@@ -1173,6 +1212,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "starting the vLLM server."
             ),
             status_code=HTTPStatus.BAD_REQUEST,
+            param="store",
         )
 
     async def _process_simple_streaming_events(
@@ -1205,6 +1245,8 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
+                # finish_reason='error' indicates a retryable error
+                self._raise_if_error(output.finish_reason, request.request_id)
                 if reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
                         previous_text=previous_text,
@@ -1499,6 +1541,9 @@ class OpenAIServingResponses(OpenAIServing):
         is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
+
+            # finish_reason='error' indicates a retryable error
+            self._raise_if_error(ctx.finish_reason, request.request_id)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
@@ -1960,7 +2005,6 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            processer = None
             if self.use_harmony:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
@@ -1994,18 +2038,25 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             )
 
-            async for event_data in processer(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-                created_time,
-                _increment_sequence_number_and_return,
-            ):
-                yield event_data
+            try:
+                async for event_data in processer(
+                    request,
+                    sampling_params,
+                    result_generator,
+                    context,
+                    model_name,
+                    tokenizer,
+                    request_metadata,
+                    created_time,
+                    _increment_sequence_number_and_return,
+                ):
+                    yield event_data
+            except GenerationError as e:
+                error_json = self._convert_generation_error_to_streaming_response(e)
+                yield _increment_sequence_number_and_return(
+                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                )
+                return
 
             async def empty_async_generator():
                 # A hack to trick Python to think this is a generator but

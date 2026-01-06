@@ -15,15 +15,19 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor
+from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
-from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
+from vllm.v1.structured_output.backend_guidance import (
+    has_guidance_unsupported_json_features,
+    validate_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
 )
@@ -56,6 +60,7 @@ class InputProcessor:
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -63,10 +68,6 @@ class InputProcessor:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
         self,
@@ -192,29 +193,39 @@ class InputProcessor:
         def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
+
             mm_data = single_prompt.get("multi_modal_data")
             mm_uuids = single_prompt.get("multi_modal_uuids")
             if not mm_data or not mm_uuids:
                 return
 
+            import torch
+
+            def _get_len(items: object):
+                if isinstance(items, dict):  # Embedding inputs
+                    return _get_len(next(iter(items.values()))) if items else 1
+
+                if isinstance(items, list):
+                    return len(items)
+                if isinstance(items, torch.Tensor):
+                    # To keep backwards compatibility for single item embedding input
+                    return 1 if getattr(items, "_is_single_item", False) else len(items)
+
+                return 1
+
             for modality, items in mm_data.items():
                 if modality in mm_uuids:
-                    data_len = len(items) if isinstance(items, list) else 1
-                    uuid_len = (
-                        len(mm_uuids[modality])
-                        if isinstance(mm_uuids[modality], list)
-                        else 1
-                    )
+                    data_len = _get_len(items)
+                    uuid_len = _get_len(mm_uuids[modality])
                     if uuid_len != data_len:
                         raise ValueError(
-                            f"multi_modal_uuids for modality '{modality}' "
+                            f"multi_modal_uuids for modality {modality!r} "
                             "must have same length as data: got "
-                            f"{uuid_len} uuids vs "
-                            f"{data_len} items."
+                            f"{uuid_len} uuids vs {data_len} items."
                         )
                 else:
                     raise ValueError(
-                        f"multi_modal_uuids for modality '{modality}' must "
+                        f"multi_modal_uuids for modality {modality!r} must "
                         "be provided if multi_modal_data is provided."
                     )
 
@@ -333,8 +344,22 @@ class InputProcessor:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
-                if isinstance(self.tokenizer, MistralTokenizer):
+
+                # Check if schema has features unsupported by guidance
+                so_params = params.structured_outputs
+                skip_guidance = False
+                if so_params.json:
+                    if isinstance(so_params.json, str):
+                        import json
+
+                        schema = json.loads(so_params.json)
+                    else:
+                        schema = so_params.json
+                    skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                if isinstance(self.tokenizer, MistralTokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
+                    # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(params)
                     params.structured_outputs._backend = "outlines"
                 else:
@@ -381,6 +406,37 @@ class InputProcessor:
             )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
+
+    def _get_mm_identifier(
+        self,
+        mm_hash: str,
+        lora_request: LoRARequest | None,
+    ) -> str:
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
+        """
+        if (
+            lora_request is None
+            or self.lora_config is None
+            or not self.lora_config.enable_tower_connector_lora
+        ):
+            return mm_hash
+        return f"{lora_request.lora_name}:{mm_hash}"
+
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniquness.
+        """
+        if request.external_req_id is not None:
+            raise ValueError(
+                "The external_req_id field should not be set on EngineCoreRequests"
+                " passed to vLLM; use the request_id field."
+            )
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,
@@ -438,11 +494,13 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with set_request_id(request_id):
+            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
@@ -502,7 +560,10 @@ class InputProcessor:
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=decoder_mm_hashes[modality][idx],
+                        identifier=self._get_mm_identifier(
+                            decoder_mm_hashes[modality][idx],
+                            lora_request,
+                        ),
                         mm_position=decoder_mm_positions[modality][idx],
                     )
                 )
@@ -560,7 +621,7 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            max_input_id = max(prompt_ids or [], default=0)
+            max_input_id = max(prompt_ids or (), default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
             # self.model_config.get_vocab_size() is the model’s vocab size.
@@ -583,6 +644,7 @@ class InputProcessor:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
                     model_config,
+                    self.vllm_config.observability_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
