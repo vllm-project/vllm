@@ -579,8 +579,10 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        self.model_type = getattr(
-            self.vllm_config.model_config.hf_config, "model_type", None
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
         )
         self.is_mxfp4_quant = self._is_mxfp4_quant(quant_config, self.quant_method)
 
