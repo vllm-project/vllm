@@ -3,7 +3,6 @@
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import numpy as np
@@ -84,57 +83,15 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-@lru_cache(maxsize=1)
-def _get_mel_filters(
-    n_fft: int = 400,
-    n_mels: int = 80,
-    sampling_rate: int = 16000,
-    device: torch.device | None = None,
-) -> torch.Tensor:
-    """
-    Compute mel filterbank matrix (cached).
-    Matches WhisperFeatureExtractor's mel_filter_bank with slaney norm/scale.
-    """
-    if device is None:
-        device = torch.device("cpu")
-    # Frequency bins
-    n_freqs = n_fft // 2 + 1
-    all_freqs = torch.linspace(0, sampling_rate // 2, n_freqs, device=device)
-
-    # Mel scale conversion (slaney)
-    min_mel = 0.0
-    max_mel = 2595.0 * np.log10(1.0 + (sampling_rate / 2) / 700.0)
-    mels = torch.linspace(min_mel, max_mel, n_mels + 2, device=device)
-    mel_freqs = 700.0 * (10.0 ** (mels / 2595.0) - 1.0)
-
-    # Create filterbank
-    mel_filters = torch.zeros(n_mels, n_freqs, device=device)
-    for i in range(n_mels):
-        lower = mel_freqs[i]
-        center = mel_freqs[i + 1]
-        upper = mel_freqs[i + 2]
-
-        # Lower slope
-        lower_slope = (all_freqs - lower) / (center - lower + 1e-10)
-        # Upper slope
-        upper_slope = (upper - all_freqs) / (upper - center + 1e-10)
-
-        mel_filters[i] = torch.maximum(
-            torch.zeros_like(all_freqs),
-            torch.minimum(lower_slope, upper_slope),
-        )
-
-    # Slaney normalization
-    enorm = 2.0 / (mel_freqs[2 : n_mels + 2] - mel_freqs[:n_mels])
-    mel_filters *= enorm.unsqueeze(1)
-
-    return mel_filters
-
-
 class GPUWhisperFeatureExtractor:
     """
     GPU-accelerated Whisper feature extractor using PyTorch.
     Computes log-mel spectrogram matching WhisperFeatureExtractor output.
+
+    This implementation reuses the mel filterbank from HuggingFace's
+    WhisperFeatureExtractor to ensure numerical precision (1e-5 tolerance).
+    The key optimization is caching the window and mel_filters tensors on GPU
+    to avoid repeated CPU->GPU transfers.
 
     Key parameters (Whisper defaults):
         - n_fft: 400 (25ms window at 16kHz)
@@ -146,42 +103,42 @@ class GPUWhisperFeatureExtractor:
 
     def __init__(
         self,
-        feature_size: int = 80,
-        sampling_rate: int = 16000,
-        hop_length: int = 160,
-        chunk_length: int = 30,
-        n_fft: int = 400,
-        padding_value: float = 0.0,
+        hf_feature_extractor: WhisperFeatureExtractor,
         device: str | torch.device = "cuda",
     ):
-        self.feature_size = feature_size
-        self.sampling_rate = sampling_rate
-        self.hop_length = hop_length
-        self.chunk_length = chunk_length
-        self.n_fft = n_fft
-        self.padding_value = padding_value
+        # Copy parameters from HF feature extractor
+        self.feature_size = hf_feature_extractor.feature_size
+        self.sampling_rate = hf_feature_extractor.sampling_rate
+        self.hop_length = hf_feature_extractor.hop_length
+        self.chunk_length = hf_feature_extractor.chunk_length
+        self.n_fft = hf_feature_extractor.n_fft
+        self.padding_value = hf_feature_extractor.padding_value
         self.device = torch.device(device) if isinstance(device, str) else device
 
         # Derived parameters
-        self.n_samples = chunk_length * sampling_rate  # 480000 for 30s
-        self.nb_max_frames = self.n_samples // hop_length  # 3000 frames
+        self.n_samples = self.chunk_length * self.sampling_rate  # 480000 for 30s
+        self.nb_max_frames = self.n_samples // self.hop_length  # 3000 frames
 
-        # Pre-compute window and mel filters on device
+        # Store HF's mel_filters (numpy float64) for precision
+        # This is precomputed by HF using librosa-compatible mel_filter_bank
+        self._mel_filters_np: np.ndarray = hf_feature_extractor.mel_filters
+
+        # Cached GPU tensors (lazily initialized)
         self._window: torch.Tensor | None = None
         self._mel_filters: torch.Tensor | None = None
+        self._current_device: torch.device | None = None
 
     def _ensure_buffers(self, device: torch.device) -> None:
-        """Lazily initialize buffers on the target device."""
-        if self._window is None or self._window.device != device:
-            self._window = torch.hann_window(self.n_fft, device=device)
+        """Lazily initialize and cache buffers on the target device."""
+        if self._current_device == device:
+            return
 
-        if self._mel_filters is None or self._mel_filters.device != device:
-            self._mel_filters = _get_mel_filters(
-                n_fft=self.n_fft,
-                n_mels=self.feature_size,
-                sampling_rate=self.sampling_rate,
-                device=device,
-            )
+        self._window = torch.hann_window(self.n_fft, device=device)
+        # Convert from numpy float64 to preserve precision during transfer
+        self._mel_filters = torch.from_numpy(self._mel_filters_np).to(
+            device=device, dtype=torch.float32
+        )
+        self._current_device = device
 
     def __call__(
         self,
@@ -459,12 +416,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         """Get or create GPU feature extractor matching HF config."""
         if cls._gpu_feature_extractor is None:
             cls._gpu_feature_extractor = GPUWhisperFeatureExtractor(
-                feature_size=hf_feature_extractor.feature_size,
-                sampling_rate=hf_feature_extractor.sampling_rate,
-                hop_length=hf_feature_extractor.hop_length,
-                chunk_length=hf_feature_extractor.chunk_length,
-                n_fft=hf_feature_extractor.n_fft,
-                padding_value=hf_feature_extractor.padding_value,
+                hf_feature_extractor=hf_feature_extractor,
                 device=device,
             )
         return cls._gpu_feature_extractor
