@@ -210,12 +210,5 @@ Example: List of modules (suffix matching)
 Example: Regex
 
 ```bash
---lora-target-modules '.*\.self_attn\..*'
-```
-
-You can also use `--lora-exclude-modules` to exclude specific modules.
-For example, to exclude the large FFN/MoE layers (which might be named `mlp`, `gate_up_proj`, `down_proj`, or `gate`):
-
-```bash
---lora-exclude-modules '.*\.mlp\.*' gate_up_proj down_proj gate
-```
++--lora-target-modules '.*\.self_attn\..*'
++```

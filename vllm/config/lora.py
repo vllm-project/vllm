@@ -69,10 +69,6 @@ class LoRAConfig:
     ['*.self_attn.*(q_proj|v_proj)$']. This helps reduce memory consumption,
     because FFN/MoE layers is disabled, which often have a large number of parameters. 
     """
-    lora_exclude_modules: str | list[str] | None = None
-    """List of module names or regex expression of the module names to exclude
-    from LoRA.
-    """
 
     def compute_hash(self) -> str:
         """
@@ -93,7 +89,6 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.lora_target_modules)
-        factors.append(self.lora_exclude_modules)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

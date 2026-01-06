@@ -133,55 +133,34 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
 
 
 @pytest.mark.parametrize(
-    "target_modules,exclude_modules,expected_lora_modules",
+    "target_modules,expected_lora_modules",
     [
         (
-            None,
             None,
             ["dense1", "layer1.dense1", "dense2", "layer1.dense2", "output"],
         ),  # All modules
         (
             "dense1",
-            None,
             ["dense1", "layer1.dense1"],
         ),  # Suffix match
         (
             ["dense1", "dense2"],
-            None,
             ["dense1", "layer1.dense1", "dense2", "layer1.dense2"],
         ),
         (
             [".*dense1"],
-            None,
             ["dense1", "layer1.dense1"],
         ),  # Regex match in list
         (
             ["dense1", ".*dense2"],
-            None,
             ["dense1", "layer1.dense1", "dense2", "layer1.dense2"],
         ),  # Mixed suffix and regex in list
-        (
-            None,
-            ["dense1"],
-            ["dense2", "layer1.dense2", "output"],
-        ),  # Exclude suffix match
-        (
-            None,
-            [".*dense1"],
-            ["dense2", "layer1.dense2", "output"],
-        ),  # Exclude regex match in list
-        (
-            ["dense1", "dense2"],
-            ["layer1.dense1"],
-            ["dense1", "dense2", "layer1.dense2"],
-        ),  # Target with exclude
     ],
 )
 def test_replace_submodules_with_target_modules(
     dist_init,
     dummy_model,
     target_modules,
-    exclude_modules,
     expected_lora_modules,
 ):
     model = dummy_model
@@ -202,7 +181,6 @@ def test_replace_submodules_with_target_modules(
             max_loras=8,
             lora_dtype=DEFAULT_DTYPE,
             lora_target_modules=target_modules,
-            lora_exclude_modules=exclude_modules,
         ),
         torch.device(DEVICES[0]),
     )

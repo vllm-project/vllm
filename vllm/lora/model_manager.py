@@ -499,9 +499,8 @@ class LoRAModelManager:
         if not model.loras:
             raise ValueError(
                 "No layers in the model have LoRA applied. "
-                "It may be caused by incorrect target modules (--lora-target-modules), "
-                "or all modules are excluded (--lora-exclude-modules). "
-                "Please check your settings."
+                "It may be caused by incorrect target modules "
+                "(--lora-target-modules). Please check your settings."
             )
 
         return model
@@ -519,7 +518,7 @@ class LoRAModelManager:
         return self._check_target_module_exists(self.lora_config, module_name)
 
     def _check_target_module_exists(self, config: LoRAConfig, key: str) -> bool:
-        """Check if the module name matches target_modules and not exclude_modules."""
+        """Check if the module name matches target_modules."""
 
         def match_any(patterns: list[str] | str, key: str) -> bool:
             if isinstance(patterns, str):
@@ -536,21 +535,13 @@ class LoRAModelManager:
                     pass
             return False
 
-        if config.lora_exclude_modules and match_any(config.lora_exclude_modules, key):
+        if config.lora_target_modules and not match_any(
+            config.lora_target_modules, key
+        ):
             logger.debug(
-                "Skipping module %s because it is excluded by lora_exclude_modules.",
-                key,
+                "Skipping module %s because it is not in lora_target_modules.", key
             )
             return False
-
-        if config.lora_target_modules:
-            if not match_any(config.lora_target_modules, key):
-                logger.debug(
-                    "Skipping module %s because it is not in lora_target_modules.", key
-                )
-                return False
-            return True
-
         return True
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
