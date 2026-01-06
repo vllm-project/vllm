@@ -8,10 +8,9 @@ import torch
 
 import vllm.model_executor.layers.activation  # noqa F401
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 
 batch_size_range = [1, 16, 128]
 seq_len_range = [1, 16, 64, 1024, 4096]
@@ -30,7 +29,7 @@ def benchmark_activation(
     device = "cuda"
     num_tokens = batch_size * seq_len
     dim = intermediate_size
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     torch.set_default_device(device)
 
     if func_name == "gelu_and_mul":
