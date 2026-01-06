@@ -108,42 +108,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
 #endif
 
-  // Function for fused QK Norm and RoPE
-  ops.def(
-      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
-      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids) -> ()");
-  ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
-
-  // Apply repetition penalties to logits in-place
-  ops.def(
-      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
-      "Tensor output_mask, Tensor repetition_penalties) -> ()");
-  ops.impl("apply_repetition_penalties_", torch::kCUDA,
-           &apply_repetition_penalties_);
-
-  // Optimized top-k per row operation
-  ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, int numRows, int stride0, "
-      "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
-
-  ops.def(
-      "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, "
-      "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
-
-  // Rotary embedding
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def(
-      "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
-  ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
-
   // Quantization ops
 #ifndef USE_ROCM
   // Quantized GEMM for AWQ.

@@ -62,6 +62,34 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed) -> ()");
+
+  // Rotary embedding
+  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
+  m.def(
+      "rotary_embedding(Tensor positions, Tensor! query, Tensor!? key, "
+      "int head_size, Tensor cos_sin_cache, bool is_neox) -> ()");
+
+  // Function for fused QK Norm and RoPE
+  m.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, int num_heads_k, "
+      "int num_heads_v, int head_dim, float eps, Tensor q_weight, "
+      "Tensor k_weight, Tensor cos_sin_cache, bool is_neox, "
+      "Tensor position_ids) -> ()");
+
+  // Apply repetition penalties to logits in-place
+  m.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+
+  // Optimized top-k per row operation
+  m.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, int stride1, int topK) -> "
+      "()");
+  m.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, Tensor seqLens, "
+      "Tensor! indices, int numRows, int stride0, int stride1, int topK) -> "
+      "()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
@@ -91,6 +119,16 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("rms_norm_dynamic_per_token_quant",
          TORCH_BOX(&rms_norm_dynamic_per_token_quant));
   m.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+
+  // Positional encoding
+  m.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  m.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+
+  // Sampler
+  m.impl("apply_repetition_penalties_",
+         TORCH_BOX(&apply_repetition_penalties_));
+  m.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
+  m.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
 
 #ifndef USE_ROCM
   // Utility ops
