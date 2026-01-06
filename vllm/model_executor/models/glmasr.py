@@ -56,7 +56,6 @@ from .glmasr_utils import (
     DEFAULT_MERGE_FACTOR,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
-    _get_num_features_for_item,
     _group_audio_embeddings,
     _normalize_chunk_counts,
     _repeat_kv,
@@ -781,8 +780,20 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         )
 
         # Postprocess: rename mask and add chunk counts
+        # Handle different key names from different transformers versions
         if "input_feature_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_feature_mask")
+        elif "feature_attention_mask" not in outputs and "input_features" in outputs:
+            # If no mask is provided, create one from input_features
+            input_features = outputs["input_features"]
+            if isinstance(input_features, torch.Tensor):
+                # Create a mask of all ones matching the sequence length
+                mask = torch.ones(
+                    input_features.shape[0],
+                    input_features.shape[-1],
+                    dtype=torch.long,
+                )
+                outputs["feature_attention_mask"] = mask
 
         # Get processor for chunk counts calculation
         processor = self.info.get_hf_processor(**mm_kwargs)
@@ -819,21 +830,64 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             audio_token_id = processor.audio_token_id
 
         merge_factor = getattr(config, "merge_factor", DEFAULT_MERGE_FACTOR)
+        conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
         out_mm_data = out_mm_kwargs.get_data()
         feature_attention_mask = out_mm_data.get("feature_attention_mask")
         chunk_counts = out_mm_data.get("chunk_counts")
 
-        def get_replacement_glmasr(item_idx: int):
-            conv_params = getattr(config, "conv_params", DEFAULT_CONV_PARAMS)
-            audio_embeds = out_mm_data.get("audio_embeds")
-            num_features = _get_num_features_for_item(
-                feature_attention_mask,
-                chunk_counts,
-                item_idx,
-                audio_embeds,
-                merge_factor,
-                conv_params,
+        # Pre-compute audio output lengths if feature_attention_mask is available
+        audio_output_lengths: list[int] = []
+        if feature_attention_mask is not None:
+            # Compute output lengths for all audio items
+            from .glmasr_utils import (
+                _as_list_chunk_counts,
+                _get_audio_output_lengths_from_mask,
             )
+
+            if chunk_counts is not None:
+                counts_list = _as_list_chunk_counts(chunk_counts)
+                start_idx = 0
+                for count in counts_list:
+                    end_idx = start_idx + count
+                    if isinstance(feature_attention_mask, torch.Tensor):
+                        mask = feature_attention_mask[start_idx:end_idx]
+                    else:
+                        mask = feature_attention_mask[start_idx:end_idx]
+                        if isinstance(mask, list):
+                            mask = torch.stack(mask)
+                    lengths = _get_audio_output_lengths_from_mask(
+                        mask, merge_factor, conv_params
+                    )
+                    audio_output_lengths.append(int(lengths.sum().item()))
+                    start_idx = end_idx
+            else:
+                # Single chunk per audio
+                for idx in range(len(feature_attention_mask)):
+                    if isinstance(feature_attention_mask, torch.Tensor):
+                        mask = feature_attention_mask[idx : idx + 1]
+                    else:
+                        mask = feature_attention_mask[idx]
+                        if not isinstance(mask, torch.Tensor):
+                            mask = torch.tensor(mask)
+                        mask = mask.unsqueeze(0)
+                    lengths = _get_audio_output_lengths_from_mask(
+                        mask, merge_factor, conv_params
+                    )
+                    audio_output_lengths.append(int(lengths.sum().item()))
+
+        def get_replacement_glmasr(item_idx: int):
+            # Use pre-computed lengths if available, otherwise fall back to audio_embeds
+            if audio_output_lengths:
+                num_features = audio_output_lengths[item_idx]
+            else:
+                audio_embeds = out_mm_data.get("audio_embeds")
+                if audio_embeds is not None:
+                    embed = audio_embeds[item_idx]
+                    num_features = embed.shape[0]
+                else:
+                    raise ValueError(
+                        "Either feature_attention_mask or audio_embeds must be provided"
+                    )
 
             if num_features == 0:
                 raise ValueError("Audio is too short")
