@@ -1251,7 +1251,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        if config.parallel_config.nnodes > 1:
+        if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
@@ -1260,7 +1260,7 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
-    if config.parallel_config.nnodes_within_dp > 1:
+    if config is not None and config.parallel_config.nnodes_within_dp > 1:
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [
