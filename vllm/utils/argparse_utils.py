@@ -399,8 +399,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]

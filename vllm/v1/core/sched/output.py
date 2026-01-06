@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING
-
-from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
 
@@ -142,19 +139,6 @@ class CachedRequestData:
     def is_context_phase(self, req_id: str) -> bool:
         num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
         return num_output_tokens is not None and num_output_tokens == 0
-
-    @cached_property
-    @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
-    def resumed_from_preemption(self) -> list[bool]:
-        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
-
-    @cached_property
-    @deprecated("This will be removed in v0.14, use `all_token_ids` instead.")
-    def resumed_req_token_ids(self) -> list[list[int] | None]:
-        return [
-            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
-            for req_id in self.req_ids
-        ]
 
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
