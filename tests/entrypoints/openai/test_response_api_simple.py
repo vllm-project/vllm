@@ -40,6 +40,7 @@ async def test_basic(client: OpenAI, model_name: str):
     assert response is not None
     print("response: ", response)
     assert response.status == "completed"
+    assert response.incomplete_details is None
 
 
 @pytest.mark.asyncio
