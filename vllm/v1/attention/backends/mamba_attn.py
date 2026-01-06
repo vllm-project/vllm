@@ -209,10 +209,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         if num_prefills > 0:
-            num_computed_tokens_cpu = (
-                num_computed_tokens
-                or common_attn_metadata.compute_num_computed_tokens()
-            ).cpu()
+            if num_computed_tokens is None:
+                num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+
+            num_computed_tokens_cpu = num_computed_tokens.cpu()
 
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
