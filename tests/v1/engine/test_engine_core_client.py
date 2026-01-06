@@ -38,7 +38,7 @@ from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda_alike():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA-alike platforms.", allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
