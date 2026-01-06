@@ -155,8 +155,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
+        return isinstance(source_layer, ColumnParallelLinear) or (
+            isinstance(source_layer, MergedColumnParallelLinear)
             and len(packed_modules_list) == 1
         )
 
@@ -275,7 +275,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         return (
-            type(source_layer) is MergedColumnParallelLinear
+            isinstance(source_layer, MergedColumnParallelLinear)
             and len(packed_modules_list) == 2
         )
 
@@ -340,7 +340,10 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
+        return (
+            isinstance(source_layer, QKVParallelLinear)
+            and len(packed_modules_list) == 1
+        )
 
 
 class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
@@ -398,7 +401,10 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 3
+        return (
+            isinstance(source_layer, QKVParallelLinear)
+            and len(packed_modules_list) == 3
+        )
 
 
 # These following layers are based on the tensor parallelism strategy given in
