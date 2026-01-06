@@ -13,10 +13,6 @@ from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-INDUCTOR_GRAPH_PARTITION_PARAMS = (
-    [True, False] if not current_platform.is_rocm() else [False]
-)
-
 
 @contextlib.contextmanager
 def temporary_environ(env_vars):
@@ -121,7 +117,7 @@ def llm_pair(request):
     [
         pytest.param((model, backend_config, use_inductor_graph_partition))
         for model, backend_config in model_backends_full_cudagraph
-        for use_inductor_graph_partition in INDUCTOR_GRAPH_PARTITION_PARAMS
+        for use_inductor_graph_partition in [True, False]
     ],
     indirect=True,
 )
