@@ -771,17 +771,27 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        # Handle sampling_rate
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
 
         # Call parent method
         outputs = super()._call_hf_processor(
-            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         # Postprocess: rename mask and add chunk counts
         if "input_feature_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_feature_mask")
+
+        # Get processor for chunk counts calculation
+        processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Override chunk counts calculation with GLM-ASR specific logic
         chunk_counts = self._calculate_chunk_counts(
