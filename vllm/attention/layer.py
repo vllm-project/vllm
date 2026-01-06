@@ -702,7 +702,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         """Forward with exposed prefill/decode split for torch.compile.
 
         This method exposes the batch splitting and GEMMs to torch.compile.
-        The actual attention kernels are wrapped in separate 
+        The actual attention kernels are wrapped in separate
         custom ops (mla_attention_decode, mla_attention_prefill_with_output).
         """
         forward_context: ForwardContext = get_forward_context()
@@ -719,7 +719,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
-        # Split batch into decode and prefill - these slices are visible to torch.compile
+        # Split batch into decode and prefill.
+        # These slices are visible to torch.compile.
         decode_q = q[:num_decode_tokens]
         prefill_q = q[num_decode_tokens:]
         prefill_k_pe = k_pe[num_decode_tokens:]
@@ -746,9 +747,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_nope = self.kv_b_proj(prefill_k_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            k_nope, v = kv_nope.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
 
             # Call prefill attention kernel (custom op)
@@ -1764,11 +1763,12 @@ direct_register_custom_op(
     dispatch_key=current_platform.dispatch_key,
 )
 
+
 def mla_split_batch(layer_name: str) -> int:
     """Returns n_decode_tokens for batch splitting.
 
     This custom op returns the number of decode tokens from attention metadata,
-    enabling the prefill/decode split to be visible to torch.compile. 
+    enabling the prefill/decode split to be visible to torch.compile.
     The value is data-dependent - marked cudagraph_unsafe.
     """
     forward_context: ForwardContext = get_forward_context()
@@ -1781,8 +1781,7 @@ def mla_split_batch(layer_name: str) -> int:
 
 
 def mla_split_batch_fake(layer_name: str) -> int:
-    """Fake implementation for torch.compile.
-    """
+    """Fake implementation for torch.compile."""
     # Return unbacked SymInt - tells torch.compile that the value is dynamic
     ctx = torch.library.get_ctx()
     return ctx.new_dynamic_size()
@@ -1937,6 +1936,7 @@ def mla_attention_prefill_with_output(
             suffix_lse=suffix_lse,
         )
     else:
+        assert isinstance(output_prefill, torch.Tensor)
         output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
         output.copy_(output_prefill)
 

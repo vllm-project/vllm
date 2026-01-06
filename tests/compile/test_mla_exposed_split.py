@@ -13,7 +13,6 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config.compilation import CompilationMode
-from vllm.platforms import current_platform
 
 
 def is_mla_model_supported() -> bool:
@@ -178,4 +177,3 @@ def test_mla_exposed_split_inductor_partition(monkeypatch, use_inductor_partitio
     assert len(output[0].outputs[0].text) > 0
 
     del model
-
