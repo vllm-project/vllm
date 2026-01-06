@@ -1186,10 +1186,16 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
+        from vllm.tokenizers.mistral import MistralTokenizer
+
+        tokenizer = self.tokenizer
+        if isinstance(tokenizer, MistralTokenizer):
+            tokenizer = tokenizer.transformers_tokenizer
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             **kwargs,
         )
 
