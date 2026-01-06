@@ -12,10 +12,12 @@ logger = init_logger(__name__)
 class AsyncScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
+        has_structured_output_requests = False
         pending_structured_output_tokens = False
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
+            has_structured_output_requests |= request.use_structured_output
             pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
             )
@@ -33,6 +35,7 @@ class AsyncScheduler(Scheduler):
                 # We will update the actual spec token ids in the worker process.
                 request.spec_token_ids = [-1] * self.num_spec_tokens
 
+        scheduler_output.has_structured_output_requests = has_structured_output_requests
         scheduler_output.pending_structured_output_tokens = (
             pending_structured_output_tokens
         )
