@@ -110,6 +110,24 @@ def select_unquantized_moe_backend(
     return UnquantizedMoeBackend.NONE
 
 
+def convert_to_unquantized_kernel_format(
+    unquantized_backend: UnquantizedMoeBackend,
+    layer: Module,
+    w13_weight: torch.Tensor | None = None,
+    w2_weight: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if unquantized_backend == UnquantizedMoeBackend.AITER:
+        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
+            layer.w13_weight.data, layer.w2_weight.data
+        )
+
+    elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
+        # Swap halves to arrange as [w3; w1] (kernel expectation)
+        w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+
+    return w13_weight, w2_weight
+
+
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
@@ -225,8 +243,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         return weight
 
-    def _setup_kernel(self, layer: Module) -> None:
-        """Setup Modular Kernel for TP Case"""
+    def _setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+    ) -> None:
+        # Shuffle weights to runtime format.
+        w13, w2 = convert_to_unquantized_kernel_format(
+            self.unquantized_backend,
+            layer=layer,
+            w13_weight=w13,
+            w2_weight=w2,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+
+        # Setup Modular Kernel for TP Case
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
 
@@ -260,26 +293,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 "Unable to select unquantized MoE backend, \
                     please check supported backends."
             )
-
-    def _convert_weights_to_kernel_format(
-        self,
-        layer: Module,
-        w13_weight: torch.Tensor | None = None,
-        w2_weight: torch.Tensor | None = None,
-        w13_weight_scale: torch.Tensor | None = None,
-        w2_weight_scale: torch.Tensor | None = None,
-    ) -> None:
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data
-            )
-            replace_parameter(layer, "w13_weight", shuffled_w13)
-            replace_parameter(layer, "w2_weight", shuffled_w2)
-
-        elif self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-            # Swap halves to arrange as [w3; w1] (kernel expectation)
-            w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-            replace_parameter(layer, "w13_weight", w13_weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
@@ -333,6 +346,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self._convert_weights_to_kernel_format(layer=layer)
             self._setup_kernel(
                 layer=layer,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
             )
 
     def apply(
