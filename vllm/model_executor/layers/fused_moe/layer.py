@@ -298,7 +298,7 @@ class FusedMoERouterImpl(FusedMoERouter):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.layer._select_experts(hidden_states, router_logits)
 
 

@@ -24,7 +24,7 @@ class FusedMoERouter(ABC):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
