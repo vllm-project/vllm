@@ -7,13 +7,13 @@
     "PYTHON_VERSION": {
       "default": "3.12"
     },
-    "torch_cuda_arch_list": {
+    "TORCH_CUDA_ARCH_LIST": {
       "default": "7.0 7.5 8.0 8.9 9.0 10.0 12.0"
     },
-    "max_jobs": {
+    "MAX_JOBS": {
       "default": "2"
     },
-    "nvcc_threads": {
+    "NVCC_THREADS": {
       "default": "8"
     },
     "FLASHINFER_VERSION": {

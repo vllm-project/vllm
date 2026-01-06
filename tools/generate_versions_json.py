@@ -46,6 +46,14 @@ TRACKED_ARGS = [
     "DEEPEP_COMMIT_HASH",
 ]
 
+# Map Dockerfile ARG names (lowercase) to bake variable names (uppercase)
+# This matches docker-bake.hcl variable naming convention
+BAKE_VAR_NAMES = {
+    "torch_cuda_arch_list": "TORCH_CUDA_ARCH_LIST",
+    "max_jobs": "MAX_JOBS",
+    "nvcc_threads": "NVCC_THREADS",
+}
+
 
 def parse_dockerfile_args(dockerfile_path: Path) -> dict[str, str]:
     """Extract ARG defaults from Dockerfile using dockerfile-parse."""
@@ -89,7 +97,9 @@ def generate_bake_native_json(args: dict[str, str]) -> dict:
     variables = {}
     for name in TRACKED_ARGS:
         if name in args:
-            variables[name] = {"default": args[name]}
+            # Use uppercase bake variable name if mapped, otherwise keep as-is
+            bake_name = BAKE_VAR_NAMES.get(name, name)
+            variables[bake_name] = {"default": args[name]}
 
     return {
         "_comment": (
