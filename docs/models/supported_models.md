@@ -767,9 +767,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
-!!! note
-    For Qwen2.5-Omni and Qwen3-Omni, reading audio from video pre-processing (`--mm-processor-kwargs '{"use_audio_in_video": true}'`) is currently work in progress and not yet supported.
-
 #### Transcription
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
