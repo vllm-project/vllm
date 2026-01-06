@@ -1332,17 +1332,20 @@ class IsaacForConditionalGeneration(
         if rope_scaling is None and target_cfg is config:
             rope_scaling = getattr(config, "_rope_scaling", None)
         rope_scaling = dict(rope_scaling or {})
-        rope_scaling["mrope_section"] = calculated_mrope_section
-        target_cfg.rope_scaling = rope_scaling
 
-        rope_parameters = getattr(target_cfg, "rope_parameters", None) or {}
+        rope_parameters = getattr(target_cfg, "rope_parameters", None)
+        rope_parameters = dict(
+            rope_parameters or rope_scaling or {"rope_type": "default"}
+        )
+        for key, value in rope_scaling.items():
+            rope_parameters.setdefault(key, value)
         rope_parameters.setdefault(
             "rope_type", rope_scaling.get("rope_type", "default")
         )
         rope_theta = getattr(target_cfg, "rope_theta", None)
         if rope_theta is not None:
             rope_parameters.setdefault("rope_theta", rope_theta)
-        rope_parameters["mrope_section"] = rope_scaling["mrope_section"]
+        rope_parameters["mrope_section"] = calculated_mrope_section
         if "mrope_interleaved" in rope_scaling:
             rope_parameters.setdefault(
                 "mrope_interleaved", rope_scaling["mrope_interleaved"]
