@@ -21,7 +21,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .llava import (
     BaseLlavaMultiModalProcessor,
     BaseLlavaProcessingInfo,
@@ -30,6 +35,7 @@ from .llava import (
     LlavaMultiModalProjector,
     init_vision_tower_for_llava,
 )
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -222,7 +228,9 @@ class LlavaNextMultiModalProcessor(
     info=LlavaNextProcessingInfo,
     dummy_inputs=LlavaDummyInputsBuilder,
 )
-class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaNextForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -579,3 +587,25 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models.
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        return num_vision_tokens
