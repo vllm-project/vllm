@@ -6,7 +6,6 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.platforms import current_platform
 
@@ -40,8 +39,6 @@ class BaseRouter(FusedMoERouter):
         eplb_state: EplbLayerState,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        zero_expert_num: int | None = 0,
-        zero_expert_type: str | None = None,
     ):
         super().__init__()
         self.top_k = top_k
@@ -49,8 +46,6 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
-        self.zero_expert_num = zero_expert_num
-        self.zero_expert_type = zero_expert_type
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -96,28 +91,6 @@ class BaseRouter(FusedMoERouter):
         assert topk_ids.dtype == indices_type or indices_type is None
         return topk_ids
 
-    def _compute_zero_expert_result(
-        self,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        """Compute zero expert result if configured."""
-        if (
-            self.zero_expert_num is not None
-            and self.zero_expert_num > 0
-            and self.zero_expert_type is not None
-            and self.global_num_experts is not None
-        ):
-            return zero_experts_compute_triton(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=self.global_num_experts,
-                zero_expert_type=self.zero_expert_type,
-                hidden_states=hidden_states,
-            )
-        return None
-
     @abstractmethod
     def _compute_routing(
         self,
@@ -145,7 +118,7 @@ class BaseRouter(FusedMoERouter):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
@@ -156,12 +129,11 @@ class BaseRouter(FusedMoERouter):
         3. Calls _compute_routing() to get topk_weights and topk_ids
         4. Applies EPLB mapping if enabled
         5. Converts indices dtype if needed
-        6. Computes zero expert result if configured
 
         Returns:
-            (topk_weights, topk_ids, zero_expert_result)
-            (tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]):
-            The weights, expert ids, and (optional) zero expert computation result.
+            (topk_weights, topk_ids)
+            (tuple[torch.Tensor, torch.Tensor]):
+            The weights and expert ids computation result.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
@@ -184,9 +156,4 @@ class BaseRouter(FusedMoERouter):
         # Step 5: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
 
-        # Step 6: Compute zero expert result
-        zero_expert_result = self._compute_zero_expert_result(
-            topk_ids, topk_weights, hidden_states
-        )
-
-        return topk_weights, topk_ids, zero_expert_result
+        return topk_weights, topk_ids
