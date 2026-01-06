@@ -848,7 +848,6 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
-        # Calculate per-position acceptance rates
         per_pos_rates: list[float] = []
         if delta_drafts > 0:
             positions = sorted(
@@ -863,10 +862,14 @@ async def benchmark(
 
         if delta_draft_tokens > 0:
             acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
+            acceptance_length = (
+                1 + delta_accepted / delta_drafts if delta_drafts > 0 else 0.0
+            )
             spec_decode_stats = {
                 "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
                 "acceptance_rate": acceptance_rate,
+                "acceptance_length": acceptance_length,
                 "per_position_acceptance_rates": per_pos_rates,
             }
 
@@ -967,6 +970,7 @@ async def benchmark(
 
     if spec_decode_stats is not None:
         result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]
+        result["spec_decode_acceptance_length"] = spec_decode_stats["acceptance_length"]
         result["spec_decode_draft_tokens"] = int(spec_decode_stats["draft_tokens"])
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
@@ -1025,6 +1029,11 @@ async def benchmark(
         print(
             "{:<40} {:<10.2f}".format(
                 "Acceptance rate (%):", spec_decode_stats["acceptance_rate"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Acceptance length:", spec_decode_stats["acceptance_length"]
             )
         )
         print(
