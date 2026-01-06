@@ -69,12 +69,15 @@ def eval_json_response(response_text: str) -> bool:
     Returns:
         True if valid JSON is found, False otherwise.
     """
-    response_text = response_text.replace("\n", "").replace(" ", "").strip()
     try:
-        response_text = re.search(r"\{.*\}", response_text).group()
-        json.loads(response_text)
+        # Use re.DOTALL to match across newlines without corrupting
+        # internal whitespace in JSON string values
+        json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if json_match is None:
+            return False
+        json.loads(json_match.group())
         return True
-    except Exception:
+    except (json.JSONDecodeError, AttributeError):
         return False
 
 
@@ -84,8 +87,8 @@ def validate_json_with_schema(
     """
     Validate JSON output and check required fields.
 
-    Uses eval_json_response() for basic validation, plus additional
-    required field validation if a schema is provided.
+    Parses JSON once and derives all validation results from that
+    single operation.
 
     Args:
         text: The text response to validate.
@@ -96,25 +99,20 @@ def validate_json_with_schema(
             - valid_json: Whether output is valid JSON
             - has_required_fields: Whether all required fields are present
     """
-    # Basic JSON validation
-    is_valid = eval_json_response(text)
-
-    if not is_valid:
-        return {"valid_json": False, "has_required_fields": False}
-
-    # Additional check: verify required fields
     try:
-        # Extract and parse JSON (same logic as basic validation)
-        text = text.replace("\n", "").replace(" ", "").strip()
-        json_match = re.search(r"\{.*\}", text)
-        if json_match:
-            text = json_match.group()
-        parsed = json.loads(text)
+        # Use re.DOTALL to match across newlines without corrupting
+        # internal whitespace in JSON string values
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match is None:
+            return {"valid_json": False, "has_required_fields": False}
 
+        parsed = json.loads(json_match.group())
+
+        # Check required fields if schema is provided
         has_required = True
         if schema and "required" in schema:
             has_required = all(field in parsed for field in schema["required"])
 
         return {"valid_json": True, "has_required_fields": has_required}
-    except Exception:
-        return {"valid_json": True, "has_required_fields": False}
+    except (json.JSONDecodeError, AttributeError):
+        return {"valid_json": False, "has_required_fields": False}

@@ -32,6 +32,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -101,27 +102,12 @@ def run_gsm8k_evaluation(
         print(f"GSM8K CORRECTNESS - {test_type}")
         print(f"{'=' * 70}")
 
-    # Extract host and port from base_url
-    base_url = base_url.rstrip("/")
-    if "://" in base_url:
-        protocol_and_rest = base_url.split("://", 1)
-        rest = (
-            protocol_and_rest[1] if len(protocol_and_rest) > 1 else protocol_and_rest[0]
-        )
-    else:
-        rest = base_url
-
-    if ":" in rest:
-        host_part, port_part = rest.rsplit(":", 1)
-        host = (
-            f"http://{host_part}"
-            if "://" not in base_url
-            else f"{protocol_and_rest[0]}://{host_part}"
-        )
-        port = int(port_part)
-    else:
-        host = base_url
-        port = 8000
+    # Extract host and port from base_url using urlparse
+    parsed_url = urlparse(base_url.rstrip("/"))
+    scheme = parsed_url.scheme or "http"
+    hostname = parsed_url.hostname or "localhost"
+    port = parsed_url.port or 8000
+    host = f"{scheme}://{hostname}"
 
     # Use existing evaluate_gsm8k function
     seed = 42 if temperature == 0.0 else None
@@ -183,7 +169,11 @@ async def evaluate_sampling_diversity(
             if result.get("verification_failures", 0) > 0:
                 print(f"  ⚠ {result['verification_failures']} prompts failed")
 
-    return {"test_name": "sampling_diversity", "configs": results, "num_prompts": len(prompts)}
+    return {
+        "test_name": "sampling_diversity",
+        "configs": results,
+        "num_prompts": len(prompts),
+    }
 
 
 async def test_sampling_config(
@@ -585,7 +575,9 @@ def print_summary(results: dict[str, Any]) -> None:
         test = tests["sampling_diversity"]
         if "configs" in test:
             failures = sum(c.get("verification_failures", 0) for c in test["configs"])
-            total = len(test["configs"]) * test.get("num_prompts", len(VERIFICATION_PROMPTS))
+            total = len(test["configs"]) * test.get(
+                "num_prompts", len(VERIFICATION_PROMPTS)
+            )
             status = "✓" if failures == 0 else "⚠"
             print(f"\n{status} Sampling: {total - failures}/{total} prompts passed")
         else:
