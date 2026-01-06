@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias, cast
 
@@ -71,8 +70,6 @@ from .interfaces import (
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
-
-logger = logging.getLogger(__name__)
 
 
 # Optimized vLLM Native GlmAsrEncoder Implementation
@@ -762,9 +759,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """
-        Call processor with GPU-accelerated feature extraction.
-        """
         # Normalize input: handle deprecated key and list conversion.
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
@@ -778,12 +772,12 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        # Get processor for tokenizer and config
+        # ===== Initialize HF processor, feature extractor, tokenizer =====
         processor = self.info.get_hf_processor(**mm_kwargs)
         hf_feature_extractor = processor.feature_extractor
         tokenizer = processor.tokenizer
 
-        # ===== Audio chunking (CPU, fast) =====
+        # ===== Calculate chunk counts and prepare audio chunks =====
         sampling_rate = hf_feature_extractor.sampling_rate
         chunk_length = hf_feature_extractor.chunk_length
         max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
@@ -813,6 +807,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 end = min((i + 1) * window_size, time_cap)
                 flat_chunks.append(audio_el[start:end])
 
+        # ===== Extract audio features =====
         audio_inputs = hf_feature_extractor(
             flat_chunks,
             sampling_rate=sampling_rate,
