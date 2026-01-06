@@ -5,12 +5,12 @@ import json
 
 import pytest
 
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+from vllm.sampling_params import SamplingParams
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tool_parsers.mistral_tool_parser import (
     MistralToolCall,
     MistralToolParser,
 )
-from vllm.sampling_params import SamplingParams
-from vllm.tokenizers.mistral import MistralTokenizer
 
 from ...utils import check_logprobs_close
 

@@ -8,11 +8,18 @@ Run `pytest tests/kernels/moe/test_grouped_topk.py`.
 import pytest
 import torch
 
+from vllm.config import (
+    CompilationConfig,
+    VllmConfig,
+    get_cached_compilation_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
+    GroupedTopk,
     fused_grouped_topk,
-    grouped_topk,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.mark.skipif(
@@ -41,24 +48,32 @@ def test_grouped_topk(
     routed_scaling_factor: float,
     dtype: torch.dtype,
 ):
-    current_platform.seed_everything(0)
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+grouped_topk"])
+    )
+    get_cached_compilation_config.cache_clear()
+
+    set_random_seed(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="cuda")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="cuda")
     e_score_correction_bias = torch.randn(
         (n_expert,), dtype=torch.float32, device="cuda"
     )
 
-    with monkeypatch.context() as m:
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         m.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0")
-        baseline_topk_weights, baseline_topk_ids = grouped_topk(
-            hidden_states=hidden_states,
-            gating_output=gating_output,
+        grouped_topk = GroupedTopk(
             topk=topk,
             renormalize=renormalize,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
+        )
+        assert grouped_topk._forward_method.__name__ == "forward_cuda"
+        baseline_topk_weights, baseline_topk_ids = grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
             e_score_correction_bias=e_score_correction_bias,
         )
 

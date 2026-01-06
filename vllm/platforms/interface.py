@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
@@ -18,8 +19,8 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
-    from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -226,15 +227,7 @@ class Platform:
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: "CacheDType | None",
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        use_mm_prefix: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
@@ -373,6 +366,10 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
+    @deprecated(
+        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
+        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
+    )
     def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
@@ -696,6 +693,13 @@ class Platform:
         Check max_model_len for the current platform.
         """
         return max_model_len
+
+    @classmethod
+    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
+        """
+        Set some additional forward context for the current platform if needs.
+        """
+        return {}
 
 
 class UnspecifiedPlatform(Platform):

@@ -30,8 +30,9 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 
 default_params = dict(
     temperature=0.0,  # greedy
-    max_tokens=23,
-    min_tokens=18,
+    max_tokens=30,
+    # spec decoding currently doesn't support min_tokens
+    # min_tokens=28,
 )
 
 
@@ -86,7 +87,7 @@ def test_without_spec_decoding(
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
@@ -100,9 +101,16 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     # Set small draft model len to force doesn't-fit-in-drafter case.
     spec_config_short = spec_config | {"max_model_len": 50}
 
+    struct_outputs = StructuredOutputsParams(json=sample_json_schema)
+
     test_sampling_params = [
         dict(),
         dict(logprobs=2),
+        dict(structured_outputs=struct_outputs),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
+        ),
     ]
 
     # test_preemption, executor, async_scheduling,
@@ -142,18 +150,19 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    with monkeypatch.context() as m:
-        # avoid precision errors
-        if current_platform.is_rocm():
-            if is_testing_with_spec_decoding:
-                # Use TRITON_ATTN for spec decoding test for consistency
-                m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-            else:
-                m.setenv("VLLM_ATTENTION_BACKEND", "ROCM_AITER_FA")
+    # Determine attention config based on platform
+    if current_platform.is_rocm():
+        if is_testing_with_spec_decoding:
+            # Use TRITON_ATTN for spec decoding test for consistency
+            attention_config = {"backend": "TRITON_ATTN"}
         else:
-            m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+            attention_config = {"backend": "ROCM_ATTN"}
+    else:
+        attention_config = {"backend": "FLEX_ATTENTION"}
+
+    with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
-        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
+        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
@@ -174,6 +183,7 @@ def run_tests(
                 spec_config,
                 test_prefill_chunking=test_prefill_chunking,
                 is_testing_with_spec_decoding=is_testing_with_spec_decoding,
+                attention_config=attention_config,
             )
             outputs.append(test_results)
 
@@ -262,6 +272,7 @@ def run_test(
     spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
     is_testing_with_spec_decoding: bool = False,
+    attention_config: dict[str, Any] | None = None,
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
@@ -281,14 +292,6 @@ def run_test(
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
 
-    # On ROCm: use float16 for first test (ROCM_AITER_FA), but float32 for
-    # spec decoding test (TRITON_ATTN) for better precision.
-    # On others: always use float32.
-    if current_platform.is_rocm() and not is_testing_with_spec_decoding:
-        dtype = "float16"
-    else:
-        dtype = "float32"
-
     with VllmRunner(
         model,
         max_model_len=512,
@@ -298,9 +301,10 @@ def run_test(
         # enforce_eager=True,
         async_scheduling=async_scheduling,
         distributed_executor_backend=executor,
-        dtype=dtype,
+        dtype="float32",
         speculative_config=spec_config,
         disable_log_stats=False,
+        attention_config=attention_config,
         **cache_arg,
     ) as vllm_model:
         results = []

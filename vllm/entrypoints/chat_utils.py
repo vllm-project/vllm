@@ -24,6 +24,7 @@ from openai.types.chat import (
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionFunctionToolParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -65,6 +66,15 @@ else:
     torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
+
+
+class ChatTemplateResolutionError(ValueError):
+    """Raised when chat template resolution fails.
+
+    This is a subclass of ValueError for backward compatibility with
+    existing exception handlers.
+    """
+
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -269,6 +279,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -299,6 +312,9 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    tools: list[ChatCompletionFunctionToolParam] | None
+    """The tools for developer role."""
 
 
 # Passed in by user
@@ -1619,6 +1635,8 @@ def _parse_chat_message_content(
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
 
+        if role == "developer":
+            result_msg["tools"] = message.get("tools", None)
     return result
 
 
@@ -1805,7 +1823,7 @@ def apply_hf_chat_template(
     )
 
     if hf_chat_template is None:
-        raise ValueError(
+        raise ChatTemplateResolutionError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."

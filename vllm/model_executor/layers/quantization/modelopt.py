@@ -50,10 +50,14 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
-    register_moe_scaling_factors,
+    make_fp8_moe_alpha_scales_for_fi,
+    register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    W8A8BlockFp8LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -72,9 +76,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
+    cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
-from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
+from vllm.model_executor.parameter import (
+    BlockQuantScaleParameter,
+    ChannelQuantScaleParameter,
+    ModelWeightParameter,
+    PerTensorScaleParameter,
+)
 from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
@@ -88,7 +98,16 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-QUANT_ALGOS = ["FP8", "NVFP4"]
+QUANT_ALGOS = [
+    # FP8 (per-tensor weight + optional static activation scale).
+    "FP8",
+    # FP8 per-channel weight scale + per-token activation scale.
+    "FP8_PER_CHANNEL_PER_TOKEN",
+    # FP8 per-block weight-only (ModelOpt may emit this as lowercase).
+    "FP8_PB_WO",
+    # FP4
+    "NVFP4",
+]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
 
@@ -255,6 +274,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if not quant_method:
             raise ValueError("Missing 'quant_algo' in quantization config")
 
+        # Normalize quant_algo for robust matching (ModelOpt may emit lowercase).
+        quant_method = str(quant_method).upper()
+
         if kv_cache_quant_method is None:
             # No KV cache quantization, keep this branch just to have this comment
             pass
@@ -263,6 +285,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
                 f"kv_cache_quant_algo must be a string, got "
                 f"{type(kv_cache_quant_method)}"
             )
+        else:
+            kv_cache_quant_method = kv_cache_quant_method.upper()
 
         if not isinstance(exclude_modules, list):
             raise ValueError(
@@ -302,17 +326,34 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     def __init__(
         self,
+        quant_method: str,
         is_checkpoint_fp8_serialized: bool,
         kv_cache_quant_method: str | None,
         exclude_modules: list[str],
     ) -> None:
         super().__init__(exclude_modules)
+        self.quant_method = quant_method
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
         if is_checkpoint_fp8_serialized:
             logger.warning(
-                "Detected ModelOpt fp8 checkpoint. Please note that"
-                " the format is experimental and could change."
+                "Detected ModelOpt fp8 checkpoint (quant_algo=%s). Please note "
+                "that the format is experimental and could change.",
+                quant_method,
+            )
+
+        # Select LinearMethod implementation based on quant_algo.
+        if self.quant_method == "FP8":
+            self.LinearMethodCls = ModelOptFp8LinearMethod
+        elif self.quant_method == "FP8_PER_CHANNEL_PER_TOKEN":
+            self.LinearMethodCls = ModelOptFp8PcPtLinearMethod
+        elif self.quant_method == "FP8_PB_WO":
+            self.LinearMethodCls = ModelOptFp8PbWoLinearMethod
+        else:
+            raise ValueError(
+                "Unsupported ModelOpt FP8 quant_algo for vLLM: "
+                f"{self.quant_method}. Supported: FP8 / "
+                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -346,13 +387,13 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
             if isinstance(quant_config, dict):
-                quant_algo = quant_config.get("quant_algo", "")
-                if "FP8" in quant_algo:
+                quant_algo = str(quant_config.get("quant_algo", ""))
+                if "FP8" in quant_algo.upper():
                     return "modelopt"
         else:
             # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = hf_quant_cfg.get("quant_algo", "")
-            if isinstance(quant_algo, str) and "FP8" in quant_algo:
+            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
+            if "FP8" in quant_algo.upper():
                 return "modelopt"
 
         return None
@@ -369,7 +410,12 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
     ) -> "ModelOptFp8Config":
         is_checkpoint_fp8_serialized = "FP8" in quant_method
 
-        return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, exclude_modules)
+        return cls(
+            quant_method,
+            is_checkpoint_fp8_serialized,
+            kv_cache_quant_method,
+            exclude_modules,
+        )
 
 
 class ModelOptFp8LinearMethod(LinearMethodBase):
@@ -464,6 +510,203 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         )
 
 
+class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
+    """Linear method for ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoints.
+
+    Expected checkpoint structure (per Linear):
+    - weight: fp8-e4m3fn, shape [out, in]
+    - weight_scale: fp32, shape [out] (per-output-channel)
+    - no input_scale (activations are dynamically quantized per-token)
+    """
+
+    def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        self.quant_config = quant_config
+        self.fp8_linear = Fp8LinearOp(
+            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN
+        )
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "FP8_PER_CHANNEL_PER_TOKEN currently only supports "
+                "FP8-serialized checkpoints."
+            )
+
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        weight_scale = ChannelQuantScaleParameter(
+            data=torch.empty(output_size_per_partition, dtype=torch.float32),
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        weight_scale[:] = torch.finfo(torch.float32).min
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.fp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=None,
+            bias=bias,
+        )
+
+
+class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
+    """Linear method for ModelOpt FP8_PB_WO checkpoints.
+
+    ModelOpt exports `weight_scale` as a 4D tensor:
+      [out_blk, 1, in_blk, 1]
+    where block size is typically 128 for both dims.
+
+    vLLM executes it as FP8 GEMM with *dynamic per-token* activation quant.
+    """
+
+    _WEIGHT_BLOCK_SIZE: tuple[int, int] = (128, 128)
+
+    def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        self.quant_config = quant_config
+        block_n, block_k = self._WEIGHT_BLOCK_SIZE
+        self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
+        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(block_n, block_k),
+            act_quant_group_shape=GroupShape(1, block_k),
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
+            use_aiter_and_is_supported=False,
+        )
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "FP8_PB_WO currently only supports FP8-serialized checkpoints."
+            )
+
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        # Expose block size so the v2 weight loaders can translate offsets from
+        # element-space -> block-space for BlockQuantScaleParameter.
+        layer.weight_block_size = self.weight_block_size
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        block_n, block_k = self._WEIGHT_BLOCK_SIZE
+        if output_size_per_partition % block_n != 0:
+            raise ValueError(
+                "ModelOpt FP8_PB_WO requires out_features divisible by "
+                f"{block_n}, got {output_size_per_partition}."
+            )
+        if input_size_per_partition % block_k != 0:
+            raise ValueError(
+                "ModelOpt FP8_PB_WO requires in_features divisible by "
+                f"{block_k}, got {input_size_per_partition}."
+            )
+
+        out_blks = output_size_per_partition // block_n
+        in_blks = input_size_per_partition // block_k
+
+        # Match ModelOpt's exported shape so weight loading works without a
+        # custom loader: [out_blk, 1, in_blk, 1]
+        weight_scale = BlockQuantScaleParameter(
+            data=torch.empty((out_blks, 1, in_blks, 1), dtype=torch.float32),
+            input_dim=2,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        weight_scale[:] = torch.finfo(torch.float32).min
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        # Keep weight in [out, in] layout for W8A8BlockFp8LinearOp.
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
+        scale = layer.weight_scale
+        if scale.dim() == 4:
+            # [out_blk, 1, in_blk, 1] -> [out_blk, in_blk]
+            scale = scale.squeeze(1).squeeze(-1)
+        elif scale.dim() != 2:
+            raise ValueError(
+                "Unexpected ModelOpt FP8_PB_WO weight_scale shape: "
+                f"{tuple(scale.shape)}."
+            )
+
+        layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.w8a8_block_fp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=None,
+            bias=bias,
+        )
+
+
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -510,13 +753,17 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -701,9 +948,18 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend is not None:
             if self.moe.is_act_and_mul:
                 layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
+
+            # NOTE: this adds some attributes used by the trtllm kernel,
+            # which does not conform to the modular kernels abstraction (yet).
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
-        register_moe_scaling_factors(layer)
+                register_scales_for_trtllm_fp8_per_tensor_moe(
+                    layer=layer,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w13_input_scale=layer.w13_input_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    w2_input_scale=layer.w2_input_scale,
+                )
 
     def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
         """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
@@ -753,19 +1009,34 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            # TRTLLM does not use modular kernels
             return None
 
-        return fp8_w8a8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
-            w2_scale=layer.w2_weight_scale,
-            g2_alphas=layer.output2_scales_scalar.squeeze(),
-            a1_scale=layer.w13_input_scale,
-            a1_gscale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            a2_gscale=layer.w2_input_scale_inv,
-            per_act_token_quant=False,
-        )
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                layer.w13_weight_scale,
+                layer.w13_input_scale,
+                layer.w2_weight_scale,
+                layer.w2_input_scale,
+            )
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                a1_gscale=(1.0 / layer.w13_input_scale),
+                a2_gscale=(1.0 / layer.w2_input_scale),
+                g1_alphas=g1_alphas,
+                g2_alphas=g2_alphas,
+            )
+        else:
+            assert self.flashinfer_moe_backend is None
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+            )
 
     def apply(
         self,
@@ -796,7 +1067,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -871,7 +1142,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def override_quantization_method(
@@ -1210,6 +1481,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
         ):
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
             # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
                 self.moe
@@ -1458,16 +1732,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
-            layer.gemm1_weights_fp4_shuffled = Parameter(
+            layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
+            layer.w2_weight_scale = Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
 
@@ -1476,12 +1748,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
-
-            # Clean up weights that won't be used by TRT-LLM
-            del layer.w2_weight
-            del layer.w2_weight_scale
-            del layer.w13_weight
-            del layer.w13_weight_scale
         elif self.use_marlin:
             # Marlin processing
             prepare_moe_fp4_layer_for_marlin(layer)
@@ -1529,6 +1795,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w2_weight_scale = Parameter(
                 w2_blockscale_swizzled, requires_grad=False
             )
+
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: FusedMoE,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        import flashinfer
+
+        a1_gscale = layer.w13_input_scale_quant
+        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
+            hidden_states,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
+        extra_tensors: list[torch.Tensor] = [hidden_states_sf]
+        return hidden_states_fp4, extra_tensors
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1584,8 +1868,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
+        # Hidden_states in select_experts is only used to extract metadata
+        if isinstance(x, tuple):
+            x_routing, _ = x
+        else:
+            x_routing = x
+        topk_weights, topk_ids = layer.select_experts(
+            hidden_states=x_routing,
             router_logits=router_logits,
         )
 
