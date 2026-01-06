@@ -28,7 +28,7 @@ from ..utils import create_new_process_for_each_test
 @pytest.fixture
 def vllm_tmp_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Fixture that sets VLLM_CACHE_ROOT to a temporary directory."""
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
     return tmp_path
 
 
