@@ -420,7 +420,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             "HybridKVCacheCoordinator requires at least two attention groups."
         )
 
-        self.attention_groups = attention_groups
+        # Put full attention first: its efficient left-to-right scan provides
+        # a tighter initial bound, reducing work for subsequent groups.
+        self.attention_groups = sorted(
+            attention_groups,
+            key=lambda x: not isinstance(x[0], FullAttentionSpec),
+        )
 
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes
