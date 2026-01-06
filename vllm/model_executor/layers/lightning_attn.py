@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -199,7 +198,7 @@ def _fwd_kv_parallel(
     )
 
     # Load the decay factors for the current head and block
-    k_decay_ptr = K_decay + off_h * BLOCK + tl.arange(0, CBLOCK)[None, :]
+    k_decay_ptr = K_decay + off_h * BLOCK + tl.arange(0, CBLOCK)
 
     kv_index = tl.arange(0, CBLOCK)
 
@@ -229,6 +228,12 @@ def _fwd_kv_parallel(
 
         # Load decay factor and compute weighted key-value outer product
         k_decay = tl.load(k_decay_ptr)
+
+        # NOTE: Need to add the extra dim here due to AMD MLIR lowering error.
+        # Please don't move it back until issue is resolved.
+        # Issue: https://github.com/ROCm/triton/issues/907
+        k_decay = k_decay[None, :]
+
         kv += tl.dot(k_trans * k_decay, v)
 
         # Move to the next sub-block
@@ -529,7 +534,7 @@ def lightning_attention(
     v: torch.Tensor,
     ed: torch.Tensor,
     block_size: int = 256,
-    kv_history: Optional[torch.Tensor] = None,
+    kv_history: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply lightning attention algorithm

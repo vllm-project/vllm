@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 from .common import (
     rotate_gptj,
     rotate_neox,
@@ -23,7 +23,7 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
-class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     """RotaryEmbedding extended with YaRN method.
 
     Credits to Peng et al. github.com/jquesnelle/yarn
@@ -56,6 +56,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             yarn_get_mscale(self.scaling_factor, float(mscale))
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
             * attn_factor
+        )
+        self.use_flashinfer = (
+            self.enabled()
+            and dtype in (torch.float16, torch.bfloat16)
+            and current_platform.is_cuda()
+            and has_flashinfer()
+            and head_size in [64, 128, 256, 512]
         )
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
@@ -110,9 +117,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
         self._match_cos_sin_cache_dtype(query)
@@ -147,11 +154,31 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             key = key_rot
         return query, key
 
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_native(positions, query, key, offsets)
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.forward_native(positions, query, key, offsets)
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                torch.add(positions, offsets) if offsets is not None else positions,
+                query,
+                key,
+                self.head_size,
+                self.cos_sin_cache,
+                self.is_neox_style,
+            )
+            return query, key
+        else:
+            return self.forward_native(positions, query, key, offsets)

@@ -13,11 +13,12 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
 )
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.workspace import init_workspace_manager
 
 DEFAULT_MODELS = [
-    "nm-testing/Mixtral-8x7B-Instruct-v0.1",
-    "nm-testing/deepseekv2-lite",
+    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "deepseek-ai/DeepSeek-V2-Lite",
     "ibm-granite/granite-3.0-1b-a400m",
     "ibm-granite/granite-3.0-3b-a800m",
 ]
@@ -364,6 +365,10 @@ def bench_run(
 
 
 def main(args):
+    # Initialize workspace manager (required for CUTLASS MoE kernels)
+    device = torch.device("cuda:0")
+    init_workspace_manager(device)
+
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")

@@ -3,7 +3,10 @@
 
 from typing import Literal, get_args
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
+logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
@@ -12,6 +15,7 @@ QuantizationMethods = Literal[
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
+    "fp_quant",
     "modelopt",
     "modelopt_fp4",
     "bitblas",
@@ -34,6 +38,8 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "petit_nvfp4",
+    "cpu_gptq",
+    "cpu_awq",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -69,15 +75,20 @@ def register_quantization_config(quantization: str):
 
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
-            raise ValueError(
-                f"The quantization method `{quantization}` is already exists."
+            logger.warning(
+                "The quantization method '%s' already exists and will be "
+                "overwritten by the quantization config %s.",
+                quantization,
+                quant_config_cls,
             )
+        else:
+            QUANTIZATION_METHODS.append(quantization)
+
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError(
                 "The quantization config must be a subclass of `QuantizationConfig`."
             )
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
-        QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
 
     return _wrapper
@@ -98,10 +109,12 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
+    from .cpu_wna16 import CPUAWQConfig, CPUGPTQConfig
     from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
+    from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_bitblas import GPTQBitBLASConfig
@@ -125,6 +138,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
+        "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "bitblas": BitBLASConfig,
@@ -148,6 +162,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
+        "cpu_gptq": CPUGPTQConfig,
+        "cpu_awq": CPUAWQConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

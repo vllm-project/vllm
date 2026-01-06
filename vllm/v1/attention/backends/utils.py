@@ -4,45 +4,47 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, fields, make_dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
     Generic,
     Literal,
-    Optional,
     Protocol,
     TypeVar,
-    Union,
     get_args,
 )
 
 import numpy as np
 import torch
-from typing_extensions import runtime_checkable
+from typing_extensions import deprecated, runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionImpl
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
-from vllm.attention.layer import Attention
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 
@@ -65,21 +67,17 @@ class CommonAttentionMetadata:
     """(batch_size + 1,), the start location of each request in query Tensor"""
 
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    num_computed_tokens_cpu: torch.Tensor
     """(batch_size,), the number of computed tokens for each request"""
 
     num_reqs: int
     """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
     num_actual_tokens: int
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
     max_seq_len: int
-    """Longest context length in batch"""
+    """Longest context length (may be an upper bound)"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -87,11 +85,89 @@ class CommonAttentionMetadata:
     causal: bool = True
 
     # Needed by FastPrefillAttentionBuilder
-    logits_indices_padded: Optional[torch.Tensor] = None
-    num_logits_indices: Optional[int] = None
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: Optional[np.ndarray] = None
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
+
+    dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
+
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
+    _num_computed_tokens_cache: torch.Tensor | None = None
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    If a CPU copy is needed, use `seq_lens.cpu()` instead.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def seq_lens_cpu(self) -> torch.Tensor:
+        if self._seq_lens_cpu is None:
+            self._seq_lens_cpu = self.seq_lens.to("cpu")
+        return self._seq_lens_cpu
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
+    async scheduling. If a CPU copy is needed, it can be derived from 
+    query_start_loc_cpu and seq_lens.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def num_computed_tokens_cpu(self) -> torch.Tensor:
+        if self._num_computed_tokens_cpu is None:
+            query_seq_lens = (
+                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+            )
+            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
+        return self._num_computed_tokens_cpu
+
+    def compute_num_computed_tokens(self) -> torch.Tensor:
+        """Compute num_computed_tokens on device (seq_lens - query_lens)."""
+        if self._num_computed_tokens_cache is None:
+            query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
+            self._num_computed_tokens_cache = self.seq_lens - query_lens
+        return self._num_computed_tokens_cache
+
+    # TODO(lucas): remove once we have FULL-CG spec-decode support
+    def unpadded(
+        self, num_actual_tokens: int, num_actual_reqs: int
+    ) -> "CommonAttentionMetadata":
+        maybe_slice_reqs = lambda x: x[:num_actual_reqs] if x is not None else None
+        return CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
+            if self._seq_lens_cpu is not None
+            else None,
+            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
+            if self._num_computed_tokens_cpu is not None
+            else None,
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            max_seq_len=self.max_seq_len,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            logits_indices_padded=self.logits_indices_padded,
+            num_logits_indices=self.num_logits_indices,
+            encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
+            encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
+            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+        )
 
 
 def slice_query_start_locs(
@@ -133,14 +209,13 @@ def _make_metadata_with_slice(
     assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
         "Token slice start outside of first request"
     )
-    assert start_locs[last_req] <= last_tok < start_locs[last_req + 1], (
-        "Token slice end outside of last request"
-    )
+    # NOTE: last token can be outside of the last request if we have CG padding.
 
-    # If the "middle" request has tokens in both ubatches, we have to split it.
-    # If ubatch_slice is the first ubatch then we will be splitting the last
-    # request. If it's the second microbatch, then we will be splitting the
-    # first request
+    # If the request is split across ubatches, we have to adjust the metadata.
+    # splits_first_request: The first request in this slice is the continuation of
+    #                       a request that started in a previous slice.
+    # splits_last_request:  The last request in this slice continues into the
+    #                       next slice.
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
@@ -161,7 +236,10 @@ def _make_metadata_with_slice(
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
+        # the tokens skipped because query_start_loc_cpu might have been modified
+        # if splits_first_request is True.
+        tokens_skipped = start_locs[last_req + 1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 
@@ -193,14 +271,14 @@ def _make_metadata_with_slice(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )
 
 
@@ -233,7 +311,7 @@ class AttentionCGSupport(enum.Enum):
     """Cudagraph always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
     """Cudagraph supported for batches the only contain query lengths that are
-    the same, this can be used for spec-decode 
+    the same, this can be used for spec-decode
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
     """Cudagraph supported for batches the only contain query_len==1 decodes"""
@@ -243,11 +321,15 @@ class AttentionCGSupport(enum.Enum):
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # Do not access directly. Call get_cudagraph_support() instead.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: Optional[int] = None
+    reorder_batch_threshold: int | None = None
+    # Does this backend/builder support updating the block table in existing
+    # metadata
+    supports_update_block_table: bool = False
 
     @abstractmethod
     def __init__(
@@ -262,8 +344,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        """Get the cudagraph support level of this builder class."""
+        return cls._cudagraph_support
+
     def _init_reorder_batch_threshold(
-        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
     ) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
         if self.reorder_batch_threshold is not None and supports_spec_as_decode:
@@ -275,9 +369,16 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_batch_threshold = (
-                    1 + speculative_config.num_speculative_tokens
+                self.reorder_batch_threshold = max(
+                    self.reorder_batch_threshold,
+                    1 + speculative_config.num_speculative_tokens,
                 )
+
+        if (
+            self.vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not supports_dcp_with_varlen
+        ):
+            self.reorder_batch_threshold = 1
 
     @abstractmethod
     def build(
@@ -296,6 +397,21 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
+        """
+        raise NotImplementedError
+
+    def update_block_table(
+        self,
+        metadata: M,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> M:
+        """
+        Update the block table for the attention metadata.
+        Faster when theres multiple kv-cache groups that create virtually the
+        same metadata but just with different block tables.
+
+        Only needs to be implemented if supports_update_block_table is True.
         """
         raise NotImplementedError
 
@@ -343,6 +459,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_sliding_window: bool,
         use_local_attention: bool,
         num_sms: int,
+        dcp_world_size: int,
     ) -> bool:
         return False
 
@@ -391,9 +508,12 @@ class PerLayerParameters:
     """
 
     window_left: int
-    logits_soft_cap: Optional[float]
+    logits_soft_cap: float | None
     sm_scale: float
     has_sinks: bool = False
+    # has same params for all layers
+    has_same_window_lefts: bool | None = field(default=None, compare=False)
+    has_same_all_params: bool | None = field(default=None, compare=False)
 
 
 def get_per_layer_parameters(
@@ -404,7 +524,7 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -445,20 +565,12 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
 
-    # trtllm attention doesn't need global hyper params so disable the check
-    if not envs.VLLM_USE_TRTLLM_ATTENTION:
-        for params in param_sets:
-            if params.window_left != global_params.window_left:
-                raise ValueError(
-                    "Window left is not the same for all layers. "
-                    "One potential fix is to set disable_sliding_window=True"
-                )
-            assert params == global_params, (
-                "FlashInfer backend currently only supports models in which all"
-                "layers share the same values "
-                "for the following hyperparameters:"
-                "`window_left`, `logits_soft_cap`, `sm_scale`."
-            )
+    global_params.has_same_window_lefts = all(
+        params.window_left == global_params.window_left for params in param_sets
+    )
+    global_params.has_same_all_params = all(
+        params == global_params for params in param_sets
+    )
 
     return global_params
 
@@ -519,7 +631,7 @@ def make_local_attention_virtual_batches(
     attn_chunk_size: int,
     common_attn_metadata: CommonAttentionMetadata,
     block_size: int = 0,
-) -> CommonAttentionMetadata:
+) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
     seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
     block_table = common_attn_metadata.block_table_tensor
@@ -631,9 +743,12 @@ def make_local_attention_virtual_batches(
     # tensor first, which recovers perf.
     batch_indices_torch = torch.from_numpy(batch_indices)
     block_indices_torch = torch.from_numpy(block_indices)
-    block_table_local = block_table[batch_indices_torch, block_indices_torch].view(
-        virtual_batches, -1
-    )
+
+    # Save as a lambda so we can return this for update_block_table
+    make_block_table = lambda block_table: block_table[
+        batch_indices_torch, block_indices_torch
+    ].view(virtual_batches, -1)
+    block_table_local = make_block_table(block_table)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
@@ -642,9 +757,7 @@ def make_local_attention_virtual_batches(
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
-        seq_lens_cpu=seq_lens_cpu,
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
-        num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -652,7 +765,9 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-    )
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+    ), make_block_table
 
 
 def make_kv_sharing_fast_prefill_common_attn_metadata(
@@ -672,7 +787,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     logits_indices = logits_indices_padded[:num_logits_indices]
     num_reqs = common_attn_metadata.num_reqs
     query_start_loc = common_attn_metadata.query_start_loc
-    seq_lens = common_attn_metadata.seq_lens
     # Example inputs
     # num_reqs: 3
     # generation_indices:  [14, 18, 19, 27]
@@ -701,9 +815,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
         query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
-        seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.to("cpu", non_blocking=True),
-        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
         max_query_len=decode_max_query_len,
@@ -711,6 +823,8 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
@@ -727,6 +841,82 @@ def subclass_attention_backend(
 
     return type(
         name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+    )
+
+
+def subclass_attention_backend_with_overrides(
+    name_prefix: str,
+    attention_backend_cls: type[AttentionBackend],
+    overrides: dict[str, Any],
+) -> type[AttentionBackend]:
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+    return type(name, (attention_backend_cls,), overrides)
+
+
+def split_decodes_prefills_and_extends(
+    common_attn_metadata: CommonAttentionMetadata,
+    decode_threshold: int = 1,
+) -> tuple[int, int, int, int, int, int]:
+    """
+    Assuming a reordered batch, finds the boundary between prefill and decode
+    requests.
+
+    Args:
+        common_attn_metadata: CommonAttentionMetadata object containing the
+            batch metadata.
+        decode_threshold: The maximum query length to be considered a decode.
+
+    Returns:
+        num_decodes: The number of decode requests.
+        num_extends: The number of extend requests.
+        num_prefills: The number of prefill requests.
+        num_decode_tokens: The number of tokens in the decode requests.
+        num_extend_tokens: The number of tokens in the extend requests.
+        num_prefill_tokens: The number of tokens in the prefill requests.
+    """
+    max_query_len = common_attn_metadata.max_query_len
+    num_reqs = common_attn_metadata.num_reqs
+    num_tokens = common_attn_metadata.num_actual_tokens
+    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    seq_lens = common_attn_metadata.seq_lens_cpu
+
+    if max_query_len <= decode_threshold:
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    is_prefill_or_extend = query_lens > decode_threshold
+    is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
+    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
+    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    num_decodes = first_extend
+    num_decode_tokens = query_start_loc[first_extend].item()
+    if not torch.any(is_prefill_or_extend):
+        return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
+
+    num_prefills_or_extends = num_reqs - num_decodes
+    num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
+    if not torch.any(is_prefill):
+        return (
+            num_decodes,
+            num_prefills_or_extends,
+            0,
+            num_decode_tokens,
+            num_prefill_or_extend_tokens,
+            0,
+        )
+
+    num_extends = first_prefill - num_decodes
+    num_prefills = num_reqs - first_prefill
+
+    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
+    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    return (
+        num_decodes,
+        num_extends,
+        num_prefills,
+        num_decode_tokens,
+        num_extend_tokens,
+        num_prefill_tokens,
     )
 
 
@@ -769,6 +959,12 @@ def split_decodes_and_prefills(
         return 0, num_reqs, 0, num_tokens
 
     if require_uniform:
+        # check if we are in a padded uniform batch; this is used for full-CGs, some
+        # requests may have a query length of 0 but since they are padding its fine
+        # to treat them as decodes (ensures num_decodes matches the captured size)
+        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
+            return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
         is_prefill = query_lens > decode_threshold
@@ -785,6 +981,33 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def split_prefill_chunks(
+    seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
+) -> list[tuple[int, int]]:
+    """
+    Split the prefill requests into chunks such that the total sequence length
+    of each chunk is less than or equal to the workspace size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests on CPU.
+        workspace_size: The maximum workspace size (in tokens) per chunk.
+        request_offset: The offset to add to the request indices.
+    Returns:
+        A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
+    """
+    chunk_bounds = []
+    i, n = 0, len(seq_lens_cpu)
+    assert torch.all(seq_lens_cpu <= workspace_size).item()
+
+    while i < n:
+        start, chunk_total = i, 0
+        while i < n and (chunk_total + (s := seq_lens_cpu[i].item())) <= workspace_size:
+            chunk_total += s
+            i += 1
+        chunk_bounds.append((start + request_offset, i + request_offset))
+    return chunk_bounds
+
+
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
@@ -797,51 +1020,59 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are at
-    # the front and the "prefill" requests are at the back using the least
-    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
-    # requests where attention is likely memory-bound and "prefill" to mean
-    # requests where attention is likely compute-bound, TODO(lucas): figure out
-    # a better naming here)
-    decodes = []
-    prefills = []
-    num_decode_tokens = 0
-    num_prefill_tokens = 0
+    # We now want to reorder the batch into decode → extend → prefill order
+    # where:
+    #   decode: request with num_scheduled_tokens <= decode_threshold
+    #   extend: non-decode request with existing context
+    #   prefill: non-decode request with no existing context
+    # NOTE for now we loosely use "decode" to mean requests where attention is
+    #  likely memory-bound and "prefill" to mean requests where attention is
+    #  likely compute-bound,
+    num_reqs = len(input_batch.req_ids)
+    num_scheduled_tokens = [
+        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
+    ]
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
+    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-            num_decode_tokens += num_tokens
-        else:
-            prefills.append(i)
-            num_prefill_tokens += num_tokens
+    is_decode = num_scheduled_tokens_np <= decode_threshold
+    is_extend = (~is_decode) & (num_computed_tokens_np > 0)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == 0)
 
-    # We hope that this is fairly minimal since decodes
-    # should be around for a number of iterations so hopefully they are
-    # relatively stationary (and new request are generally appended to the
-    # persistent batch so already should be at the back)
-    # To achieve this we loop over the decodes in descending order and
-    # the prefills in ascending order. We swap decodes from the  "back"
-    # i.e. past where the last decode should be in the reodorered with
-    # prefills from the front of the batch.
-    # `decodes` and `prefills` are already in ascending order just based on
-    # the above loop
-    num_decodes = len(decodes)
-    num_prefills = len(prefills)
-    modified_batch = False
+    # Desired order: decode → extend → prefill
+    req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions[is_extend] = 1
+    req_regions[is_prefill] = 2
 
-    for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
+    num_decodes = int(is_decode.sum())
+    num_extends = int(is_extend.sum())
 
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
+    target_regions = np.zeros(num_reqs, dtype=np.int32)
+    target_regions[num_decodes : num_decodes + num_extends] = 1
+    target_regions[num_decodes + num_extends :] = 2
 
-    return modified_batch
+    needs_swap = req_regions != target_regions
+
+    if not needs_swap.any():
+        return False
+
+    # Extract indices that need swapping and sort by target region
+    orig_indices = np.where(needs_swap)[0]
+    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+    src_indices = orig_indices[sorted_order]
+
+    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
+
+    for src in src_dest_map:
+        dst = src_dest_map[src]
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            # Mark dst as done by updating its destination to itself
+            next_dst = src_dest_map.get(dst, dst)
+            src_dest_map[dst] = dst
+            dst = next_dst
+
+    return True
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -873,12 +1104,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
 
 
-KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", Optional[torch.Tensor], None),
-    ("num_logits_indices", int, 0),
-]
-
-
 def subclass_attention_metadata(
     name_prefix: str,
     metadata_cls: Any,
@@ -894,8 +1119,8 @@ def subclass_attention_metadata(
 
 @runtime_checkable
 class KVSharingFastPrefillMetadata(Protocol):
-    logits_indices_padded: torch.Tensor
-    num_logits_indices: int
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
 
 def create_fast_prefill_custom_backend(
@@ -924,14 +1149,9 @@ def create_fast_prefill_custom_backend(
             ):
                 def __init__(self, metadata, common_attn_metadata):
                     # Shallow copy all fields in metadata cls
-                    for field in fields(metadata.__class__):
-                        setattr(self, field.name, getattr(metadata, field.name))
+                    for _field in fields(metadata.__class__):
+                        setattr(self, _field.name, getattr(metadata, _field.name))
 
-                    # Set additional fields that will be used in model code
-                    assert (
-                        common_attn_metadata.logits_indices_padded is not None
-                        and common_attn_metadata.num_logits_indices is not None
-                    )
                     self.logits_indices_padded = (
                         common_attn_metadata.logits_indices_padded
                     )
@@ -994,3 +1214,43 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
 
     return nums_dict, batch_ptr, token_chunk_offset_ptr
+
+
+def get_dcp_local_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    """While using dcp, kv_cache size stored on each rank may be different,
+    use this function to calculate split decode seq_lens of each dcp rank.
+    Only consider dcp now, we can extend the case of cp based on this.
+    """
+    num_requests = seq_lens.size(0)
+    if dcp_rank is None:
+        rank_offsets = (
+            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
+    else:
+        rank_offsets = torch.tensor(
+            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
+        )
+    seq_lens_tiled = (
+        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
+    )
+    base = (
+        seq_lens_tiled
+        // cp_kv_cache_interleave_size
+        // dcp_size
+        * cp_kv_cache_interleave_size
+    )
+    remainder = seq_lens_tiled - base * dcp_size
+    remainder = torch.clip(
+        remainder - rank_offsets * cp_kv_cache_interleave_size,
+        0,
+        cp_kv_cache_interleave_size,
+    )
+    dcp_local_seq_lens = base + remainder
+    return dcp_local_seq_lens.squeeze(1)

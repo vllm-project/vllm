@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -28,15 +27,23 @@ logger = init_logger(__name__)
 
 
 class JinaVLScorer(nn.Module):
-    def __init__(self, model_config: "ModelConfig"):
+    def __init__(self, model_config: "ModelConfig", prefix: str = ""):
         super().__init__()
-        config = model_config.hf_config
+        config = model_config.hf_config.get_text_config()
         head_dtype = model_config.head_dtype
         self.dense = ColumnParallelLinear(
-            config.hidden_size, config.hidden_size, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.hidden_size,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.dense",
         )
         self.out_proj = RowParallelLinear(
-            config.hidden_size, config.num_labels, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.out_proj",
         )
 
     def forward(self, x, **kwargs):
@@ -95,24 +102,32 @@ class JinaVLForSequenceClassification(
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.score = JinaVLScorer(vllm_config.model_config)
+        self.score = JinaVLScorer(
+            vllm_config.model_config, prefix=maybe_prefix(prefix, "score")
+        )
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
-                "score": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
 
         raise ValueError("Only image modality is supported")
 
     @classmethod
-    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+    def get_score_template(cls, query: str, document: str) -> str | None:
         return f"**Document**:\n{document}\n**Query**:\n{query}"
 
     @classmethod
@@ -124,8 +139,8 @@ class JinaVLForSequenceClassification(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         hidden_states = super().forward(

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -13,10 +12,10 @@ def merge_attn_states(
     prefix_lse: torch.Tensor,
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
-    output_lse: Optional[torch.Tensor] = None,
+    output_lse: torch.Tensor | None = None,
 ) -> None:
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
-    # is not support for FP8 dtype, fallback to use Triton kernel.
+    # does not support FP8 dtype, fallback to use Triton kernel.
     def supported_dtypes(o: torch.Tensor) -> bool:
         return o.dtype in [torch.float32, torch.half, torch.bfloat16]
 

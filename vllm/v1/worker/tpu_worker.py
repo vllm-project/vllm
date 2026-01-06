@@ -3,30 +3,29 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Callable, Optional, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import torch
-import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
-    has_kv_transfer_group,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.platforms.tpu import USE_TPU_COMMONS
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -36,8 +35,8 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R")
 
-if not USE_TPU_COMMONS:
-    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+if not USE_TPU_INFERENCE:
+    logger.info("tpu_inference not found, using vLLM's TPUWorker.")
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.profiler as xp
     import torch_xla.runtime as xr
@@ -88,7 +87,7 @@ class TPUWorker:
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 
@@ -98,16 +97,13 @@ class TPUWorker:
         # MP runtime is initialized.
         self.profiler = None
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if vllm_config.profiler_config.profiler == "torch" and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
-            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            self.profile_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s", self.profile_dir
             )
-
-        if self.model_config.seed is None:
-            self.model_config.seed = 0
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -141,8 +137,7 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        if self.model_config.seed is not None:
-            xm.set_rng_state(self.model_config.seed, self.device)
+        xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -182,8 +177,8 @@ class TPUWorker:
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
+                # Use an empty tensor instead of `None` to force Dynamo to pass
+                # it by reference, rather by specializing on the value `None`.
                 tpu_kv_cache = torch.tensor([], dtype=dtype).to(self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
@@ -211,7 +206,8 @@ class TPUWorker:
         # one compiled bytecode. Having one FX graph/cached bytecode per
         # compiled model is required for `support_torch_compile` decorator to
         # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reset_dynamo_cache()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
@@ -254,13 +250,13 @@ class TPUWorker:
             tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is set up
-        return output if self.is_driver_worker or has_kv_transfer_group() else None
+        self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | None:
+        return self.model_runner.execute_model(scheduler_output)
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
@@ -293,6 +289,9 @@ class TPUWorker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def reset_mm_cache(self) -> None:
+        self.model_runner.reset_mm_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -304,6 +303,13 @@ class TPUWorker:
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def check_health(self) -> None:
@@ -314,7 +320,7 @@ class TPUWorker:
         self,
         vllm_config: VllmConfig,
         rank: int,
-        distributed_init_method: Optional[str] = None,
+        distributed_init_method: str | None = None,
         local_rank: int = -1,
     ) -> None:
         """Initialize the distributed environment."""
@@ -329,14 +335,12 @@ class TPUWorker:
             world_size=parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
-            distributed_init_method=distributed_init_method,
+            distributed_init_method=distributed_init_method or "env://",
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size
         )
-
-        ensure_kv_transfer_initialized(vllm_config)
 
     def shutdown(self) -> None:
         self.model_runner.ensure_kv_transfer_shutdown()
@@ -346,7 +350,7 @@ class TPUWorker:
         return fn(self.get_model())
 
 
-if USE_TPU_COMMONS:
-    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+if USE_TPU_INFERENCE:
+    from tpu_inference.worker.tpu_worker import TPUWorker as TpuInferenceWorker
 
-    TPUWorker = TPUCommonsWorker  # type: ignore
+    TPUWorker = TpuInferenceWorker  # type: ignore

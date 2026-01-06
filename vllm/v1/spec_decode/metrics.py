@@ -3,7 +3,6 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import prometheus_client
@@ -143,9 +142,9 @@ class SpecDecodingProm:
 
     def __init__(
         self,
-        speculative_config: Optional[SpeculativeConfig],
+        speculative_config: SpeculativeConfig | None,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
@@ -216,7 +215,8 @@ class SpecDecodingProm:
 
 
 def make_per_engine(
-    counter: prometheus_client.Counter, per_engine_labelvalues: dict[int, list[str]]
+    counter: prometheus_client.Counter,
+    per_engine_labelvalues: dict[int, list[object]],
 ):
     """Create a counter for each label value."""
     return {

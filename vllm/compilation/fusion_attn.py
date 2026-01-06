@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 import torch._inductor.pattern_matcher as pm
+from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -17,10 +19,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .fx_utils import is_func
 from .inductor_pass import enable_fake_mode
+from .matcher_utils import MatcherQuantFP8
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -66,9 +70,13 @@ class AttentionQuantPattern(ABC):
         return torch.empty(*args, **kwargs)
 
     @staticmethod
-    def wrap_trace_fn(process_fx, trace_fn):
+    def wrap_trace_fn(trace_fn, *process_fx_fns: Callable[[fx.GraphModule], None]):
         def wrapped(*args, **kwargs):
-            return process_fx(trace_fn(*args, **kwargs))
+            gm = trace_fn(*args, **kwargs)
+            for process_fx in process_fx_fns:
+                process_fx(gm)
+
+            return gm
 
         return wrapped
 
@@ -77,7 +85,20 @@ class AttentionQuantPattern(ABC):
         from torch._inductor.fx_passes.post_grad import view_to_reshape
 
         view_to_reshape(gm)
-        return gm
+
+    @staticmethod
+    def remove_noop_permutes(gm: torch.fx.GraphModule):
+        for node in gm.graph.nodes:
+            if not is_func(node, torch.ops.aten.permute.default):
+                continue
+
+            dims = node.args[1]
+            if any(dim != i for i, dim in enumerate(dims)):
+                continue
+
+            # this is now an identity op, remove
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
 
     def register_if_supported(self, pm_pass: PatternMatcherPass):
         if self.layer.impl.fused_output_quant_supported(self.quant_key):
@@ -108,6 +129,7 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=symmetric
         )
         super().__init__(layer, quant_key, dtype)
+        self.quant_matcher = MatcherQuantFP8(quant_key)
 
     def _register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -115,7 +137,6 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
             scale: torch.Tensor,
         ):
             at1 = auto_functionalized(
@@ -131,17 +152,14 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self.num_heads * self.head_size]
             )
-            at2 = auto_functionalized(
-                self.QUANT_OP, result=output_quant, input=attn_out_view, scale=scale
-            )
-            return at2[1]
+
+            return self.quant_matcher(attn_out_view, scale)[0]
 
         def replacement(
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
             scale: torch.Tensor,
         ):
             # attn output in quant_dtype
@@ -164,13 +182,10 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         inputs = [
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # q
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # k
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # v
-            self.empty(
-                5, self.num_heads, self.head_size, dtype=self.dtype
-            ),  # attn_output
-            self.empty_quant(5, self.num_heads * self.head_size),  # quant_output
+            self.empty(5, self.num_heads, self.head_size),  # q
+            self.empty(5, self.num_heads, self.head_size),  # k
+            self.empty(5, self.num_heads, self.head_size),  # v
+            self.empty(5, self.num_heads, self.head_size),  # attn_output
             empty_fp32(1, 1),  # scale
         ]
 
@@ -179,7 +194,9 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             replacement,
             inputs,
             AttentionQuantPattern.wrap_trace_fn(
-                AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only
+                pm.fwd_only,
+                AttentionQuantPattern.fx_view_to_reshape,
+                AttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
         )
@@ -279,7 +296,9 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             replacement,
             inputs,
             AttentionQuantPattern.wrap_trace_fn(
-                AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only
+                pm.fwd_only,
+                AttentionQuantPattern.fx_view_to_reshape,
+                AttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
         )

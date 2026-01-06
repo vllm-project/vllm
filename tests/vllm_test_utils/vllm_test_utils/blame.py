@@ -5,8 +5,7 @@ import contextlib
 import dataclasses
 import sys
 import traceback
-from collections.abc import Generator
-from typing import Callable
+from collections.abc import Callable, Generator
 
 
 @dataclasses.dataclass

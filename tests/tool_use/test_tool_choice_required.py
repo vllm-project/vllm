@@ -9,10 +9,10 @@ import regex as re
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 pytestmark = pytest.mark.cpu_test
 
@@ -67,8 +67,9 @@ EXAMPLE_TOOLS = [
 def _compile_and_check(
     tools: list[ChatCompletionToolsParam], sample_output, should_match: bool
 ):
-    self = MagicMock(tool_choice="required", tools=tools)
-    schema = ChatCompletionRequest._get_json_schema_from_tool(self)
+    # self = MagicMock(tool_choice="required", tools=tools)
+    # schema = ChatCompletionRequest._get_json_schema_from_tool(self)
+    schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
     assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide

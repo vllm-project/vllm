@@ -5,11 +5,12 @@ import queue
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import asdict
 from itertools import count
 from queue import Queue
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import msgspec
 import zmq
@@ -29,7 +30,7 @@ class EventBatch(
 ):
     ts: float
     events: list[Any]
-    data_parallel_rank: Optional[int] = None
+    data_parallel_rank: int | None = None
 
 
 class KVCacheEvent(
@@ -47,16 +48,37 @@ MEDIUM_GPU = "GPU"
 
 class BlockStored(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
-    parent_block_hash: Optional[ExternalBlockHash]
+    parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_id: Optional[int]
-    medium: Optional[str]
+
+    lora_id: int | None
+    """Deprecated: use `lora_name` for KV block key hash.
+    Retained for backward compatibility.
+    """
+
+    medium: str | None
+    lora_name: str | None
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                tuple(self.block_hashes),
+                self.parent_block_hash,
+                tuple(self.token_ids),
+                self.block_size,
+                self.lora_id,
+                self.medium,
+            )
+        )
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
-    medium: Optional[str]
+    medium: str | None
+
+    def __hash__(self) -> int:
+        return hash((tuple(self.block_hashes), self.medium))
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -64,7 +86,120 @@ class AllBlocksCleared(KVCacheEvent):
 
 
 class KVEventBatch(EventBatch):
-    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+
+
+class KVEventAggregator:
+    """
+    Aggregates KV events across multiple workers.
+    Tracks how many times each event appears and returns only those
+    that were emitted by all workers.
+    """
+
+    __slots__ = ("_event_counter", "_num_workers")
+
+    def __init__(self, num_workers: int) -> None:
+        if num_workers <= 0:
+            raise ValueError("num_workers must be greater than zero.")
+        self._event_counter: Counter[KVCacheEvent] = Counter()
+        self._num_workers: int = num_workers
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        """
+        Add events from a worker batch.
+
+        :param events: List of KVCacheEvent objects.
+        """
+        if not isinstance(events, list):
+            raise TypeError("events must be a list of KVCacheEvent.")
+        self._event_counter.update(events)
+
+    def get_common_events(self) -> list[KVCacheEvent]:
+        """
+        Return events that appeared in all workers.
+
+        :return: List of events present in all workers.
+        """
+        return [
+            event
+            for event, count in self._event_counter.items()
+            if count == self._num_workers
+        ]
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        """
+        Return all events for all workers.
+
+        :return: List of events for all workers.
+        """
+        return list(self._event_counter.elements())
+
+    def clear_events(self) -> None:
+        """
+        Clear all tracked events.
+        """
+        self._event_counter.clear()
+
+    def increment_workers(self, count: int = 1) -> None:
+        """
+        Increment the number of workers contributing events.
+
+        :param count: Number to increment the workers by.
+        """
+        if count <= 0:
+            raise ValueError("count must be positive.")
+        self._num_workers += count
+
+    def reset_workers(self) -> None:
+        """
+        Reset the number of workers to 1.
+        """
+        self._num_workers = 1
+
+    def get_number_of_workers(self) -> int:
+        """
+        Return the number of workers.
+
+        :return: int number of workers.
+        """
+        return self._num_workers
+
+    def __repr__(self) -> str:
+        return (
+            f"<KVEventAggregator workers={self._num_workers}, "
+            f"events={len(self._event_counter)}>"
+        )
+
+
+class KVConnectorKVEvents(ABC):
+    """
+    Abstract base class for KV events.
+    Acts as a container for KV events from the connector.
+    """
+
+    @abstractmethod
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def aggregate(self) -> "KVConnectorKVEvents":
+        raise NotImplementedError
+
+    @abstractmethod
+    def increment_workers(self, count: int = 1) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_all_events(self) -> list[KVCacheEvent]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_number_of_workers(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear_events(self) -> None:
+        raise NotImplementedError
 
 
 class EventPublisher(ABC):
@@ -116,7 +251,7 @@ class ZmqEventPublisher(EventPublisher):
     Parameters
     ----------
     endpoint:
-        PUB address. Use ``tcp://*:5557`` to bind or ``tcp://host:5557`` to
+        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
         connect.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
@@ -139,7 +274,7 @@ class ZmqEventPublisher(EventPublisher):
         self,
         data_parallel_rank: int,
         endpoint: str = "tcp://*:5557",
-        replay_endpoint: Optional[str] = None,
+        replay_endpoint: str | None = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
@@ -147,13 +282,13 @@ class ZmqEventPublisher(EventPublisher):
     ) -> None:
         # Storage
         super().__init__(data_parallel_rank)
-        self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
+        self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
         # ZMQ sockets
         self._ctx = zmq.Context.instance()
-        self._pub: Optional[zmq.Socket] = None
-        self._replay: Optional[zmq.Socket] = None
+        self._pub: zmq.Socket | None = None
+        self._replay: zmq.Socket | None = None
         self._dp_rank = data_parallel_rank
 
         self._endpoint = self.offset_endpoint_port(endpoint, self._dp_rank)
@@ -303,8 +438,8 @@ class ZmqEventPublisher(EventPublisher):
 
     @staticmethod
     def offset_endpoint_port(
-        endpoint: Optional[str], data_parallel_rank: int
-    ) -> Optional[str]:
+        endpoint: str | None, data_parallel_rank: int
+    ) -> str | None:
         """Helper function to offset the port in an endpoint by
             the data parallel rank.
 
@@ -349,15 +484,19 @@ class EventPublisherFactory:
 
     @classmethod
     def create(
-        cls, config: Optional[KVEventsConfig], data_parallel_rank: int = 0
+        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
     ) -> EventPublisher:
         """Create publisher from a config mapping."""
-        if not config:
+        if (
+            config is None
+            or not config.enable_kv_cache_events
+            or config.publisher == "null"
+        ):
             return NullEventPublisher()
 
         config_dict = asdict(config)
 
-        kind = config_dict.pop("publisher", "null")
+        kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
         try:
             constructor = cls._registry[kind]

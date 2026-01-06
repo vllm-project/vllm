@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helper functions to work with nested JSON structures."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import reduce
-from typing import TYPE_CHECKING, Callable, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 
 if TYPE_CHECKING:
     import torch
@@ -14,23 +14,20 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
-JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    _T,
-]
+JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"] | list["JSONTree[_T]"] | tuple["JSONTree[_T]", ...] | _T
+)
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
-_JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    dict[str, _T],
-    list[_T],
-    tuple[_T, ...],
-    _T,
-]
+_JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"]
+    | list["JSONTree[_T]"]
+    | tuple["JSONTree[_T]", ...]
+    | dict[str, _T]
+    | list[_T]
+    | tuple[_T, ...]
+    | _T
+)
 """
 Same as `JSONTree` but with additional `Union` members to satisfy overloads.
 """
@@ -58,22 +55,22 @@ def json_map_leaves(
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, dict[str, _T]],
-) -> Union[_U, dict[str, _U]]: ...
+    value: _T | dict[str, _T],
+) -> _U | dict[str, _U]: ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, list[_T]],
-) -> Union[_U, list[_U]]: ...
+    value: _T | list[_T],
+) -> _U | list[_U]: ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, tuple[_T, ...]],
-) -> Union[_U, tuple[_U, ...]]: ...
+    value: _T | tuple[_T, ...],
+) -> _U | tuple[_U, ...]: ...
 
 
 @overload
@@ -85,16 +82,13 @@ def json_map_leaves(
 
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union["BatchedTensorInputs", _JSONTree[_T]],
-) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
+    value: Any,
+) -> "BatchedTensorInputs" | _JSONTree[_U]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
-        return {
-            k: json_map_leaves(func, v)  # type: ignore[arg-type]
-            for k, v in value.items()
-        }
+        return {k: json_map_leaves(func, v) for k, v in value.items()}  # type: ignore
     elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
+        return [json_map_leaves(func, v) for v in value]  # type: ignore
     elif isinstance(value, tuple):
         return tuple(json_map_leaves(func, v) for v in value)
     else:
@@ -104,7 +98,7 @@ def json_map_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, dict[str, _T]],
+    value: _T | dict[str, _T],
     /,
 ) -> _T: ...
 
@@ -112,7 +106,7 @@ def json_reduce_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, list[_T]],
+    value: _T | list[_T],
     /,
 ) -> _T: ...
 
@@ -120,7 +114,7 @@ def json_reduce_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, tuple[_T, ...]],
+    value: _T | tuple[_T, ...],
     /,
 ) -> _T: ...
 
@@ -143,24 +137,20 @@ def json_reduce_leaves(
 
 
 def json_reduce_leaves(
-    func: Callable[..., Union[_T, _U]],
+    func: Callable[[_T, _T], _T] | Callable[[_U, _T], _U],
     value: _JSONTree[_T],
-    initial: _U = cast(_U, ...),  # noqa: B008
+    initial: _U = ...,  # type: ignore[assignment]
     /,
-) -> Union[_T, _U]:
+) -> _T | _U:
     """
     Apply a function of two arguments cumulatively to each leaf in a
     nested JSON structure, from left to right, so as to reduce the
     sequence to a single value.
     """
     if initial is ...:
-        return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
+        return reduce(func, json_iter_leaves(value))  # type: ignore
 
-    return reduce(
-        func,  # type: ignore[arg-type]
-        json_iter_leaves(value),
-        initial,
-    )
+    return reduce(func, json_iter_leaves(value), initial)  # type: ignore
 
 
 def json_count_leaves(value: JSONTree[_T]) -> int:

@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import importlib
 import os
 import signal
 import time
 import uuid
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Optional, Union
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,10 +23,14 @@ from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublis
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreClient, SyncMPClient
+from vllm.v1.engine.core_client import (
+    AsyncMPClient,
+    EngineCoreClient,
+    SyncMPClient,
+)
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 
@@ -39,15 +45,21 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request(
-    params: SamplingParams, prompt_tokens_ids: Optional[list[int]] = None
+    params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
 
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=prompt_tokens_ids,
         mm_features=None,
         sampling_params=params,
@@ -58,6 +70,92 @@ def make_request(
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def _reload_envs_module():
+    import vllm.envs as envs_mod
+
+    cache_clear = getattr(getattr(envs_mod, "__getattr__", None), "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
+    return importlib.reload(envs_mod)
+
+
+def _reload_core_client_module():
+    module = importlib.import_module("vllm.v1.engine.core_client")
+    return importlib.reload(module)
+
+
+def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
+    timeout_value = 654
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", str(timeout_value))
+
+    # Ensure that the environment variable is loaded if caching is enabled
+    _reload_envs_module()
+    core_client_mod = _reload_core_client_module()
+
+    poll_timeouts: list[int] = []
+
+    class ShadowSocket:
+        def poll(self, timeout: int) -> int:
+            # Capture the timeout value for each poll call
+            poll_timeouts.append(timeout)
+            return 1
+
+        def recv_multipart(self):
+            return (b"\x00\x00", b"ready")
+
+    class DummySocket:
+        def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
+            if track:
+                return SimpleNamespace(done=True)
+
+        def recv_multipart(self, *, copy: bool = False):
+            return (b"", b"")
+
+        def close(self, *, linger: int = 0):
+            pass
+
+        def bind(self, _address):
+            pass
+
+        def connect(self, _address):
+            pass
+
+        def setsockopt(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
+    monkeypatch.setattr(
+        core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
+    )
+
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        data_parallel_rank=0,
+        data_parallel_index=0,
+        data_parallel_size_local=1,
+        data_parallel_rank_local=None,
+        data_parallel_hybrid_lb=False,
+        data_parallel_external_lb=False,
+    )
+    vllm_config = SimpleNamespace(parallel_config=parallel_config)
+
+    client = core_client_mod.MPClient(
+        asyncio_mode=False,
+        vllm_config=vllm_config,
+        executor_class=object,
+        log_stats=False,
+        client_addresses={
+            "input_address": "inproc://input",
+            "output_address": "inproc://output",
+        },
+    )
+    try:
+        # timeout_value is in seconds, but poll receives milliseconds
+        assert poll_timeouts == [timeout_value * 1000]
+    finally:
+        client.shutdown()
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -113,9 +211,7 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(
-    self, msg: str, err_msg: Optional[str] = None, sleep: Optional[float] = None
-) -> str:
+def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
     if sleep is not None:
         time.sleep(sleep)
@@ -317,7 +413,7 @@ def echo_dc(
     self,
     msg: str,
     return_list: bool = False,
-) -> Union[MyDataclass, list[MyDataclass]]:
+) -> MyDataclass | list[MyDataclass]:
     print(f"echo dc util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dataclass to verify support for returning custom types
@@ -330,7 +426,7 @@ def echo_dc_dict(
     self,
     msg: str,
     return_dict: bool = False,
-) -> Union[MyDataclass, dict[str, MyDataclass]]:
+) -> MyDataclass | dict[str, MyDataclass]:
     print(f"echo dc dict util function called: {msg}")
     val = None if msg is None else MyDataclass(msg)
     # Return dict of dataclasses to verify support for returning dicts
@@ -638,6 +734,7 @@ def test_kv_cache_events(
         )
         assert event.parent_block_hash is None, "Parent block hash should be None"
         assert event.lora_id is None, "Lora id should be None"
+        assert event.lora_name is None, "Lora name should be None"
         assert len(event.token_ids) == num_blocks * block_size, (
             "Token ids should be the same as the custom tokens"
         )

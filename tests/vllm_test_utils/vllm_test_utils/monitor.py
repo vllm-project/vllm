@@ -5,8 +5,8 @@ import contextlib
 import dataclasses
 import sys
 import traceback
-from collections.abc import Generator
-from typing import Callable, Generic, TypeVar
+from collections.abc import Callable, Generator
+from typing import Generic, TypeVar
 
 _T = TypeVar("_T")
 

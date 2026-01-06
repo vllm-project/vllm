@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional, TypedDict, Union
+from typing import Any, TypedDict
 
 import numpy.typing as npt
 import pytest
@@ -83,7 +83,7 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 
 def batch_make_image_embeddings(
-    image_batches: list[Union[Image.Image, list[Image.Image]]],
+    image_batches: list[Image.Image | list[Image.Image]],
     processor,
     llm: VllmRunner,
 ) -> list[Qwen2VLPromptImageEmbeddingInput]:
@@ -128,12 +128,7 @@ def batch_make_image_embeddings(
             visual = model.visual
 
             pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
-            image_grid_thw_on_device = image_grid_thw.to(
-                visual.device, dtype=torch.int64
-            )
-            return visual(
-                pixel_values_on_device, grid_thw=image_grid_thw_on_device
-            ).cpu()
+            return visual(pixel_values_on_device, grid_thw=image_grid_thw).cpu()
 
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
@@ -217,12 +212,7 @@ def batch_make_video_embeddings(
             visual = model.visual
 
             pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
-            video_grid_thw_on_device = video_grid_thw.to(
-                visual.device, dtype=torch.int64
-            )
-            return visual(
-                pixel_values_on_device, grid_thw=video_grid_thw_on_device
-            ).cpu()
+            return visual(pixel_values_on_device, grid_thw=video_grid_thw).cpu()
 
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
@@ -272,12 +262,12 @@ def run_embedding_input_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between
     original image/video input and image/video embeddings input.
     """
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model)
 
@@ -292,6 +282,7 @@ def run_embedding_input_test(
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         default_torch_num_threads=1,
+        enable_mm_embeds=True,
     ) as vllm_model:
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(

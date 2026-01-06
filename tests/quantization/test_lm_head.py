@@ -31,7 +31,9 @@ def test_lm_head(
 ) -> None:
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(model_id, dtype=torch.float16, max_model_len=2048) as vllm_model:
+    with vllm_runner(
+        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as vllm_model:
 
         def check_model(model):
             lm_head_layer = model.lm_head
@@ -47,4 +49,4 @@ def test_lm_head(
 
         vllm_model.apply_model(check_model)
 
-        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=10)[0][1])
+        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])

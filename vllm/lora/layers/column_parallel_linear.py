@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -32,8 +31,6 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         == len(layer.lora_b_stacked)
         == len(layer.output_slices)
     )
-    if layer.lora_bias_stacked is not None:
-        assert layer.n_slices == len(layer.lora_bias_stacked)
 
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
@@ -48,7 +45,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         device=x.device,
     )
 
-    shrunk_buffers: Optional[torch.Tensor] = layer.punica_wrapper.add_shrink(
+    shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
         buffers, x, layer.lora_a_stacked, 1.0
     )
 
@@ -57,11 +54,10 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
     buffers = tensor_model_parallel_all_gather(buffers)
 
-    lora_output: Optional[torch.Tensor] = layer.punica_wrapper.add_expand(
+    lora_output: torch.Tensor | None = layer.punica_wrapper.add_expand(
         output,
         buffers,
         layer.lora_b_stacked,
-        layer.lora_bias_stacked,
         layer.output_slices,
         offset_start=0,
         add_input=True,
@@ -122,19 +118,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
-    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
-        # TODO: Fix the slicing logic of bias.
-        if bias is None:
-            return bias
-        shard_size = self.output_size
-        start_idx = self.tp_rank * shard_size
-        end_idx = (self.tp_rank + 1) * shard_size
-        bias = bias[start_idx:end_idx]
-        return bias
-
     def forward(
         self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -167,7 +153,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
@@ -185,7 +171,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """
 
     def __init__(
-        self, base_layer: Union[MergedColumnParallelLinear, QKVParallelLinear]
+        self, base_layer: MergedColumnParallelLinear | QKVParallelLinear
     ) -> None:
         super().__init__(base_layer)
         # There are two LoRA layers
@@ -202,7 +188,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         """
         The main reason for overriding this function is to enhance  code
@@ -238,26 +224,15 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
-        if lora_config.bias_enabled:
-            self.lora_bias_stacked = tuple(
-                torch.zeros(
-                    max_loras,
-                    1,
-                    output_size,
-                    dtype=lora_config.lora_dtype,
-                    device=self.device,
-                )
-                for output_size in self.output_slices
-            )
 
     def slice_lora_a(
-        self, lora_a: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_a: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
         return lora_a
 
     def slice_lora_b(
-        self, lora_b: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_b: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
         sliced_lora_b = [None] * self.n_slices
         for i, (shard_id, shard_size) in enumerate(
             zip(self.output_ids, self.output_slices)
@@ -268,31 +243,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 ]
         return sliced_lora_b
 
-    def slice_bias(
-        self, bias: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
-        for i, (shard_id, shard_size) in enumerate(
-            zip(self.output_ids, self.output_slices)
-        ):
-            if (bias_i := bias[i]) is not None:
-                bias[i] = bias_i[shard_size * shard_id : shard_size * (shard_id + 1)]
-        return bias
-
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        lora_bias: Optional[torch.Tensor] = None,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         self.reset_lora(index)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            if lora_bias is not None:
-                lora_bias = self.slice_bias(lora_bias)
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
@@ -304,16 +265,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
 
-        if lora_bias is not None:
-            self.lora_bias_stacked = cast(
-                tuple[torch.Tensor, ...], self.lora_bias_stacked
-            )
-            for i in range(self.n_slices):
-                if (lora_bias_i := lora_bias[i]) is not None:
-                    self.lora_bias_stacked[i][index, 0, : lora_bias_i.shape[0]].copy_(
-                        lora_bias_i, non_blocking=True
-                    )
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -321,7 +272,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return (
             type(source_layer) is MergedColumnParallelLinear
@@ -380,24 +331,6 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=0)
         return lora_b
 
-    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
-        bias_q = bias[
-            self.q_proj_shard_size * self.q_shard_id : self.q_proj_shard_size
-            * (self.q_shard_id + 1)
-        ]
-        k_offset = self.q_proj_total_size
-        bias_k = bias[
-            k_offset + self.kv_proj_shard_size * self.kv_shard_id : k_offset
-            + self.kv_proj_shard_size * (self.kv_shard_id + 1)
-        ]
-        v_offset = k_offset + self.kv_proj_total_size
-        bias_v = bias[
-            v_offset + self.kv_proj_shard_size * self.kv_shard_id : v_offset
-            + self.kv_proj_shard_size * (self.kv_shard_id + 1)
-        ]
-        bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
-        return bias
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -405,7 +338,7 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
 
@@ -448,7 +381,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         """
         The main reason for overloading this function is to handle inconsistent
@@ -463,7 +396,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 3
 
@@ -491,9 +424,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         lora_a = lora_a[start_idx : start_idx + shard_size, :]
         return lora_a
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -503,7 +434,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -524,8 +455,8 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
     """
 
     def slice_lora_a(
-        self, lora_a: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_a: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
         # NOTE: lora_a contains 2 subloras, and each sublora could be None.
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
@@ -539,9 +470,7 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
         ]
         return lora_a
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -551,7 +480,7 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -577,9 +506,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         lora_a = lora_a[start_idx : start_idx + shard_size, :]
         return lora_a
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -589,7 +516,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -610,8 +537,8 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
     """
 
     def slice_lora_a(
-        self, lora_a: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_a: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
         # NOTE: lora_a contains 3 subloras, and each sublora could be None.
         shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
         start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
@@ -628,9 +555,7 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         ]
         return lora_a
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -640,7 +565,7 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(

@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -111,12 +111,10 @@ class InternS1ImageEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["image_embeds"] = "image_embeds"
-    data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]], TensorShape("ni", "tifs", "hs")
-    ]
+    data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("ni", "tifs", "hs")]
 
 
-InternS1ImageInputs = Union[InternS1ImagePixelInputs, InternS1ImageEmbeddingInputs]
+InternS1ImageInputs: TypeAlias = InternS1ImagePixelInputs | InternS1ImageEmbeddingInputs
 
 
 class InternS1VideoPixelInputs(TensorSchema):
@@ -143,12 +141,10 @@ class InternS1VideoEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["video_embeds"] = "video_embeds"
-    data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]], TensorShape("nv", "tvfs", "hs")
-    ]
+    data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("nv", "tvfs", "hs")]
 
 
-InternS1VideoInputs = Union[InternS1VideoPixelInputs, InternS1VideoEmbeddingInputs]
+InternS1VideoInputs: TypeAlias = InternS1VideoPixelInputs | InternS1VideoEmbeddingInputs
 
 
 def resolve_interns1_min_max_num(
@@ -186,11 +182,14 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         hf_processor = self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
         hf_processor.video_processor = cached_video_processor_from_config(
-            self.ctx.model_config, processor_cls=InternVLVideoProcessor, **kwargs
+            self.ctx.model_config,
+            processor_cls=InternVLVideoProcessor,
+            size=hf_processor.image_processor.size,
+            **kwargs,
         )
         return hf_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     def get_num_image_tokens(
@@ -198,7 +197,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional["GotOcr2ImageProcessorFast"] = None,
+        processor: GotOcr2ImageProcessorFast | None = None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor().image_processor
@@ -213,7 +212,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
         return num_image_tokens
 
-    def resolve_target_ratios(self, use_thumbnail: Optional[bool] = None):
+    def resolve_target_ratios(self, use_thumbnail: bool | None = None):
         image_processor = self.get_hf_processor().image_processor
         min_dynamic_patch = image_processor.min_patches
         max_dynamic_patch = image_processor.max_patches
@@ -298,7 +297,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
@@ -510,8 +509,6 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 class InternS1ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    merge_by_field_config = True
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -523,7 +520,7 @@ class InternS1ForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         # transformers InternVLProcessor uses <IMG_CONTEXT> as the separator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
@@ -576,7 +573,7 @@ class InternS1ForConditionalGeneration(
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         prefix: str,
     ):
@@ -620,7 +617,7 @@ class InternS1ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[InternS1ImageInputs]:
+    ) -> InternS1ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -635,8 +632,11 @@ class InternS1ForConditionalGeneration(
             )
 
         image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
 
         if pixel_values is not None:
             h, w = self.config.vision_config.image_size
@@ -654,7 +654,7 @@ class InternS1ForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[InternS1VideoInputs]:
+    ) -> InternS1VideoInputs | None:
         pixel_values_flat_video = kwargs.pop("pixel_values_videos", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -669,8 +669,11 @@ class InternS1ForConditionalGeneration(
             )
 
         video_token_id = kwargs["video_token_id"]
-        assert isinstance(video_token_id, torch.Tensor)
-        self.video_context_token_id = video_token_id.flatten().unique().item()
+        if isinstance(video_token_id, torch.Tensor):
+            video_token_id = video_token_id.flatten().unique().item()
+
+        assert isinstance(video_token_id, int)
+        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             h, w = self.config.vision_config.image_size
@@ -688,7 +691,7 @@ class InternS1ForConditionalGeneration(
 
     def _process_vision_input(
         self,
-        image_input: Union[InternS1ImageInputs, InternS1VideoInputs],
+        image_input: InternS1ImageInputs | InternS1VideoInputs,
     ) -> tuple[torch.Tensor, ...]:
         if (
             image_input["type"] == "image_embeds"
@@ -737,7 +740,7 @@ class InternS1ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -751,21 +754,21 @@ class InternS1ForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_vision_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
@@ -773,9 +776,9 @@ class InternS1ForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
@@ -786,8 +789,8 @@ class InternS1ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
@@ -807,7 +810,7 @@ class InternS1ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

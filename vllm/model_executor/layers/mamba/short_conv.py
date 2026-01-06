@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 import torch
 
@@ -27,7 +23,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
@@ -38,8 +34,8 @@ class ShortConv(MambaBase, CustomOp):
         config,
         dim: int,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -122,6 +118,7 @@ class ShortConv(MambaBase, CustomOp):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             state_indices_tensor = attn_metadata.state_indices_tensor
             has_initial_states_p = attn_metadata.has_initial_states_p
+            query_start_loc_p = attn_metadata.query_start_loc_p
 
         BCx, _ = self.in_proj(hidden_states)
 
@@ -168,11 +165,6 @@ class ShortConv(MambaBase, CustomOp):
             state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
-        )
-        query_start_loc_p = (
-            attn_metadata.query_start_loc[-num_prefills - 1 :] - num_decodes
-            if has_prefill
-            else None
         )
 
         conv_output_list = []
@@ -231,11 +223,6 @@ class ShortConv(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "short_conv"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
-
-        return ShortConvAttentionBackend
 
 
 def short_conv(

@@ -11,11 +11,13 @@ import contextlib
 import functools
 import logging
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,8 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: tuple[Optional[tuple], Optional[dict], Any] = []
-    cache_size = 4
+    cache_entries: tuple[tuple | None, dict | None, Any] = []
+    cache_size = 8
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -117,7 +119,7 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
 def get_available_device() -> str:
     try:
         return triton.runtime.driver.active.get_current_target().backend
-    except BaseException:
+    except (RuntimeError, AttributeError):
         return "cpu"
 
 
@@ -136,8 +138,8 @@ def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
 # However, the torch backend is 'cuda' for both Nvidia and AMD GPUs.
 # Therefore, we need to check the triton backend to determine the actual GPU vendor.
-device = get_available_device() if get_available_device() != "hip" else "cuda"
-device_torch_lib = getattr(torch, device)
+device = "cuda" if current_platform.is_cuda_alike() else get_available_device()
+device_torch_lib = getattr(torch, device, None)
 device_platform = _check_platform()
 
 is_amd = device_platform == "amd"
@@ -149,6 +151,11 @@ is_nvidia_hopper = is_nvidia and (
     or torch.cuda.get_device_capability()[0] >= 9
 )
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
+is_gather_supported = hasattr(triton.language, "gather")
+is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) and (
+    hasattr(triton.language, "_experimental_make_tensor_descriptor")
+    or hasattr(triton.language, "make_tensor_descriptor")
+)
 
 
 def get_all_max_shared_mem():

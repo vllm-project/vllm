@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
@@ -15,13 +14,13 @@ ROCM_FP8FNUZ_MAX = 224.0
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
+def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float32, device="cuda")
 
 
 def ref_dynamic_per_token_quant(
-    x: torch.tensor, quant_dtype: torch.dtype, scale_ub: Optional[torch.tensor] = None
-) -> tuple[torch.tensor, torch.tensor]:
+    x: torch.Tensor, quant_dtype: torch.dtype, scale_ub: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert quant_dtype in [torch.int8, FP8_DTYPE]
     if scale_ub is not None:
         assert quant_dtype == FP8_DTYPE
@@ -31,16 +30,11 @@ def ref_dynamic_per_token_quant(
         if quant_dtype == torch.int8
         else torch.finfo(quant_dtype)
     )
-    qtype_traits_max = (
-        ROCM_FP8FNUZ_MAX
-        if current_platform.is_rocm() and current_platform.is_fp8_fnuz()
-        else qtype_traits.max
+    use_fp8fnuz = (
+        current_platform.is_fp8_fnuz() and quant_dtype == current_platform.fp8_dtype()
     )
-    qtype_traits_min = (
-        -ROCM_FP8FNUZ_MAX
-        if current_platform.is_rocm() and current_platform.is_fp8_fnuz()
-        else qtype_traits.min
-    )
+    qtype_traits_max = ROCM_FP8FNUZ_MAX if use_fp8fnuz else qtype_traits.max
+    qtype_traits_min = -ROCM_FP8FNUZ_MAX if use_fp8fnuz else qtype_traits.min
     qtype_max = as_float32_tensor(qtype_traits_max)
     s_1 = as_float32_tensor(1.0)
     s_512 = as_float32_tensor(512.0)
@@ -76,8 +70,8 @@ def ref_dynamic_per_token_quant(
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant
 # kernel
 def ref_dynamic_per_tensor_fp8_quant(
-    x: torch.tensor,
-) -> tuple[torch.tensor, torch.tensor]:
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     fp8_traits = torch.finfo(FP8_DTYPE)
     fp8_traits_max = (
         ROCM_FP8FNUZ_MAX
@@ -104,7 +98,7 @@ def ref_dynamic_per_tensor_fp8_quant(
         .clamp(fp8_traits_min, fp8_traits_max)
         .to(FP8_DTYPE)
     )
-    return ref_out, ref_scale.view((1,))
+    return ref_out, ref_scale.view(1)
 
 
 def native_w8a8_block_matmul(
@@ -250,10 +244,10 @@ def per_block_cast_to_int8(
 
 def dequant(
     t: torch.Tensor,
-    scale: Optional[torch.Tensor],
-    block_shape: Optional[list[int]],
+    scale: torch.Tensor | None,
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
-    out_dtype: Optional[torch.dtype] = torch.float32,
+    out_dtype: torch.dtype | None = torch.float32,
 ) -> torch.Tensor:
     if scale is not None:
         f32 = torch.float32
@@ -267,10 +261,10 @@ def dequant(
 
 def batched_dequant(
     t: torch.Tensor,
-    scale: Optional[torch.Tensor],
-    block_shape: Optional[list[int]],
+    scale: torch.Tensor | None,
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
-    out_dtype: Optional[torch.dtype] = torch.float32,
+    out_dtype: torch.dtype | None = torch.float32,
 ) -> torch.Tensor:
     if scale is not None:
         assert t.shape[0] == scale.shape[0]
@@ -289,9 +283,9 @@ def native_batched_masked_quant_matmul(
     B: torch.Tensor,
     C: torch.Tensor,
     num_expert_tokens: torch.Tensor,
-    A_scale: Optional[torch.Tensor] = None,
-    B_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
+    A_scale: torch.Tensor | None = None,
+    B_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
 ) -> torch.Tensor:
     num_expert_tokens_cpu = num_expert_tokens.clone()

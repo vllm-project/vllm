@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Optional
 
 import torch
 
@@ -18,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -25,23 +25,29 @@ logger = init_logger(__name__)
 class FlashinferMoeBackend(Enum):
     TENSORRT_LLM = "TensorRT-LLM"
     CUTLASS = "CUTLASS"
+    CUTEDSL = "CUTEDSL"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
+    from flashinfer import next_positive_power_of_2
+
     # FlashInfer 0.2.10 has issues with larger tile sizes. Set to 8 for now.
     # TODO: Revert this to dynamic calculation once a new version of FlashInfer
     # with the necessary kernels is released.
     tile_tokens_dim = 8
 
-    # from flashinfer import next_positive_power_of_2
-
-    # # Guess tokens per expert assuming perfect expert distribution first.
-    # num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # # And pad the number to the next power of 2.
-    # tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # # Cap to 8-64 tokens per CTA tile as it's the range supported by the
-    # # kernel.
-    # tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
+    # A factor considering tokens are not perfectly balanced among experts.
+    imbalance_factor = 1.3
+    # Calculate the number of tokens per expert
+    # assuming perfect distribution.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # Apply the imbalance factor.
+    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
+    # And pad the number to the next power of 2.
+    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
+    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
+    # as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
 
     return tile_tokens_dim
 
@@ -97,32 +103,47 @@ def rotate_flashinfer_fp8_moe_weights(
     )
 
 
+def register_scales_for_trtllm_fp8_per_tensor_moe(
+    layer: torch.nn.Module,
+    w13_weight_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> None:
+    """Register necessary scales for FlashInfer TRTLLM FP8 MoE kernel"""
+    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+        w13_scale=w13_weight_scale,
+        w13_input_scale=w13_input_scale,
+        w2_scale=w2_weight_scale,
+        w2_input_scale=w2_input_scale,
+    )
+    layer.w2_input_scale_inv = 1.0 / w2_input_scale
+    layer.output1_scales_gate_scalar = g1_alphas
+    layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
+    layer.output2_scales_scalar = g2_alphas
+
+
 def apply_flashinfer_per_tensor_scale_fp8(
     layer: torch.nn.Module,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
+    routing_bias: torch.Tensor | None,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
 
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
-
-    assert layer.output1_scales_scalar is not None, (
-        "Expected output1_scales_scalar to be initialized"
-    )
-    assert layer.output1_scales_scalar is not None, (
-        "Expected output1_scales_gate_scalar to be initialized"
-    )
-    assert layer.output1_scales_scalar is not None, (
-        "Expected output2_scales_scalar to be initialized"
-    )
-
     from vllm.model_executor.models.llama4 import Llama4MoE
+
+    assert (
+        hasattr(layer, "output1_scales_scalar")
+        and hasattr(layer, "output1_scales_gate_scalar")
+        and hasattr(layer, "output2_scales_scalar")
+    )
 
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
         "FusedMoE flashinfer kernels are only supported for Llama4"
@@ -149,54 +170,35 @@ def apply_flashinfer_per_tensor_scale_fp8(
     )
 
 
-def get_moe_scaling_factors(
-    input_scale: torch.Tensor,
-    gemm1_weights_scale: torch.Tensor,
-    activation_scale: torch.Tensor,
-    gemm2_weights_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    output1_scales_scalar = gemm1_weights_scale * input_scale * (1.0 / activation_scale)
-    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
-    output2_scales_scalar = activation_scale * gemm2_weights_scale
+def make_fp8_moe_alpha_scales_for_fi(
+    w13_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    g1_alphas = (w13_scale * w13_input_scale).squeeze()
+    g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
-    return output1_scales_scalar, output1_scales_gate_scalar, output2_scales_scalar
-
-
-def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
-    output1_scales, output1_gate_scales, output2_scales = get_moe_scaling_factors(
-        layer.w13_input_scale,
-        layer.w13_weight_scale,
-        layer.w2_input_scale,
-        layer.w2_weight_scale,
-    )
-    layer.register_parameter(
-        "output1_scales_scalar", torch.nn.Parameter(output1_scales, requires_grad=False)
-    )
-    layer.register_parameter(
-        "output1_scales_gate_scalar",
-        torch.nn.Parameter(output1_gate_scales, requires_grad=False),
-    )
-    layer.register_parameter(
-        "output2_scales_scalar", torch.nn.Parameter(output2_scales, requires_grad=False)
-    )
-    layer.register_parameter(
-        "w2_input_scale_inv",
-        torch.nn.Parameter(1.0 / layer.w2_input_scale, requires_grad=False),
-    )
+    return g1_alphas, g2_alphas
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    return create_flashinfer_prepare_finalize(use_dp)
+    # Propagate block-scale flag so prepare/finalize can skip act quantization
+    # and inform the kernel to consume per-block weight scales.
+    return create_flashinfer_prepare_finalize(
+        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+    )
 
 
 def select_cutlass_fp8_gemm_impl(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None,
     quant_config: FusedMoEQuantConfig,
-    out_dtype: Optional[torch.dtype] = None,
+    out_dtype: torch.dtype | None = None,
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -208,12 +210,14 @@ def select_cutlass_fp8_gemm_impl(
             ep_size=moe.moe_parallel_config.ep_size,
             tp_rank=moe.moe_parallel_config.tp_rank,
             tp_size=moe.moe_parallel_config.tp_size,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         )
 
     assert out_dtype is not None, "If moe config is None, out_dtype must be passed"
     return FlashInferExperts(
         out_dtype=out_dtype,
         quant_config=quant_config,
+        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
     )
 
 
@@ -225,17 +229,26 @@ def flashinfer_cutlass_moe_fp8(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
+    use_deepseek_fp8_block_scale: bool = False,
+    moe: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
     assert quant_config is not None
 
+    # Construct modular kernel with block-scale support when requested.
     fused_experts = mk.FusedMoEModularKernel(
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize(moe=None),
-        select_cutlass_fp8_gemm_impl(
-            moe=None, quant_config=quant_config, out_dtype=hidden_states.dtype
+        build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+            moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
         ),
+        select_cutlass_fp8_gemm_impl(
+            moe=moe,
+            quant_config=quant_config,
+            out_dtype=hidden_states.dtype,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+        ),
+        moe_parallel_config=layer.moe_parallel_config,
     )
 
     return fused_experts(
@@ -253,14 +266,38 @@ def flashinfer_cutlass_moe_fp8(
 
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
-    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend == "throughput":
-        return FlashinferMoeBackend.CUTLASS
-    elif flashinfer_moe_backend == "latency":
-        return FlashinferMoeBackend.TENSORRT_LLM
+    backend_map = {
+        "throughput": FlashinferMoeBackend.CUTLASS,
+        "latency": FlashinferMoeBackend.TENSORRT_LLM,
+        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
+    }
 
-    allowed_backends = ["throughput", "latency"]
+    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    if flashinfer_moe_backend in backend_map:
+        if (
+            flashinfer_moe_backend == "latency"
+            and not current_platform.is_device_capability_family(100)
+        ):
+            logger.info_once(
+                "Flashinfer TRTLLM MOE backend is only supported on "
+                "SM100 and later, using CUTLASS backend instead",
+                scope="local",
+            )
+            return FlashinferMoeBackend.CUTLASS
+        return backend_map[flashinfer_moe_backend]
+    elif current_platform.is_device_capability(90):
+        return FlashinferMoeBackend.CUTLASS
+
     raise ValueError(
-        f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
-        f" expected one of {allowed_backends}"
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
+        f"Expected one of {list(backend_map.keys())}."
     )
+
+
+def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
+    # TODO(shuw@nvidia): Update when new backends are added.
+    backends_supporting_global_sf = (
+        FlashinferMoeBackend.CUTLASS,
+        FlashinferMoeBackend.TENSORRT_LLM,
+    )
+    return backend in backends_supporting_global_sf

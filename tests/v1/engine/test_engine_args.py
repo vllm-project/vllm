@@ -8,7 +8,8 @@ import pytest
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.hashing import _xxhash
 
 
 def test_prefix_caching_from_cli():
@@ -48,15 +49,32 @@ def test_prefix_caching_from_cli():
         args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
 
 
+@pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
+def test_prefix_caching_xxhash_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # set hash algorithm to xxhash (pickle)
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash"
+
+    # set hash algorithm to xxhash_cbor
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
+
+
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
 
     from vllm.platforms import current_platform
+    from vllm.utils.mem_constants import GiB_bytes
 
+    device_memory = current_platform.get_device_total_memory()
     device_name = current_platform.get_device_name().lower()
-    if "h100" in device_name or "h200" in device_name:
-        # For H100 and H200, we use larger default values.
+    if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+        # For GPUs like H100, H200, and MI300x with >= 70GB memory
         default_llm_tokens = 16384
         default_server_tokens = 8192
         default_max_num_seqs = 1024

@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any, ClassVar
 
 import torch
 
-from vllm.attention import AttentionMetadata
-from vllm.config import VllmConfig
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.layer import Attention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -21,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
@@ -41,13 +44,20 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        super().__init__(vllm_config, role)
+    prefer_cross_layer_blocks: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig | None = None,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config)
 
-        self.connector_scheduler: Optional[OffloadingConnectorScheduler] = None
-        self.connector_worker: Optional[OffloadingConnectorWorker] = None
+        self.connector_scheduler: OffloadingConnectorScheduler | None = None
+        self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
@@ -56,6 +66,12 @@ class OffloadingConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        assert self.connector_worker is not None
+        self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -113,7 +129,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -148,7 +164,7 @@ class OffloadingConnectorScheduler:
         self,
         req: Request,
         start_idx: int = 0,
-        end_idx: Optional[int] = None,
+        end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
         return islice(
             req.block_hashes,
@@ -274,8 +290,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            num_gpu_blocks = num_blocks * self.block_size_factor
-            assert len(req.block_hashes) >= num_gpu_blocks
+            # NOTE: In async scheduling, placeholders may temporarily make
+            # len(req.block_hashes) < num_blocks * self.block_size_factor.
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
@@ -354,7 +370,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 
@@ -390,6 +406,7 @@ class OffloadingConnectorScheduler:
                     lora_id=None,
                     block_size=event.block_size,
                     medium=event.medium,
+                    lora_name=None,
                 )
 
 
@@ -416,9 +433,34 @@ class OffloadingConnectorWorker:
         self._job_counter = job_id + 1
         return job_id
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
+    def _register_handlers(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        attn_backends: dict[str, type[AttentionBackend]],
+    ):
+        for src_cls, dst_cls, handler in self.spec.get_handlers(
+            kv_caches, attn_backends
+        ):
             self.worker.register_handler(src_cls, dst_cls, handler)
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        layer_names = list(kv_caches.keys())
+        layers = get_layers_from_vllm_config(
+            self.spec.vllm_config, Attention, layer_names
+        )
+        attn_backends = {
+            layer_name: layers[layer_name].get_attn_backend()
+            for layer_name in layer_names
+        }
+        self._register_handlers(kv_caches, attn_backends)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        cross_layer_name = "ALL_LAYERS"
+        kv_caches = {cross_layer_name: kv_cache}
+        attn_backends = {cross_layer_name: attn_backend}
+        self._register_handlers(kv_caches, attn_backends)
 
     def start_load_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_load.items():
@@ -476,23 +518,3 @@ class OffloadingConnectorWorker:
                 del self._store_jobs[req_id]
 
         return finished_sending, finished_recving
-
-
-def yield_req_data(
-    scheduler_output,
-) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
-    """
-    # new requests
-    for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, False
-
-    # cached requests
-    cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(
-        cached_reqs.req_ids,
-        cached_reqs.new_block_ids,
-        cached_reqs.resumed_from_preemption,
-    )

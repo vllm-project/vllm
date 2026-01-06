@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 import random
-from typing import Optional
 
 import pytest
 import torch
@@ -17,7 +16,7 @@ def cal_diff(
     y: torch.Tensor,
     name: str,
     use_fp8: bool = False,
-    diff_threshold: Optional[float] = None,
+    diff_threshold: float | None = None,
 ) -> None:
     x, y = x.double(), y.double()
     cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
@@ -33,8 +32,8 @@ def cal_diff(
 
 
 CUTLASS_MLA_UNSUPPORTED_REASON = (
-    "Cutlass MLA Requires compute capability of 10 or above."
-    if not current_platform.is_device_capability(100)
+    "Cutlass MLA Requires compute capability of 100 or above."
+    if not current_platform.is_device_capability_family(100)
     else "Cutlass MLA is supported"
 )
 

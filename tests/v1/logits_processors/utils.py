@@ -3,7 +3,7 @@
 
 import types
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -27,7 +27,7 @@ DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_MODULE = "DummyModule"
+DUMMY_LOGITPROC_MODULE = "tests.v1.logits_processors.utils"
 DUMMY_LOGITPROC_FQCN = f"{DUMMY_LOGITPROC_MODULE}:DummyLogitsProcessor"
 
 
@@ -52,6 +52,16 @@ prompts = [
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token: int | None = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"target_token value {target_token} {type(target_token)} is not int"
+            )
+
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
     ):
@@ -61,12 +71,15 @@ class DummyLogitsProcessor(LogitsProcessor):
         """Never impacts greedy sampling"""
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
+        def extract_extra_arg(params: SamplingParams) -> int | None:
+            self.validate_params(params)
+            return params.extra_args and params.extra_args.get("target_token")
+
         process_dict_updates(
             self.req_info,
             batch_update,
-            lambda params, _, __: params.extra_args
-            and (params.extra_args.get("target_token")),
+            lambda params, _, __: extract_extra_arg(params),
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -145,7 +158,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 
@@ -159,7 +172,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+        target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"
         )
         if target_token is None:

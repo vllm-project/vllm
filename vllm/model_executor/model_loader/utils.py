@@ -2,52 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
 
-import contextlib
 import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 from torch import nn
 from typing_extensions import assert_never
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.models.adapters import (
-    as_embedding_model,
-    as_reward_model,
-    as_seq_cls_model,
-    try_create_mm_pooling_model_cls,
-)
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-
-@contextlib.contextmanager
-def set_default_torch_dtype(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
 
 
 def initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    model_class: Optional[type[nn.Module]] = None,
-    model_config: Optional[ModelConfig] = None,
+    model_class: type[nn.Module] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     if model_config is None:
@@ -99,6 +81,14 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    if getattr(model, "process_weights_after_loading_already_called", False):
+        # In case `process_weights_after_loading` is called multiple times
+        # we'll skip it at later times
+        logger.debug_once(
+            "process_weights_after_loading already called for model %s", model
+        )
+        return
+
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
         maybe_save_metadata_and_attributes_for_weight_reloading,
@@ -107,11 +97,6 @@ def process_weights_after_loading(
     maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
 
     for _, module in model.named_modules():
-        if isinstance(module, QKVCrossParallelLinear):
-            # NOTE(Isotr0py): special case for cross QKV layer because
-            # q and kv proj aren't registered as submodules intentionally
-            module.process_weights_after_loading()
-            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
@@ -122,11 +107,10 @@ def process_weights_after_loading(
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
-    # Currently only used by MLA.
-    # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA.
+    # Initialize post-load attention weights for both Attention and MLA.
+    # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(module, Attention) and hasattr(
+        if isinstance(module, (Attention, MLAAttention)) and hasattr(
             module, "process_weights_after_loading"
         ):
             # TODO(lucas): see if there is a way to unify the signatures
@@ -181,6 +165,12 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 
 
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    from vllm.model_executor.models.adapters import (
+        as_embedding_model,
+        as_seq_cls_model,
+        try_create_mm_pooling_model_cls,
+    )
+
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     model_cls, arch = model_config.registry.resolve_model_cls(
@@ -199,7 +189,9 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
             )
 
     convert_type = model_config.convert_type
-    if convert_type != "none" and supports_multimodal(model_cls):
+    if convert_type not in ["none", "mm_encoder_only"] and supports_multimodal(
+        model_cls
+    ):
         logger.debug_once("Detected conversion of Multi Modal model.")
         converted = try_create_mm_pooling_model_cls(model_cls)
         if converted is not None:
@@ -210,15 +202,17 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
 
     if convert_type == "none":
         pass
+    elif convert_type == "mm_encoder_only":
+        logger.debug_once("Converting to mm encoder only model.")
+        from vllm.model_executor.models.adapters import as_mm_encoder_only_model
+
+        model_cls = as_mm_encoder_only_model(model_cls)
     elif convert_type == "embed":
         logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)
     elif convert_type == "classify":
         logger.debug_once("Converting to sequence classification model.")
         model_cls = as_seq_cls_model(model_cls)
-    elif convert_type == "reward":
-        logger.debug_once("Converting to reward model.")
-        model_cls = as_reward_model(model_cls)
     else:
         assert_never(convert_type)
 
@@ -274,7 +268,7 @@ class ParamMapping:
                     index,
                 )
 
-    def get_sub_modules(self, module_name: str) -> Optional[tuple[str, list[str]]]:
+    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
         for key, value in self.packed_mapping.items():
             if module_name.endswith(key):
                 return key, value

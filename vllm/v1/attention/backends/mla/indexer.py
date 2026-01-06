@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    MultipleOf,
+)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     split_decodes_and_prefills,
+    split_prefill_chunks,
 )
 
 logger = init_logger(__name__)
@@ -21,8 +26,8 @@ logger = init_logger(__name__)
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return DeepseekV32IndexerMetadata
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [1 if current_platform.is_rocm() else 64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -44,7 +49,11 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (0, 1, 2, 3)
         return (0, 1, 2)
 
 
@@ -97,8 +106,8 @@ class DeepseekV32IndexerMetadata:
     num_prefills: int
     num_prefill_tokens: int
 
-    decode: Optional[DeepSeekV32IndexerDecodeMetadata] = None
-    prefill: Optional[DeepseekV32IndexerPrefillMetadata] = None
+    decode: DeepSeekV32IndexerDecodeMetadata | None = None
+    prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
 
 # TODO (zyongye) optimize this, this is now vibe coded
@@ -168,44 +177,19 @@ def kv_spans_from_batches(
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 2 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    return max_model_len * 2
-
-
-def split_prefill_chunks(
-    seq_lens_cpu: torch.Tensor, max_prefill_buffer_size: int, reqs_start: int
-) -> list[tuple[int, int]]:
-    """
-    Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
-    such that the total sequence length of each chunk is less than the
-    maximum prefill buffer size.
-
-    Args:
-        seq_lens_cpu: The sequence lengths of the prefill requests.
-        max_prefill_buffer_size: The maximum prefill buffer size.
-        reqs_start: The start index of the prefill requests.
-
-    Returns:
-        A list of tuples of (reqs_start, reqs_end).
-    """
-    chunk_seq_ids = []
-    total_seq_lens = 0
-    for i in range(reqs_start, len(seq_lens_cpu)):
-        cur_seq_len = seq_lens_cpu[i].item()
-        assert cur_seq_len <= max_prefill_buffer_size
-        total_seq_lens += cur_seq_len
-        if total_seq_lens > max_prefill_buffer_size:
-            chunk_seq_ids.append((reqs_start, i))
-            reqs_start = i
-            total_seq_lens = cur_seq_len
-    if total_seq_lens > 0:
-        chunk_seq_ids.append((reqs_start, len(seq_lens_cpu)))
-    return chunk_seq_ids
+    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+    # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
+    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
+    # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
+    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
+    # within the flashmla_sparse workspace.
+    # For DeepSeek-V3.2, the max_model_len is 163840.
+    #   40 * 163840 * 132 = 865075200 bytes = 825 MB
+    return max_model_len * 40
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
@@ -294,9 +278,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         prefill_metadata = None
         if num_prefills > 0:
             chunk_seq_ids = split_prefill_chunks(
-                common_attn_metadata.seq_lens_cpu,
+                common_attn_metadata.seq_lens_cpu[num_decodes:],
                 self.max_prefill_buffer_size,
-                num_decodes,
+                request_offset=num_decodes,
             )
             chunks = [
                 self.build_one_prefill_chunk(
@@ -327,10 +311,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-
-            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                seq_lens, self.kv_cache_spec.block_size, self.num_sms
-            )
+            if is_deep_gemm_supported():
+                self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                    seq_lens, self.kv_cache_spec.block_size, self.num_sms
+                )
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=common_attn_metadata.block_table_tensor[:num_decodes, ...],
                 seq_lens=common_attn_metadata.seq_lens[:num_decodes],

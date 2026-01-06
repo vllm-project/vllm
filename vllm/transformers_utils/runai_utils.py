@@ -5,12 +5,11 @@ import hashlib
 import os
 import shutil
 import signal
-from typing import Optional
 
 from vllm import envs
 from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 logger = init_logger(__name__)
 
@@ -19,9 +18,7 @@ SUPPORTED_SCHEMES = ["s3://", "gs://"]
 try:
     from runai_model_streamer import list_safetensors as runai_list_safetensors
     from runai_model_streamer import pull_files as runai_pull_files
-except (ImportError, OSError):
-    # see https://github.com/run-ai/runai-model-streamer/issues/26
-    # OSError will be raised on arm64 platform
+except ImportError:
     runai_model_streamer = PlaceholderModule("runai_model_streamer")  # type: ignore[assignment]
     runai_pull_files = runai_model_streamer.placeholder_attr("pull_files")
     runai_list_safetensors = runai_model_streamer.placeholder_attr("list_safetensors")
@@ -88,8 +85,8 @@ class ObjectStorageModel:
     def pull_files(
         self,
         model_path: str = "",
-        allow_pattern: Optional[list[str]] = None,
-        ignore_pattern: Optional[list[str]] = None,
+        allow_pattern: list[str] | None = None,
+        ignore_pattern: list[str] | None = None,
     ) -> None:
         """
         Pull files from object storage into the temporary directory.

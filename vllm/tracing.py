@@ -3,17 +3,16 @@
 
 import os
 from collections.abc import Mapping
-from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.utils import run_once
+from vllm.utils.func_utils import run_once
 
 TRACE_HEADERS = ["traceparent", "tracestate"]
 
 logger = init_logger(__name__)
 
 _is_otel_imported = False
-otel_import_error_traceback: Optional[str] = None
+otel_import_error_traceback: str | None = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -55,7 +54,7 @@ def is_otel_available() -> bool:
 
 def init_tracer(
     instrumenting_module_name: str, otlp_traces_endpoint: str
-) -> Optional[Tracer]:
+) -> Tracer | None:
     if not is_otel_available():
         raise ValueError(
             "OpenTelemetry is not available. Unable to initialize "
@@ -88,7 +87,7 @@ def get_span_exporter(endpoint):
     return OTLPSpanExporter(endpoint=endpoint)
 
 
-def extract_trace_context(headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)

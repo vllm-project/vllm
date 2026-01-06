@@ -7,6 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -34,7 +35,7 @@ class PTPCFp8Config(Fp8Config):
     def __init__(
         self,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[list[str]] = None,
+        ignored_layers: list[str] | None = None,
     ) -> None:
         if not current_platform.is_rocm():
             raise ValueError("ptpc_fp8 quantization is supported only on ROCm.")
@@ -65,8 +66,6 @@ class PTPCFp8Config(Fp8Config):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()
@@ -125,7 +124,7 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply(
             input=x,

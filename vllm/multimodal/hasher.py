@@ -4,7 +4,6 @@
 import pickle
 import uuid
 from collections.abc import Iterable
-from typing import Union
 
 import numpy as np
 import torch
@@ -13,12 +12,14 @@ from PIL import Image
 
 from vllm.logger import init_logger
 
+from .base import MediaWithBytes
+
 logger = init_logger(__name__)
 
 
 class MultiModalHasher:
     @classmethod
-    def serialize_item(cls, obj: object) -> Iterable[Union[bytes, memoryview]]:
+    def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
         if isinstance(obj, (bytes, memoryview)):
             return (obj,)
@@ -32,14 +33,26 @@ class MultiModalHasher:
             if Image.ExifTags.Base.ImageID in exif and isinstance(
                 exif[Image.ExifTags.Base.ImageID], uuid.UUID
             ):
-                # If the image has exif ImageID tag, use that
                 return (exif[Image.ExifTags.Base.ImageID].bytes,)
+
             data = {"mode": obj.mode, "data": np.asarray(obj)}
-            if obj.palette is not None:
-                data["palette"] = obj.palette.palette
-                if obj.palette.rawmode is not None:
-                    data["palette_rawmode"] = obj.palette.rawmode
+            palette = obj.palette
+            if palette is not None:
+                data["palette"] = palette.palette
+                if palette.rawmode is not None:
+                    data["palette_rawmode"] = palette.rawmode
+
             return cls.iter_item_to_bytes("image", data)
+
+        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
+            exif = obj.media.getexif()
+            if Image.ExifTags.Base.ImageID in exif and isinstance(
+                exif[Image.ExifTags.Base.ImageID], uuid.UUID
+            ):
+                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+
+            return cls.iter_item_to_bytes("image", obj.original_bytes)
+
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
@@ -84,7 +97,7 @@ class MultiModalHasher:
         cls,
         key: str,
         obj: object,
-    ) -> Iterable[Union[bytes, memoryview]]:
+    ) -> Iterable[bytes | memoryview]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):

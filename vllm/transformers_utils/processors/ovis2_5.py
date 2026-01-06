@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from functools import cached_property
-from typing import Optional, Union
 
 import numpy as np
 import PIL
@@ -99,10 +98,11 @@ class Ovis2_5Processor(ProcessorMixin):
     def __call__(
         self,
         images: ImageInput = None,
-        videos: Union[np.ndarray, list[ImageInput]] = None,
-        text: Union[
-            TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]
-        ] = None,
+        videos: np.ndarray | list[ImageInput] = None,
+        text: TextInput
+        | PreTokenizedInput
+        | list[TextInput]
+        | list[PreTokenizedInput] = None,
         **kwargs: Unpack[Ovis2_5ProcessorKwargs],
     ) -> BatchFeature:
         """
@@ -376,12 +376,12 @@ class Ovis2_5Processor(ProcessorMixin):
 
     def preprocess_multidata(
         self,
-        images: Optional[Union[PIL.Image.Image, list[PIL.Image.Image]]] = None,
-        video: Optional[Union[list[PIL.Image.Image], np.ndarray]] = None,
-        convert_to_rgb: Optional[bool] = True,
+        images: PIL.Image.Image | list[PIL.Image.Image] | None = None,
+        video: list[PIL.Image.Image] | np.ndarray | None = None,
+        convert_to_rgb: bool | None = True,
         min_pixels: int = MIN_PIXELS,
         max_pixels: int = MAX_PIXELS,
-        return_tensors: Optional[str] = "pt",
+        return_tensors: str | None = "pt",
     ):
         is_video = False
         if images is not None:
@@ -397,6 +397,8 @@ class Ovis2_5Processor(ProcessorMixin):
                     images.append(image)
             elif isinstance(video, list):
                 images = video
+        else:
+            raise ValueError("Either images or video should be provided.")
         min_pixels = min(
             max_pixels if max_pixels is not None else MAX_PIXELS,
             min_pixels if min_pixels is not None else MIN_PIXELS,

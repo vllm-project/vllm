@@ -6,18 +6,23 @@ Run `pytest tests/kernels/quantization/test_cutlass_w4a8.py`.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    convert_packed_uint4b8_to_signed_int4_inplace,
+    pack_cols,
     pack_rows,
     quantize_weights,
+    unpack_quantized_values_into_int32,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+if not current_platform.is_cuda():
+    pytest.skip("These tests use CUTLASS which requires CUDA", allow_module_level=True)
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of
@@ -60,10 +65,10 @@ SCHEDULES = [
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
-    output_type: Optional[torch.dtype]
-    group_scale_type: Optional[torch.dtype]
-    channel_scale_type: Optional[torch.dtype]
-    token_scale_type: Optional[torch.dtype]
+    output_type: torch.dtype | None
+    group_scale_type: torch.dtype | None
+    channel_scale_type: torch.dtype | None
+    token_scale_type: torch.dtype | None
 
 
 @dataclass
@@ -80,7 +85,7 @@ class Tensors:
 # (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints,
 #  Ch Scales Type, Tok Scales Type)
 TestTypeTuple = tuple[
-    list[torch.dtype], ScalarType, Optional[torch.dtype], Optional[torch.dtype], bool
+    list[torch.dtype], ScalarType, torch.dtype | None, torch.dtype | None, bool
 ]
 TEST_TYPES = [
     *(
@@ -116,8 +121,8 @@ def cutlass_quantize_and_pack(
     atype: torch.dtype,
     w: torch.Tensor,
     wtype: ScalarType,
-    stype: Optional[torch.dtype],
-    group_size: Optional[int],
+    stype: torch.dtype | None,
+    group_size: int | None,
     zero_points: bool = False,
 ):
     assert wtype.is_integer(), "TODO: support floating point weights"
@@ -143,7 +148,7 @@ def cutlass_quantize_and_pack(
 
 
 def create_test_tensors(
-    shape: tuple[int, int, int], types: TypeConfig, group_size: Optional[int]
+    shape: tuple[int, int, int], types: TypeConfig, group_size: int | None
 ) -> Tensors:
     m, n, k = shape
 
@@ -168,8 +173,7 @@ def create_test_tensors(
 
     # for the practical use case we need per-tok scales for fp8 activations
     w_tok_s = torch.randn((m,), device="cuda", dtype=types.token_scale_type)
-    # weights are already per-group quantized, use placeholder here
-    w_ch_s = torch.ones((n,), device="cuda", dtype=types.channel_scale_type)
+    w_ch_s = torch.randn((n,), device="cuda", dtype=types.channel_scale_type)
 
     return Tensors(
         w_ref=w_ref,
@@ -185,8 +189,8 @@ def create_test_tensors(
 def mm_test_helper(
     types: TypeConfig,
     tensors: Tensors,
-    group_size: Optional[int] = None,
-    schedule: Optional[str] = None,
+    group_size: int | None = None,
+    schedule: str | None = None,
 ):
     # CUTLASS upstream uses fp8 with fastaccum as reference
     # https://github.com/NVIDIA/cutlass/blob/main/examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm.cu#L406
@@ -212,7 +216,7 @@ def mm_test_helper(
     print(output_ref)
 
     torch.testing.assert_close(
-        output, output_ref.to(output.dtype), rtol=1e-3, atol=1e-3
+        output, output_ref.to(output.dtype), rtol=1e-2, atol=1e-2
     )
 
 
@@ -258,7 +262,7 @@ def test_w4a8_cuda_graph():
     )
 
     w_tok_s = torch.randn((m,), device="cuda", dtype=torch.float32)
-    w_ch_s = torch.ones((n,), device="cuda", dtype=torch.float32)
+    w_ch_s = torch.randn((n,), device="cuda", dtype=torch.float32)
 
     # Construct a trivial model with a single layer that calls the kernel
     model = W4A8Layer(
@@ -288,4 +292,38 @@ def test_w4a8_cuda_graph():
     output.zero_()
     g.replay()
 
-    torch.testing.assert_close(output, output_ref, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(
+    not IS_SUPPORTED_BY_GPU, reason="CUTLASS W4A8 is not supported on this GPU type."
+)
+@pytest.mark.parametrize("shape", MNK_SHAPES)
+def test_convert_packed_uint4b8_to_signed_int4_inplace(shape):
+    """
+    The W4A16 checkpoints encode the weights as int4b8 packed to int32.
+    The CUTLASS kernels expect signed int4 packed to int32.
+    This tests checks that the runtime int4b8 -> signed int4 conversion
+    matches the offline conversion step exactly.
+    """
+    _, N, K = shape
+    # random weights packed to int32
+    t = torch.randint(
+        low=torch.iinfo(torch.int32).min,
+        high=torch.iinfo(torch.int32).max + 1,
+        size=(N, K // 8),
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    # compute reference
+    unpacked = unpack_quantized_values_into_int32(
+        t.clone(), scalar_types.uint4b8, packed_dim=1
+    )
+    unpacked = unpacked - 8  # int4b8 -> signed int4
+    ref = pack_cols(unpacked & 0x0F, 4, *unpacked.shape)
+
+    out = convert_packed_uint4b8_to_signed_int4_inplace(t.clone())
+
+    assert torch.equal(ref, out)
+    assert not torch.equal(ref, t)

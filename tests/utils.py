@@ -6,6 +6,7 @@ import contextlib
 import copy
 import functools
 import importlib
+import itertools
 import json
 import os
 import random
@@ -15,12 +16,14 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Literal
 from unittest.mock import patch
 
+import anthropic
 import cloudpickle
 import httpx
 import openai
@@ -41,13 +44,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (
-    FlexibleArgumentParser,
-    GB_bytes,
-    cuda_device_count_stateless,
-    get_open_port,
-)
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import GB_bytes
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -94,7 +95,7 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
     def _start_server(
-        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         """Subclasses override this method to customize server process launch"""
         env = os.environ.copy()
@@ -105,6 +106,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -117,11 +119,11 @@ class RemoteOpenAIServer:
         model: str,
         vllm_serve_args: list[str],
         *,
-        env_dict: Optional[dict[str, str]] = None,
-        seed: Optional[int] = 0,
+        env_dict: dict[str, str] | None = None,
+        seed: int = 0,
         auto_port: bool = True,
-        max_wait_seconds: Optional[float] = None,
-        override_hf_configs: Optional[dict[str, Any]] = None,
+        max_wait_seconds: float | None = None,
+        override_hf_configs: dict[str, Any] | None = None,
     ) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
@@ -156,7 +158,7 @@ class RemoteOpenAIServer:
             self.host = None
             self.port = None
         else:
-            self.host = str(args.host or "localhost")
+            self.host = str(args.host or "127.0.0.1")
             self.port = int(args.port)
 
         self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
@@ -186,7 +188,7 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
-    def _poll(self) -> Optional[int]:
+    def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
@@ -246,12 +248,29 @@ class RemoteOpenAIServer:
             **kwargs,
         )
 
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
+        )
+
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     """Launch test server with custom child process"""
 
     def _start_server(
-        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         self.proc: Process = Process(
             target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
@@ -262,12 +281,12 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         self,
         model: str,
         vllm_serve_args: list[str],
-        child_process_fxn: Callable[[Optional[dict[str, str]], str, list[str]], None],
+        child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
-        env_dict: Optional[dict[str, str]] = None,
-        seed: Optional[int] = 0,
+        env_dict: dict[str, str] | None = None,
+        seed: int = 0,
         auto_port: bool = True,
-        max_wait_seconds: Optional[float] = None,
+        max_wait_seconds: float | None = None,
     ) -> None:
         """Store custom child process function then invoke superclass
         constructor which will indirectly launch it."""
@@ -281,7 +300,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             max_wait_seconds=max_wait_seconds,
         )
 
-    def _poll(self) -> Optional[int]:
+    def _poll(self) -> int | None:
         return self.proc.exitcode
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -547,11 +566,11 @@ def compare_two_settings(
     model: str,
     arg1: list[str],
     arg2: list[str],
-    env1: Optional[dict[str, str]] = None,
-    env2: Optional[dict[str, str]] = None,
+    env1: dict[str, str] | None = None,
+    env2: dict[str, str] | None = None,
     *,
     method: str = "generate",
-    max_wait_seconds: Optional[float] = None,
+    max_wait_seconds: float | None = None,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -577,10 +596,10 @@ def compare_two_settings(
 def compare_all_settings(
     model: str,
     all_args: list[list[str]],
-    all_envs: list[Optional[dict[str, str]]],
+    all_envs: list[dict[str, str] | None],
     *,
     method: str = "generate",
-    max_wait_seconds: Optional[float] = None,
+    max_wait_seconds: float | None = None,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -658,7 +677,7 @@ def compare_all_settings(
                 results += _test_image_text(
                     client,
                     model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
@@ -785,8 +804,8 @@ def get_physical_device_indices(devices):
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
-    threshold_bytes: Optional[int] = None,
-    threshold_ratio: Optional[float] = None,
+    threshold_bytes: int | None = None,
+    threshold_ratio: float | None = None,
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
@@ -983,6 +1002,11 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             # `cloudpickle` allows pickling complex functions directly
             input_bytes = cloudpickle.dumps((f, output_filepath))
 
+            repo_root = str(VLLM_PATH.resolve())
+
+            env = dict(env or os.environ)
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
             cmd = [sys.executable, "-m", f"{module_name}"]
 
             returned = subprocess.run(
@@ -1002,7 +1026,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
 
 def create_new_process_for_each_test(
-    method: Optional[Literal["spawn", "fork"]] = None,
+    method: Literal["spawn", "fork"] | None = None,
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """Creates a decorator that runs each test function in a new process.
 
@@ -1052,6 +1076,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     )
 
 
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
+
+
 def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
@@ -1098,9 +1129,9 @@ async def completions_with_server_args(
     prompts: list[str],
     model_name: str,
     server_cli_args: list[str],
-    num_logprobs: Optional[int],
+    num_logprobs: int | None,
     max_wait_seconds: int = 240,
-    max_tokens: Union[int, list] = 5,
+    max_tokens: int | list = 5,
 ) -> list[Completion]:
     """Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
@@ -1195,9 +1226,9 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         try:
             import aiter  # noqa: F401
 
-            attn_backend_list.append("FLASH_ATTN")
+            attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():
@@ -1260,3 +1291,23 @@ def check_answers(
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok >= accept_rate
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """
+    Flatten lists of tuples of the cartesian product.
+    Useful when we want to avoid nested tuples to allow
+    test params to be unpacked directly from the decorator.
+
+    Example:
+    flat_product([(1, 2), (3, 4)], ["a", "b"]) ->
+    [
+      (1, 2, "a"),
+      (1, 2, "b"),
+      (3, 4, "a"),
+      (3, 4, "b"),
+    ]
+    """
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else (e,) for e in element)
+        yield tuple(itertools.chain(*normalized))

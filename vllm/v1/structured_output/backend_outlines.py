@@ -14,7 +14,7 @@ import torch
 from regex import escape as regex_escape
 
 from vllm.sampling_params import SamplingParams
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,

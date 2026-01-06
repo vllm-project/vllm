@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 
@@ -49,7 +49,7 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         if not batch_update:
             return
 
@@ -110,7 +110,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Identify valid tokens using threshold comparison
         invalid_token_mask = probability_values < adjusted_min_p
         # Apply mask using boolean indexing
-        logits[invalid_token_mask] = -float("inf")
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
         return logits
 
 
@@ -131,7 +131,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.biases, batch_update, lambda params, _, __: params.logit_bias or None
         )
@@ -178,6 +178,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             self._device_tensor([], torch.int32),
         )
 
+        self.neg_inf_tensor = torch.tensor(
+            -float("inf"), dtype=torch.float32, device=self.device
+        )
+
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
         of the argmax operation in greedy sampling."""
@@ -185,14 +189,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     @staticmethod
     def add_request(
-        params: SamplingParams, _: Optional[list[int]], output_tok_ids: list[int]
-    ) -> Optional[tuple[int, Sequence[int], set[int]]]:
+        params: SamplingParams, _: list[int] | None, output_tok_ids: list[int]
+    ) -> tuple[int, Sequence[int], set[int]] | None:
         min_tokens = params.min_tokens
         if not min_tokens or len(output_tok_ids) >= min_tokens:
             return None
         return min_tokens, output_tok_ids, params.all_stop_token_ids
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.min_toks, batch_update, self.add_request
         )
@@ -229,14 +233,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length
-            logits[self.logits_slice] = -float("inf")
+            logits.index_put_(self.logits_slice, self.neg_inf_tensor)
         return logits
 
 
 def process_dict_updates(
     req_entries: dict[int, T],
-    batch_update: Optional[BatchUpdate],
-    new_state: Callable[[SamplingParams, Optional[list[int]], list[int]], Optional[T]],
+    batch_update: BatchUpdate | None,
+    new_state: Callable[[SamplingParams, list[int] | None, list[int]], T | None],
 ) -> bool:
     """Utility function to update dict state for sparse LogitsProcessors."""
 

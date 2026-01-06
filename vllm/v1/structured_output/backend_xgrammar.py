@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -12,8 +10,9 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import LazyLoader
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -43,34 +42,13 @@ class XgrammarBackend(StructuredOutputBackend):
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            try:
-                if self.tokenizer.is_tekken:
-                    encoded_vocab = self.tokenizer._vocab
-                else:
-                    encoded_vocab = [
-                        token
-                        for token, _ in sorted(
-                            self.tokenizer.get_vocab().items(),
-                            key=lambda x: x[1],
-                        )
-                    ]
-                stop_token_ids = None
-                if (
-                    hasattr(
-                        self.tokenizer,
-                        "eos_token_id",
-                    )
-                    and self.tokenizer.eos_token_id is not None
-                ):
-                    stop_token_ids = [self.tokenizer.eos_token_id]
-            except AttributeError as e:
-                raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(self.tokenizer)}. The tokenizer should have a "
-                    "get_vocab method."
-                ) from e
+            stop_token_ids = [self.tokenizer.eos_token_id]
+
+            # not self.tokenizer.vocab_size as self.tokenizer.vocab
+            # collapses all decoded errors into a single token.
+            self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
-                encoded_vocab=encoded_vocab,
+                encoded_vocab=self.tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type=xgr.VocabType.RAW
                 if self.tokenizer.is_tekken
@@ -78,6 +56,27 @@ class XgrammarBackend(StructuredOutputBackend):
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
+            )
+        elif isinstance(self.tokenizer, DeepseekV32Tokenizer):
+            # copy from xgr.TokenizerInfo.from_huggingface()
+            # because we are using a custom tokenizer wrapper here.
+            vocab_dict = self.tokenizer.get_vocab()
+            tokenizer_vocab_size = max(len(vocab_dict), self.tokenizer.max_token_id + 1)
+            vocab_size = self.vocab_size or tokenizer_vocab_size
+            # maintain tokenizer's indexing
+            encoded_vocab = [""] * vocab_size
+            for token, idx in vocab_dict.items():
+                if idx < vocab_size:
+                    encoded_vocab[idx] = token
+            stop_token_ids = [self.tokenizer.eos_token_id]
+            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()
+            metadata = xgr.TokenizerInfo._detect_metadata_from_hf(backend_str)
+            tokenizer_info = xgr.TokenizerInfo(
+                encoded_vocab=encoded_vocab,
+                vocab_type=metadata["vocab_type"],
+                vocab_size=vocab_size,
+                stop_token_ids=stop_token_ids,
+                add_prefix_space=metadata["add_prefix_space"],
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
@@ -114,18 +113,19 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_regex(grammar_spec)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            ctx = self.compiler.compile_structural_tag(structural_tag)
+            if "structures" in s_tag:
+                # Falling back to deprecated method of compiling structural tag
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+            else:
+                ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -221,6 +221,25 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.reset()
 
 
+# cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
+STRING_SUPPORTED_FORMATS = {
+    "email",
+    "date",
+    "time",
+    "date-time",
+    "duration",
+    "ipv4",
+    "ipv6",
+    "hostname",
+    "uuid",
+    "uri",
+    "uri-reference",
+    "uri-template",
+    "json-pointer",
+    "relative-json-pointer",
+}
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -240,18 +259,16 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # Unsupported keywords for strings
-        if obj.get("type") == "string" and "format" in obj:
+        if (
+            obj.get("type") == "string"
+            and "format" in obj
+            and obj["format"] not in STRING_SUPPORTED_FORMATS
+        ):
             return True
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 
@@ -343,17 +360,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            xgr.Grammar.from_structural_tag(structural_tag)
+
+            # Using the deprecated method of compiling structural tag
+            if "structures" in s_tag:
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    )
+                    for s in s_tag["structures"]
+                ]
+                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+            else:
+                xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e

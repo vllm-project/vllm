@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Integration tests for FlexAttention backend vs default backend"""
-
-from typing import Optional
 
 import pytest
 import torch
@@ -38,8 +35,8 @@ def ref_int8_scaled_mm(
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
-    azp: Optional[torch.Tensor],
-    bias: Optional[torch.Tensor],
+    azp: torch.Tensor | None,
+    bias: torch.Tensor | None,
     output_type: torch.dtype,
 ):
     if azp is not None:

@@ -10,9 +10,13 @@ like uniform random routing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class RoutingStrategy(ABC):
@@ -24,7 +28,7 @@ class RoutingStrategy(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route tokens to experts.
@@ -89,7 +93,7 @@ class DistributionBasedRouting(RoutingStrategy):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Randomly select experts for each token using the specified distribution.
@@ -269,7 +273,7 @@ class RoutingSimulator:
         router_logits: torch.Tensor,
         strategy_name: str,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Simulate token-to-expert routing using the specified strategy.
@@ -290,6 +294,12 @@ class RoutingSimulator:
                 f"Available strategies: "
                 f"{list(RoutingSimulator._routing_strategies.keys())}"
             )
+        logger.warning_once(
+            "Simulating MoE routing using a %s strategy. "
+            "This should only be used for performance testing. "
+            "Model outputs will not be valid.",
+            strategy_name,
+        )
 
         strategy = RoutingSimulator._routing_strategies[strategy_name]
         return strategy.route_tokens(

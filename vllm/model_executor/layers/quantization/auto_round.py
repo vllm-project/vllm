@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -46,8 +47,8 @@ class AutoRoundConfig(QuantizationConfig):
         group_size: int,
         sym: bool = True,
         packing_format: str = "auto_round:auto_gptq",
-        block_name_to_quantize: Optional[Union[str, list[str]]] = None,
-        extra_config: Optional[dict[str, Any]] = None,
+        block_name_to_quantize: str | list[str] | None = None,
+        extra_config: dict[str, Any] | None = None,
         data_type: str = "int",
         backend: str = "auto",
     ) -> None:
@@ -128,11 +129,44 @@ class AutoRoundConfig(QuantizationConfig):
 
     def get_layer_config(self, layer, layer_name: str):
         def get_config(name: str, quantized: bool = True):
-            cfg = self.extra_config.get(name, {}) if self.extra_config else {}
+            if not self.extra_config:
+                return (
+                    self.weight_bits if quantized else 16,
+                    self.group_size if quantized else -1,
+                    self.sym if quantized else True,
+                )
+
+            # exact match first
+            if name in self.extra_config:
+                cfg = self.extra_config[name]
+                return (
+                    cfg.get("bits", self.weight_bits if quantized else 16),
+                    cfg.get("group_size", self.group_size if quantized else -1),
+                    cfg.get("sym", self.sym if quantized else True),
+                )
+
+            REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
+            for pattern, cfg in self.extra_config.items():
+                if not isinstance(pattern, str) or not any(
+                    c in REGEX_SPECIAL_CHARS for c in pattern
+                ):
+                    continue
+
+                try:
+                    if re.search(re.compile(pattern), name) is not None:
+                        return (
+                            cfg.get("bits", self.weight_bits if quantized else 16),
+                            cfg.get("group_size", self.group_size if quantized else -1),
+                            cfg.get("sym", self.sym if quantized else True),
+                        )
+                except re.error:
+                    # Invalid regex, ignore.
+                    continue
+
             return (
-                cfg.get("bits", self.weight_bits if quantized else 16),
-                cfg.get("group_size", self.group_size if quantized else -1),
-                cfg.get("sym", self.sym if quantized else True),
+                self.weight_bits if quantized else 16,
+                self.group_size if quantized else -1,
+                self.sym if quantized else True,
             )
 
         # 1. Exact match from config
@@ -176,7 +210,7 @@ class AutoRoundConfig(QuantizationConfig):
                         f"consistent quant config for {sub_names}"
                     )
 
-        # 5. Fallback
+        # 5. Fallback or try a regular expression match
         return get_config(layer_name, quantized)
 
     def check_quantized(self, weight_bits: int) -> bool:
@@ -232,7 +266,7 @@ class AutoRoundConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,
                 AWQMarlinLinearMethod,
-                AWQMoEMethod,
+                AWQMarlinMoEMethod,
             )
 
             quant_args_marlin = AWQMarlinConfig(
@@ -257,7 +291,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args_marlin, layer.moe_config)
+                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe)
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             config = {
@@ -402,6 +436,12 @@ class AutoRoundConfig(QuantizationConfig):
             return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
+        if prefix and self.extra_config:
+            for layer_name in self.extra_config:
+                if (
+                    layer_name == prefix or layer_name == f"model.{prefix}"
+                ) and self.extra_config[layer_name].get("bits", 16) >= 16:
+                    return UnquantizedLinearMethod()
         if (
             current_platform.is_cpu()
             or current_platform.is_xpu()

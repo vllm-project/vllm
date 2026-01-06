@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -26,9 +27,7 @@ MNK_FACTORS = [
     (2, 1024, 1024),
     (2, 1024, 1536),
     (2, 3072, 1024),
-    (2, 3072, 1536),
     (64, 1024, 1024),
-    (64, 1024, 1536),
     (64, 3072, 1024),
     (64, 2048, 1536),
     (224, 1024, 1024),
@@ -39,12 +38,12 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
-@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype
+    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, workspace_init
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):

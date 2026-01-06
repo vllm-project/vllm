@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from typing import Optional
 
 import torch
 from functorch.experimental.control_flow import cond  # noqa: F401
@@ -18,14 +17,15 @@ from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfi
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "TPU platform does have a concept of compute capability, "
-            "this method should not be called."
-        )
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_tpu():
+            return False, "Requires TPU."
+        return True, None
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
 
@@ -77,17 +77,17 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             message="Pred is a Python constant. When used with torch.cond, it specializes on one of the branches.",  # noqa: E501
         )
 
-    def no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
+    def no_add_bias(self, x: torch.Tensor, bias: torch.Tensor | None):
         return x
 
-    def add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
+    def add_bias(self, x: torch.Tensor, bias: torch.Tensor | None):
         return x + bias
 
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
 

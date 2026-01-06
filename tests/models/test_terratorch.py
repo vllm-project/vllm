@@ -32,12 +32,13 @@ def test_inference(
         dtype="half",
         enforce_eager=True,
         skip_tokenizer_init=True,
+        enable_mm_embeds=True,
         # Limit the maximum number of sequences to avoid the
         # test going OOM during the warmup run
         max_num_seqs=32,
         default_torch_num_threads=1,
     ) as vllm_model:
-        vllm_output = vllm_model.llm.encode(prompt)
+        vllm_output = vllm_model.llm.encode(prompt, pooling_task="plugin")
         assert torch.equal(
             torch.isnan(vllm_output[0].outputs.data).any(), torch.tensor(False)
         )

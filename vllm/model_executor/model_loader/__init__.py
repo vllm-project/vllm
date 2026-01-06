@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal, Optional
+from typing import Literal
 
 from torch import nn
 
@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 # if a new load format is added here
 LoadFormats = Literal[
     "auto",
+    "hf",
     "bitsandbytes",
     "dummy",
     "fastsafetensors",
@@ -45,6 +46,7 @@ LoadFormats = Literal[
 ]
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
+    "hf": DefaultModelLoader,
     "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
@@ -122,7 +124,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
 
 def get_model(
-    *, vllm_config: VllmConfig, model_config: Optional[ModelConfig] = None
+    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None
 ) -> nn.Module:
     loader = get_model_loader(vllm_config.load_config)
     if model_config is None:

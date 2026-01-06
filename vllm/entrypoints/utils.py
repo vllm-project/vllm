@@ -6,18 +6,32 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from typing import Any, Optional, Union
+from pathlib import Path
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.config import ModelConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    load_chat_template,
+    resolve_hf_chat_template,
+    resolve_mistral_chat_template,
+)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    StreamOptions,
+)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -164,9 +178,9 @@ def cli_env_setup():
 
 def _validate_truncation_size(
     max_model_len: int,
-    truncate_prompt_tokens: Optional[int],
-    tokenization_kwargs: Optional[dict[str, Any]] = None,
-) -> Optional[int]:
+    truncate_prompt_tokens: int | None,
+    tokenization_kwargs: dict[str, Any] | None = None,
+) -> int | None:
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -191,7 +205,7 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: Union[ChatCompletionRequest, CompletionRequest],
+    request: ChatCompletionRequest | CompletionRequest,
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
@@ -211,7 +225,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Union[Namespace, EngineArgs]):
+def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = {}
 
     # Handle Namespace
@@ -237,3 +251,69 @@ def log_non_default_args(args: Union[Namespace, EngineArgs]):
         )
 
     logger.info("non-default args: %s", non_default_args)
+
+
+def should_include_usage(
+    stream_options: StreamOptions | None, enable_force_include_usage: bool
+) -> tuple[bool, bool]:
+    if stream_options:
+        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_continuous_usage = include_usage and bool(
+            stream_options.continuous_usage_stats
+        )
+    else:
+        include_usage, include_continuous_usage = enable_force_include_usage, False
+    return include_usage, include_continuous_usage
+
+
+def process_lora_modules(
+    args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
+) -> list[LoRAModulePath]:
+    lora_modules = args_lora_modules
+    if default_mm_loras:
+        default_mm_lora_paths = [
+            LoRAModulePath(
+                name=modality,
+                path=lora_path,
+            )
+            for modality, lora_path in default_mm_loras.items()
+        ]
+        if args_lora_modules is None:
+            lora_modules = default_mm_lora_paths
+        else:
+            lora_modules += default_mm_lora_paths
+    return lora_modules
+
+
+async def process_chat_template(
+    args_chat_template: Path | str | None,
+    engine_client: EngineClient,
+    model_config: ModelConfig,
+) -> str | None:
+    resolved_chat_template = load_chat_template(args_chat_template)
+    if resolved_chat_template is not None:
+        # Get the tokenizer to check official template
+        tokenizer = await engine_client.get_tokenizer()
+
+        if isinstance(tokenizer, MistralTokenizer):
+            # The warning is logged in resolve_mistral_chat_template.
+            resolved_chat_template = resolve_mistral_chat_template(
+                chat_template=resolved_chat_template
+            )
+        else:
+            hf_chat_template = resolve_hf_chat_template(
+                tokenizer=tokenizer,
+                chat_template=None,
+                tools=None,
+                model_config=model_config,
+            )
+
+            if hf_chat_template != resolved_chat_template:
+                logger.warning(
+                    "Using supplied chat template: %s\n"
+                    "It is different from official chat template '%s'. "
+                    "This discrepancy may lead to performance degradation.",
+                    resolved_chat_template,
+                    model_config.model,
+                )
+    return resolved_chat_template

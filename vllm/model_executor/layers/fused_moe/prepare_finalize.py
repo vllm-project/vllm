@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -14,18 +13,25 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+    def __init__(self, defer_input_quant: bool = False) -> None:
+        super().__init__()
+        self.defer_input_quant = defer_input_quant
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return None
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return None
 
     def num_dispatchers(self) -> int:
         return 1
+
+    def output_is_reduced(self) -> bool:
+        return False
 
     def prepare(
         self,
@@ -33,7 +39,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -43,7 +49,13 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            a1.mul_(topk_weights.to(a1.dtype))
+            # Note: do not use inplace for shared experts overlap
+            a1 = a1 * topk_weights.to(a1.dtype)
+
+        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
+        # which use a single kernel call for quant + experts.
+        if self.defer_input_quant:
+            return a1, None, None, None, None
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,

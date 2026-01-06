@@ -4,24 +4,26 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
 import zmq
 
+from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -55,13 +57,13 @@ class EngineZmqAddresses:
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
     # ZMQ input socket address of DP coordinator if applicable
-    coordinator_input: Optional[str] = None
+    coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
-    coordinator_output: Optional[str] = None
+    coordinator_output: str | None = None
     # ZMQ socket for front-end to connect to DP coordinator.
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
-    frontend_stats_publish_address: Optional[str] = None
+    frontend_stats_publish_address: str | None = None
 
 
 @dataclass
@@ -72,7 +74,7 @@ class EngineHandshakeMetadata:
     """
 
     addresses: EngineZmqAddresses
-    parallel_config: dict[str, Union[int, str, list[int]]]
+    parallel_config: dict[str, int | str | list[int]]
 
 
 class CoreEngineProcManager:
@@ -92,7 +94,7 @@ class CoreEngineProcManager:
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
-        client_handshake_address: Optional[str] = None,
+        client_handshake_address: str | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -131,9 +133,18 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                # Adjust device control in DP for non-CUDA platforms
+                # as well as external and ray launchers
+                # For CUDA platforms, we use torch.cuda.set_device()
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel)
+                    if (
+                        data_parallel
+                        and (
+                            not current_platform.is_cuda_alike()
+                            or vllm_config.parallel_config.use_ray
+                        )
+                    )
                     else contextlib.nullcontext()
                 ):
                     proc.start()
@@ -171,15 +182,19 @@ def set_device_control_env_var(
     for engine subprocess.
     """
     world_size = vllm_config.parallel_config.world_size
+    local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size)
+    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
     with patch.dict(os.environ, values=((evar, value),)):
         yield
 
 
 def get_device_indices(
-    device_control_env_var: str, local_dp_rank: int, world_size: int
+    device_control_env_var: str,
+    local_dp_rank: int,
+    world_size: int,
+    local_world_size: int | None = None,
 ):
     """
     Returns a comma-separated string of device indices for the specified
@@ -188,10 +203,15 @@ def get_device_indices(
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
     this will select devices 2 and 3 for local_dp_rank=1.
     """
+    if local_world_size is None:
+        local_world_size = world_size
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
-            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) * world_size)
+            for i in range(
+                local_dp_rank * world_size,
+                local_dp_rank * world_size + local_world_size,
+            )
         )
     except IndexError as e:
         raise Exception(
@@ -219,8 +239,8 @@ class CoreEngineActorManager:
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
         log_stats: bool,
-        placement_groups: Optional[list["PlacementGroup"]] = None,
-        local_dp_ranks: Optional[list[int]] = None,
+        placement_groups: list["PlacementGroup"] | None = None,
+        local_dp_ranks: list[int] | None = None,
     ):
         import copy
 
@@ -228,12 +248,19 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPEngineCoreActor
+        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        actor_class = (
+            DPMoEEngineCoreActor
+            if dp_size > 1 and vllm_config.model_config.is_moe
+            else EngineCoreActor
+        )
 
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination="DPEngineCoreActor")
+        env_vars_list = get_env_vars_to_copy(destination=actor_class.__name__)
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
@@ -242,7 +269,6 @@ class CoreEngineActorManager:
         self.addresses = addresses
         self.executor_class = executor_class
         self.log_stats = log_stats
-        dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
 
@@ -293,7 +319,7 @@ class CoreEngineActorManager:
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
-                ray.remote(DPEngineCoreActor)
+                ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -336,66 +362,175 @@ class CoreEngineActorManager:
 
         logger.info("Creating placement groups for data parallel")
         dp_master_ip = vllm_config.parallel_config.data_parallel_master_ip
-        num_pg_to_create = vllm_config.parallel_config.data_parallel_size
-        local_engine_count = vllm_config.parallel_config.data_parallel_size_local
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        dp_size_local = vllm_config.parallel_config.data_parallel_size_local
 
         available_resources = available_resources_per_node()
         world_size = vllm_config.parallel_config.world_size
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
+
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
         )
         assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
         assert dp_master_ip_key in nodes[0], (
-            "The DP master node (ip: %s) is missing or dead",
-            dp_master_ip,
+            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
         device_str = current_platform.ray_device_key
-        for node_resources in nodes:
-            if device_str not in node_resources:
-                continue
-            # For now, each DP rank can only be assigned to one node
-            # TODO(rui): support allocating a single DP rank
-            # to multiple nodes
-            available_engine_count = int(node_resources[device_str]) // world_size
-            if dp_master_ip_key in node_resources:
-                assert available_engine_count >= local_engine_count, (
-                    "Not enough resources to allocate DP ranks "
-                    f"on DP master node {dp_master_ip}"
-                )
-                for i in range(local_engine_count):
-                    bundles = [
-                        {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                    ] * world_size + [{"CPU": 1.0}]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
-                    )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
-            else:
-                for i in range(available_engine_count):
-                    if len(placement_groups) == num_pg_to_create:
-                        break
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
-                    )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
-        if len(placement_groups) < num_pg_to_create:
+        n_node_devices: list[int] = [
+            int(node_resources[device_str])
+            for node_resources in nodes
+            if device_str in node_resources
+        ]
+        assert n_node_devices, f"No {device_str} found in Ray cluster."
+        max_device_per_node = max(n_node_devices)
+
+        pack_strategy = envs.VLLM_RAY_DP_PACK_STRATEGY
+        _supported_pack_strategies = ("strict", "fill", "span")
+        if pack_strategy not in _supported_pack_strategies:
             raise ValueError(
-                f"Not enough resources to allocate {num_pg_to_create} "
+                f"{envs.VLLM_RAY_DP_PACK_STRATEGY} is not supported. "
+                "Make sure to set `VLLM_RAY_DP_PACK_STRATEGY` "
+                f"to one of {_supported_pack_strategies}"
+            )
+
+        all2all_backend = vllm_config.parallel_config.all2all_backend
+        if pack_strategy == "fill" and (
+            all2all_backend == "deepep_high_throughput"
+            or all2all_backend == "deepep_low_latency"
+        ):
+            raise ValueError(
+                "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "
+                "to be on the same node, but VLLM_RAY_DP_PACK_STRATEGY=fill "
+                "does not guarantee that. "
+                "Please use VLLM_RAY_DP_PACK_STRATEGY=strict instead."
+            )
+
+        if pack_strategy in ("strict", "fill"):
+            placement_strategy = "STRICT_PACK"
+        else:
+            placement_strategy = "PACK"
+            assert world_size > max_device_per_node, (
+                f"World size {world_size} is smaller than the "
+                "maximum number of devices per node "
+                f"{max_device_per_node}. Make sure to set "
+                "`VLLM_RAY_DP_PACK_STRATEGY` to `strict` or `fill`"
+            )
+
+            # if we need multiple nodes per dp group, we require for now that
+            # available nodes are homogenous
+            assert set(n_node_devices) == {max_device_per_node}, (
+                f"Nodes are not homogenous, {nodes}"
+            )
+            assert world_size % max_device_per_node == 0, (
+                f"For multi-node data parallel groups, world_size ({world_size}) must "
+                f"be a multiple of number of devices per node ({max_device_per_node})."
+            )
+            assert len(n_node_devices) * max_device_per_node >= world_size * dp_size, (
+                f"Not enough total available nodes ({len(n_node_devices)}) "
+                f"and devices per node ({max_device_per_node}) "
+                f"to satisfy required world size {world_size} and data parallel size "
+                f"{dp_size}"
+            )
+            assert dp_size_local == 1, (
+                f"data-parallel-size-local {dp_size_local} should be set as the "
+                "default (1) for VLLM_RAY_DP_PACK_STRATEGY=span. "
+                "The actual data-parallel-size-local will be auto determined."
+            )
+
+        # bundles collected for a single DP rank from multiple nodes,
+        # for "span" pack strategy
+        collected_bundles = []
+        for node_resources in nodes:
+            node_ip_keys = [
+                key
+                for key in node_resources
+                if key != "node:__internal_head__" and key.startswith("node:")
+            ]
+            assert len(node_ip_keys) == 1, (
+                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
+            )
+            node_ip_key = node_ip_keys[0]
+            node_ip = node_ip_key.split(":")[1]
+
+            n_device_on_node = int(node_resources.get(device_str, 0))
+            if pack_strategy == "span" and n_device_on_node != 0:
+                # Strictly speaking,
+                # dp_size_available = n_device_on_node / world_size
+                # and is a fraction, but we use 1 for easier processing
+                dp_size_available = 1
+            else:
+                dp_size_available = n_device_on_node // world_size
+
+            if node_ip == dp_master_ip:
+                if dp_size_available < dp_size_local:
+                    raise ValueError(
+                        f"Not enough resources to allocate {dp_size_local} DP ranks "
+                        f"on DP master node {dp_master_ip}, possible to fit "
+                        f"{dp_size_available} DP ranks."
+                    )
+                dp_size_to_allocate = dp_size_local
+            elif pack_strategy == "strict":
+                if dp_size_available < dp_size_local:
+                    logger.info(
+                        "Skipping node %s as %s DP ranks could not fit, "
+                        "possible to fit %s DP ranks",
+                        node_ip,
+                        dp_size_local,
+                        dp_size_available,
+                    )
+                    continue
+                dp_size_to_allocate = dp_size_local
+            else:
+                # for "pack_strategy" in "fill" and "span"
+                # we always take everything that's available
+                dp_size_to_allocate = dp_size_available
+
+            for i in range(dp_size_to_allocate):
+                device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
+                if pack_strategy == "span":
+                    collected_bundles += device_bundle * n_device_on_node
+                    assert len(collected_bundles) <= world_size, (
+                        "collected_bundles should be <= world_size, "
+                        f"but got {len(collected_bundles)=} and {world_size=}"
+                    )
+
+                    # we only create a placement group if we collected enough devices
+                    if len(collected_bundles) < world_size:
+                        continue
+
+                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    collected_bundles = []
+                else:
+                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+
+                pg = ray.util.placement_group(
+                    name=f"dp_rank_{len(placement_groups)}",
+                    strategy=placement_strategy,
+                    bundles=bundles,
+                )
+                placement_groups.append(pg)
+                local_dp_ranks.append(i)
+                if len(placement_groups) == dp_size:
+                    break
+
+        if len(placement_groups) < dp_size:
+            raise ValueError(
+                f"Not enough resources to allocate {dp_size} "
                 "placement groups, only created "
                 f"{len(placement_groups)} placement groups. "
                 "Available resources: "
                 f"{available_resources}"
             )
+        assert len(placement_groups) == dp_size, (
+            f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
+        )
+        assert len(local_dp_ranks) == dp_size, (
+            f"local_dp_ranks length {len(local_dp_ranks)} does not match "
+            f"expected {dp_size}"
+        )
         return placement_groups, local_dp_ranks
 
     @staticmethod
@@ -494,7 +629,13 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPEngineCoreActor
+        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+
+        actor_class = (
+            DPMoEEngineCoreActor
+            if cur_vllm_config.model_config.is_moe
+            else EngineCoreActor
+        )
 
         cur_data_parallel_size = len(self.local_engine_actors) + len(
             self.remote_engine_actors
@@ -537,7 +678,7 @@ class CoreEngineActorManager:
                 )
 
             actor = (
-                ray.remote(DPEngineCoreActor)
+                ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -633,8 +774,8 @@ def launch_core_engines(
     num_api_servers: int = 1,
 ) -> Iterator[
     tuple[
-        Optional[Union[CoreEngineProcManager, CoreEngineActorManager]],
-        Optional[DPCoordinator],
+        CoreEngineProcManager | CoreEngineActorManager | None,
+        DPCoordinator | None,
         EngineZmqAddresses,
     ]
 ]:
@@ -674,12 +815,19 @@ def launch_core_engines(
         ],
     )
 
-    # Run the DP Coordinator process with rank 0 when in
-    # online DP mode.
-    run_coordinator = dp_size > 1 and not offline_mode and dp_rank == 0
+    # Run the DP Coordinator process with rank 0 when in online DP mode.
+    # The coordinator is needed for:
+    # 1. Internal/hybrid LB: collecting and publishing queue stats for load balancing
+    # 2. MoE models: wave coordination in addition to stats
+    run_coordinator = (
+        vllm_config.needs_dp_coordinator and not offline_mode and dp_rank == 0
+    )
 
     if run_coordinator:
-        coordinator = DPCoordinator(parallel_config)
+        coordinator = DPCoordinator(
+            parallel_config,
+            enable_wave_coordination=vllm_config.model_config.is_moe,
+        )
 
         addresses.coordinator_input, addresses.coordinator_output = (
             coordinator.get_engine_socket_addresses()
@@ -775,6 +923,7 @@ def launch_core_engines(
             addresses,
             engines_to_handshake,
             parallel_config,
+            dp_size > 1 and vllm_config.model_config.is_moe,
             vllm_config.cache_config,
             local_engine_manager,
             coordinator.proc if coordinator else None,
@@ -786,9 +935,10 @@ def wait_for_engine_startup(
     addresses: EngineZmqAddresses,
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
+    coordinated_dp: bool,
     cache_config: CacheConfig,
-    proc_manager: Optional[CoreEngineProcManager],
-    coord_process: Optional[Process],
+    proc_manager: CoreEngineProcManager | None,
+    coord_process: Process | None,
 ):
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
@@ -879,7 +1029,9 @@ def wait_for_engine_startup(
                             "_data_parallel_master_port_list",
                             "data_parallel_size",
                         )
-                    },
+                    }
+                    if coordinated_dp
+                    else {},
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)
@@ -899,6 +1051,23 @@ def wait_for_engine_startup(
             # front-end process in the response from the other.
             if addresses.frontend_stats_publish_address is None:
                 addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
+
+            # Validate config hash consistency across DP workers for MoE models.
+            if coordinated_dp:
+                worker_config_hash = msg.get("parallel_config_hash")
+                expected_hash = parallel_config.compute_hash()
+                if worker_config_hash != expected_hash:
+                    raise RuntimeError(
+                        f"Configuration mismatch detected for engine "
+                        f"{eng_index}. All DP workers must have identical "
+                        f"configurations for parameters that affect collective "
+                        f"communication (e.g., enable_eplb, "
+                        f"eplb_config.log_balancedness). "
+                        f"Worker hash: {worker_config_hash}, "
+                        f"Expected hash: {expected_hash}. "
+                        f"Please ensure all workers are started with the same "
+                        f"command-line arguments."
+                    )
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY

@@ -10,7 +10,7 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 @pytest.fixture()
@@ -22,10 +22,12 @@ def serving() -> OpenAIServing:
     model_config = Mock(spec=ModelConfig)
     model_config.max_model_len = 32768
     models = Mock(spec=OpenAIServingModels)
+    models.model_config = model_config
+    models.input_processor = Mock()
+    models.io_processor = Mock()
 
     serving = OpenAIServing(
         engine_client=engine_client,
-        model_config=model_config,
         models=models,
         request_logger=None,
     )

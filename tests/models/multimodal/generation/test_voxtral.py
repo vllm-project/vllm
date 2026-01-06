@@ -6,14 +6,10 @@ import json
 import pytest
 import pytest_asyncio
 from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 
-from vllm.transformers_utils.tokenizer import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....conftest import AudioTestAssets
 from ....utils import RemoteOpenAIServer
@@ -115,4 +111,5 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
 
     assert len(chat_completion.choices) == 1
     choice = chat_completion.choices[0]
+    assert choice.message.content == "In the first audio clip, you hear a brief"
     assert choice.finish_reason == "length"

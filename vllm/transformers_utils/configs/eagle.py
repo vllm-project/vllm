@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional, Union
 
-from transformers import AutoConfig, PretrainedConfig
-
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+from transformers import AutoConfig, DeepseekV2Config, PretrainedConfig
 
 
 class EAGLEConfig(PretrainedConfig):
@@ -14,20 +11,14 @@ class EAGLEConfig(PretrainedConfig):
 
     def __init__(
         self,
-        model: Union[PretrainedConfig, dict, None] = None,
-        truncated_vocab_size: Optional[int] = None,
-        method: Optional[str] = "eagle",
+        model: PretrainedConfig | dict | None = None,
+        truncated_vocab_size: int | None = None,
+        method: str | None = "eagle",
         **kwargs,
     ):
-        model_config: Union[PretrainedConfig, DeepseekV2Config, None]
+        model_config: PretrainedConfig | DeepseekV2Config | None
         if isinstance(model, dict):
-            archs = model.get("architectures", [])
-            target_archs = ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]
-            if any(target_arch in archs for target_arch in target_archs):
-                # AutoConfig does not support DeepSeek MoE models yet
-                model_config = DeepseekV2Config(**model)
-            else:
-                model_config = AutoConfig.for_model(**model)
+            model_config = AutoConfig.for_model(**model)
         else:
             model_config = model
 
@@ -84,10 +75,16 @@ class EAGLEConfig(PretrainedConfig):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: Union[str, os.PathLike],
+        pretrained_model_name_or_path: str | os.PathLike,
         **kwargs,
     ) -> "EAGLEConfig":
         config_dict, kwargs = cls.get_config_dict(
             pretrained_model_name_or_path, **kwargs
         )
         return cls.from_dict(config_dict, **kwargs)
+
+    def to_json_string(self, use_diff: bool = True) -> str:
+        # we override use_diff to False as initializing
+        # EAGLEConfig with default arguments is not supported
+        del use_diff
+        return super().to_json_string(use_diff=False)

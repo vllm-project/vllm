@@ -5,9 +5,7 @@ from typing import (
     Any,
     ClassVar,
     Literal,
-    Optional,
     Protocol,
-    Union,
     overload,
     runtime_checkable,
 )
@@ -17,14 +15,18 @@ import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import PoolingTypeStr
     from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any
+    PoolingTypeStr = Any
+    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
@@ -43,36 +45,25 @@ T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 class VllmModel(Protocol[T_co]):
     """The interface required for all models in vLLM."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None: ...
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None: ...
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Apply token embeddings to `input_ids`."""
         ...
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> T_co: ...
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> T_co: ...
 
 
-def _check_vllm_model_init(model: Union[type[object], object]) -> bool:
+def _check_vllm_model_init(model: type[object] | object) -> bool:
     model_init = model.__init__
     return supports_kw(model_init, "vllm_config")
 
 
-def _check_vllm_model_get_input_embeddings(model: Union[type[object], object]) -> bool:
-    model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
-    if not callable(model_get_input_embeddings):
+def _check_vllm_model_embed_input_ids(model: type[object] | object) -> bool:
+    model_embed_input_ids = getattr(model, "embed_input_ids", None)
+    if not callable(model_embed_input_ids):
         logger.warning(
-            "The model (%s) is missing the `get_input_embeddings` method.",
+            "The model (%s) is missing the `embed_input_ids` method.",
             model,
         )
         return False
@@ -80,7 +71,7 @@ def _check_vllm_model_get_input_embeddings(model: Union[type[object], object]) -
     return True
 
 
-def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
+def _check_vllm_model_forward(model: type[object] | object) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
         return False
@@ -108,11 +99,11 @@ def is_vllm_model(model: object) -> TypeIs[VllmModel]: ...
 
 
 def is_vllm_model(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[VllmModel]], TypeIs[VllmModel]]:
+    model: type[object] | object,
+) -> TypeIs[type[VllmModel]] | TypeIs[VllmModel]:
     return (
         _check_vllm_model_init(model)
-        and _check_vllm_model_get_input_embeddings(model)
+        and _check_vllm_model_embed_input_ids(model)
         and _check_vllm_model_forward(model)
     )
 
@@ -124,7 +115,7 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     def compute_logits(
         self,
         hidden_states: T,
-    ) -> Optional[T]:
+    ) -> T | None:
         """Return `None` if TP rank > 0."""
         ...
 
@@ -140,10 +131,8 @@ def is_text_generation_model(model: object) -> TypeIs[VllmModelForTextGeneration
 
 
 def is_text_generation_model(
-    model: Union[type[object], object],
-) -> Union[
-    TypeIs[type[VllmModelForTextGeneration]], TypeIs[VllmModelForTextGeneration]
-]:
+    model: type[object] | object,
+) -> TypeIs[type[VllmModelForTextGeneration]] | TypeIs[VllmModelForTextGeneration]:
     if not is_vllm_model(model):
         return False
 
@@ -166,14 +155,24 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    default_pooling_type: ClassVar[str] = "LAST"
+    default_pooling_type: ClassVar[PoolingTypeStr] = "LAST"
     """
-    Indicates the
-    [vllm.model_executor.layers.pooler.PoolerConfig.pooling_type][]
+    Indicates the [vllm.config.pooler.PoolerConfig.pooling_type][]
     to use by default.
 
     You can use the
     [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    attn_type: ClassVar[AttnTypeStr] = "decoder"
+    """
+    Indicates the
+    [vllm.config.model.ModelConfig.attn_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.attn_type][]
     decorator to conveniently set this field.
     """
 
@@ -190,8 +189,8 @@ def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]: ...
 
 
 def is_pooling_model(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
+    model: type[object] | object,
+) -> TypeIs[type[VllmModelForPooling]] | TypeIs[VllmModelForPooling]:
     if not is_vllm_model(model):
         return False
 
@@ -201,7 +200,7 @@ def is_pooling_model(
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def default_pooling_type(pooling_type: str):
+def default_pooling_type(pooling_type: PoolingTypeStr):
     """Decorator to set `VllmModelForPooling.default_pooling_type`."""
 
     def func(model: _T) -> _T:
@@ -211,5 +210,19 @@ def default_pooling_type(pooling_type: str):
     return func
 
 
-def get_default_pooling_type(model: Union[type[object], object]) -> str:
+def get_default_pooling_type(model: type[object] | object) -> PoolingTypeStr:
     return getattr(model, "default_pooling_type", "LAST")
+
+
+def attn_type(attn_type: AttnTypeStr):
+    """Decorator to set `VllmModelForPooling.attn_type`."""
+
+    def func(model: _T) -> _T:
+        model.attn_type = attn_type  # type: ignore
+        return model
+
+    return func
+
+
+def get_attn_type(model: type[object] | object) -> AttnTypeStr:
+    return getattr(model, "attn_type", "decoder")

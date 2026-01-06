@@ -22,15 +22,15 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.attention.ops import flashmla
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.utils import cdiv
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
-    FlashMLASparseDecodeAndContextMetadata,
-    FlashMLASparseImpl,
-    FlashMLASparseMetadata,
+    triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.mla.indexer import split_prefill_chunks
+from vllm.v1.attention.backends.utils import split_prefill_chunks
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -116,62 +116,19 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
-def test_sparse_backend_metadata_registration():
-    backend = FlashMLASparseBackend
-
-    assert backend.get_name() == "FLASHMLA_SPARSE_VLLM_V1"
-    assert backend.get_metadata_cls() is FlashMLASparseMetadata
-    assert backend.get_impl_cls() is FlashMLASparseImpl
-
-    dtype_list = backend.get_supported_dtypes()
-    assert torch.bfloat16 in dtype_list
-
-    shape = backend.get_kv_cache_shape(
-        num_blocks=2, block_size=64, num_kv_heads=1, head_size=576
-    )
-    assert shape == (2, 64, 576)
-
-
-def test_sparse_decode_metadata_filters_prefill_indices():
-    prefill_context_lengths = torch.tensor([4, 2], dtype=torch.int32)
-    metadata = FlashMLASparseDecodeAndContextMetadata(
-        scheduler_metadata=torch.tensor([[0]], dtype=torch.int32),
-        num_splits=torch.tensor([1, 1], dtype=torch.int32),
-        cache_lens=torch.tensor([10, 12], dtype=torch.int32),
-        prefill_context_lengths=prefill_context_lengths,
-    )
-
-    indices = torch.tensor([[0, 3, 5], [1, 2, 4]], dtype=torch.int32)
-
-    context_indices, new_token_indices = metadata.filter_prefill_indices(indices)
-
-    expected_context = torch.tensor([[-1, -1, 5], [-1, -1, 4]], dtype=torch.int32)
-    expected_new_tokens = torch.tensor([[-1, -1, 1], [-1, 0, 2]], dtype=torch.int32)
-
-    assert torch.equal(context_indices, expected_context)
-    assert torch.equal(new_token_indices, expected_new_tokens)
-
-
-def test_sparse_impl_zero_fills_when_metadata_missing():
-    impl = FlashMLASparseImpl.__new__(FlashMLASparseImpl)
-    dummy_layer = object()
-    q = torch.zeros((2, 1, 3))
-    k_c = torch.zeros((2, 3))
-    k_pe = torch.zeros((2, 1, 1))
-    kv_cache = torch.zeros((1, 1, 1))
-    output = torch.ones((2, 4))
-
-    result = FlashMLASparseImpl.forward(
-        impl, dummy_layer, q, k_c, k_pe, kv_cache, attn_metadata=None, output=output
-    )
-
-    assert result is output
-    assert torch.all(result == 0)
-
-
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
-def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_sparse_backend_decode_correctness(
+    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size, workspace_init
+):
+    if current_platform.is_rocm():
+        pytest.skip("ROCm does not support fp8_ds_mla data type for kv cache.")
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
@@ -193,16 +150,20 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     total_cache_tokens = sum(batch_spec.seq_lens)
     block_size = 64
 
+    # Note: We use TP=1 to avoid multi-GPU requirements in CI.
+    # The test simulates head partitioning via mocked methods below.
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
         max_model_len=max_seqlen,
         num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
         block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
     )
     model_config = vllm_config.model_config
-    model_config.hf_config = SimpleNamespace(
-        attn_module_list_cfg=[{"topk_tokens": topk_tokens}]
-    )
     model_config.hf_text_config = SimpleNamespace(
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
@@ -213,7 +174,8 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     )
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+        lambda self, parallel_config: max(1, num_heads // tensor_parallel_size),
+        model_config,
     )
     model_config.get_num_kv_heads = MethodType(
         lambda self, parallel_config: 1, model_config
@@ -301,6 +263,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     sdpa_reference = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.model_config.hf_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -334,7 +297,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     positions = np.arange(starts[-1], dtype=np.int32) - np.repeat(
         starts[:-1], seg_lengths
     )
-    seq_lengths = np.asarray(common_attn_metadata.seq_lens_cpu, dtype=np.int32)
+    seq_lengths = np.asarray(common_attn_metadata.seq_lens.cpu(), dtype=np.int32)
     prefix_lengths = seq_lengths - seg_lengths
     positions += np.repeat(prefix_lengths, seg_lengths)
 
@@ -352,7 +315,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
     mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
 
-    ok, reason = flashmla.is_flashmla_supported()
+    ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
         pytest.skip(reason)
 
@@ -369,37 +332,45 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
     impl_cls = FlashMLASparseBackend.get_impl_cls()
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=1,
-        alibi_slopes=None,
-        sliding_window=None,
-        kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-        logits_soft_cap=None,
-        attn_type="decoder",
-        kv_sharing_target_layer_name=None,
-        q_lora_rank=None,
-        kv_lora_rank=kv_lora_rank,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        kv_b_proj=mock_kv_b_proj,
-        indexer=mock_indexer,
-    )
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
+            indexer=mock_indexer,
+        )
 
-    impl.process_weights_after_loading(dtype)
+        impl.process_weights_after_loading(dtype)
 
     layer = MockAttentionLayer(device)
     out_buffer = torch.empty(
         metadata.num_actual_tokens, num_heads * v_head_dim, dtype=dtype, device=device
     )
 
-    backend_output = impl.forward(
-        layer, query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, output=out_buffer
-    )
+    with torch.inference_mode():
+        backend_output = impl.forward(
+            layer,
+            query_vllm,
+            kv_c_vllm,
+            k_pe_vllm,
+            kv_cache,
+            metadata,
+            output=out_buffer,
+        )
 
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
@@ -408,22 +379,192 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.5, atol=0.5)
 
 
+def _triton_convert_reference_impl(
+    req_ids: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    block_size: int,
+    num_topk_tokens: int,
+    HAS_PREFILL_WORKSPACE: bool = False,
+    prefill_workspace_request_ids: torch.Tensor | None = None,
+    prefill_workspace_starts: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reference implementation for triton_convert_req_index_to_global_index."""
+    num_tokens = req_ids.shape[0]
+    max_blocks_per_req = block_table.shape[1]
+    result = torch.empty(
+        num_tokens, num_topk_tokens, dtype=torch.int32, device=req_ids.device
+    )
+
+    for token_id in range(num_tokens):
+        req_id = req_ids[token_id].item()
+
+        # Determine if this token uses workspace or paged cache
+        use_prefill_workspace = False
+        workspace_start = 0
+        if HAS_PREFILL_WORKSPACE and prefill_workspace_request_ids is not None:
+            assert prefill_workspace_starts is not None
+            prefill_req_id = prefill_workspace_request_ids[token_id].item()
+            if prefill_req_id >= 0:
+                use_prefill_workspace = True
+                workspace_start = prefill_workspace_starts[prefill_req_id].item()
+
+        for idx_id in range(num_topk_tokens):
+            token_idx = token_indices[token_id, idx_id].item()
+
+            if token_idx == -1:
+                result[token_id, idx_id] = -1
+            elif use_prefill_workspace:
+                # Prefill + using prefill workspace: map to workspace offset
+                result[token_id, idx_id] = workspace_start + token_idx
+            else:
+                # Decode: map to paged cache
+                block_id = token_idx // block_size
+                if block_id >= max_blocks_per_req:
+                    result[token_id, idx_id] = -1
+                else:
+                    block_num = block_table[req_id, block_id].item()
+                    offset = token_idx % block_size
+                    result[token_id, idx_id] = block_num * block_size + offset
+
+    return result
+
+
+@pytest.mark.parametrize("block_size", [16, 64, 128])
+@pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_triton_convert_req_index_to_global_index_decode_only(
+    block_size, num_topk_tokens
+):
+    device = torch.device("cuda")
+    num_tokens = 8
+    num_requests = 4
+    max_blocks_per_req = 10
+
+    req_id = torch.randint(
+        0, num_requests, (num_tokens,), dtype=torch.int32, device=device
+    )
+    block_table = torch.randint(
+        0, 100, (num_requests, max_blocks_per_req), dtype=torch.int32, device=device
+    )
+
+    token_indices = torch.randint(
+        0,
+        block_size * max_blocks_per_req,
+        (num_tokens, num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # Set some to -1 to test masking
+    token_indices[0, :10] = -1
+    token_indices[3, 50:60] = -1
+
+    # Set some to out of bounds
+    token_indices[2, 100:110] = max_blocks_per_req * block_size
+    token_indices[6, 150:160] = max_blocks_per_req * block_size
+
+    result = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+    )
+
+    reference_result = _triton_convert_reference_impl(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+    )
+
+    torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
+    device = torch.device("cuda")
+    num_requests = 4
+    max_blocks_per_req = 8
+    num_topk_tokens = 128
+
+    # First 6 tokens are decode (reqs 0, 1), last 6 are prefill (reqs 2, 3)
+    req_id = torch.tensor(
+        [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], dtype=torch.int32, device=device
+    )
+    prefill_workspace_request_ids = torch.tensor(
+        [-1, -1, -1, -1, -1, -1, 0, 0, 0, 1, 1, 1], dtype=torch.int32, device=device
+    )
+
+    # Workspace starts for the 2 prefill reqs: req 2 starts at 0, req 3 starts at 100
+    prefill_workspace_starts = torch.tensor([0, 100], dtype=torch.int32, device=device)
+
+    block_table = torch.randint(
+        0, 50, (num_requests, max_blocks_per_req), dtype=torch.int32, device=device
+    )
+    token_indices = torch.randint(
+        0,
+        block_size * max_blocks_per_req,
+        (req_id.shape[0], num_topk_tokens),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # Set some to -1 to test masking
+    token_indices[0, :10] = -1
+    token_indices[3, 50:60] = -1
+
+    # Set some to out of bounds
+    token_indices[2, 100:110] = max_blocks_per_req * block_size
+    token_indices[6, 150:160] = max_blocks_per_req * block_size
+
+    result = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        token_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk_tokens,
+        HAS_PREFILL_WORKSPACE=True,
+        prefill_workspace_request_ids=prefill_workspace_request_ids,
+        prefill_workspace_starts=prefill_workspace_starts,
+    )
+
+    reference_result = _triton_convert_reference_impl(
+        req_id,
+        block_table,
+        token_indices,
+        block_size,
+        num_topk_tokens,
+        HAS_PREFILL_WORKSPACE=True,
+        prefill_workspace_request_ids=prefill_workspace_request_ids,
+        prefill_workspace_starts=prefill_workspace_starts,
+    )
+
+    torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
-    "seq_lens,max_buf,start,expected",
+    "seq_lens,max_buf,expected",
     [
         # Basic split: totals per chunk ≤ max_buf
-        (torch.tensor([2, 3, 4, 2]), 5, 0, [(0, 2), (2, 3), (3, 4)]),
-        # Non-zero start index
-        (torch.tensor([2, 3, 4, 2]), 5, 1, [(1, 2), (2, 3), (3, 4)]),
-        # Exact fits should split between items when adding the next would
-        # overflow
-        (torch.tensor([5, 5, 5]), 5, 0, [(0, 1), (1, 2), (2, 3)]),
+        (torch.tensor([2, 3, 4, 2]), 5, [(0, 2), (2, 3), (3, 4)]),
+        # Exact fits should split between items when adding the next would overflow
+        (torch.tensor([5, 5, 5]), 5, [(0, 1), (1, 2), (2, 3)]),
         # All requests fit in a single chunk
-        (torch.tensor([1, 1, 1]), 10, 0, [(0, 3)]),
-        # Large buffer with non-zero start
-        (torch.tensor([4, 4, 4]), 100, 1, [(1, 3)]),
+        (torch.tensor([1, 1, 1]), 10, [(0, 3)]),
+        # Large buffer
+        (torch.tensor([4, 4, 4]), 100, [(0, 3)]),
     ],
 )
-def test_split_prefill_chunks(seq_lens, max_buf, start, expected):
-    out = split_prefill_chunks(seq_lens, max_buf, start)
+def test_split_prefill_chunks(seq_lens, max_buf, expected):
+    out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected

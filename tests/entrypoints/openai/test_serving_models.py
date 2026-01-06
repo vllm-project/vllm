@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = "Success: LoRA adapter '{lora_name}' added successfully."
 LORA_UNLOADING_SUCCESS_MESSAGE = (
@@ -25,15 +25,17 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 
 
 async def _async_serving_models_init() -> OpenAIServingModels:
-    mock_model_config = MagicMock(spec=ModelConfig)
     mock_engine_client = MagicMock(spec=EngineClient)
     # Set the max_model_len attribute to avoid missing attribute
+    mock_model_config = MagicMock(spec=ModelConfig)
     mock_model_config.max_model_len = 2048
+    mock_engine_client.model_config = mock_model_config
+    mock_engine_client.input_processor = MagicMock()
+    mock_engine_client.io_processor = MagicMock()
 
     serving_models = OpenAIServingModels(
         engine_client=mock_engine_client,
         base_model_paths=BASE_MODEL_PATHS,
-        model_config=mock_model_config,
         lora_modules=None,
     )
     await serving_models.init_static_loras()

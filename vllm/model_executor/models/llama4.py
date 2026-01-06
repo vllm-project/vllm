@@ -19,21 +19,22 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any, Optional
 
 import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
+    get_ep_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -42,20 +43,23 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     extract_layer_index,
     fast_topk,
     is_pp_missing_parameter,
 )
+
+logger = init_logger(__name__)
 
 
 class Llama4MoE(nn.Module):
@@ -81,6 +85,9 @@ class Llama4MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(
@@ -102,6 +109,20 @@ class Llama4MoE(nn.Module):
             disable_tp=self.is_sequence_parallel,
         )
 
+        # Load balancing settings.
+        eplb_config = parallel_config.eplb_config if parallel_config else None
+        self.enable_eplb = parallel_config.enable_eplb if parallel_config else False
+        self.n_redundant_experts = (
+            eplb_config.num_redundant_experts if eplb_config else 0
+        )
+
+        self.n_routed_experts: int = config.num_local_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_shared_experts: int = 1
+        self.n_local_experts: int = config.num_local_experts
+        self.n_physical_experts = self.n_local_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
@@ -115,6 +136,8 @@ class Llama4MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             is_sequence_parallel=self.is_sequence_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
         )
 
     def forward(self, hidden_states):
@@ -148,13 +171,11 @@ class Llama4Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -185,7 +206,6 @@ class Llama4Attention(nn.Module):
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
@@ -223,10 +243,8 @@ class Llama4Attention(nn.Module):
         self.rotary_emb = (
             get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=int(rope_theta),
-                rope_scaling=rope_scaling if rope_scaling != "default" else None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=is_neox_style,
             )
             if not self.nope
@@ -297,7 +315,7 @@ class Llama4DecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: Optional[Llama4TextConfig] = None,
+        config: Llama4TextConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -308,8 +326,6 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
-        rope_theta = config.rope_theta
-        rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
 
         self.self_attn = Llama4Attention(
@@ -317,8 +333,6 @@ class Llama4DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,
@@ -353,7 +367,7 @@ class Llama4DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -379,6 +393,9 @@ class Llama4Model(LlamaModel):
         layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer,
     ):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
+        self.n_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def load_moe_expert_weights(
@@ -399,7 +416,7 @@ class Llama4Model(LlamaModel):
             params_dict: The dictionary of module parameters.
             loaded_params: The set of already loaded parameters.
             expert_params_mapping: The mapping of expert parameters. Must be
-                generated by FusedMoE.make_expert_params_mapping().
+                generated by SharedFusedMoE.make_expert_params_mapping().
             fused: Whether the expert weights are fused into a single weight
                 tensor or are separate weight tensors for each expert.
                 When fused is True, loaded_weight should have shape of:
@@ -500,7 +517,6 @@ class Llama4Model(LlamaModel):
                 shard_id=shard_id,
                 expert_id=expert_id,
             )
-
             loaded_params.add(full_param_name)
             expert_param_loaded = True
 
@@ -522,15 +538,16 @@ class Llama4Model(LlamaModel):
         fused_experts_params = False
         # Expert parameter mapping for the case where the expert weights are
         # not fused into a single weight tensor.
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.num_experts,
+            num_redundant_experts=self.n_redundant_experts,
         )
         # Expert parameter mapping for the case where the expert weights are
         # fused into a single weight tensor.
-        expert_params_mapping_fused = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping_fused = SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="gate_up_proj",
@@ -684,7 +701,7 @@ class Llama4Model(LlamaModel):
         return loaded_params
 
 
-class Llama4ForCausalLM(LlamaForCausalLM):
+class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -703,6 +720,63 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, layer_type=Llama4DecoderLayer
         )
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.expert_weights = []
+
+        self.moe_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(layer, Llama4DecoderLayer)
+            if isinstance(layer.feed_forward, Llama4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.feed_forward
+                self.moe_layers.append(layer.feed_forward.experts)
+
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            logger.warning("No Llama4MoE layer found in model.layers.")
+        else:
+            self.num_moe_layers = len(self.moe_layers)
+            self.num_expert_groups = 1
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            if isinstance(layer.feed_forward, Llama4MoE):
+                moe = layer.feed_forward
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def _init_model(
         self,

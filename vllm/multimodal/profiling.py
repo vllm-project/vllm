@@ -3,13 +3,12 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, Optional, TypeVar, Union, cast
+from typing import Generic, NamedTuple, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-import vllm.envs as envs
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -41,7 +40,7 @@ class ProcessorInputs:
     [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
 
-    prompt: Union[str, list[int]]
+    prompt: str | list[int]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
@@ -87,7 +86,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
@@ -107,7 +106,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
@@ -136,7 +135,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         *,
         length: int,
         num_audios: int,
-        overrides: Optional[AudioDummyOptions] = None,
+        overrides: AudioDummyOptions | None = None,
     ) -> list[npt.NDArray]:
         if num_audios == 0:
             return []
@@ -158,7 +157,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         width: int,
         height: int,
         num_images: int,
-        overrides: Optional[ImageDummyOptions] = None,
+        overrides: ImageDummyOptions | None = None,
     ) -> list[Image.Image]:
         if num_images == 0:
             return []
@@ -191,7 +190,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_frames: int,
         num_videos: int,
-        overrides: Optional[VideoDummyOptions] = None,
+        overrides: VideoDummyOptions | None = None,
     ) -> list[npt.NDArray]:
         if num_videos == 0:
             return []
@@ -223,7 +222,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                         height,
                     )
                 height = min(height, overrides.height)
-        video = np.full((num_frames, width, height, 3), 255)
+        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         return [video] * num_videos
 
 
@@ -254,8 +253,8 @@ class MultiModalProfiler(Generic[_I]):
     def _get_dummy_mm_inputs(
         self,
         seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_counts: Mapping[str, int] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalInputs:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -275,23 +274,19 @@ class MultiModalProfiler(Generic[_I]):
     def _get_mm_num_tokens(
         self,
         mm_inputs: MultiModalInputs,
-        mm_embeddings_only: bool = True,
     ) -> Mapping[str, int]:
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         return {
-            modality: sum(
-                item.get_num_embeds() if mm_embeddings_only else item.length
-                for item in placeholders
-            )
+            modality: sum(item.get_num_embeds for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
 
     def get_encoder_dummy_data(
         self,
         seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_counts: Mapping[str, int] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> DummyEncoderData:
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
@@ -306,26 +301,14 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper allows total_len > seq_len.
-        elif total_len > seq_len and not envs.VLLM_USE_V1:
-            # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
-                "The encoder sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
-                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
-                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
-                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
-                seq_len,
-                total_len,
-                str(self._get_mm_num_tokens(mm_inputs)),
-            )
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
     def get_decoder_dummy_data(
         self,
         seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_counts: Mapping[str, int] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> DummyDecoderData:
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
 
@@ -341,12 +324,15 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
 
-    def _get_mm_max_tokens(
+    def get_mm_max_tokens(
         self,
         seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-        mm_embeddings_only: bool = True,
+        mm_counts: Mapping[str, int] | None = None,
     ) -> Mapping[str, int]:
+        """
+        Returns the maximum number of embeddings per item of each modality, excluding
+        any break/text tokens in-between multimodal embeddings/encoder outputs.
+        """
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
 
@@ -355,25 +341,11 @@ class MultiModalProfiler(Generic[_I]):
             mm_counts=mm_counts,
         )
         if max_tokens_per_item is not None:
-            return max_tokens_per_item
+            return {
+                modality: max_tokens
+                for modality, max_tokens in max_tokens_per_item.items()
+                if mm_counts.get(modality, 0) > 0
+            }
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        return self._get_mm_num_tokens(mm_inputs, mm_embeddings_only=mm_embeddings_only)
-
-    def get_mm_max_contiguous_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-    ):
-        """
-        Returns the maximum length of the multimodal (image placeholders+text)
-        tokens, including any break/text tokens in-between image embeddings.
-
-        `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
-        Returns 9, even when the number of image embeddings is 6.
-
-        This is important to take into account when profiling and
-        initializing the encoder cache size.
-        """
-
-        return self._get_mm_max_tokens(seq_len, mm_counts, mm_embeddings_only=False)
+        return self._get_mm_num_tokens(mm_inputs)

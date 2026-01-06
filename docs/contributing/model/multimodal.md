@@ -16,7 +16,7 @@ Further update the model as follows:
             ...
 
             @classmethod
-            def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+            def get_placeholder_str(cls, modality: str, i: int) -> str | None:
                 if modality.startswith("image"):
                     return "<image>"
 
@@ -36,7 +36,7 @@ Further update the model as follows:
   
   More conveniently, you can simply pass `**kwargs` to the [forward][torch.nn.Module.forward] method and retrieve the keyword parameters for multimodal inputs from it.
 
-- Implement [get_multimodal_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+- Implement [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
     ??? code
 
@@ -45,14 +45,14 @@ Further update the model as follows:
             ...
 
             def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
-
                 assert self.vision_encoder is not None
                 image_features = self.vision_encoder(image_input)
                 return self.multi_modal_projector(image_features)
 
-            def get_multimodal_embeddings(
-                    self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-
+            def embed_multimodal(
+                self,
+                **kwargs: object,
+            ) -> MultiModalEmbeddings | None:
                 # Validate the multimodal input keyword arguments
                 image_input = self._parse_and_validate_image_input(**kwargs)
                 if image_input is None:
@@ -69,7 +69,7 @@ Further update the model as follows:
 !!! note
     By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
     [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
-    This logic can be found at [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings].
+    This logic can be found at [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids].
 
     You may override this method if additional logic is required for your model when merging embeddings. 
 
@@ -110,7 +110,7 @@ to return the maximum number of input items for each modality supported by the m
 For example, if the model supports any number of images but only one video per prompt:
 
 ```python
-def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+def get_supported_mm_limits(self) -> Mapping[str, int | None]:
     return {"image": None, "video": 1}
 ```
 
@@ -258,7 +258,7 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
             self,
             seq_len: int,
             mm_counts: Mapping[str, int],
-            mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+            mm_options: Mapping[str, BaseDummyOptions] | None = None,
         ) -> MultiModalDataDict:
             num_images = mm_counts.get("image", 0)
 
@@ -421,8 +421,10 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     ```python
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
-        return ImageSize(width=image_processor.size["width"],
-                            height=image_processor.size["height"])
+        return ImageSize(
+            width=image_processor.size["width"],
+            height=image_processor.size["height"],
+        )
     ```
 
     Fuyu does not expect image placeholders in the inputs to HF processor, so
@@ -452,10 +454,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
 
             return {
                 "image":
-                self._get_dummy_images(width=target_width,
-                                    height=target_height,
-                                    num_images=num_images,
-                                    overrides=image_overrides)
+                self._get_dummy_images(
+                    width=target_width,
+                    height=target_height,
+                    num_images=num_images,
+                    overrides=image_overrides,
+                )
             }
         ```
 
@@ -503,7 +507,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
+        Our [actual code](../../../vllm/model_executor/models/llava.py) additionally supports
         pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 
 === "With postprocessing: Fuyu"
@@ -565,7 +569,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
+        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     !!! note
@@ -744,8 +748,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
-            image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
-                            [_NEWLINE_TOKEN_ID]) * nrows
+            image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
             return PromptUpdateDetails.select_token_id(
                 image_tokens + [bos_token_id],
@@ -781,8 +784,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
-                image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
-                                [_NEWLINE_TOKEN_ID]) * nrows
+                image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
                 return PromptUpdateDetails.select_token_id(
                     image_tokens + [bos_token_id],
@@ -810,9 +812,11 @@ to register them to the multi-modal registry:
   from vllm.model_executor.models.interfaces import SupportsMultiModal
 + from vllm.multimodal import MULTIMODAL_REGISTRY
 
-+ @MULTIMODAL_REGISTRY.register_processor(YourMultiModalProcessor,
-+                                         info=YourProcessingInfo,
-+                                         dummy_inputs=YourDummyInputsBuilder)
++ @MULTIMODAL_REGISTRY.register_processor(
++     YourMultiModalProcessor,
++     info=YourProcessingInfo,
++     dummy_inputs=YourDummyInputsBuilder,
++ )
   class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 ```
 
@@ -824,8 +828,8 @@ Some HF processors directly insert feature tokens without replacing anything in 
 
 Examples:
 
-- BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
+- BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
+- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Handling prompt updates unrelated to multi-modal data
 
@@ -833,9 +837,9 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): <gh-file:vllm/model_executor/models/chameleon.py>
-- Fuyu (appends `boa_token`): <gh-file:vllm/model_executor/models/fuyu.py>
-- Molmo (applies chat template which is not defined elsewhere): <gh-file:vllm/model_executor/models/molmo.py>
+- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
+- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
+- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 
@@ -843,6 +847,6 @@ Some models don't define an HF processor class on HF Hub. In that case, you can 
 
 Examples:
 
-- DeepSeek-VL2: <gh-file:vllm/model_executor/models/deepseek_vl2.py>
-- InternVL: <gh-file:vllm/model_executor/models/internvl.py>
-- Qwen-VL: <gh-file:vllm/model_executor/models/qwen_vl.py>
+- DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
+- InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
+- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)

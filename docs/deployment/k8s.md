@@ -12,8 +12,10 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 - [Helm](frameworks/helm.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
+- [llm-d](integrations/llm-d.md)
 - [KAITO](integrations/kaito.md)
 - [KServe](integrations/kserve.md)
+- [Kthena](integrations/kthena.md)
 - [KubeRay](integrations/kuberay.md)
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
@@ -49,10 +51,13 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
     metadata:
       name: hf-token-secret
     type: Opaque
-    data:
-      token: $(HF_TOKEN)
+    stringData:
+      token: "REPLACE_WITH_TOKEN"
     EOF
     ```
+
+Here, the `token` field stores your **Hugging Face access token**. For details on how to generate a token,
+see the [Hugging Face documentation](https://huggingface.co/docs/hub/en/security-tokens).
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
@@ -82,7 +87,7 @@ Next, start the vLLM server as a Kubernetes Deployment and Service:
               "vllm serve meta-llama/Llama-3.2-1B-Instruct"
             ]
             env:
-            - name: HUGGING_FACE_HUB_TOKEN
+            - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: hf-token-secret
@@ -209,7 +214,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
               ]
               env:
-              - name: HUGGING_FACE_HUB_TOKEN
+              - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
@@ -298,7 +303,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
               ]
               env:
-              - name: HUGGING_FACE_HUB_TOKEN
+              - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
