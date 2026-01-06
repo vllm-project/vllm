@@ -24,7 +24,7 @@ pytestmark = pytest.mark.cpu_test
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
     return SlidingWindowManager(
         sliding_window_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
     )
@@ -35,7 +35,7 @@ def get_chunked_local_attention_manager(
 ):
     return ChunkedLocalAttentionManager(
         chunked_local_attention_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
     )
