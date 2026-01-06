@@ -86,7 +86,11 @@ class OlmoeMoE(nn.Module):
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
-            hidden_size, num_experts, bias=False, quant_config=None
+            hidden_size,
+            num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.experts = FusedMoE(
