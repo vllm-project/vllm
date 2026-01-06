@@ -1163,16 +1163,19 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._prefill_context_chunk_impl = self._run_prefill_context_chunk_fi
             self._prefill_new_tokens_impl = self._run_prefill_new_tokens_fi
+            self._pad_v = False
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
             self._prefill_context_chunk_impl = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
+            self._pad_v = False
             self._prefill_new_tokens_impl = self._run_prefill_new_tokens_trtllm_ragged
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._prefill_context_chunk_impl = self._run_prefill_context_chunk_cudnn
             self._prefill_new_tokens_impl = self._run_prefill_new_tokens_cudnn
+            self._pad_v = False
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
             self._prefill_context_chunk_impl = self._run_prefill_context_chunk_fa
@@ -1188,6 +1191,14 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
                 self.flash_attn_varlen_func = functools.partial(
                     flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
                 )
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim for attention backends that do
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
+            self._pad_v = get_flash_attn_version() is None or not (
+                get_flash_attn_version() == 3
+                and current_platform.get_device_capability()[0] == 9
+            )
 
         if self.dcp_world_size == 1:
             self.dcp_rank = 0
