@@ -123,9 +123,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     "Sonic MoE disabled because expert parallelism is enabled."
                 )
             elif not self.moe.is_act_and_mul:
-                logger.debug_once(
-                    "Sonic MoE disabled because is_act_and_mul is False."
-                )
+                logger.debug_once("Sonic MoE disabled because is_act_and_mul is False.")
 
     @property
     def supports_eplb(self) -> bool:
