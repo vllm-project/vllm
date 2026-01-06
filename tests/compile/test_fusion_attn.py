@@ -405,7 +405,8 @@ def test_attention_quant_pattern(
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
-        result_fused_0 = model_fused(q, k, v)  # noqa: F841  HACK: See #131044
+        # HACK: See https://github.com/vllm-project/vllm/issues/31044
+        result_fused_0 = model_fused(q, k, v)  # noqa: F841  
 
         # Compile model with fusion enabled
         compiled_fused = torch.compile(
