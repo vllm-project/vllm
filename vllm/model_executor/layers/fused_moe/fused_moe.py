@@ -365,6 +365,9 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    IS_PRIMARY: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -479,6 +482,11 @@ def fused_moe_kernel(
         # bias shape: [num_experts, N]
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
         bias = tl.load(bias_ptrs, mask=(offs_bn < N), other=0.0)
+
+    if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+        tl.extra.cuda.gdc_launch_dependents()
+
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -488,12 +496,17 @@ def fused_moe_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # GDC wait waits for ALL programs in the prior kernel to complete
+        # before continuing.
+        if USE_GDC and not IS_PRIMARY:
+            tl.extra.cuda.gdc_wait()
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -549,6 +562,8 @@ def _silu_and_mul_kernel(
     x_stride,
     d: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ) -> None:
     i = tl.program_id(axis=0).to(tl.int64)
     j = tl.program_id(axis=1)
@@ -559,6 +574,10 @@ def _silu_and_mul_kernel(
     offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < d
 
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+        tl.extra.cuda.gdc_wait()
+
     a = tl.load(x_row_ptr + offsets, mask=mask).to(tl.float32)
     b = tl.load(x_row_ptr + offsets + d, mask=mask).to(tl.float32)
 
@@ -568,14 +587,19 @@ def _silu_and_mul_kernel(
 
 
 def _silu_and_mul(
-    output: torch.Tensor,
-    input: torch.Tensor,
+    output: torch.Tensor, input: torch.Tensor, use_gdc: bool = False
 ) -> None:
     b, n = input.shape
 
     assert output.size(-1) * 2 == input.size(-1)
     assert n % 2 == 0
     d = n // 2
+
+    _config = {
+        "USE_GDC": use_gdc,
+        "launch_pdl": use_gdc,
+        "BLOCK_SIZE": 1024,
+    }
 
     def grid(meta: Mapping[str, int]) -> tuple[int, int]:
         return (b, triton.cdiv(d, meta["BLOCK_SIZE"]))
@@ -586,7 +610,7 @@ def _silu_and_mul(
         x_ptr=input,
         x_stride=input.stride(0),
         d=d,
-        BLOCK_SIZE=1024,
+        **_config,
     )
 
 
@@ -761,6 +785,8 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    IS_PRIMARY: bool = False,
+    USE_GDC: bool = False,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -2309,6 +2335,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
+        if quant_config is None:
+            self.enable_pdl = (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability(90)
+            )
 
     @property
     def activation_formats(
@@ -2443,6 +2474,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w1_bias,
+            IS_PRIMARY=True,
         )
 
         self.activation(
@@ -2480,6 +2512,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
+            IS_PRIMARY=False,
         )
 
         # separate function is required for MoE + LoRA
