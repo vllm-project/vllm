@@ -155,10 +155,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         and hasattr(layer, "output2_scales_scalar")
     )
 
-    is_llama4 = (
-        layer.custom_routing_function == Llama4MoE.custom_routing_function
-        and not layer.renormalize
-    )
+    is_llama4 = layer.custom_routing_function == Llama4MoE.custom_routing_function
     assert is_llama4, "FusedMoE flashinfer kernels are only supported for Llama4"
     return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
