@@ -95,6 +95,10 @@ class LMCacheMPSchedulerAdapter:
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
         """
+        logger.warning(
+            "Importing LMCacheMPSchedulerAdapter is deprecated. "
+            "Please update your LMCache to the latest version."
+        )
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Request futures
@@ -176,6 +180,10 @@ class LMCacheMPWorkerAdapter:
         kv_rank: int,
         vllm_block_size: int,
     ):
+        logger.warning(
+            "Importing LMCacheMPWorkerAdapter is deprecated. "
+            "Please update your LMCache to the latest version."
+        )
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Instance id for GPU worker
