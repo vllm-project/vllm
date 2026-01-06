@@ -1161,25 +1161,25 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
-            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
-            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._prefill_context_chunk_impl = self._run_prefill_context_chunk_fi
+            self._prefill_new_tokens_impl = self._run_prefill_new_tokens_fi
             self._pad_v = False
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
-            self._run_prefill_context_chunk = (
+            self._prefill_context_chunk_impl = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
-            self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
+            self._prefill_new_tokens_impl = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
-            self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
-            self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
+            self._prefill_context_chunk_impl = self._run_prefill_context_chunk_cudnn
+            self._prefill_new_tokens_impl = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
-            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
-            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
+            self._prefill_context_chunk_impl = self._run_prefill_context_chunk_fa
+            self._prefill_new_tokens_impl = self._run_prefill_new_tokens_fa
 
             # Handle the differences between the flash_attn_varlen from
             # flash_attn and the one from vllm_flash_attn. The former is used on
@@ -1512,9 +1512,12 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         """Implementation is assigned in __init__ based on backend."""
         # The actual implementation is one of: _run_prefill_new_tokens_fa,
         # _run_prefill_new_tokens_fi, _run_prefill_new_tokens_cudnn, etc.
-        raise NotImplementedError(
-            "_run_prefill_new_tokens should be set in __init__"
-        )
+        impl = getattr(self, "_prefill_new_tokens_impl", None)
+        if impl is None:
+            raise NotImplementedError(
+                "_prefill_new_tokens_impl should be set in __init__"
+            )
+        return impl(prefill, q, k, v, return_softmax_lse)
 
     def _run_prefill_context_chunk(
         self,
@@ -1527,6 +1530,9 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         """Implementation is assigned in __init__ based on backend."""
         # The actual implementation is one of: _run_prefill_context_chunk_fa,
         # _run_prefill_context_chunk_fi, _run_prefill_context_chunk_cudnn, etc.
-        raise NotImplementedError(
-            "_run_prefill_context_chunk should be set in __init__"
-        )
+        impl = getattr(self, "_prefill_context_chunk_impl", None)
+        if impl is None:
+            raise NotImplementedError(
+                "_prefill_context_chunk_impl should be set in __init__"
+            )
+        return impl(prefill, chunk_idx, q, k, v)

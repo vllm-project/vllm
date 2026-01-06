@@ -1124,6 +1124,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         if has_context:
+            assert isinstance(output_prefill, tuple)
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
@@ -1154,6 +1155,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 suffix_lse=suffix_lse,
             )
         else:
+            # When has_context is False, return_softmax_lse is also False,
+            # so output_prefill is a tensor, not a tuple
+            assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
 
