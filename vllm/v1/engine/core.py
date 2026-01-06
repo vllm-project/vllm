@@ -480,7 +480,6 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),

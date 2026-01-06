@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm._bc_linter import bc_linter_include
