@@ -8,18 +8,21 @@
 # =============================================================================
 # VERSION MANAGEMENT
 # =============================================================================
-# The canonical source of truth for all pinned versions is: docker/versions.json
-#
-# To query versions: jq '.cuda.version' docker/versions.json
+# ARG defaults in this Dockerfile are the source of truth for pinned versions.
+# docker/versions.json is auto-generated for use with docker buildx bake.
 #
 # When updating versions:
-# 1. Update docker/versions.json (source of truth)
-# 2. Update the corresponding ARG defaults below to match
+# 1. Edit the ARG defaults below
+# 2. Run: python tools/generate_versions_json.py
+#
+# To query versions programmatically:
+#   jq -r '.variable.CUDA_VERSION.default' docker/versions.json
+#
+# To build with bake:
+#   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-# From versions.json: .cuda.version
 ARG CUDA_VERSION=12.9.1
-# From versions.json: .python.version
 ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -271,7 +274,8 @@ ENV UV_LINK_MODE=copy
 WORKDIR /workspace
 
 # Build DeepGEMM wheel
-ARG DEEPGEMM_GIT_REF
+# Default moved here from tools/install_deepgemm.sh for centralized version management
+ARG DEEPGEMM_GIT_REF=594953acce41793ae00a1233eb516044d604bcb6
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
@@ -286,8 +290,9 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 # Build pplx-kernels and DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
-ARG PPLX_COMMIT_HASH
-ARG DEEPEP_COMMIT_HASH
+# Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
+ARG PPLX_COMMIT_HASH=12cecfd
+ARG DEEPEP_COMMIT_HASH=73b6ea4
 ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
