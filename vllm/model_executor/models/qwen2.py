@@ -207,22 +207,36 @@ class Qwen2Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Apply QK normalization if enabled (before RoPE)
-        if self.qk_norm:
-            # Reshape to apply per-head normalization
-            # q shape: (total_tokens, q_size) -> (total_tokens, num_heads, head_dim)
-            total_tokens = q.shape[0]
-            q = q.view(total_tokens, self.num_heads, self.head_dim)
-            k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+        # if self.qk_norm:
+        #     # Reshape to apply per-head normalization
+        #     # q shape: (total_tokens, q_size) -> (total_tokens, num_heads, head_dim)
+        #     total_tokens = q.shape[0]
+        #     q = q.view(total_tokens, self.num_heads, self.head_dim)
+        #     k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+        #
+        #     # Apply normalization
+        #     q = self.q_norm(q)
+        #     k = self.k_norm(k)
+        #
+        #     # Reshape back
+        #     q = q.view(total_tokens, self.q_size)
+        #     k = k.view(total_tokens, self.kv_size)
+        #
+        # q, k = self.rotary_emb(positions, q, k)
 
-            # Apply normalization
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+        q, k, v = torch.ops._C_ascend.npu_split_mrope(
+            positions.contiguous(),
+            qkv,
+            self.rotary_emb.cos_sin_cache,
+            self.q_size,
+            self.kv_size,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            mrope_section=self.rotary_emb.mrope_section,
+            rotary_mode="half"
+        )
 
-            # Reshape back
-            q = q.view(total_tokens, self.q_size)
-            k = k.view(total_tokens, self.kv_size)
-
-        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
