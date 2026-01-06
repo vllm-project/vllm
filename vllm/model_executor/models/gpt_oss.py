@@ -360,6 +360,7 @@ class GptOssModel(nn.Module):
 
                 # for amd-quark format that each expert is seperated
                 # need to extract the parameter name with experts fused.
+                # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:
                     layer_id, expert_id = int(ids[0]), int(ids[-1])
                     parts.pop(len(parts) - 1 - parts[::-1].index(str(expert_id)))
@@ -367,6 +368,7 @@ class GptOssModel(nn.Module):
 
                 # for openai mxfp4 format that all experts are combined
                 # no need to extract the parameter name with experts fused.
+                # models: openai/gpt-oss-20b, openai/gpt-oss-120b
                 elif len(ids) == 1:
                     layer_id, expert_id = int(ids[0]), None
                     fused_name = name
@@ -419,9 +421,14 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[
-                        2 * tp_rank_start : 2 * tp_rank_end, ...
-                    ]
+                    if expert_id is None:
+                        narrow_weight = loaded_weight[
+                            :, 2 * tp_rank_start : 2 * tp_rank_end, ...
+                        ]
+                    else:
+                        narrow_weight = loaded_weight[
+                            2 * tp_rank_start : 2 * tp_rank_end, ...
+                        ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -473,9 +480,14 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[
-                        2 * tp_rank_start : 2 * tp_rank_end, ...
-                    ]
+                    if expert_id is None:
+                        narrow_weight = loaded_weight[
+                            :, 2 * tp_rank_start : 2 * tp_rank_end, ...
+                        ]
+                    else:
+                        narrow_weight = loaded_weight[
+                            2 * tp_rank_start : 2 * tp_rank_end, ...
+                        ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -523,7 +535,14 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[2 * tp_rank_start : 2 * tp_rank_end]
+                    if expert_id is None:
+                        narrow_weight = loaded_weight[
+                            :, 2 * tp_rank_start : 2 * tp_rank_end
+                        ]
+                    else:
+                        narrow_weight = loaded_weight[
+                            2 * tp_rank_start : 2 * tp_rank_end
+                        ]
 
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
