@@ -1628,9 +1628,6 @@ class GPUModelRunner(
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            # TODO need to add
-            # if force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
-            # somewhere?
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
@@ -3270,7 +3267,13 @@ class GPUModelRunner(
                 ubatch_slices_padded,
             )
 
-            pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
+
+            pad_attn = has_separate_kv_update or cudagraph_mode == CUDAGraphMode.FULL
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -4390,7 +4393,10 @@ class GPUModelRunner(
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+            pad_attn = force_attention == (
+                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                or cudagraph_runtime_mode == CUDAGraphMode.FULL
+            )
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs_padded,
