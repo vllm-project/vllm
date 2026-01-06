@@ -9,9 +9,8 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 class FusedMoERouter(ABC):
     """
-    FusedMoERouter is an abstract class that primarily provides a
-    'select_experts' method that is used for routing hidden states based
-    on router logits.
+    FusedMoERouter is an abstract class that provides a 'select_experts'
+    method that is used for routing hidden states based on router logits.
     """
 
     @property
