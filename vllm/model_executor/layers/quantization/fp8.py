@@ -947,17 +947,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             logger.debug_once("Using %s", experts.__class__.__name__)
             return experts
-        else:
+        elif self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
             logger.debug(
                 "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
                 self.__class__.__name__,
                 self.weight_block_size,
                 False,
             )
-            return TritonOrDeepGemmExperts(
-                quant_config=self.moe_quant_config,
-                allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+            return TritonOrDeepGemmExperts(self.moe_quant_config)
+        else:
+            assert self.fp8_backend == Fp8MoeBackend.TRITON
+            logger.debug(
+                "TritonExperts(%s): block_size=%s, per_act_token=%s",
+                self.__class__.__name__,
+                self.weight_block_size,
+                False,
             )
+            return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
