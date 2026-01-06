@@ -142,7 +142,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
-        context_lens = m.num_computed_tokens_cpu
+        # Compute num_computed_tokens from query_start_loc and seq_lens
+        query_lens = m.query_start_loc_cpu[1:] - m.query_start_loc_cpu[:-1]
+        context_lens = m.seq_lens.cpu() - query_lens
         context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
@@ -370,6 +372,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-        m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
+        # Note: Setting _num_computed_tokens_cpu directly for cudagraph capture
+        m._num_computed_tokens_cpu = m.seq_lens.cpu() - num_accepted_tokens.cpu()
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
