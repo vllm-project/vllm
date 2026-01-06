@@ -1500,3 +1500,33 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
+
+    def _run_prefill_new_tokens(
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Implementation is assigned in __init__ based on backend."""
+        # The actual implementation is one of: _run_prefill_new_tokens_fa,
+        # _run_prefill_new_tokens_fi, _run_prefill_new_tokens_cudnn, etc.
+        raise NotImplementedError(
+            "_run_prefill_new_tokens should be set in __init__"
+        )
+
+    def _run_prefill_context_chunk(
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Implementation is assigned in __init__ based on backend."""
+        # The actual implementation is one of: _run_prefill_context_chunk_fa,
+        # _run_prefill_context_chunk_fi, _run_prefill_context_chunk_cudnn, etc.
+        raise NotImplementedError(
+            "_run_prefill_context_chunk should be set in __init__"
+        )
