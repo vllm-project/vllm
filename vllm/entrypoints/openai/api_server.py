@@ -25,7 +25,16 @@ import prometheus_client
 import pydantic
 import regex as re
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -96,6 +105,7 @@ from vllm.entrypoints.openai.serving_models import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_realtime import OpenAIServingRealtime
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
@@ -356,6 +366,10 @@ def translation(request: Request) -> OpenAIServingTranslation:
     return request.app.state.openai_serving_translation
 
 
+def realtime(request: Request) -> OpenAIServingRealtime | None:
+    return request.app.state.openai_serving_realtime
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
@@ -394,6 +408,135 @@ async def get_server_load_metrics(request: Request):
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
+
+
+@router.get("/v1/realtime")
+async def realtime_info(raw_request: Request):
+    """OpenAI Realtime API Information.
+    
+    This endpoint provides information about the Realtime WebSocket API.
+    
+    **To connect**: Use a WebSocket client to connect to `ws://{host}:{port}/v1/realtime`
+    
+    ## Client Events (send to server)
+    
+    - `session.update` - Update session configuration
+    - `input_audio_buffer.append` - Append audio data (base64 PCM16)
+    - `input_audio_buffer.commit` - Commit audio buffer as user message
+    - `input_audio_buffer.clear` - Clear audio buffer
+    - `conversation.item.create` - Create a conversation item
+    - `conversation.item.truncate` - Truncate a conversation item
+    - `conversation.item.delete` - Delete a conversation item
+    - `response.create` - Request a model response
+    - `response.cancel` - Cancel an in-progress response
+    
+    ## Server Events (received from server)
+    
+    - `session.created` - Session established
+    - `session.updated` - Session configuration updated
+    - `conversation.created` - Conversation created
+    - `conversation.item.created` - Item added to conversation
+    - `input_audio_buffer.committed` - Audio buffer committed
+    - `input_audio_buffer.cleared` - Audio buffer cleared
+    - `response.created` - Response generation started
+    - `response.output_item.added` - Output item added
+    - `response.content_part.added` - Content part added
+    - `response.text.delta` - Text chunk (streaming)
+    - `response.text.done` - Text complete
+    - `response.done` - Response complete
+    - `error` - Error occurred
+    
+    ## Example (Python)
+    
+    ```python
+    import websockets
+    import json
+    
+    async with websockets.connect("ws://localhost:8000/v1/realtime") as ws:
+        # Wait for session.created
+        event = json.loads(await ws.recv())
+        
+        # Send a text message
+        await ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello!"}]
+            }
+        }))
+        
+        # Request response
+        await ws.send(json.dumps({"type": "response.create"}))
+    ```
+    
+    Reference: https://platform.openai.com/docs/guides/realtime-conversations
+    """
+    handler = getattr(raw_request.app.state, "openai_serving_realtime", None)
+    return {
+        "status": "available" if handler else "unavailable",
+        "websocket_url": f"ws://{raw_request.headers.get('host', 'localhost:8000')}/v1/realtime",
+        "protocol": "OpenAI Realtime API",
+        "reference": "https://platform.openai.com/docs/guides/realtime-conversations",
+        "supported_modalities": {
+            "input": ["text", "audio"],
+            "output": ["text"]
+        },
+        "audio_format": {
+            "encoding": "pcm16",
+            "sample_rate": 24000,
+            "channels": 1
+        },
+        "client_events": [
+            "session.update",
+            "input_audio_buffer.append",
+            "input_audio_buffer.commit", 
+            "input_audio_buffer.clear",
+            "conversation.item.create",
+            "conversation.item.truncate",
+            "conversation.item.delete",
+            "response.create",
+            "response.cancel"
+        ],
+        "server_events": [
+            "session.created",
+            "session.updated",
+            "conversation.created",
+            "conversation.item.created",
+            "conversation.item.deleted",
+            "input_audio_buffer.committed",
+            "input_audio_buffer.cleared",
+            "response.created",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.text.delta",
+            "response.text.done",
+            "response.done",
+            "rate_limits.updated",
+            "error"
+        ]
+    }
+
+
+@router.websocket("/v1/realtime")
+async def realtime_handler(websocket: WebSocket):
+    """OpenAI Realtime API WebSocket endpoint.
+    
+    Handles real-time audio conversations using WebSocket.
+    Reference: https://platform.openai.com/docs/guides/realtime-conversations
+    """
+    # Get the handler, handling the case where the server isn't fully initialized yet
+    handler: OpenAIServingRealtime | None = getattr(
+        websocket.app.state, "openai_serving_realtime", None
+    )
+    if handler is None:
+        # Must accept the WebSocket before we can close it properly
+        await websocket.accept()
+        await websocket.close(code=1003, reason="Realtime API not available")
+        return
+    await handler.handle_session(websocket)
 
 
 @router.post(
@@ -1386,15 +1529,25 @@ class AuthenticationMiddleware:
         return token_match
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] not in ("http", "websocket") or scope["method"] == "OPTIONS":
-            # scope["type"] can be "lifespan" or "startup" for example,
-            # in which case we don't need to do anything
+        # Skip non-HTTP/WebSocket scopes (e.g. "lifespan", "startup")
+        if scope["type"] not in ("http", "websocket"):
             return self.app(scope, receive, send)
+        
+        # Skip OPTIONS requests (only for HTTP, not WebSocket)
+        if scope["type"] == "http" and scope.get("method") == "OPTIONS":
+            return self.app(scope, receive, send)
+        
         root_path = scope.get("root_path", "")
         url_path = URL(scope=scope).path.removeprefix(root_path)
         headers = Headers(scope=scope)
-        # Type narrow to satisfy mypy.
+        
+        # Check authentication for /v1 paths
         if url_path.startswith("/v1") and not self.verify_token(headers):
+            if scope["type"] == "websocket":
+                # For WebSocket, we need to close the connection properly
+                async def send_forbidden():
+                    await send({"type": "websocket.close", "code": 4003})
+                return send_forbidden()
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
@@ -1912,6 +2065,18 @@ async def init_app_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
+
+    # OpenAI Realtime API (WebSocket-based audio conversations)
+    state.openai_serving_realtime = (
+        OpenAIServingRealtime(
+            engine_client,
+            state.openai_serving_models,
+            state.openai_serving_models.model_config,
+            default_model=served_model_names[0],
         )
         if "generate" in supported_tasks
         else None

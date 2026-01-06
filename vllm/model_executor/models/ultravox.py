@@ -117,7 +117,12 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
         audio_processor = hf_processor.audio_processor  # type: ignore
-        feature_extractor = audio_processor.feature_extractor  # type: ignore
+        # Handle both nested and direct WhisperFeatureExtractor
+        if hasattr(audio_processor, 'feature_extractor'):
+            feature_extractor = audio_processor.feature_extractor  # type: ignore
+        else:
+            # audio_processor is the feature extractor directly
+            feature_extractor = audio_processor
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
