@@ -1406,3 +1406,19 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
+##### MoE Refactor (Temporary) Tests #####
+
+- label: MoE Refactor Integration Test (H100 - TEMPORARY) # optional
+  gpu: h100
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  
+- label: MoE Refactor Integration Test (B200 - TEMPORARY) # optional
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
