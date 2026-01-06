@@ -1128,8 +1128,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 multimodal_embeddings += tuple(audio_embeddings)
         return multimodal_embeddings
 
-    # TODO (ywang96): support overlapping modality embeddings so that
-    # `use_audio_in_video` will work on V1.
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
