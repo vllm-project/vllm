@@ -79,7 +79,7 @@ def maybe_make_prepare_finalize(
 
     # TODO(rob): update this as part of the MoE refactor.
     assert not moe.use_flashinfer_cutlass_kernels, (
-        "Must be created by fp8 or modelopt.py"
+        "Must be created in modelopt.py or fp8.py"
     )
 
     if moe.use_pplx_kernels:
