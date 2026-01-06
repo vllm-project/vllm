@@ -12,6 +12,7 @@ import importlib.util
 import os
 import shutil
 from collections.abc import Callable
+from enum import Enum
 from typing import Any, NoReturn
 
 import requests
@@ -597,7 +598,7 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
 # MoE utilities (unified from flashinfer_utils.py to reduce code duplication)
 # ==============================================================================
 
-from enum import Enum
+
 
 
 class FlashinferMoeBackend(Enum):
@@ -726,12 +727,13 @@ def rotate_flashinfer_fp8_moe_weights(
         )
 
     # Stack weights for all experts
-    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
-    )
-    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
-    )
+    with torch.no_grad():
+        gemm1_weights.copy_(torch.stack(gemm1_weights_fp8_shuffled).view(
+            torch.float8_e4m3fn
+        ))
+        gemm2_weights.copy_(torch.stack(gemm2_weights_fp8_shuffled).view(
+            torch.float8_e4m3fn
+        ))
 
 
 __all__ = [
