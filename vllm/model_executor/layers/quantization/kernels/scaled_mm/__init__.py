@@ -83,39 +83,22 @@ def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
 ) -> tuple[bool, str]:
     if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
-        return False, f" {kernel.__name__} disabled by environment variable"
-
-    platform_supported, requires_platform = kernel.is_platform_supported()
-    if not platform_supported:
-        return (
-            False,
-            f"{kernel.__name__} is not supported as it requires {requires_platform}.",
-        )
+        return False, f" {kernel.__name__} is disabled by environment variable"
 
     if compute_capability is None:
         _cc = current_platform.get_device_capability()
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
 
-    # If the current platform uses compute_capability,
-    # make sure the kernel supports the compute cability.
-    if compute_capability is not None:
-        kernel_min_capability = kernel.get_min_capability()
-        if (
-            kernel_min_capability is not None
-            and kernel_min_capability > compute_capability
-        ):
-            return (
-                False,
-                f"{kernel.__name__} requires capability "
-                f"{kernel_min_capability}, current compute capability "
-                f"is {compute_capability}",
-            )
+    is_supported, failure_reason = kernel.is_supported(compute_capability)
+    if not is_supported:
+        return False, f"{kernel.__name__} {failure_reason}."
+
     can_implement, failure_reason = kernel.can_implement(config)
     if not can_implement:
         return (
             False,
-            f" {kernel.__name__} cannot be implement because: {failure_reason}",
+            f"{kernel.__name__} {failure_reason}.",
         )
 
     return True, ""

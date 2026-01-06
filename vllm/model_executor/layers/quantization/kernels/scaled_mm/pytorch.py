@@ -128,17 +128,19 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """
     Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
-    specific device capabilities and torch versions,
-    so we split them up and implement
-    get_min_capability() separately for each.
+    specific device capabilities and torch versions.
     """
 
     @classmethod
-    def is_platform_supported(
-        cls,
+    def is_supported(
+        cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda_alike():
-            return False, "ROCm or CUDA"
+            return False, "requires ROCm or CUDA."
+
+        if compute_capability is not None and compute_capability < 89:
+            return False, "requires compute capability 89 and above."
+
         return True, None
 
     def get_ouput_padding(self) -> int | None:
@@ -162,11 +164,7 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
-            return (
-                False,
-                "PerTensorTorchScaledMMLinearKernel requires "
-                + "per tensor activation and weight scales.",
-            )
+            return False, "requires per tensor activation and weight scales."
         return True, None
 
     def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
@@ -175,13 +173,23 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 94
-
-    @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "ROCm"
+            return False, "requires ROCm."
+
+        from vllm.platforms.rocm import on_mi3xx
+
+        if not on_mi3xx():
+            return False, "requires MI3xx."
+
+        if compute_capability is not None and compute_capability < 94:
+            return False, "requires compute capability 94 and above."
+
+        if not version.parse(torch.__version__) >= version.parse("2.7"):
+            return False, "requires pytorch version >=2.7."
+
         return True, None
 
     @classmethod
@@ -193,23 +201,10 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
         if c.out_dtype == torch.float16:
             # hipblaslt rowwise _scaled_mm only supports BFloat16
-            return (
-                False,
-                "RowWiseTorchScaledMMLinearKernel only supports BFloat16.",
-            )
+            return False, "supports BFloat16 output data type only."
 
         if per_tensor_activation_scales or per_tensor_weight_scales:
-            return (
-                False,
-                "RowWiseTorchScaledMMLinearKernel cannot be used with "
-                + "per tensor activation and weight scales.",
-            )
-
-        if not version.parse(torch.__version__) >= version.parse("2.7"):
-            return (
-                False,
-                "RowWiseTorchScaledMMLinearKernel requires " + "pytorch version >=2.7.",
-            )
+            return False, "cannot be used with per tensor activation and weight scales."
 
         return True, None
 
@@ -226,11 +221,7 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
         if per_tensor_activation_scales and per_tensor_weight_scales:
-            return (
-                False,
-                "ChannelWiseTorchScaledMMLinearKernel cannot be used with "
-                + "per tensor activation and weight scales.",
-            )
+            return False, "cannot be used with per tensor activation and weight scales."
 
         return True, None
 

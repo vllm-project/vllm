@@ -20,21 +20,23 @@ from .ScaledMMLinearKernel import (
 
 class XLAScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_tpu():
-            return False, "TPU"
+            return False, "Requires TPU."
         return True, None
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if c.is_static_input_scheme:
-            return False, "ScaledMMXLA requires dynamic activation scales."
+            return False, "requires dynamic activation scales."
 
         if not c.input_symmetric:
-            return False, "ScaledMMXLA requires symmetric activation scales."
+            return False, "requires symmetric activation scales."
 
         if not c.is_channelwise:
-            return False, "ScaledMMXLA requires channelwise weight scales"
+            return False, "requires channelwise weight scales."
 
         return True, None
 

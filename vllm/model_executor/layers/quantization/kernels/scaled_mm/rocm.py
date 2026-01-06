@@ -89,14 +89,19 @@ if current_platform.is_rocm():
 
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "ROCm"
+            return False, "requires ROCm."
 
         from vllm.platforms.rocm import on_mi3xx
 
         if not on_mi3xx():
-            return False, "ROCm MI3xx"
+            return False, "requires MI3xx."
+
+        if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
+            return False, "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."
 
         return True, None
 
@@ -107,19 +112,9 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
-        if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
-            return (
-                False,
-                "VLLM_ROCM_USE_SKINNY_GEMM must be enabled "
-                + "to use ROCmScaledMMLinearKernel.",
-            )
-
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
-            return (
-                False,
-                "ROCmScaledMMLinearKernel requires "
-                + "per tensor activation and weight scales.",
-            )
+            return False, "requires per tensor activation and weight scales."
+
         return True, None
 
     def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:

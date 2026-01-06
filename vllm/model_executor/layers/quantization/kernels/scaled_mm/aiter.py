@@ -18,36 +18,30 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 90
 
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "ROCm"
-        return True, None
+            return False, "Requires ROCm."
 
-    @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
         except Exception:
-            return (
-                False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not "
-                + "installed on ROCm.",
-            )
+            return False, "requires `aiter` to be installed."
 
         if not rocm_aiter_ops.is_linear_enabled():
             return (
                 False,
-                "AiterScaledMMLinearKernel is disabled. "
-                + "Enable by setting `VLLM_ROCM_USE_AITER=1` "
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
                 + "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
                 + "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
             )
+        return True, None
 
+    @classmethod
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
-            return (
-                False,
-                "AiterScaledMMLinearKernel only supports symmetric " + "quantization.",
-            )
+            return False, "supports symmetric quantization only."
         return True, None
 
     def apply_weights(

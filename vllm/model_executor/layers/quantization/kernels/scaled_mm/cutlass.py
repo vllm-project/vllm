@@ -40,9 +40,11 @@ def cutlass_w8a8_scaled_mm_fp8(
 
 class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
-            return False, "CUDA"
+            return False, "requires CUDA."
         return True, None
 
     @classmethod
@@ -161,9 +163,11 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
-            return False, "CUDA"
+            return False, "requires CUDA."
         return True, None
 
     @classmethod

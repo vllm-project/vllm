@@ -19,15 +19,17 @@ from .ScaledMMLinearKernel import (
 
 class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
     @classmethod
-    def is_platform_supported(cls) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if current_platform.is_cuda_alike():
             return True, None
-        return False, "ROCm or CUDA"
+        return False, "requires ROCm or CUDA."
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
-            return False, "Only symmetric input is supported."
+            return False, "supports symmetric input only."
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
