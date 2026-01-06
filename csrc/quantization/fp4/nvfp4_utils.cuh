@@ -249,8 +249,8 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 }
 
 template <class Type>
-__inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& x_vec,
-                                                       PackedVec<Type>& y_vec) {
+__inline__ __device__ PackedVec<Type> compute_silu_mul(
+    const PackedVec<Type>& x_vec, const PackedVec<Type>& y_vec) {
   PackedVec<Type> result;
   using packed_type = typename TypeConverter<Type>::Type;
 
