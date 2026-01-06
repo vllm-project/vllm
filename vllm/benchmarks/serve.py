@@ -868,6 +868,7 @@ async def benchmark(
                 1 + delta_accepted / delta_drafts if delta_drafts > 0 else 0.0
             )
             spec_decode_stats = {
+                "num_drafts": delta_drafts,
                 "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
                 "acceptance_rate": acceptance_rate,
@@ -973,6 +974,7 @@ async def benchmark(
     if spec_decode_stats is not None:
         result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]
         result["spec_decode_acceptance_length"] = spec_decode_stats["acceptance_length"]
+        result["spec_decode_num_drafts"] = int(spec_decode_stats["num_drafts"])
         result["spec_decode_draft_tokens"] = int(spec_decode_stats["draft_tokens"])
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
@@ -1038,6 +1040,7 @@ async def benchmark(
                 "Acceptance length:", spec_decode_stats["acceptance_length"]
             )
         )
+        print("{:<40} {:<10}".format("Drafts:", int(spec_decode_stats["num_drafts"])))
         print(
             "{:<40} {:<10}".format(
                 "Draft tokens:", int(spec_decode_stats["draft_tokens"])
