@@ -1,0 +1,2 @@
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ht.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ll.yaml
