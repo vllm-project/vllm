@@ -235,7 +235,7 @@ def memory_profiling(
     """
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device)
+    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device_)
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,
