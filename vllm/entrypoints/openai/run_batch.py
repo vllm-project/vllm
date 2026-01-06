@@ -468,6 +468,9 @@ async def run_batch(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            default_chat_template_kwargs=getattr(
+                args, "default_chat_template_kwargs", None
+            ),
         )
         if "generate" in supported_tasks
         else None
@@ -495,6 +498,7 @@ async def run_batch(
             engine_client,
             openai_serving_models,
             request_logger=request_logger,
+            score_template=None,
         )
         if ("embed" in supported_tasks or enable_serving_reranking)
         else None

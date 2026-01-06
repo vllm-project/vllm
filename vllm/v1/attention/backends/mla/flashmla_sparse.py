@@ -511,7 +511,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # For pure decode batches, prefill_request_id will be None
         # For mixed batches, it will have -1 for decode and request_id for prefill
         if num_prefills > 0:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             seq_lens = common_attn_metadata.seq_lens
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -930,8 +930,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
             logger.warning_once(
-                f"padding num_heads to {self.padding} \
-                    due to sparse attn kernel requirement"
+                f"padding num_heads to {self.padding} due to sparse attn "
+                "kernel requirement"
             )
             q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
             q_padded[:, : self.num_heads, :] = q

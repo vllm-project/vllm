@@ -20,8 +20,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
@@ -446,7 +446,7 @@ def test_deep_ep_moe(
     low_latency_mode = False
     use_fp8_dispatch = False
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 
@@ -507,7 +507,7 @@ def test_low_latency_deep_ep_moe(
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
         )
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 
