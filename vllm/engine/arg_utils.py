@@ -450,6 +450,12 @@ class EngineArgs:
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | None = ModelConfig.quantization
+    torchao_config: str | None = None
+    """TorchAO quantization config. Can be a JSON string of the quantization
+    config dict (e.g., from torchao.core.config.config_to_dict), or a path to
+    a JSON file containing the config. When specified with
+    --quantization torchao, this config will be used for online quantization.
+    Example: '{"_type": "torchao.quantization.Int4WeightOnlyConfig"}'"""
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
@@ -647,6 +653,7 @@ class EngineArgs:
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
+        model_group.add_argument("--torchao-config", type=str, default=None)
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
@@ -1194,6 +1201,29 @@ class EngineArgs:
         # gguf file needs a specific model loader
         if is_gguf(self.model):
             self.quantization = self.load_format = "gguf"
+
+        # Handle torchao_config: add to hf_overrides for quantization
+        if self.torchao_config is not None:
+            import os
+
+            # Determine if torchao_config is a file path or JSON string
+            if os.path.isfile(self.torchao_config):
+                torchao_override_key = "quantization_config_file"
+                torchao_override_value = self.torchao_config
+            else:
+                torchao_override_key = "quantization_config_dict_json"
+                torchao_override_value = self.torchao_config
+
+            # Merge with existing hf_overrides
+            if self.hf_overrides is None:
+                self.hf_overrides = {}
+            if isinstance(self.hf_overrides, dict):
+                self.hf_overrides[torchao_override_key] = torchao_override_value
+            else:
+                logger.warning(
+                    "Cannot apply torchao_config when hf_overrides is a "
+                    "callable. Please use --hf-overrides instead."
+                )
 
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
