@@ -1362,6 +1362,7 @@ MM_PARSER_MAP: dict[
     "input_audio": lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal": lambda part: _RefusalParser(part).get("refusal", None),
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
+    "video_frames": lambda part: _VideoParser(part).get("video", []),
 }
 
 
@@ -1573,6 +1574,12 @@ def _parse_chat_message_content_part(
         modality = "audio"
     elif part_type == "video_url":
         str_content = cast(str, content)
+        mm_parser.parse_video(str_content, uuid)
+        modality = "video"
+    elif part_type == "video_frames":
+        str_content = "data:video/jpeg;files,"
+        list_content = cast(list[str], content)
+        str_content += ",".join(list_content)
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
     else:

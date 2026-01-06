@@ -7,6 +7,8 @@ from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
@@ -303,14 +305,38 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self, media_type: str, data: str
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
-            load_frame = partial(
-                self.image_io.load_base64,
-                "image/jpeg",
-            )
-
-            return np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
-            ), {}
+            if data.startswith("file://"):
+                load_frame = partial(
+                    self.image_io.load_file,
+                )
+                frames = data.split(",")
+                frames_path = []
+                for frame in frames:
+                    url_spec = urlparse(frame)
+                    filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
+                    frames_path.append(filepath)
+                return np.stack(
+                    [np.asarray(load_frame(frame_data)) for frame_data in frames_path]
+                ), {
+                    "total_num_frames": len(frames),
+                    "frames_indices": list(range(len(frames))),
+                    "fps": 24,
+                    "duration": len(frames) // 24,
+                }
+            else:
+                load_frame = partial(
+                    self.image_io.load_base64,
+                    "image/jpeg",
+                )
+                frames = data.split(",")
+                return np.stack(
+                    [np.asarray(load_frame(frame_data)) for frame_data in frames]
+                ), {
+                    "total_num_frames": len(frames),
+                    "frames_indices": list(range(len(frames))),
+                    "fps": 24,
+                    "duration": len(frames) // 24,
+                }
 
         return self.load_bytes(base64.b64decode(data))
 

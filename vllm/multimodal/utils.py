@@ -107,9 +107,15 @@ class MediaConnector:
         data_spec, data = url_spec.path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
 
-        if data_type != "base64":
-            msg = "Only base64 data URLs are supported for now."
+        if data_type != "base64" and data_type != "files":
+            msg = "Only base64 data URLs and files path URLs are supported for now."
             raise NotImplementedError(msg)
+
+        if data_type == "files":
+            for file_path in data.split(","):
+                url_spec = urlparse(file_path)
+                path = Path(url2pathname(url_spec.netloc + url_spec.path))
+                self._assert_filepath_in_allowed_local_media_path(path)
 
         return media_io.load_base64(media_type, data)
 
@@ -118,20 +124,23 @@ class MediaConnector:
         url_spec: ParseResult,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
+        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
+        self._assert_filepath_in_allowed_local_media_path(filepath)
+
+        return media_io.load_file(filepath)
+
+    def _assert_filepath_in_allowed_local_media_path(self, filepath: Path) -> None:
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
             raise RuntimeError(
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
-
-        return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: ParseResult) -> None:
         if (
