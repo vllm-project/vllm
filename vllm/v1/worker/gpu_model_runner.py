@@ -5685,12 +5685,7 @@ class GPUModelRunner(
             + 1
         ) * block_size
 
-        if ":" in self.vllm_config.instance_id:  # for async mode in verl
-            self.instance_id = self.vllm_config.instance_id
-        else:  # sync mode in verl
-            rank = self.vllm_config.parallel_config.rank
-            world_size = self.vllm_config.parallel_config.world_size
-            self.instance_id = f"rank_{rank // world_size}"
+        self.instance_id = self.vllm_config.instance_id
 
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,

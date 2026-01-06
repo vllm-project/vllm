@@ -236,12 +236,7 @@ class Scheduler(SchedulerInterface):
             enable=self.vllm_config.model_config.enable_return_routed_experts
         )
 
-        if ":" in self.vllm_config.instance_id:  # for async mode in verl
-            self.instance_id = self.vllm_config.instance_id
-        else:  # sync mode in verl
-            rank = self.vllm_config.parallel_config.rank
-            world_size = self.vllm_config.parallel_config.world_size
-            self.instance_id = f"rank_{rank // world_size}"
+        self.instance_id = self.vllm_config.instance_id
 
         self.routed_experts_reader.attach_buffer(
             max_num_kv_tokens=self.max_num_kv_tokens,
