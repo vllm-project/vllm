@@ -22,6 +22,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import ApplyRotaryEmb
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -53,7 +54,6 @@ from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
-    _apply_rotary_pos_emb,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _get_num_features_for_item,
@@ -77,8 +77,8 @@ class GlmAsrRotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding for GLM-ASR encoder.
 
-    Optimized with pre-computed cos/sin cache for better performance.
-    Falls back to dynamic computation only when sequence length exceeds cache.
+    Pre-computes cos/sin cache and uses vLLM's ApplyRotaryEmb CustomOp
+    for efficient rotary embedding application.
     """
 
     def __init__(self, config, device: torch.device | None = None):
@@ -107,6 +107,7 @@ class GlmAsrRotaryEmbedding(nn.Module):
             self.attention_scaling = 1.0
 
         self.dim = dim
+        self.head_dim = head_dim
         self.base = base
 
         # Compute the inverse frequencies exactly as transformers does
@@ -124,6 +125,13 @@ class GlmAsrRotaryEmbedding(nn.Module):
         # Pre-compute cos/sin cache for efficiency
         self._set_cos_sin_cache(self.max_seq_len_cached, device)
 
+        # Use vLLM's ApplyRotaryEmb CustomOp for efficient rotary embedding
+        # enforce_enable=True ensures the op is always enabled (important for ViT)
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            is_neox_style=True,
+        )
+
     def _set_cos_sin_cache(
         self, seq_len: int, device: torch.device | None = None
     ) -> None:
@@ -134,48 +142,36 @@ class GlmAsrRotaryEmbedding(nn.Module):
         t = torch.arange(seq_len, device=device, dtype=torch.float32)
         # Compute frequencies: [seq_len, dim/2]
         freqs = torch.outer(t, self.inv_freq.to(device=device, dtype=torch.float32))
-        # Double the frequencies: [seq_len, dim]
-        emb = torch.cat((freqs, freqs), dim=-1)
 
-        # Compute and cache cos/sin
-        cos = emb.cos() * self.attention_scaling
-        sin = emb.sin() * self.attention_scaling
+        # Compute and cache cos/sin (shape: [seq_len, dim/2])
+        # ApplyRotaryEmb expects cos/sin with shape [seq_len, rotary_dim/2]
+        cos = freqs.cos() * self.attention_scaling
+        sin = freqs.sin() * self.attention_scaling
 
         self.register_buffer("cos_cached", cos, persistent=False)
         self.register_buffer("sin_cached", sin, persistent=False)
 
-    def forward(
-        self, x: torch.Tensor, position_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_cos_sin(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute rotary embeddings with caching optimization.
+        Get cos and sin tensors for a given sequence length.
 
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_size]
-            position_ids: Position indices [batch_size, seq_len]
+            seq_len: The sequence length to get embeddings for.
 
         Returns:
-            Tuple of (cos, sin) tensors with shape [batch_size, seq_len, rotary_dim]
+            Tuple of (cos, sin) tensors with shape [seq_len, dim/2]
         """
-        seq_len = position_ids.shape[-1]
-
         # Extend cache if needed
         if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len, device=x.device)
+            self._set_cos_sin_cache(seq_len, device=self.cos_cached.device)
 
-        # Use cached values - index with position_ids for correctness
-        # For encoder, position_ids is typically [0, 1, 2, ..., seq_len-1]
-        # so we can directly slice the cache
-        cos = self.cos_cached[:seq_len].unsqueeze(0)  # [1, seq_len, dim]
-        sin = self.sin_cached[:seq_len].unsqueeze(0)  # [1, seq_len, dim]
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
 
 
 class GlmAsrAttention(nn.Module):
     """
     Optimized Multi-headed Grouped Query Attention for GLM-ASR.
-    Uses vLLM's QKVParallelLinear for better performance.
+    Uses vLLM's QKVParallelLinear and ApplyRotaryEmb for better performance.
     """
 
     def __init__(
@@ -219,15 +215,21 @@ class GlmAsrAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # Use vLLM's ApplyRotaryEmb CustomOp
+        # enforce_enable=True ensures the op is always enabled (important for ViT)
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: [batch_size, seq_len, hidden_size]
-            position_embeddings: Tuple of (cos, sin) for RoPE
+            cos: [seq_len, rotary_dim/2] - cosine part of rotary embeddings
+            sin: [seq_len, rotary_dim/2] - sine part of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
@@ -242,24 +244,21 @@ class GlmAsrAttention(nn.Module):
         kv_size = self.num_kv_heads_per_rank * self.head_dim
         q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
 
-        # Reshape and transpose
-        # [batch, seq, num_heads * head_dim] -> [batch, num_heads, seq, head_dim]
-        q = q.view(
-            batch_size, seq_len, self.num_heads_per_rank, self.head_dim
-        ).transpose(1, 2)
-        k = k.view(
-            batch_size, seq_len, self.num_kv_heads_per_rank, self.head_dim
-        ).transpose(1, 2)
-        # v doesn't go through RoPE, so make it contiguous now for SDPA
-        v = (
-            v.view(batch_size, seq_len, self.num_kv_heads_per_rank, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
-        )
+        # Reshape to [batch, seq, num_heads, head_dim] for ApplyRotaryEmb
+        q = q.view(batch_size, seq_len, self.num_heads_per_rank, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_kv_heads_per_rank, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_kv_heads_per_rank, self.head_dim)
 
-        # Apply rotary position embeddings
-        cos, sin = position_embeddings
-        q, k = _apply_rotary_pos_emb(q, k, cos, sin)
+        # Apply rotary position embeddings using vLLM's ApplyRotaryEmb
+        # ApplyRotaryEmb expects x: [batch, seq, heads, head_dim]
+        # cos/sin: [seq_len, rotary_dim/2]
+        q = self.apply_rotary_emb(q, cos, sin)
+        k = self.apply_rotary_emb(k, cos, sin)
+
+        # Transpose to [batch, num_heads, seq, head_dim] for attention
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
         # Handle GQA: repeat k/v if needed
         if self.num_kv_groups > 1:
@@ -368,12 +367,14 @@ class GlmAsrEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: [batch_size, seq_len, hidden_size]
-            position_embeddings: Tuple of (cos, sin) for RoPE
+            cos: [seq_len, rotary_dim/2] - cosine part of rotary embeddings
+            sin: [seq_len, rotary_dim/2] - sine part of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
@@ -383,7 +384,8 @@ class GlmAsrEncoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
+            cos=cos,
+            sin=sin,
         )
         hidden_states = residual + hidden_states
 
@@ -466,14 +468,6 @@ class GlmAsrEncoder(nn.Module):
         # Rotary position embeddings
         self.rotary_emb = GlmAsrRotaryEmbedding(config)
 
-        # Pre-register position_ids buffer for efficiency
-        # This avoids creating a new tensor on every forward pass
-        self.register_buffer(
-            "position_ids",
-            torch.arange(config.max_position_embeddings, dtype=torch.long).unsqueeze(0),
-            persistent=False,
-        )
-
     def _get_feat_extract_output_lengths(
         self, input_lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -514,15 +508,15 @@ class GlmAsrEncoder(nn.Module):
         hidden_states = hidden_states.transpose(1, 2)
         output_seq_len = hidden_states.shape[1]
 
-        # Use pre-registered position_ids buffer (slice to actual seq_len)
-        position_ids = self.position_ids[:, :output_seq_len]
-
-        # Get position embeddings - uses pre-computed cache
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # Get cos/sin from rotary embedding cache
+        cos, sin = self.rotary_emb.get_cos_sin(output_seq_len)
+        # Match dtype with hidden states
+        cos = cos.to(dtype=hidden_states.dtype)
+        sin = sin.to(dtype=hidden_states.dtype)
 
         # Apply transformer layers
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, position_embeddings)
+            hidden_states = encoder_layer(hidden_states, cos, sin)
 
         # Final layer norm
         hidden_states = self.norm(hidden_states)
