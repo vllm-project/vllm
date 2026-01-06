@@ -1,5 +1,8 @@
 # GPU Memory Warnings
 
+Author: Arnab Mitra (email: papan.mitra.2121@gmail.com)  
+GitHub: https://github.com/Dedulus/vllm
+
 vLLM includes an optional GPU memory monitoring system that warns users when GPU memory usage exceeds a configurable threshold. This can be helpful for preventing Out-Of-Memory (OOM) crashes by providing early warnings.
 
 ## Enabling Warnings
