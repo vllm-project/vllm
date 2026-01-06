@@ -61,9 +61,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     expert_weight_is_col_major,
     requant_weight_ue8m0_inplace,
@@ -429,28 +426,33 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = a2_scale
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        self.kernel = make_nvfp4_moe_kernel(
-            backend=self.nvfp4_backend,
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-        )
+        use_dp = self.moe.dp_size > 1
+        if self.moe_quant_config is not None and not use_dp:
+            self.kernel = make_nvfp4_moe_kernel(
+                backend=self.nvfp4_backend,
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+            )
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        return None
-        if self.use_marlin or (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        ):
+        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
+        if self.nvfp4_backend in UNSUPPORTED:
             return None
-        elif not self.allow_flashinfer:
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+            # For now, fp4 moe only works with the flashinfer dispatcher.
+            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+                self.moe
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        else:
             return super().maybe_make_prepare_finalize(routing_tables)
-
-        prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe)
-        logger.debug_once("%s", prepare_finalize.__class__.__name__)
-        return prepare_finalize
 
     def select_gemm_impl(
         self,
@@ -462,7 +464,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,
-            allow_flashinfer=self.allow_flashinfer,
+            allow_flashinfer=(self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS),
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
@@ -527,30 +529,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 weight_attr_name="weight_packed",
             )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight_packed,
-                layer.w2_weight_packed,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=get_marlin_input_dtype(""),
-            )
-        elif self.nvfp4_backend in [
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.VLLM_CUTLASS,
-        ]:
+        else:
             assert self.kernel is not None
             return self.kernel(
                 x,
@@ -564,8 +543,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-        else:
-            raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):

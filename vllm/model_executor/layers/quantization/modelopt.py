@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -52,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     register_moe_scaling_factors,
@@ -89,7 +89,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -756,6 +755,17 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
@@ -1435,10 +1445,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
-        return None
         if self.nvfp4_backend in UNSUPPORTED:
             return None
         elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
             # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
                 self.moe
@@ -1595,9 +1607,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
             logger.warning_once(
-                "w13_weight_scale_2 must match w13_weight_scale_2. "
-                "Accuracy may be affected.",
-                scope="local",
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
@@ -1660,11 +1671,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        self.kernel = make_nvfp4_moe_kernel(
-            backend=self.nvfp4_backend,
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-        )
+        use_dp = self.moe.dp_size > 1
+        if self.moe_quant_config is not None and not use_dp:
+            self.kernel = make_nvfp4_moe_kernel(
+                backend=self.nvfp4_backend,
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+            )
 
     def prepare_dp_allgather_tensor(
         self,
@@ -1708,6 +1721,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        logger.info_once("============ APPLY ============")
         if (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
@@ -1745,30 +1759,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
             )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                input_dtype=get_marlin_input_dtype(""),
-            )
-        elif self.nvfp4_backend in [
-            NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.VLLM_CUTLASS,
-        ]:
+        else:
             assert self.kernel is not None
             return self.kernel(
                 x,
@@ -1782,8 +1773,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-        else:
-            raise RuntimeError(f"Unsupported NVFP4 MoE backend: {self.nvfp4_backend}")
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod

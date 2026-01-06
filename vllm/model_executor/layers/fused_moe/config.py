@@ -332,6 +332,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
     @property
+    def use_nvfp4_w4a16(self) -> bool:
+        return self._a1.dtype is None and self._w1.dtype == "nvfp4"
+
+    @property
     def ocp_mx_scheme(self) -> str | None:
         if not hasattr(self, "_ocp_mx_scheme"):
             if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
