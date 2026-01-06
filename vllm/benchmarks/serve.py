@@ -121,38 +121,27 @@ async def fetch_spec_decode_metrics(
                 if not line or line.startswith("#"):
                     continue
 
-                if line.startswith("vllm:spec_decode_num_drafts"):
+                if line.startswith("vllm:spec_decode"):
                     found_spec_decode = True
                     parts = line.split()
                     if parts:
                         with contextlib.suppress(ValueError):
-                            num_drafts += int(float(parts[-1]))
-                elif line.startswith("vllm:spec_decode_num_draft_tokens"):
-                    found_spec_decode = True
-                    parts = line.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            num_draft_tokens += int(float(parts[-1]))
-                elif line.startswith("vllm:spec_decode_num_accepted_tokens_per_pos"):
-                    found_spec_decode = True
-                    pos_label = 'position="'
-                    if pos_label in line:
-                        start = line.index(pos_label) + len(pos_label)
-                        end = line.index('"', start)
-                        pos = int(line[start:end])
-                        parts = line.split()
-                        if parts:
-                            with contextlib.suppress(ValueError):
-                                val = int(float(parts[-1]))
-                                accepted_per_pos[pos] = (
-                                    accepted_per_pos.get(pos, 0) + val
-                                )
-                elif line.startswith("vllm:spec_decode_num_accepted_tokens"):
-                    found_spec_decode = True
-                    parts = line.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            num_accepted_tokens += int(float(parts[-1]))
+                            if "num_drafts" in line:
+                                num_drafts += int(float(parts[-1]))
+                            elif "num_draft_tokens" in line:
+                                num_draft_tokens += int(float(parts[-1]))
+                            elif "num_accepted_tokens_per_pos" in line:
+                                pos_label = 'position="'
+                                if pos_label in line:
+                                    start = line.index(pos_label) + len(pos_label)
+                                    end = line.index('"', start)
+                                    pos = int(line[start:end])
+                                    val = int(float(parts[-1]))
+                                    accepted_per_pos[pos] = (
+                                        accepted_per_pos.get(pos, 0) + val
+                                    )
+                            elif "num_accepted_tokens" in line:
+                                num_accepted_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
