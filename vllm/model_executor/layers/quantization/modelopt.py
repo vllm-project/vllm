@@ -853,9 +853,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor,
+        w2_input_scale: torch.Tensor,
     ):
-        # NOTE(rob): this is currently not a pure function because of
-        # flashinfer nonsense. Fix it.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
@@ -863,6 +863,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2=w2,
             w13_scale=w13_scale,
             w2_scale=w2_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -909,7 +911,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

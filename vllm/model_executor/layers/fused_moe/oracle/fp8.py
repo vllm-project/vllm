@@ -36,7 +36,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
-    make_alpha_scales_for_fi,
+    make_fp8_moe_alpha_scales_for_fi,
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -177,6 +177,8 @@ def convert_to_fp8_moe_kernel_format(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor | None,
+    w2_input_scale: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend == Fp8MoeBackend.DEEPGEMM:
@@ -204,12 +206,14 @@ def convert_to_fp8_moe_kernel_format(
     ]:
         is_trtllm = fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            is_trtllm,
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w13_input_scale=w13_input_scale,
+            w2_scale=w2_scale,
+            w2_input_scale=w2_input_scale,
+            is_trtllm=is_trtllm,
         )
 
     return w13, w2, w13_scale, w2_scale
@@ -222,7 +226,7 @@ def make_fp8_moe_quant_config(
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
     block_shape: list[int] | None = None,
-) -> FusedMoEQuantConfig:
+) -> FusedMoEQuantConfig | None:
     """
     Create FusedMoEQuantConfig for the specifed FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
@@ -251,7 +255,7 @@ def make_fp8_moe_quant_config(
     # (alpha = w_scale * a_scale) and inverse a2 scale.
     if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS and block_shape is None:
         assert a1_scale is not None and a2_scale is not None
-        g1_alphas, g2_alphas = make_alpha_scales_for_fi(
+        g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
             w1_scale,
             a1_scale,
             w2_scale,

@@ -105,22 +105,21 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def register_scales_for_fi_trtllm_fp8_per_tensor_moe(
+def register_scales_for_trtllm_fp8_per_tensor_moe(
     layer: torch.nn.Module,
-    w13_weight_scale: torch.Tensor,
-    w2_weight_scale: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
 ) -> None:
     """Register necessary scales for FlashInfer TRTLLM FP8 MoE kernel"""
-    assert hasattr(layer, "w13_input_scale")
-    assert hasattr(layer, "w2_input_scale")
-
-    g1_alphas, g2_alphas = make_alpha_scales_for_fi(
-        w13_scale=w13_weight_scale,
-        w13_input_scale=layer.w13_input_scale,
-        w2_scale=w2_weight_scale,
-        w2_input_scale=layer.w2_input_scale,
+    g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+        w13_scale=w13_scale,
+        w13_input_scale=w13_input_scale,
+        w2_scale=w2_scale,
+        w2_input_scale=w2_input_scale,
     )
-    layer.w2_input_scale_inv = 1.0 / layer.w2_input_scale
+    layer.w2_input_scale_inv = 1.0 / w2_input_scale
     layer.output1_scales_gate_scalar = g1_alphas
     layer.output1_scales_scalar = g1_alphas * layer.w2_input_scale_inv
     layer.output2_scales_scalar = g2_alphas
@@ -141,6 +140,13 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
 
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
+
+    # Added to the layer by: register_scales_for_fi_trtllm_fp8_per_tensor_moe
+    assert (
+        hasattr(layer, "output1_scales_scalar")
+        and hasattr(layer, "output1_scales_gate_scalar")
+        and hasattr(layer, "output2_scales_scalar")
+    )
 
     # Added to the layer by: register_scales_for_fi_trtllm_fp8_per_tensor_moe
     assert (
@@ -176,17 +182,12 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def make_alpha_scales_for_fi(
+def make_fp8_moe_alpha_scales_for_fi(
     w13_scale: torch.Tensor,
     w13_input_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Make dq alpha scales for FlashInfer Fp8 Per-Tensor kernels.
-    Since FlashInfer uses static quantization, the single
-    dq scale is precomputed to avoid the runtime multiply.
-    """
     g1_alphas = (w13_scale * w13_input_scale).squeeze()
     g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
@@ -316,7 +317,9 @@ def prepare_fp8_moe_layer_for_fi(
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor | None,
     w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor | None,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -354,7 +357,12 @@ def prepare_fp8_moe_layer_for_fi(
     # and registration of alpha scales. Note that we do not register
     # as nn.Parameters since they are not needed for weight-reloading.
     if is_trtllm and not block_quant:
+        assert w13_input_scale is not None
+        assert w2_input_scale is not None
+
         rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2)
-        register_scales_for_fi_trtllm_fp8_per_tensor_moe(layer, w13_scale, w2_scale)
+        register_scales_for_trtllm_fp8_per_tensor_moe(
+            layer, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
 
     return w13, w2, w13_scale

@@ -793,10 +793,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
     ) -> None:
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            self.fp8_backend, layer, w13, w2, w13_scale, w2_scale
+            self.fp8_backend,
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_input_scale,
+            w2_input_scale,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -860,7 +869,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -951,6 +962,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # TRTLLM does not use Modular Kernel.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            return None
+
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
@@ -1181,7 +1196,15 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             )
 
         # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self._setup_kernel(
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
+        )
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
