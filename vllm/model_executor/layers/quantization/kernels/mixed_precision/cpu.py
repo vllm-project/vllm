@@ -34,7 +34,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
             )
 
-        if c.group_size % 2 != 0:
+        if c.group_size != -1 and c.group_size % 2 != 0:
             return (
                 False,
                 f"Group size ({c.group_size}) not supported by "
