@@ -158,12 +158,11 @@ class InputProcessor:
                 or params.presence_penalty != 0.0
                 or params.repetition_penalty != 1.0
                 or params.bad_words_token_ids
-                or params.structured_outputs
             )
         ):
             raise ValueError(
                 "async scheduling with spec decoding doesn't yet support "
-                "penalties, bad words or structured outputs in sampling parameters."
+                "penalties or bad words in sampling parameters."
             )
 
     def _validate_params(
