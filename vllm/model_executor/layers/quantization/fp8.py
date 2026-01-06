@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     make_fp8_moe_alpha_scales_for_fi,
     register_scales_for_trtllm_fp8_per_tensor_moe,
@@ -150,7 +151,7 @@ def get_fp8_moe_backend(
             if block_quant and current_platform.is_device_capability_family(100):
                 raise ValueError(
                     "FlashInfer FP8 MoE throughput backend does not "
-                    "support block quantization. Please use "
+                    "support block quantization on SM100. Please use "
                     "VLLM_FLASHINFER_MOE_BACKEND=latency "
                     "instead."
                 )
@@ -1128,6 +1129,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=self.block_quant,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(

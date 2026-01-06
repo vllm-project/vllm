@@ -2284,7 +2284,6 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     # 4th Schedule - this should trigger the resumption
     output = scheduler.schedule()
     scheduled_cached_reqs = output.scheduled_cached_reqs
-    resumed_from_preemption = scheduled_cached_reqs.resumed_from_preemption
 
     assert len(output.scheduled_new_reqs) == 0
     assert scheduled_cached_reqs.num_reqs == 1
@@ -2292,14 +2291,14 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     assert len(scheduler.running) == 1
 
     # Preempted request resumed in scheduled_cached_reqs
-    assert len(resumed_from_preemption) == 1
-    assert len(scheduled_cached_reqs.resumed_req_token_ids) == 1
-    assert resumed_from_preemption[0]
+    assert len(scheduled_cached_reqs.resumed_req_ids) == 1
+    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
-    assert scheduled_cached_reqs.resumed_req_token_ids[0] is not None
+    assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
+    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
     # Resumed tokens include 30 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.resumed_req_token_ids[0]) == 32
-    assert scheduled_cached_reqs.resumed_req_token_ids[0][31] == 100
+    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 32
+    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][31] == 100
 
 
 @pytest.mark.parametrize(
@@ -3122,7 +3121,6 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     # 4th Schedule - this should trigger req_low resumption from waiting
     output = scheduler.schedule()
     scheduled_cached_reqs = output.scheduled_cached_reqs
-    resumed_from_preemption = scheduled_cached_reqs.resumed_from_preemption
 
     assert len(output.scheduled_new_reqs) == 0
     assert scheduled_cached_reqs.num_reqs == 1
@@ -3130,14 +3128,14 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     assert len(scheduler.running) == 1
 
     # Preempted request resumed in scheduled_cached_reqs
-    assert len(resumed_from_preemption) == 1
-    assert len(scheduled_cached_reqs.resumed_req_token_ids) == 1
-    assert resumed_from_preemption[0]
+    assert len(scheduled_cached_reqs.resumed_req_ids) == 1
+    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
-    assert scheduled_cached_reqs.resumed_req_token_ids[0] is not None
+    assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
+    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
     ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.resumed_req_token_ids[0]) == 96
-    assert scheduled_cached_reqs.resumed_req_token_ids[0][95] == 100
+    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 96
+    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][95] == 100
     assert scheduler.running[0].request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
 
