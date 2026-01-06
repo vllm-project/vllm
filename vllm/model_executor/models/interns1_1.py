@@ -645,29 +645,10 @@ class Qwen3MoeLLMModel(nn.Module):
                         else:
                             name = remapped_kv_scale_name
                     param = params_dict[name]
-                    # FIXME: zhouxinyu, put this logic as FoPE weight_loader
-                    if name == "rotary_emb.cos_coef" or name == "rotary_emb.sin_coef":
-                        from vllm.distributed import (
-                            get_tensor_model_parallel_rank,
-                            get_tensor_model_parallel_world_size,
-                        )
-
-                        world_size = get_tensor_model_parallel_world_size()
-                        rank = get_tensor_model_parallel_rank()
-                        num_key_value_heads = loaded_weight.size(0)
-
-                        if num_key_value_heads < world_size:
-                            n_replicate = world_size // num_key_value_heads
-                            world_size = num_key_value_heads
-                            rank = rank // n_replicate
-
-                        loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
-                        param.copy_(loaded_weight)
-                    else:
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

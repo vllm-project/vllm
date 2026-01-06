@@ -3,8 +3,28 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.parameter import Parameter
 
 from .base import RotaryEmbedding
+
+
+def fope_coef_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
+    from vllm.distributed import (
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+    )
+
+    world_size = get_tensor_model_parallel_world_size()
+    rank = get_tensor_model_parallel_rank()
+    num_key_value_heads = loaded_weight.size(0)
+
+    if num_key_value_heads < world_size:
+        n_replicate = world_size // num_key_value_heads
+        world_size = num_key_value_heads
+        rank = rank // n_replicate
+
+    loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
+    param.copy_(loaded_weight)
 
 
 class FourierRotaryEmbedding(RotaryEmbedding):
@@ -59,13 +79,25 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             torch.empty(num_key_value_heads, self.input_dim, self.output_dim),
             requires_grad=False,
         )
+        self.cos_coef.weight_loader = (
+            lambda param, loaded_weight: fope_coef_weight_loader(param, loaded_weight)
+        )
+        self.sin_coef.weight_loader = (
+            lambda param, loaded_weight: fope_coef_weight_loader(param, loaded_weight)
+        )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
+        """Compute the inverse frequency."""
         return None
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
+        """Compute the cos and sin cache."""
         # FIXME: zhouxinyu, implement FoPE cos/sin cache computation
         return torch.zeros(1)
+
+    def apply_rotary_emb(self):
+        """Customized apply_rotary_emb function for FoPE."""
+        pass
 
     def get_step_eye(self, _param):
         import math
