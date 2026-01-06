@@ -27,6 +27,7 @@ ALLOWED_FILES = {
     "vllm/distributed/device_communicators/shm_broadcast.py",
     "vllm/distributed/device_communicators/shm_object_storage.py",
     "vllm/utils/hashing.py",
+    "tests/multimodal/test_image.py",
     "tests/tokenizers_/test_hf.py",
     "tests/utils_/test_hashing.py",
     "benchmarks/kernels/graph_machete_bench.py",
