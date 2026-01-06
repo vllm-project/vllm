@@ -52,6 +52,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_fi_trtllm_fp8_per_tensor_moe,
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
     select_cutlass_fp8_gemm_impl,
@@ -738,6 +739,17 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TRT LLM not supported with all2all yet.
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+
+            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
+            )
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
@@ -1347,6 +1359,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
         ):
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
             # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
                 self.moe

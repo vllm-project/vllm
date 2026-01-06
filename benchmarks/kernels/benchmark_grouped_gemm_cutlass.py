@@ -349,6 +349,10 @@ def bench_run(
 
 
 def main(args):
+    # Initialize workspace manager (required for CUTLASS MoE kernels)
+    device = torch.device("cuda:0")
+    init_workspace_manager(device)
+
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
