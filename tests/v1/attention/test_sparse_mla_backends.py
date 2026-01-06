@@ -330,25 +330,23 @@ def test_sparse_backend_decode_correctness(
     torch.set_default_dtype(dtype)
 
     # Set the global config for the duration of the test
-
-    mla_layer = MLAAttention(
-        num_heads=num_heads,
-        scale=scale,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        q_lora_rank=None,
-        kv_lora_rank=kv_lora_rank,
-        kv_b_proj=mock_kv_b_proj,
-        cache_config=vllm_config.cache_config,
-        prefix="mla",
-        use_sparse=True,
-        indexer=mock_indexer,
-    ).to(device=device, dtype=dtype)
-
-    # Replace the impl with the test's impl_cls
     impl_cls = FlashMLASparseBackend.get_impl_cls()
     with set_current_vllm_config(vllm_config):
+        mla_layer = MLAAttention(
+            num_heads=num_heads,
+            scale=scale,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=mock_kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="mla",
+            use_sparse=True,
+            indexer=mock_indexer,
+        ).to(device=device, dtype=dtype)
+
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
