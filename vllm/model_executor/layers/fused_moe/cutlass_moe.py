@@ -228,9 +228,7 @@ def run_cutlass_moe_fp8(
             permuted_hidden_states=mm2_out,
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
-            expert_first_token_offset=(
-                expert_first_token_offset if expert_map is not None else None
-            ),
+            expert_first_token_offset=expert_first_token_offset,
         )
 
 
@@ -1024,9 +1022,7 @@ def run_cutlass_moe_w4a8_fp8(
         permuted_hidden_states=mm2_out,
         topk_weights=topk_weights,
         inv_permuted_idx=inv_perm,
-        expert_first_token_offset=(
-            expert_first_token_offset if expert_map is not None else None
-        ),
+        expert_first_token_offset=expert_first_token_offset,
     )
 
 
