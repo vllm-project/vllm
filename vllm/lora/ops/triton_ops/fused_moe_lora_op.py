@@ -237,9 +237,9 @@ def _fused_moe_lora_shrink(
     split_k: int,
     num_active_loras: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
-    use_gdc = supports_pdl(qcurr_hidden_states.device)
     shrink_config = {
         "BLOCK_SIZE_M": block_size_m,
         "BLOCK_SIZE_N": block_size_n,
@@ -334,6 +334,7 @@ def _fused_moe_lora_expand(
     num_active_loras: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
+    use_gdc: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -345,7 +346,6 @@ def _fused_moe_lora_expand(
         -1, a_intermediate_cache1.shape[3]
     )
 
-    use_gdc = supports_pdl(a_intermediate_cache1.device)
     expand_config = {
         "BLOCK_SIZE_M": block_size_m,
         "BLOCK_SIZE_N": block_size_n,
@@ -476,7 +476,7 @@ def _fused_moe_lora(
         dtype=output.dtype,
         device=device,
     )
-
+    use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,
@@ -506,6 +506,7 @@ def _fused_moe_lora(
         shrink_split_k,
         num_active_loras,
         mul_routed_weight,
+        use_gdc=use_gdc,
     )
 
     if fully_sharded:
@@ -554,6 +555,7 @@ def _fused_moe_lora(
         num_active_loras,
         mul_routed_weight,
         offset,
+        use_gdc=use_gdc,
     )
 
 
@@ -618,6 +620,7 @@ def _fused_moe_lora_shrink_fake(
     split_k: int,
     num_active_loras: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 
@@ -652,6 +655,7 @@ def _fused_moe_lora_expand_fake(
     split_k: int,
     num_active_loras: int,
     mul_routed_weight: bool = False,
+    use_gdc: bool = False,
 ) -> None:
     return
 
