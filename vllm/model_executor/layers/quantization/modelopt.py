@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -52,6 +53,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
+    build_flashinfer_fp4_trtllm_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
     select_nvfp4_gemm_impl,
@@ -1355,9 +1357,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        UNSUPPORTED = [NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.FLASHINFER_TRTLLM]
-        if self.nvfp4_backend in UNSUPPORTED:
+        if self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
             return None
+        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            # Use TRTLLM FP4 Modular Kernel only when all2all_backend
+            # is not allgather_reducescatter
+            if self.moe.moe_parallel_config.all2all_backend != "allgather_reducescatter":
+                prepare_finalize = build_flashinfer_fp4_trtllm_moe_prepare_finalize(
+                    self.moe
+                )
+                logger.debug_once("%s", prepare_finalize.__class__.__name__)
+                return prepare_finalize
+            else:
+                return None
         elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
             # TP case: avoid convert to ModularKernelMethod - to be refactored.
             if self.moe.dp_size == 1:
@@ -1377,10 +1389,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
+
+        # TRT-LLM backend requires intermediate_size_per_partition from layer
+        intermediate_size_per_partition = None
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            intermediate_size_per_partition = layer.intermediate_size_per_partition
+
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,
             allow_flashinfer=self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS,
+            intermediate_size_per_partition=intermediate_size_per_partition,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
@@ -1586,6 +1605,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # TRT-LLM modular kernel path needs special handling
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and self.moe.moe_parallel_config.all2all_backend != "allgather_reducescatter"
+        ):
+            # For TRT-LLM modular kernel, build config with precomputed scales
+            return nvfp4_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_gscale=layer.a1_gscale,
+                a2_gscale=layer.a2_gscale,
+                g1_scale_c=getattr(layer, "g1_scale_c", None),
+            )
+        
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1610,6 +1645,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
+            and layer.moe_parallel_config.all2all_backend == "allgather_reducescatter"
         ):
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
@@ -1633,9 +1669,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             router_logits=router_logits,
         )
 
-        # EPLB path
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            assert layer.enable_eplb
+        # EPLB path - only use direct TRT-LLM path when using allgather_reducescatter
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and layer.enable_eplb
+            and layer.moe_parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
                 x=x,
