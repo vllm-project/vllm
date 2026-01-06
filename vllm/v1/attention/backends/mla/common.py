@@ -791,11 +791,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            # Compute num_computed_tokens from query_start_loc and seq_lens
-            query_lens = (
-                common_attn_metadata.query_start_loc_cpu[1:]
-                - common_attn_metadata.query_start_loc_cpu[:-1]
-            )
+            query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             num_computed_tokens_cpu = common_attn_metadata.seq_lens.cpu() - query_lens
 
             reqs_start = num_decodes  # prefill_start
