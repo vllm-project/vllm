@@ -15,7 +15,6 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
@@ -62,9 +61,10 @@ class UnquantizedMoeBackend(Enum):
     TRITON = 3
 
 
-def get_unquantized_moe_backend(
-    moe_parallel_config: FusedMoEParallelConfig,
-) -> UnquantizedMoeBackend | None:
+def select_unquantized_moe_backend(
+    use_ep: bool,
+    use_dp: bool,
+) -> UnquantizedMoeBackend:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -76,8 +76,8 @@ def get_unquantized_moe_backend(
     flashinfer_cutlass_moe_enabled = (
         has_flashinfer_cutlass_fused_moe()
         and envs.VLLM_USE_FLASHINFER_MOE_FP16
-        and moe_parallel_config.use_ep
-        and moe_parallel_config.dp_size == 1
+        and use_ep
+        and (not use_dp)
         and current_platform.get_device_capability()[0] >= 9
     )
     if current_platform.is_rocm():
@@ -93,14 +93,14 @@ def get_unquantized_moe_backend(
             )
             return UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
-            if moe_parallel_config.use_ep and moe_parallel_config.dp_size == 1:
+            if use_ep and (not use_dp):
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
                     scope="local",
                 )
-            elif moe_parallel_config.dp_size > 1:
+            elif use_dp:
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
@@ -116,8 +116,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.unquantized_backend = get_unquantized_moe_backend(
-            self.moe.moe_parallel_config,
+        self.unquantized_backend = select_unquantized_moe_backend(
+            use_ep=self.moe.moe_parallel_config.use_ep,
+            use_dp=self.moe.moe_parallel_config.dp_rank > 1,
         )
 
     @property
@@ -248,17 +249,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.kernel = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
                 AiterExperts(self.moe_quant_config),
-                shared_experts=None,
             )
         elif self.unquantized_backend == UnquantizedMoeBackend.TRITON:
             self.kernel = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
                 TritonExperts(self.moe_quant_config),
-                shared_experts=None,
             )
         elif self.unquantized_backend == UnquantizedMoeBackend.NONE:
             raise ValueError(
-                "Unable to select quantization backend, please check supported backend."
+                "Unable to select unquantized MoE backend, \
+                    please check supported backends."
             )
 
     def _convert_weights_to_kernel_format(
