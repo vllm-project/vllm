@@ -103,16 +103,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
 
-    def _get_num_computed_tokens_cpu(
-        self, common_attn_metadata: CommonAttentionMetadata
-    ) -> torch.Tensor:
-        """Compute num_computed_tokens_cpu from query_start_loc and seq_lens."""
-        query_lens = (
-            common_attn_metadata.query_start_loc_cpu[1:]
-            - common_attn_metadata.query_start_loc_cpu[:-1]
-        )
-        return common_attn_metadata.seq_lens.cpu() - query_lens
-
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
@@ -148,10 +138,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common_attn_metadata: CommonAttentionMetadata,
         mamba_block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_computed_tokens_cpu = self._get_num_computed_tokens_cpu(
-            common_attn_metadata
-        )
-        num_computed_tokens = num_computed_tokens_cpu.to(self.device)
+        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
         # Block index of the last computed token
         block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
         # which is <= block index for the first scheduled token
@@ -203,16 +190,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        num_computed_tokens_cpu = self._get_num_computed_tokens_cpu(
-            common_attn_metadata
-        )
-
         if self.vllm_config.cache_config.enable_prefix_caching:
+            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = num_computed_tokens_cpu.to(self.device)
             (
                 block_idx_last_computed_token,
                 block_idx_first_scheduled_token,
@@ -225,6 +209,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         if num_prefills > 0:
+            num_computed_tokens_cpu = (
+                num_computed_tokens
+                or common_attn_metadata.compute_num_computed_tokens()
+            ).cpu()
+
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
