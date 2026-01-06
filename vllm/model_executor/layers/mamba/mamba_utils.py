@@ -276,7 +276,7 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def mamba1_state_copy_func(cls):
-        return get_conv_copy_spec, get_temporal_copy_spec
+        return (get_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod
     def mamba2_state_copy_func(cls):
@@ -288,7 +288,7 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def gated_delta_net_state_copy_func(cls):
-        return get_conv_copy_spec, get_temporal_copy_spec
+        return (get_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod
     def kda_state_copy_func(cls):

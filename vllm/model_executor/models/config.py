@@ -313,7 +313,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = "align"
                 logger.warning(
-                    "Mamba cache mode is set to 'align' defaultly when prefix "
+                    "Mamba cache mode is set to 'align' by default when prefix "
                     "caching is enabled"
                 )
             if cache_config.mamba_cache_mode == "all":

@@ -829,10 +829,9 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
-            if self.kv_cache_spec.num_speculative_blocks > 0:
+            if self.num_speculative_blocks > 0:
                 num_tokens += (
-                    self.kv_cache_spec.block_size
-                    * self.kv_cache_spec.num_speculative_blocks
+                    self.kv_cache_spec.block_size * self.num_speculative_blocks
                 )
             return super().get_num_blocks_to_allocate(
                 request_id,
@@ -864,7 +863,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 else:
                     # First prefill. Allocate 1 block for running state and the
                     # speculative blocks.
-                    num_new_blocks = 1 + self.kv_cache_spec.num_speculative_blocks
+                    num_new_blocks = 1 + self.num_speculative_blocks
 
             # If a computed block of a request is an eviction candidate (in the
             # free queue and ref_cnt == 0), it will be changed from a free block
