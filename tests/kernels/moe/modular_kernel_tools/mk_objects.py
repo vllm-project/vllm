@@ -6,7 +6,7 @@ import torch
 
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe import TritonExperts, TritonWNA16Experts
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -176,6 +176,16 @@ register_experts(
 
 register_experts(
     TritonExperts,
+    standard_format,
+    common_float_and_int_types,
+    blocked_quantization_support=True,
+    supports_chunking=True,
+    supports_expert_map=True,
+    needs_matching_quant=True,
+)
+
+register_experts(
+    TritonWNA16Experts,
     standard_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
@@ -451,6 +461,10 @@ def make_fused_experts(
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
         experts = TritonExperts(**kwargs)
+    elif fused_experts_type == TritonWNA16Experts:
+        kwargs = quant_kwargs
+        print(f"Making TritonWNA16Experts {kwargs} ...")
+        experts = TritonWNA16Experts(**kwargs)
     elif fused_experts_type == TritonOrDeepGemmExperts:
         kwargs = quant_kwargs | deepgemm_kwargs
         print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
