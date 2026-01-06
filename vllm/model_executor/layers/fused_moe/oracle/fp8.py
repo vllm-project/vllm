@@ -329,7 +329,7 @@ def make_fp8_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                out_dtype=layer.moe.in_dtype,
+                out_dtype=moe_config.in_dtype,
                 e=layer.local_num_experts,
                 n=layer.intermediate_size_per_partition,
                 k=layer.hidden_size,
