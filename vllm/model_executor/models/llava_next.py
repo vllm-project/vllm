@@ -590,7 +590,7 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
-        Get the module prefix in multimodal models.
+        Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
@@ -602,10 +602,14 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         self,
         num_image_tokens: int,
     ) -> int:
+        # LLaVA's vision encoder outputs one token per patch without
+        # spatial merging or pixel shuffle
         return num_image_tokens
 
     def get_num_mm_connector_tokens(
         self,
         num_vision_tokens: int,
     ) -> int:
+        # LLaVA's MLP projector outputs the same number of tokens
+        # as it receives from the vision encoder (1:1 mapping)
         return num_vision_tokens
