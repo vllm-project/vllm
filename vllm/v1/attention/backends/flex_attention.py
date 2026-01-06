@@ -727,9 +727,13 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             block_table_tensor, seq_lens, block_size, num_gpu_blocks
         )
 
-        offset_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
-            self.device, non_blocking=True
+        # Compute num_computed_tokens from query_start_loc_cpu and seq_lens
+        query_lens = (
+            common_attn_metadata.query_start_loc_cpu[1:]
+            - common_attn_metadata.query_start_loc_cpu[:-1]
         )
+        num_computed_tokens_cpu = common_attn_metadata.seq_lens.cpu() - query_lens
+        offset_tensor = num_computed_tokens_cpu.to(self.device, non_blocking=True)
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
