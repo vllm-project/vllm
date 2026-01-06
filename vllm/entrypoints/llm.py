@@ -37,7 +37,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    apply_hf_chat_template,
+    apply_hf_chat_template_tokenize,
     apply_mistral_chat_template,
     parse_chat_messages,
     resolve_chat_template_content_format,
@@ -838,16 +838,11 @@ class LLM:
                     **_chat_template_kwargs,
                 )
             else:
-                prompt_str = apply_hf_chat_template(
+                prompt_token_ids = apply_hf_chat_template_tokenize(
                     tokenizer=tokenizer,
                     conversation=conversation,
                     model_config=model_config,
                     **_chat_template_kwargs,
-                )
-                # Special tokens are already included in chat templates so
-                # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(
-                    prompt_str, add_special_tokens=False
                 )
 
             prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)

@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import copy
 import inspect
 import json
+import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
@@ -1806,15 +1808,14 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
-def apply_hf_chat_template(
+def resolve_template_kwargs(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-    conversation: list[ConversationMessage],
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     *,
     model_config: ModelConfig,
     **kwargs: Any,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     hf_chat_template = resolve_hf_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -1833,6 +1834,108 @@ def apply_hf_chat_template(
         tokenizer=tokenizer,
         chat_template=hf_chat_template,
         chat_template_kwargs=kwargs,
+    )
+    return hf_chat_template, resolved_kwargs
+
+
+# Prevent special token injection in user content
+def apply_hf_chat_template_tokenize(
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    conversation: list[ConversationMessage],
+    chat_template: str | None,
+    tools: list[dict[str, Any]] | None,
+    *,
+    model_config: ModelConfig,
+    **kwargs: Any,
+) -> list[int]:
+    hf_chat_template, resolved_kwargs = resolve_template_kwargs(
+        tokenizer,
+        chat_template=chat_template,
+        tools=tools,
+        model_config=model_config,
+        **kwargs,
+    )
+
+    tag_prefix = f"__VLLM_TAG_{uuid.uuid4()}__"
+
+    idx = 0
+    tag_map = {}
+
+    def value_tag(v) -> str:
+        nonlocal idx, tag_map
+
+        tag = f"{tag_prefix}{idx}__"
+        idx += 1
+        tag_map[tag] = v
+        return tag
+
+    def dict_tag(obj: dict, omit_keys: list | None = None):
+        # replace all str values with tags
+        for k in list(obj.keys()):
+            if omit_keys and k in omit_keys:
+                continue
+
+            v = obj[k]
+            if isinstance(v, str):
+                obj[k] = value_tag(v)
+            elif isinstance(v, dict):
+                dict_tag(v)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        dict_tag(item)
+
+    msgs_copy = copy.deepcopy(conversation)
+    for msg in msgs_copy:
+        if msg.get("role") == "user":
+            dict_tag(
+                msg,  # type: ignore[arg-type]
+                omit_keys=["role"],
+            )
+
+    # apply_chat_template to get the full prompt with tags
+    chat_str = tokenizer.apply_chat_template(
+        conversation=msgs_copy,  # type: ignore[arg-type]
+        tools=tools,  # type: ignore[arg-type]
+        chat_template=hf_chat_template,
+        tokenize=False,
+        **resolved_kwargs,
+    )
+
+    # each part is encoded separately
+    parts = chat_str.split(tag_prefix)
+    token_ids = tokenizer.encode(parts[0])
+    for part in parts[1:]:
+        if "__" not in part:
+            token_ids += tokenizer.encode(part)
+            continue
+
+        idx_end = part.index("__")
+        idx = int(part[:idx_end])
+        v = tag_map.get(f"{tag_prefix}{idx}__", "")
+        token_ids += tokenizer.encode(
+            v, add_special_tokens=False, split_special_tokens=True
+        )
+        token_ids += tokenizer.encode(part[idx_end + 2 :])
+
+    return token_ids
+
+
+def apply_hf_chat_template(
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    conversation: list[ConversationMessage],
+    chat_template: str | None,
+    tools: list[dict[str, Any]] | None,
+    *,
+    model_config: ModelConfig,
+    **kwargs: Any,
+) -> str:
+    hf_chat_template, resolved_kwargs = resolve_template_kwargs(
+        tokenizer,
+        chat_template=chat_template,
+        tools=tools,
+        model_config=model_config,
+        **kwargs,
     )
 
     try:
