@@ -211,7 +211,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if num_prefills > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-
             num_computed_tokens_cpu = num_computed_tokens.cpu()
 
             query_start_loc_p = (
