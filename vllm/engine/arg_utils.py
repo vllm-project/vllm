@@ -1211,8 +1211,15 @@ class EngineArgs:
                 torchao_override_key = "quantization_config_file"
                 torchao_override_value = self.torchao_config
             else:
-                torchao_override_key = "quantization_config_dict_json"
-                torchao_override_value = self.torchao_config
+                try:
+                    json.loads(self.torchao_config)
+                    torchao_override_key = "quantization_config_dict_json"
+                    torchao_override_value = self.torchao_config
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"torchao_config='{self.torchao_config}' is not a valid "
+                        "file path and not a valid JSON string."
+                    ) from None
 
             # Merge with existing hf_overrides
             if self.hf_overrides is None:
