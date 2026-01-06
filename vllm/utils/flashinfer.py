@@ -599,8 +599,6 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
 # ==============================================================================
 
 
-
-
 class FlashinferMoeBackend(Enum):
     """Backend selection for FlashInfer MoE kernels."""
 
@@ -728,12 +726,12 @@ def rotate_flashinfer_fp8_moe_weights(
 
     # Stack weights for all experts
     with torch.no_grad():
-        gemm1_weights.copy_(torch.stack(gemm1_weights_fp8_shuffled).view(
-            torch.float8_e4m3fn
-        ))
-        gemm2_weights.copy_(torch.stack(gemm2_weights_fp8_shuffled).view(
-            torch.float8_e4m3fn
-        ))
+        gemm1_weights.copy_(
+            torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
+        )
+        gemm2_weights.copy_(
+            torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
+        )
 
 
 __all__ = [
