@@ -669,6 +669,12 @@ class VoxtralForConditionalGeneration(
 
         return quant_config
 
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        return num_audio_tokens * self.downsample_factor
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        return num_encoder_tokens // self.downsample_factor
+
 
 class AudioLanguageAdapter(nn.Module):
     def __init__(self, hidden_size: int, dim: int) -> None:
