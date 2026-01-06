@@ -268,24 +268,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
-    @staticmethod
-    def convert_weights_to_kernel_format(
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w1_scale: torch.Tensor | None,
-        w2_scale: torch.Tensor | None,
-        a1_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
-        """
-        Convert the weights to the format expected by this kernel.
-        By default, this is a no-op that returns the weights as is.
-        """
-        assert w1_scale is not None and w2_scale is not None
-        assert a1_scale is None and a2_scale is None
-
-        return w1, w2, w1_scale, w2_scale, a1_scale, a2_scale
-
     @property
     def activation_formats(
         self,
