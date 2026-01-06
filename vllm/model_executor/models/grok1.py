@@ -283,9 +283,7 @@ class Grok1Attention(nn.Module):
             is_neox_style=True,
         )
 
-        attn_logits_soft_cap = max(
-            getattr(config, "attn_logit_softcapping", 30.0), 0.0
-        )
+        attn_logits_soft_cap = max(getattr(config, "attn_logit_softcapping", 30.0), 0.0)
         attn_logit_softcapping_method = getattr(
             config, "attn_logit_softcapping_method", None
         )

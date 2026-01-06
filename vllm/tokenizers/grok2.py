@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tokenizer for Grok-2 .tok.json format."""
 
-from __future__ import annotations
-
 import functools
 import json
+from collections.abc import Collection, Set
 from pathlib import Path
-from typing import AbstractSet, Any, Collection, Literal, overload
+from typing import Any, Literal, overload
 
 from huggingface_hub import hf_hub_download
 from transformers import BatchEncoding
@@ -87,9 +86,7 @@ def _load_tiktoken_encoding(
     try:
         import tiktoken
     except ImportError as exc:
-        raise ImportError(
-            "Grok-2 tokenizer requires the `tiktoken` package."
-        ) from exc
+        raise ImportError("Grok-2 tokenizer requires the `tiktoken` package.") from exc
 
     with vocab_file.open("rb") as f:
         xtok_dict = json.load(f)
@@ -106,9 +103,7 @@ def _load_tiktoken_encoding(
     if xtok_dict.get("word_split") == "V1":
         pat_str = PAT_STR_B
     else:
-        raise ValueError(
-            f"Unknown word_split: {xtok_dict.get('word_split')!r}"
-        )
+        raise ValueError(f"Unknown word_split: {xtok_dict.get('word_split')!r}")
 
     pat_str = xtok_dict.get("pat_str", pat_str)
 
@@ -138,7 +133,7 @@ def _load_tiktoken_encoding(
         self,
         text: str,
         *,
-        allowed_special: Literal["all"] | AbstractSet[str] = set(),
+        allowed_special: Literal["all"] | Set[str] = set(),
         disallowed_special: Literal["all"] | Collection[str] = "all",
     ) -> list[int]:
         del disallowed_special
@@ -196,9 +191,7 @@ class Grok2Tokenizer(TokenizerLike):
             repo_id = str(path_or_repo_id)
 
         if not vocab_file.is_file():
-            raise FileNotFoundError(
-                f"tokenizer.tok.json not found at {vocab_file}."
-            )
+            raise FileNotFoundError(f"tokenizer.tok.json not found at {vocab_file}.")
 
         config = _maybe_load_tokenizer_config(
             model_path,
@@ -230,9 +223,7 @@ class Grok2Tokenizer(TokenizerLike):
         self.init_kwargs = init_kwargs or {}
         self._chat_template = chat_template or DEFAULT_CHAT_TEMPLATE
 
-        self._tokenizer, self._special_tokens = _load_tiktoken_encoding(
-            vocab_file
-        )
+        self._tokenizer, self._special_tokens = _load_tiktoken_encoding(vocab_file)
 
         self._token_to_id: dict[str, int] = {}
         self._id_to_token: dict[int, str] = {}
@@ -324,8 +315,11 @@ class Grok2Tokenizer(TokenizerLike):
         if isinstance(ids, int):
             ids = [ids]
         if skip_special_tokens:
-            ids = [token_id for token_id in ids
-                   if token_id not in self._special_tokens.values()]
+            ids = [
+                token_id
+                for token_id in ids
+                if token_id not in self._special_tokens.values()
+            ]
         return self._tokenizer.decode(ids)
 
     @overload
@@ -337,10 +331,7 @@ class Grok2Tokenizer(TokenizerLike):
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         if isinstance(tokens, str):
             return self._token_to_id.get(tokens, self._unk_token_id)
-        return [
-            self._token_to_id.get(token, self._unk_token_id)
-            for token in tokens
-        ]
+        return [self._token_to_id.get(token, self._unk_token_id) for token in tokens]
 
     def convert_ids_to_tokens(
         self, ids: list[int], skip_special_tokens: bool = False
@@ -387,9 +378,7 @@ class Grok2Tokenizer(TokenizerLike):
             )
             attention_mask = [1] * len(input_ids)
 
-        return BatchEncoding(
-            {"input_ids": input_ids, "attention_mask": attention_mask}
-        )
+        return BatchEncoding({"input_ids": input_ids, "attention_mask": attention_mask})
 
     def get_chat_template(
         self, chat_template: str | None, tools: list[dict[str, Any]] | None = None
