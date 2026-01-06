@@ -739,7 +739,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # TRT LLM not supported with all2all yet.
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             # TP case: avoid convert to ModularKernelMethod - to be refactored.
             if self.moe.dp_size == 1:
                 return None
