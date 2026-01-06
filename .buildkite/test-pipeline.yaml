@@ -383,7 +383,6 @@ steps:
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
-  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
     - vllm/v1/attention
     - tests/v1/attention
@@ -944,7 +943,6 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
-  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
@@ -986,7 +984,6 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
-  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -1054,7 +1051,6 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   gpu: b200
-  optional: true # TODO(mgoin): disable optional once runner is fixed
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py
@@ -1410,3 +1406,19 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
+##### MoE Refactor (Temporary) Tests #####
+
+- label: MoE Refactor Integration Test (H100 - TEMPORARY) # optional
+  gpu: h100
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  
+- label: MoE Refactor Integration Test (B200 - TEMPORARY) # optional
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
