@@ -20,8 +20,11 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import MLAAttention
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import set_current_vllm_config
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -330,25 +333,23 @@ def test_sparse_backend_decode_correctness(
     torch.set_default_dtype(dtype)
 
     # Set the global config for the duration of the test
-
-    mla_layer = MLAAttention(
-        num_heads=num_heads,
-        scale=scale,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        q_lora_rank=None,
-        kv_lora_rank=kv_lora_rank,
-        kv_b_proj=mock_kv_b_proj,
-        cache_config=vllm_config.cache_config,
-        prefix="mla",
-        use_sparse=True,
-        indexer=mock_indexer,
-    ).to(device=device, dtype=dtype)
-
-    # Replace the impl with the test's impl_cls
     impl_cls = FlashMLASparseBackend.get_impl_cls()
     with set_current_vllm_config(vllm_config):
+        mla_layer = MLAAttention(
+            num_heads=num_heads,
+            scale=scale,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=mock_kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="mla",
+            use_sparse=True,
+            indexer=mock_indexer,
+        ).to(device=device, dtype=dtype)
+
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -371,15 +372,50 @@ def test_sparse_backend_decode_correctness(
         )
         mla_layer.impl = impl
 
-        mla_layer.is_aiter_triton_fp8_bmm_enabled = getattr(
-            impl, "is_aiter_triton_fp8_bmm_enabled", False
+        from vllm.v1.attention.backends.mla.common import (
+            MLACommonMetadataBuilder,
+            use_cudnn_prefill,
+            use_flashinfer_prefill,
+            use_trtllm_ragged_deepseek_prefill,
         )
-        mla_layer.dcp_world_size = getattr(impl, "dcp_world_size", None)
-        mla_layer.chunked_prefill_workspace_size = getattr(
-            impl, "chunked_prefill_workspace_size", 0
+
+        # Initialize is_aiter_triton_fp8_bmm_enabled
+        mla_layer.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+
+        try:
+            mla_layer.dcp_world_size = get_dcp_group().world_size
+            mla_layer.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            mla_layer.dcp_world_size = 1
+            mla_layer.dcp_rank = 0
+
+        # Initialize chunked_prefill_workspace_size
+        mla_layer.chunked_prefill_workspace_size = (
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                vllm_config
+            )
         )
-        mla_layer._pad_v = getattr(impl, "_pad_v", False)
-        mla_layer._use_fi_prefill = getattr(impl, "_use_fi_prefill", False)
+
+        # Initialize _use_fi_prefill
+        mla_layer._use_fi_prefill = use_flashinfer_prefill()
+
+        # Initialize _pad_v based on prefill backend
+        if (
+            use_flashinfer_prefill()
+            or use_trtllm_ragged_deepseek_prefill()
+            or use_cudnn_prefill()
+        ):
+            mla_layer._pad_v = False
+        else:
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim for attention backends that do
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
+            mla_layer._pad_v = get_flash_attn_version() is None or not (
+                get_flash_attn_version() == 3
+                and current_platform.get_device_capability()[0] == 9
+            )
 
         # Process weights on the layer (this also sets weights on impl)
         mla_layer.process_weights_after_loading(dtype)

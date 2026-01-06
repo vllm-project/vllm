@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
@@ -12,6 +11,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.common import MLACommonPrefillMetadata
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
@@ -399,18 +399,12 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
-    if TYPE_CHECKING:
-        W_K: torch.Tensor | None
-        W_K_scale: torch.Tensor | None
-        W_V: torch.Tensor | None
-        W_V_scale: torch.Tensor | None
-        W_UV: torch.Tensor | None
-        W_UK_T: torch.Tensor | None
-
-        # Optional methods for prefill operations
-        # These are set dynamically in MLACommonImpl.__init__()
-        _run_prefill_context_chunk: Callable | None
-        _run_prefill_new_tokens: Callable | None
+    W_K: torch.Tensor | None = None
+    W_K_scale: torch.Tensor | None = None
+    W_V: torch.Tensor | None = None
+    W_V_scale: torch.Tensor | None = None
+    W_UV: torch.Tensor | None = None
+    W_UK_T: torch.Tensor | None = None
 
     @abstractmethod
     def __init__(
@@ -451,6 +445,34 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _run_prefill_new_tokens(
+        self,
+        prefill: "MLACommonPrefillMetadata",
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run prefill attention for new tokens (causal).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _run_prefill_context_chunk(
+        self,
+        prefill: "MLACommonPrefillMetadata",
+        chunk_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run prefill attention for a context chunk (non-causal).
+        """
         raise NotImplementedError
 
 

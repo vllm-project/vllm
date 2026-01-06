@@ -24,6 +24,7 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.selector import get_attn_backend
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -377,8 +378,11 @@ class Attention(nn.Module, AttentionLayerBase):
 
         if self.use_output:
             if output_shape is None:
+                # Handle both 2D [num_tokens, hidden] and
+                # 3D [num_tokens, heads, head_dim] query
+                num_tokens = query.shape[0]
                 output_shape = torch.Size(
-                    (*query.shape[:-1], self.num_heads * self.head_size_v)
+                    (num_tokens, self.num_heads * self.head_size_v)
                 )
             output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
@@ -594,17 +598,51 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Store kv_b_proj for use in methods
         self.kv_b_proj = kv_b_proj
 
-        # Initialize attributes from impl for direct method access
-        # Use getattr since these exist on MLACommonImpl but not on abstract base
-        self.is_aiter_triton_fp8_bmm_enabled: bool = getattr(
-            self.impl, "is_aiter_triton_fp8_bmm_enabled", False
+        from vllm.v1.attention.backends.mla.common import (
+            MLACommonMetadataBuilder,
+            use_cudnn_prefill,
+            use_flashinfer_prefill,
+            use_trtllm_ragged_deepseek_prefill,
         )
-        self.dcp_world_size: int | None = getattr(self.impl, "dcp_world_size", None)
-        self.chunked_prefill_workspace_size: int = getattr(
-            self.impl, "chunked_prefill_workspace_size", 0
+
+        # Initialize is_aiter_triton_fp8_bmm_enabled
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+
+        # Initialize chunked_prefill_workspace_size
+        vllm_config = get_current_vllm_config()
+        self.chunked_prefill_workspace_size = (
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                vllm_config
+            )
         )
-        self._pad_v: bool = getattr(self.impl, "_pad_v", False)
-        self._use_fi_prefill: bool = getattr(self.impl, "_use_fi_prefill", False)
+
+        # Initialize _use_fi_prefill
+        self._use_fi_prefill = use_flashinfer_prefill()
+
+        # Initialize _pad_v based on prefill backend
+        if (
+            use_flashinfer_prefill()
+            or use_trtllm_ragged_deepseek_prefill()
+            or use_cudnn_prefill()
+        ):
+            self._pad_v = False
+        else:
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim for attention backends that do
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
+            self._pad_v = get_flash_attn_version() is None or not (
+                get_flash_attn_version() == 3
+                and current_platform.get_device_capability()[0] == 9
+            )
 
         self.use_direct_call = not current_platform.opaque_attention_op()
 
@@ -1282,6 +1320,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         if has_context:
+            assert isinstance(output_prefill, tuple)
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
@@ -1312,6 +1351,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 suffix_lse=suffix_lse,
             )
         else:
+            # When has_context is False, return_softmax_lse is also False,
+            # so output_prefill is a tensor, not a tuple
+            assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
 
