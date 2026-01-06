@@ -175,7 +175,8 @@ steps:
       - text: "What is the release version?"
         key: release-version
 
-  - label: "Upload release wheels to PyPI and GitHub"
+  - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
+    key: block-upload-release-wheels
     depends_on:
       - input-release-version
       - build-wheel-x86-cuda-12-9
@@ -184,6 +185,10 @@ steps:
       - build-wheel-arm64-cuda-12-9
       - build-wheel-arm64-cuda-13-0
       - build-wheel-arm64-cpu
+
+  - label: "Upload release wheels to PyPI and GitHub"
+    depends_on:
+      - block-upload-release-wheels
     id: upload-release-wheels
     agents:
       queue: small_cpu_queue_postmerge
