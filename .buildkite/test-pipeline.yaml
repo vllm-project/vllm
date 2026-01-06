@@ -1340,7 +1340,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/moe-refactor/configs-h100.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/evals/gsm8k/moe-refactor/configs-h100.txt
 
 ##### H200 test #####
 - label: Distributed Tests (H200) # optional
