@@ -141,14 +141,14 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
-    # Added to the layer by: register_scales_for_fi_trtllm_fp8_per_tensor_moe
+    # Added to the layer by: register_scales_for_trtllm_fp8_per_tensor_moe
     assert (
         hasattr(layer, "output1_scales_scalar")
         and hasattr(layer, "output1_scales_gate_scalar")
         and hasattr(layer, "output2_scales_scalar")
     )
 
-    # Added to the layer by: register_scales_for_fi_trtllm_fp8_per_tensor_moe
+    # Added to the layer by: register_scales_for_trtllm_fp8_per_tensor_moe
     assert (
         hasattr(layer, "output1_scales_scalar")
         and hasattr(layer, "output1_scales_gate_scalar")

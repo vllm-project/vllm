@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    register_scales_for_fi_trtllm_fp8_per_tensor_moe,
+    register_scales_for_trtllm_fp8_per_tensor_moe,
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
@@ -135,7 +135,7 @@ class TestData:
             rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
                 layer.w13_weight, layer.w2_weight
             )
-            register_scales_for_fi_trtllm_fp8_per_tensor_moe(
+            register_scales_for_trtllm_fp8_per_tensor_moe(
                 layer,
                 layer.w13_weight_scale,
                 layer.w13_input_scale,
