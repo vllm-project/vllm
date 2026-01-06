@@ -12,7 +12,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
-from vllm.tokenizers.deepseekv32 import DeepseekV32Tokenizer
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
 from .protocol import RendererLike
 
