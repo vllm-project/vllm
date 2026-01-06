@@ -9,7 +9,6 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -19,8 +18,6 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-logger = init_logger(__name__)
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -150,8 +147,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens_tensor = context_lens.to(query_start_loc.device, non_blocking=True)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         block_table_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
+            m.block_table_tensor,
+            m.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )

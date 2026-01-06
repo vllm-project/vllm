@@ -378,7 +378,6 @@ class SingleTypeKVCacheManager(ABC):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:

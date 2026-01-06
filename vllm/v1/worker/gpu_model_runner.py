@@ -5178,7 +5178,6 @@ class GPUModelRunner(
         just may have a performance penalty due to that backend treating decodes
         as prefills.
         """
-
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
         reorder_batch_thresholds: list[int | None] = [

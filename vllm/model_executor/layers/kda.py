@@ -31,10 +31,7 @@ from .linear import (
     RowParallelLinear,
 )
 from .mamba.abstract import MambaBase
-from .mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
+from .mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
 from .mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from .quantization.base_config import QuantizationConfig
 

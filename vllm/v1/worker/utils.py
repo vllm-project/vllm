@@ -19,10 +19,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
