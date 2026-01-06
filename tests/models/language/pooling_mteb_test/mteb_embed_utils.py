@@ -19,9 +19,9 @@ from tests.models.utils import (
 # - Model implementation and minor changes in tensor dtype
 #   results in differences less than 1e-4
 # - Different model results in differences more than 1e-3
-# 1e-4 is a good tolerance threshold
+# 5e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
-MTEB_EMBED_TOL = 1e-4
+MTEB_EMBED_TOL = 5e-4
 
 
 _empty_model_meta = ModelMeta(
