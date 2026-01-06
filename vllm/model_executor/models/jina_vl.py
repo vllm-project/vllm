@@ -27,15 +27,23 @@ logger = init_logger(__name__)
 
 
 class JinaVLScorer(nn.Module):
-    def __init__(self, model_config: "ModelConfig"):
+    def __init__(self, model_config: "ModelConfig", prefix: str = ""):
         super().__init__()
         config = model_config.hf_config.get_text_config()
         head_dtype = model_config.head_dtype
         self.dense = ColumnParallelLinear(
-            config.hidden_size, config.hidden_size, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.hidden_size,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.dense",
         )
         self.out_proj = RowParallelLinear(
-            config.hidden_size, config.num_labels, params_dtype=head_dtype, bias=True
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=head_dtype,
+            bias=True,
+            prefix=f"{prefix}.out_proj",
         )
 
     def forward(self, x, **kwargs):
@@ -94,7 +102,9 @@ class JinaVLForSequenceClassification(
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.score = JinaVLScorer(vllm_config.model_config)
+        self.score = JinaVLScorer(
+            vllm_config.model_config, prefix=maybe_prefix(prefix, "score")
+        )
         self.pooler = DispatchPooler(
             {
                 "token_classify": Pooler.for_token_classify(

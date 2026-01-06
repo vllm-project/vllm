@@ -452,11 +452,14 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
-            per-channel scales for w1 (for W4A8 FP8).
+                     Optional per-channel scales for w1 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
-            per-channel scales for w2 (for W4A8 FP8).
-        - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
-        - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
+                     Optional per-channel scales for w2 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
+        - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
+        - a2_gscale: Optional global quantization scales for a2 (1.0 /a2_scale).
+
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
@@ -1028,6 +1031,10 @@ class FusedMoEConfig:
         return self.moe_parallel_config.dp_size
 
     @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
+
+    @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
 
@@ -1038,6 +1045,10 @@ class FusedMoEConfig:
     @property
     def dp_rank(self):
         return self.moe_parallel_config.dp_rank
+
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
 
     @property
     def ep_rank(self):
