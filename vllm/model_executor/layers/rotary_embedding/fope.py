@@ -48,22 +48,6 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         self.fope_sep_head = fope_sep_head
         self.fope_init_factor = fope_init_factor
 
-        # init inv_freq
-        inv_freq = 1.0 / (
-            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
-        )
-        inv_freq_idx_selected = torch.ones_like(inv_freq, dtype=torch.bool)
-        if self.num_inv_freq is not None:
-            num_inv_freq = self.num_inv_freq
-            inv_freq_idx_selected[num_inv_freq:] = False
-        else:
-            inv_freq_idx_selected = inv_freq > (
-                2.0 * torch.pi / max_position_embeddings
-            )
-            num_inv_freq = inv_freq_idx_selected.sum().item()
-        inv_freq = inv_freq[inv_freq_idx_selected]
-        self.inv_freq = inv_freq
-
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
@@ -88,10 +72,30 @@ class FourierRotaryEmbedding(RotaryEmbedding):
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
-        return None
+        inv_freq = 1.0 / (
+            base
+            ** (
+                torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
+            )
+        )
+
+        inv_freq_idx_selected = torch.ones_like(inv_freq, dtype=torch.bool)
+        if self.num_inv_freq is not None:
+            num_inv_freq = self.num_inv_freq
+            inv_freq_idx_selected[num_inv_freq:] = False
+        else:
+            inv_freq_idx_selected = inv_freq > (
+                2.0 * torch.pi / self.max_position_embeddings
+            )
+            num_inv_freq = inv_freq_idx_selected.sum().item()
+
+        inv_freq = inv_freq[inv_freq_idx_selected]
+
+        return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
+        self.inv_freq = self._compute_inv_freq(self.base)
         # FIXME: zhouxinyu, implement FoPE cos/sin cache computation
         return torch.zeros(1)
 
