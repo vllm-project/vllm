@@ -841,6 +841,7 @@ steps:
   no_gpu: true
   commands:
     - "pip install git+https://github.com/TIGER-AI-Lab/Mantis.git || echo 'Mantis installation skipped (decord not available on CPU-only environment)'"
+    - pip install timm==1.0.22
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor Test
