@@ -105,24 +105,7 @@ class MultiprocExecutor(Executor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        if not USE_TPU_INFERENCE:
-            self.world_size = self.parallel_config.world_size
-            assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-                f"global world_size ({self.parallel_config.world_size}) must be "
-                f"divisible by nnodes_within_dp "
-                f"({self.parallel_config.nnodes_within_dp}). "
-            )
-            self.local_world_size = self.parallel_config.local_world_size
-            tp_size = self.parallel_config.tensor_parallel_size
-            pp_size = self.parallel_config.pipeline_parallel_size
-            pcp_size = self.parallel_config.prefill_context_parallel_size
-        else:
-            # Jax handles TP, PCP with SPMD, world_size = pp_size.
-            self.world_size = self.parallel_config.pipeline_parallel_size
-            self.local_world_size = self.world_size
-            tp_size = 1
-            pcp_size = 1
-            pp_size = self.parallel_config.pipeline_parallel_size
+        tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
@@ -211,12 +194,7 @@ class MultiprocExecutor(Executor):
 
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
-            # set up jax transfer connection.
-            if USE_TPU_INFERENCE:
-                for rank in range(1, self.world_size):
-                    self.collective_rpc(
-                        "initialize_pp_transfer_connect", unique_reply_rank=rank
-                    )
+            self._post_init_executor()
 
             success = True
         finally:
@@ -229,6 +207,22 @@ class MultiprocExecutor(Executor):
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
+
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -442,8 +436,6 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
-        if USE_TPU_INFERENCE:
-            return self.world_size - 1
         return (
             self.world_size
             - self.parallel_config.tensor_parallel_size
