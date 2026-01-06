@@ -253,7 +253,6 @@ def maybe_roundup_hidden_size(
     Args:
         hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
         is_lora_enabled: True if the engine is enabled with LoRA. This
             is used in the case of mxfp4 quantization in selecting the
