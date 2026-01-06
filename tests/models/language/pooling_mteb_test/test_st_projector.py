@@ -29,7 +29,6 @@ ST_PROJECTOR_MODELS = [
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
         enable_test=True,
-        dtype="float32",
     ),
 ]
 
