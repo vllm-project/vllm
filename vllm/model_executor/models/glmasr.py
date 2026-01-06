@@ -125,20 +125,26 @@ class GPUWhisperFeatureExtractor:
 
         # Cached GPU tensors (lazily initialized)
         self._window: torch.Tensor | None = None
-        self._mel_filters: torch.Tensor | None = None
-        self._current_device: torch.device | None = None
+        self._mel_filters_T: torch.Tensor | None = None  # Transposed & contiguous
+        self._current_device_str: str | None = None
 
     def _ensure_buffers(self, device: torch.device) -> None:
         """Lazily initialize and cache buffers on the target device."""
-        if self._current_device == device:
+        # Use string comparison for stable device checking
+        device_str = str(device)
+        if self._current_device_str == device_str:
             return
 
         self._window = torch.hann_window(self.n_fft, device=device)
-        # Convert from numpy float64 to preserve precision during transfer
-        self._mel_filters = torch.from_numpy(self._mel_filters_np).to(
-            device=device, dtype=torch.float32
+        # Convert from numpy float64, transpose, and make contiguous for optimal matmul
+        # HF mel_filters is [n_mels, n_freqs], we need [n_freqs, n_mels] for matmul
+        # Using .contiguous() ensures optimal memory layout for GPU matmul
+        self._mel_filters_T = (
+            torch.from_numpy(self._mel_filters_np)
+            .to(device=device, dtype=torch.float32)
+            .T.contiguous()
         )
-        self._current_device = device
+        self._current_device_str = device_str
 
     def __call__(
         self,
@@ -253,11 +259,10 @@ class GPUWhisperFeatureExtractor:
         # Power spectrogram, drop last frame (matching HF implementation)
         magnitudes = stft[..., :-1].abs() ** 2  # [batch, n_freqs, frames]
 
-        # Apply mel filterbank: [n_freqs, n_mels].T @ [batch, n_freqs, frames]
+        # Apply mel filterbank: [n_freqs, n_mels] @ [batch, n_freqs, frames]
         # -> [batch, n_mels, frames]
-        # HF uses mel_filters.T @ magnitudes, where mel_filters is [n_mels, n_freqs]
-        # So we transpose to get [n_freqs, n_mels], then use matmul with broadcasting
-        mel_spec = torch.matmul(self._mel_filters.T, magnitudes)
+        # _mel_filters_T is pre-transposed and contiguous for optimal performance
+        mel_spec = torch.matmul(self._mel_filters_T, magnitudes)
 
         # Log scale with floor
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
