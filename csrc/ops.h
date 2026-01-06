@@ -142,8 +142,6 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
-void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
-
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
@@ -160,30 +158,11 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
-void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
-
-void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
-
-void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
-
-void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
-                     double threshold);
-void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
-                       double alpha = 1.702, double limit = 7.0);
-
-void gelu_new(torch::Tensor& out, torch::Tensor& input);
-
-void gelu_fast(torch::Tensor& out, torch::Tensor& input);
-
-void gelu_quick(torch::Tensor& out, torch::Tensor& input);
-
 void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& q_pe,
                         torch::Tensor const& kv_c_and_k_pe_cache,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
-
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
 
@@ -196,7 +175,6 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
