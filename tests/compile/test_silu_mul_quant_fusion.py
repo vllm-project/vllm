@@ -25,6 +25,21 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
+    FlashInferScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    PerTensorTorchScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
+    ROCmScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -33,7 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..utils import TestFP8Layer, override_cutlass_fp8_supported
+from ..utils import TestFP8Layer
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -47,21 +62,18 @@ def is_nvfp4_supported():
 class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
-    def __init__(self, hidden_size: int, cuda_force_torch: bool, **kwargs):
+    def __init__(
+        self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
+    ):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
-        self.weight_scale = torch.rand(1, dtype=torch.float32)
-        self.input_scale = torch.rand(1, dtype=torch.float32)
-        self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
-        with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = TestFP8Layer(
-                self.quant_key,
-                self.quant_key,
-                self.weight,
-                self.weight_scale,
-                self.input_scale,
-            )
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            force_kernel=force_kernel,
+        )
 
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
@@ -162,20 +174,27 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
         return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
 
 
+ROCM_KERNELS = [ROCmScaledMMLinearKernel, PerTensorTorchScaledMMLinearKernel]
+CUDA_KERNELS = [
+    FlashInferScaledMMLinearKernel,
+    CutlassFP8ScaledMMLinearKernel,
+    PerTensorTorchScaledMMLinearKernel,
+]
+TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+
+
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
 @pytest.mark.parametrize(
-    "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
-    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
+    "model_class, enable_quant_fp8_custom_op, force_kernel",
+    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
-        (TestSiluMulNvfp4QuantModel, False, False),
-        (TestSiluMulGroupFp8QuantModel, False, False),
+        (TestSiluMulNvfp4QuantModel, False, None),
+        (TestSiluMulGroupFp8QuantModel, False, None),
     ],
 )
-# cuda_force_torch used to test torch code path on platforms that
-# cutlass_fp8_supported() == True.
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
@@ -190,7 +209,7 @@ def test_fusion_silu_and_mul_quant(
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
-    cuda_force_torch: bool,
+    force_kernel: FP8ScaledMMLinearKernel | None,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
@@ -227,9 +246,7 @@ def test_fusion_silu_and_mul_quant(
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
-        model = model_class(
-            hidden_size=hidden_size, cuda_force_torch=cuda_force_torch, x=x
-        )
+        model = model_class(hidden_size=hidden_size, force_kernel=force_kernel, x=x)
 
         # First dimension dynamic
         torch._dynamo.mark_dynamic(x, 0)

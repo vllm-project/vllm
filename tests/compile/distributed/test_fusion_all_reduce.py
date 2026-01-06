@@ -82,22 +82,11 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
-        self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        self.input_scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        self.weight = [
-            torch.rand(hidden_size, hidden_size)
-            .to(dtype=current_platform.fp8_dtype())
-            .t()
-            for _ in range(3)
-        ]
-
         self.fp8_linear_layers = [
             TestFP8Layer(
-                self.quant_key,
-                self.quant_key,
-                self.weight[i],
-                self.wscale[i],
-                input_scale=self.input_scale[i],
+                weight_shape=(hidden_size, hidden_size),
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
             )
             for i in range(3)
         ]

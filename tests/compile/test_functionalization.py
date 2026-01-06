@@ -39,16 +39,11 @@ class TestSiluMul(torch.nn.Module):
     def __init__(self, hidden_size: int = 128):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
-        self.weight_scale = torch.rand(1, dtype=torch.float32)
-        self.input_scale = torch.rand(1, dtype=torch.float32)
         if TEST_FP8:
-            self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             self.fp8_linear = TestFP8Layer(
-                self.quant_key,
-                self.quant_key,
-                self.weight,
-                self.weight_scale,
-                self.input_scale,
+                weight_shape=(hidden_size, hidden_size),
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
             )
 
     def forward(self, x):
@@ -88,17 +83,10 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
         if TEST_FP8:
-            self.weight = (
-                torch.rand(hidden_size, intermediate_size).to(dtype=FP8_DTYPE).t()
-            )
-            self.weight_scale = torch.rand(1, dtype=torch.float32)
-            self.input_scale = torch.rand(1, dtype=torch.float32)
             self.fp8_linear = TestFP8Layer(
-                self.quant_key,
-                self.quant_key,
-                self.weight,
-                self.weight_scale,
-                self.input_scale,
+                weight_shape=(hidden_size, intermediate_size),
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
             )
 
     def forward(self, hidden_states, residual):
@@ -113,7 +101,6 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         norm_output, residual_output = self.norm(mm, residual)
 
         if TEST_FP8:
-            self.input_scale = self.input_scale.to(norm_output.device)
             # scaled_mm with static input quantization
             fp8_linear_result = self.fp8_linear(norm_output)
 

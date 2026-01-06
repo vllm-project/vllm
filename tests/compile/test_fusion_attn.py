@@ -184,11 +184,9 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             },
         )
         self.fp8_linear = TestFP8Layer(
-            self.quant_key,
-            self.quant_key,
-            self.w["weight"],
-            self.w["wscale"],
-            self.w["scale"],
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
         )
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
