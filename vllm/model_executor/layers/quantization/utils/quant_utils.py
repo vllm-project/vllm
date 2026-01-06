@@ -20,16 +20,10 @@ FP4_DTYPE = torch.uint8
 
 
 def get_fp8_min_max() -> tuple[float, float]:
-    """
-    Get the min and max values for FP8 quantization.
-
-    On ROCm platforms that use the torch.float8_e4m3fnuz dtype, the default
-    PyTorch finfo.max (240.0) causes accuracy issues with dynamic quantization.
-    Use 224.0 instead for fnuz dtype.
-
-    Returns:
-        Tuple of (fp8_min, fp8_max) values
-    """
+    """Get the min and max values for FP8 quantization."""
+    # Using the default value (240.0) from pytorch will cause accuracy
+    # issue on dynamic quantization models on ROCm. Here, use 224.0 for fnuz on
+    # ROCm platforms that use the torch.float8_e4m3fnuz dtype.
     if current_platform.is_fp8_fnuz():
         return -224.0, 224.0
     finfo = torch.finfo(current_platform.fp8_dtype())
