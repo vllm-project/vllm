@@ -683,10 +683,8 @@ class VllmBackend:
                         indent=2,
                         sort_keys=True,
                     )
-        except (OSError, TypeError, ValueError):
+        except Exception:
             # Best-effort only; metadata write failures are non-fatal.
-            # OSError: file system errors
-            # TypeError/ValueError: JSON serialization errors
             logger.warning(
                 (
                     "Could not write compile cache metadata at %s; continuing without "
