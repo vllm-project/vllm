@@ -89,7 +89,6 @@ MODELS = [
         "Qwen/Qwen3-Embedding-0.6B",
         mteb_score=0.771163695,
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
@@ -99,7 +98,6 @@ MODELS = [
     EmbedModelInfo(
         "Qwen/Qwen3-Embedding-4B",
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
         enable_test=False,
     ),
 ]
