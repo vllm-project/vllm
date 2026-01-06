@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -41,6 +42,26 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+
+
+@dataclass
+class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    metadata: tuple[KVConnectorWorkerMetadata | None, ...]
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        assert isinstance(other, MultiKVConnectorWorkerMetadata)
+
+        assert len(self.metadata) == len(other.metadata)
+        metadata_list = []
+        for metadata1, metadata2 in zip(self.metadata, other.metadata):
+            if metadata1 is None:
+                metadata_list.append(metadata2)
+            elif metadata2 is None:
+                metadata_list.append(metadata1)
+            else:
+                metadata_list.append(metadata1.aggregate(metadata2))
+
+        return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
 
 @dataclass
@@ -272,6 +293,18 @@ class MultiConnector(KVConnectorBase_V1):
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
 
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
+        for i, c in enumerate(self._connectors):
+            kv_connector_worker_meta = c.build_connector_worker_meta()
+            if metadata_list is None and kv_connector_worker_meta is not None:
+                metadata_list = [None] * i
+            if metadata_list is not None:
+                metadata_list.append(kv_connector_worker_meta)
+        if metadata_list is None:
+            return None
+        return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
+
     # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events' method
     # for the MultiConnector. It should be able to get events from multiple
     # connectors, handling the case where only a subset of the requested connectors
@@ -329,8 +362,25 @@ class MultiConnector(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        for c in self._connectors:
-            c.update_connector_output(connector_output)
+        multi_connector_worker_meta: MultiKVConnectorWorkerMetadata | None = None
+        if connector_output.kv_connector_worker_meta is not None:
+            assert isinstance(
+                connector_output.kv_connector_worker_meta,
+                MultiKVConnectorWorkerMetadata,
+            )
+            multi_connector_worker_meta = connector_output.kv_connector_worker_meta
+
+        try:
+            for i, c in enumerate(self._connectors):
+                if multi_connector_worker_meta is not None:
+                    # set the connector-specific worker metadata
+                    connector_output.kv_connector_worker_meta = (
+                        multi_connector_worker_meta.metadata[i]
+                    )
+                c.update_connector_output(connector_output)
+        finally:
+            # restore kv_connector_worker_meta
+            connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
     def request_finished(
         self,
