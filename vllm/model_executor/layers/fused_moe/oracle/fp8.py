@@ -8,30 +8,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    TritonExperts,
-    TritonOrDeepGemmExperts,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    CutlassExpertsFp8,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    AiterExperts,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -286,6 +267,29 @@ def make_fp8_moe_kernel(
     moe_config: FusedMoEConfig,
     fp8_backend: Fp8MoeBackend,
 ) -> tuple[mk.FusedMoEModularKernel, bool]:
+    # Delayed import is required since the oracle is imported
+    # by CPU backends which cannot import all of these experts.
+    # TODO: update the experts to make this not happen.
+    from vllm.model_executor.layers.fused_moe import (
+        TritonExperts,
+        TritonOrDeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp8,
+    )
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        MarlinExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoEP,
+    )
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        AiterExperts,
+    )
+
     # NOTE(rob): this is a WIP refactor. We are first migrating
     # all of the kernels in the TP case to use mk. Once this is
     # done, then we will initialzie the TP case and DP/EP case
