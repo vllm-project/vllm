@@ -84,7 +84,7 @@ Since simple RTN does not require data for weight quantization and the activatio
 Install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
+pip install vllm "lm-eval[api]>=0.4.9.2"
 ```
 
 Load and run the model in `vllm`:
