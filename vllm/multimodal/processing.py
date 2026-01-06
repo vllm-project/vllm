@@ -27,6 +27,7 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -1186,10 +1187,14 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
+        tokenizer = self.tokenizer
+        if isinstance(tokenizer, MistralTokenizer):
+            tokenizer = tokenizer.transformers_tokenizer
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             **kwargs,
         )
 
