@@ -1445,7 +1445,7 @@ def get_current_vllm_config() -> VllmConfig:
             "Current vLLM config is not set. This typically means "
             "get_current_vllm_config() was called outside of a "
             "set_current_vllm_config() context, or a CustomOp was "
-            "instantiated at module import time before config was set. "
+            "instantiated at module import time or model forward time when config is not set. "
             "For tests that directly test custom ops/modules, use the "
             "'default_vllm_config' pytest fixture from tests/conftest.py."
         )
