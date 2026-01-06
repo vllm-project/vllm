@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum
 
 import torch
 import torch.nn.functional as F
+from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -13,6 +15,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
@@ -52,46 +55,70 @@ else:
 logger = init_logger(__name__)
 
 
-# --8<-- [start:unquantized_fused_moe]
-@CustomOp.register("unquantized_fused_moe")
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
-    """MoE method without quantization."""
+class UnquantizedMoeBackend(Enum):
+    NONE = 0
+    FLASHINFER_CUTLASS = 1
+    AITER = 2
+    TRITON = 3
 
-    # --8<-- [end:unquantized_fused_moe]
 
-    def __init__(self, moe: FusedMoEConfig):
-        super().__init__(moe)
+def get_unquantized_moe_backend(
+    moe_parallel_config: FusedMoEParallelConfig,
+) -> UnquantizedMoeBackend | None:
+    """
+    Select the primary FP8 MoE backend
+    Note: Shape-specific fallbacks may still occur at runtime.
+    """
 
-        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+    rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
-        # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
-        self.flashinfer_cutlass_moe_enabled = (
-            has_flashinfer_cutlass_fused_moe()
-            and envs.VLLM_USE_FLASHINFER_MOE_FP16
-            and self.moe.moe_parallel_config.use_ep
-            and self.moe.moe_parallel_config.dp_size == 1
-            and current_platform.get_device_capability()[0] >= 9
-        )
-        if self.flashinfer_cutlass_moe_enabled:
+    # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
+    flashinfer_cutlass_moe_enabled = (
+        has_flashinfer_cutlass_fused_moe()
+        and envs.VLLM_USE_FLASHINFER_MOE_FP16
+        and moe_parallel_config.use_ep
+        and moe_parallel_config.dp_size == 1
+        and current_platform.get_device_capability()[0] >= 9
+    )
+    if current_platform.is_rocm():
+        if rocm_aiter_moe_enabled:
+            logger.info_once("Enabling ROCm Aiter MoE for UnquantizedFusedMoEMethod")
+            return UnquantizedMoeBackend.AITER
+        else:
+            return UnquantizedMoeBackend.TRITON
+    if current_platform.is_cuda():
+        if flashinfer_cutlass_moe_enabled:
             logger.info_once(
                 "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
             )
+            return UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
-            if (
-                self.moe.moe_parallel_config.use_ep
-                and self.moe.moe_parallel_config.dp_size == 1
-            ):
+            if moe_parallel_config.use_ep and moe_parallel_config.dp_size == 1:
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available for EP"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
                     scope="local",
                 )
-            elif self.moe.moe_parallel_config.dp_size > 1:
+            elif moe_parallel_config.dp_size > 1:
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
+            return UnquantizedMoeBackend.TRITON
+
+    return UnquantizedMoeBackend.NONE
+
+
+@CustomOp.register("unquantized_fused_moe")
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+    """MoE method without quantization."""
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+        self.unquantized_backend = get_unquantized_moe_backend(
+            self.moe.moe_parallel_config,
+        )
 
     @property
     def supports_eplb(self) -> bool:
@@ -105,7 +132,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> FusedMoEPrepareAndFinalize | None:
-        if self.rocm_aiter_moe_enabled:
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
             return None
         else:
             return super().maybe_make_prepare_finalize(routing_tables)
@@ -197,6 +224,63 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         return weight
 
+    def _setup_kernel(self, layer: Module) -> None:
+        """Setup Modular Kernel for TP Case"""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+
+        self.use_inplace = True
+
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                FlashInferExperts(
+                    out_dtype=layer.params_dtype,
+                    quant_config=self.moe_quant_config,
+                    tp_rank=self.moe.moe_parallel_config.tp_rank,
+                    tp_size=self.moe.moe_parallel_config.tp_size,
+                    ep_rank=self.moe.moe_parallel_config.ep_rank,
+                    ep_size=self.moe.moe_parallel_config.ep_size,
+                ),
+            )
+            self.use_inplace = False
+        elif self.unquantized_backend == UnquantizedMoeBackend.AITER:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                AiterExperts(self.moe_quant_config),
+                shared_experts=None,
+            )
+        elif self.unquantized_backend == UnquantizedMoeBackend.TRITON:
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonExperts(self.moe_quant_config),
+                shared_experts=None,
+            )
+        elif self.unquantized_backend == UnquantizedMoeBackend.NONE:
+            raise ValueError(
+                "Unable to select quantization backend, please check supported backend."
+            )
+
+    def _convert_weights_to_kernel_format(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+        w13_weight_scale: torch.Tensor | None = None,
+        w2_weight_scale: torch.Tensor | None = None,
+    ) -> None:
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data
+            )
+            replace_parameter(layer, "w13_weight", shuffled_w13)
+            replace_parameter(layer, "w2_weight", shuffled_w2)
+
+        elif self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+            replace_parameter(layer, "w13_weight", w13_weight)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
@@ -246,45 +330,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            if self.rocm_aiter_moe_enabled:
-                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-                    layer.w13_weight.data, layer.w2_weight.data
-                )
-                replace_parameter(layer, "w13_weight", shuffled_w13)
-                replace_parameter(layer, "w2_weight", shuffled_w2)
-
-                self.use_inplace = True
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    AiterExperts(self.moe_quant_config),
-                    shared_experts=None,
-                )
-
-            elif self.flashinfer_cutlass_moe_enabled:
-                self.use_inplace = False
-                # Swap halves to arrange as [w3; w1] (kernel expectation)
-                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-                replace_parameter(layer, "w13_weight", w13_weight)
-
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    FlashInferExperts(
-                        out_dtype=layer.params_dtype,
-                        quant_config=self.moe_quant_config,
-                        tp_rank=self.moe.moe_parallel_config.tp_rank,
-                        tp_size=self.moe.moe_parallel_config.tp_size,
-                        ep_rank=self.moe.moe_parallel_config.ep_rank,
-                        ep_size=self.moe.moe_parallel_config.ep_size,
-                    ),
-                )
-            else:
-                self.use_inplace = True
-                self.kernel = mk.FusedMoEModularKernel(
-                    MoEPrepareAndFinalizeNoEP(),
-                    TritonExperts(self.moe_quant_config),
-                    shared_experts=None,
-                )
+            self._convert_weights_to_kernel_format(layer=layer)
+            self._setup_kernel(
+                layer=layer,
+            )
 
     def apply(
         self,
