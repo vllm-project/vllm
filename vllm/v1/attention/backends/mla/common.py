@@ -791,7 +791,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
+            num_computed_tokens_cpu = (
+                common_attn_metadata.compute_num_computed_tokens().cpu()
+            )
 
             reqs_start = num_decodes  # prefill_start
 

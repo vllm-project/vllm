@@ -24,7 +24,7 @@ sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
-timm >=1.0.17 # required for internvl and gemma3n-mm test
+timm==1.0.17 # required for internvl and gemma3n-mm test
 torch==2.9.1
 torchaudio==2.9.1
 torchvision==0.24.1
