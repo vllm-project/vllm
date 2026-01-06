@@ -343,7 +343,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
-            self._convert_weights_to_kernel_format(layer=layer)
             self._setup_kernel(
                 layer=layer,
                 w13=layer.w13_weight,
