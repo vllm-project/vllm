@@ -39,6 +39,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
+    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -49,22 +50,17 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .audioflamingo3 import (
-    AudioFlamingo3MultiModalDataParser,
-    AudioFlamingo3ProcessingInfo,
-)
-from .audioflamingo3 import (
-    _audioflamingo3_field_config as _glmasr_field_config,
-)
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
+    _apply_rotary_pos_emb,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _get_num_features_for_item,
     _group_audio_embeddings,
     _normalize_chunk_counts,
+    _repeat_kv,
 )
 from .interfaces import (
     MultiModalEmbeddings,
@@ -78,56 +74,8 @@ from .whisper import ISO639_1_SUPPORTED_LANGS
 
 logger = logging.getLogger(__name__)
 
+
 # Optimized vLLM Native GlmAsrEncoder Implementation
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary position embeddings to query and key tensors.
-
-    Follows transformers' apply_rotary_pos_emb exactly.
-    Supports partial rotary where only the first rotary_dim of head_dim is rotated.
-
-    Args:
-        q: [batch, num_heads, seq_len, head_dim]
-        k: [batch, num_kv_heads, seq_len, head_dim]
-        cos: [batch, seq_len, rotary_dim]
-        sin: [batch, seq_len, rotary_dim]
-    """
-    # unsqueeze_dim=1 to add head dimension: [batch, 1, seq_len, rotary_dim]
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
-
-    # Get the rotary dimension from cos/sin
-    rotary_dim = cos.shape[-1]
-
-    # Split into rotary and pass-through parts
-    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
-    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
-
-    # Apply rotary embeddings on the first half or full tensor
-    q_embed = (q_rot * cos) + (_rotate_half(q_rot) * sin)
-    k_embed = (k_rot * cos) + (_rotate_half(k_rot) * sin)
-
-    # Concatenate back to full shape
-    q_embed = torch.cat([q_embed, q_pass], dim=-1)
-    k_embed = torch.cat([k_embed, k_pass], dim=-1)
-
-    return q_embed, k_embed
-
-
 class GlmAsrRotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding for GLM-ASR encoder.
@@ -225,27 +173,6 @@ class GlmAsrRotaryEmbedding(nn.Module):
         sin = self.sin_cached[:seq_len].unsqueeze(0)  # [1, seq_len, dim]
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-
-def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    Repeat key/value tensors for Grouped Query Attention.
-
-    Args:
-        hidden_states: [batch, num_kv_heads, seq_len, head_dim]
-        n_rep: Number of repetitions
-
-    Returns:
-        [batch, num_kv_heads * n_rep, seq_len, head_dim]
-    """
-    if n_rep == 1:
-        return hidden_states
-
-    batch, num_kv_heads, slen, head_dim = hidden_states.shape
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_kv_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
 
 
 class GlmAsrAttention(nn.Module):
@@ -645,9 +572,7 @@ class GlmAsrEncoder(nn.Module):
         return loaded_params
 
 
-# =============================================================================
 # GPU-accelerated Whisper Feature Extractor
-# =============================================================================
 
 
 class GPUWhisperFeatureExtractor:
@@ -913,7 +838,7 @@ class GlmAsrMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class GlmAsrProcessingInfo(AudioFlamingo3ProcessingInfo):
+class GlmAsrProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> GlmAsrConfig:
         return self.ctx.get_hf_config(GlmAsrConfig)
 
@@ -921,10 +846,12 @@ class GlmAsrProcessingInfo(AudioFlamingo3ProcessingInfo):
         return self.ctx.get_hf_processor(GlmAsrProcessor, **kwargs)
 
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
-        # Reuse parent implementation, but add type annotation and assertion
-        feature_extractor = super().get_feature_extractor(**kwargs)
-        assert isinstance(feature_extractor, WhisperFeatureExtractor)
+        hf_processor = self.get_hf_processor(**kwargs)
+        feature_extractor = hf_processor.feature_extractor
         return feature_extractor
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"audio": None}
 
 
 class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
@@ -956,7 +883,28 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         }
 
 
-class GlmAsrMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
+def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    chunk_counts = hf_inputs.get("chunk_counts")
+    if chunk_counts is not None:
+        return dict(
+            audio_embeds=MultiModalFieldConfig.batched("audio"),
+            input_features=MultiModalFieldConfig.flat_from_sizes(
+                "audio", chunk_counts, dim=0
+            ),
+            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                "audio", chunk_counts, dim=0
+            ),
+            chunk_counts=MultiModalFieldConfig.batched("audio"),
+        )
+    return dict(
+        audio_embeds=MultiModalFieldConfig.batched("audio"),
+        input_features=MultiModalFieldConfig.batched("audio"),
+        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
+        chunk_counts=MultiModalFieldConfig.batched("audio"),
+    )
+
+
+class GlmAsrMultiModalDataParser(MultiModalDataParser):
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[Any],

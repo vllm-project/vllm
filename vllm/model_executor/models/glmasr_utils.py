@@ -17,6 +17,74 @@ DEFAULT_MERGE_FACTOR = 4
 DEFAULT_CONV_PARAMS = [(1, 3, 1), (1, 3, 2)]
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary position embeddings to query and key tensors.
+
+    Follows transformers' apply_rotary_pos_emb exactly.
+    Supports partial rotary where only the first rotary_dim of head_dim is rotated.
+
+    Args:
+        q: [batch, num_heads, seq_len, head_dim]
+        k: [batch, num_kv_heads, seq_len, head_dim]
+        cos: [batch, seq_len, rotary_dim]
+        sin: [batch, seq_len, rotary_dim]
+    """
+    # unsqueeze_dim=1 to add head dimension: [batch, 1, seq_len, rotary_dim]
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+
+    # Get the rotary dimension from cos/sin
+    rotary_dim = cos.shape[-1]
+
+    # Split into rotary and pass-through parts
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    # Apply rotary embeddings on the first half or full tensor
+    q_embed = (q_rot * cos) + (_rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (_rotate_half(k_rot) * sin)
+
+    # Concatenate back to full shape
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+
+    return q_embed, k_embed
+
+
+def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    Repeat key/value tensors for Grouped Query Attention.
+
+    Args:
+        hidden_states: [batch, num_kv_heads, seq_len, head_dim]
+        n_rep: Number of repetitions
+
+    Returns:
+        [batch, num_kv_heads * n_rep, seq_len, head_dim]
+    """
+    if n_rep == 1:
+        return hidden_states
+
+    batch, num_kv_heads, slen, head_dim = hidden_states.shape
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_kv_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
+
+
 def _calculate_conv_output_length(
     input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
 ) -> torch.Tensor:
