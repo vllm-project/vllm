@@ -253,9 +253,11 @@ class GPUWhisperFeatureExtractor:
         # Power spectrogram, drop last frame (matching HF implementation)
         magnitudes = stft[..., :-1].abs() ** 2  # [batch, n_freqs, frames]
 
-        # Apply mel filterbank: [n_mels, n_freqs] @ [batch, n_freqs, frames]
+        # Apply mel filterbank: [n_freqs, n_mels].T @ [batch, n_freqs, frames]
         # -> [batch, n_mels, frames]
-        mel_spec = torch.matmul(self._mel_filters, magnitudes)
+        # HF uses mel_filters.T @ magnitudes, where mel_filters is [n_mels, n_freqs]
+        # So we transpose to get [n_freqs, n_mels], then use matmul with broadcasting
+        mel_spec = torch.matmul(self._mel_filters.T, magnitudes)
 
         # Log scale with floor
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
