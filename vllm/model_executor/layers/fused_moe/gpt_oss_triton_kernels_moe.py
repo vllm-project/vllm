@@ -94,6 +94,7 @@ def triton_kernel_moe_forward(
     if (
         quant_config is not None
         and quant_config.use_mxfp4_w4a16
+        and quant_config.ocp_mx_scheme == "w_mxfp4"
     ):
         output = torch.empty_like(hidden_states)
 
