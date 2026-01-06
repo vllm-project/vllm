@@ -4,7 +4,7 @@
 import openai
 import pytest
 
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
 from ...entrypoints.openai.test_vision import TEST_IMAGE_ASSETS
@@ -12,11 +12,9 @@ from ...utils import RemoteOpenAIServer
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server) -> dict[str, str]:
+def url_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_asset: encode_image_base64(
-            local_asset_server.get_image_asset(image_asset)
-        )
+        image_asset: encode_image_url(local_asset_server.get_image_asset(image_asset))
         for image_asset in TEST_IMAGE_ASSETS
     }
 
@@ -24,19 +22,16 @@ def base64_encoded_image(local_asset_server) -> dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 @pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
-async def test_basic_vision(model_name: str, base64_encoded_image: dict[str, str]):
+async def test_basic_vision(model_name: str, url_encoded_image: dict[str, str]):
     pytest.skip("Skip this test until it's fixed.")
 
-    def whats_in_this_image_msg(b64):
+    def whats_in_this_image_msg(url):
         return [
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What's in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                    },
+                    {"type": "image_url", "image_url": {"url": url}},
                 ],
             }
         ]
@@ -63,14 +58,14 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str, str
 
         # Other requests now should be much faster
         for image_url in TEST_IMAGE_ASSETS:
-            image_base64 = base64_encoded_image[image_url]
-            chat_completion_from_base64 = await client.chat.completions.create(
+            image_url = url_encoded_image[image_url]
+            chat_completion_from_url = await client.chat.completions.create(
                 model=model_name,
-                messages=whats_in_this_image_msg(image_base64),
+                messages=whats_in_this_image_msg(image_url),
                 max_completion_tokens=24,
                 temperature=0.0,
             )
-            result = chat_completion_from_base64
+            result = chat_completion_from_url
             assert result
             choice = result.choices[0]
             assert choice.finish_reason == "length"

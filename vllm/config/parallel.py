@@ -36,6 +36,14 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+All2AllBackend = Literal[
+    "naive",
+    "pplx",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "allgather_reducescatter",
+    "flashinfer_all2allv",
+]
 
 
 @config
@@ -111,6 +119,8 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    is_moe_model: bool | None = None
+    """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -126,24 +136,14 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: (
-        Literal[
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ]
-        | None
-    ) = None
-    """All2All backend for MoE expert parallel communication. If not set, uses
-    the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
-    - "naive": Naive all2all implementation using broadcasts
-    - "allgather_reducescatter": All2all based on allgather and reducescatter
-    - "pplx": Use pplx kernels
-    - "deepep_high_throughput": Use deepep high-throughput kernels
-    - "deepep_low_latency": Use deepep low-latency kernels
+    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    """All2All backend for MoE expert parallel communication. Available options:
+
+    - "naive": Naive all2all implementation using broadcasts\n
+    - "allgather_reducescatter": All2all based on allgather and reducescatter\n
+    - "pplx": Use pplx kernels\n
+    - "deepep_high_throughput": Use deepep high-throughput kernels\n
+    - "deepep_low_latency": Use deepep low-latency kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
@@ -256,6 +256,10 @@ class ParallelConfig:
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
+
+    data_parallel_index: int = Field(init=False)
+    """Equal to the data parallel rank but not used for torch process groups
+    and not overridden for dense models."""
 
     _api_process_count: int = Field(default=1, gt=0)
     """
@@ -476,6 +480,8 @@ class ParallelConfig:
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
             "data_parallel_rank_local",
+            "data_parallel_size_local",
+            "data_parallel_index",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
@@ -504,20 +510,17 @@ class ParallelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
-        # Explicitly include backend affecting env factor as before
-        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Set all2all_backend from env var if not specified, with deprecation warning
-        if self.all2all_backend is None:
+        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
+            logger.warning_once(
+                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
+                "will be removed in v0.15.0. Please use the "
+                "--all2all-backend command-line argument instead."
+            )
             self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-                logger.warning_once(
-                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                    "will be removed in a future release. Please use the "
-                    "--all2all-backend command-line argument instead."
-                )
 
         # Continue with the rest of the initialization
         self.world_size = (
@@ -558,6 +561,14 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_size > 1 and self.is_moe_model is False:
+                raise ValueError(
+                    "Offline data parallel mode is not supported/useful"
+                    " for dense models."
+                )
+
+        self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
