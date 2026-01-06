@@ -411,11 +411,23 @@ COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /tmp/pytorch_vars.env && \
     if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+        # For nightly builds: Use two-stage installation to prevent torch downgrade
+        # Stage 1: Install all dependencies (which may downgrade torch due to pinned versions)
         echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
-        python3 use_existing_torch.py; \
-    fi && \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
-    --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}
+        python3 use_existing_torch.py && \
+        echo ">>> Stage 1: Installing dev dependencies (allowing any torch version)" && \
+        uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
+            --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG} && \
+        # Stage 2: Force-reinstall torch nightly packages to ensure correct versions
+        echo ">>> Stage 2: Reinstalling torch nightly packages to ensure correct versions" && \
+        uv pip install --python /opt/venv/bin/python3 --force-reinstall --no-deps \
+            torch torchaudio torchvision triton \
+            --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
+    else \
+        # For stable builds: Standard single-stage installation
+        uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
+            --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
+    fi
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -661,11 +673,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         . /tmp/pytorch_vars.env && \
         if [ "$USE_TORCH_NIGHTLY" = "true" ]; then \
+            # For nightly builds: Use two-stage installation to prevent torch downgrade
+            # Stage 1: Install all dependencies (which may downgrade torch due to pinned versions)
             echo ">>> Running use_existing_torch.py to reset torch dependencies for nightly build" && \
-            python3 use_existing_torch.py; \
-        fi && \
-        uv pip install --system -r requirements/dev.txt \
-        --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
+            python3 use_existing_torch.py && \
+            echo ">>> Stage 1: Installing dev dependencies (allowing any torch version)" && \
+            uv pip install --system -r requirements/dev.txt \
+                --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG} && \
+            # Stage 2: Force-reinstall torch nightly packages to ensure correct versions
+            echo ">>> Stage 2: Reinstalling torch nightly packages to ensure correct versions" && \
+            uv pip install --system --force-reinstall --no-deps \
+                torch torchaudio torchvision triton \
+                --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
+        else \
+            # For stable builds: Standard single-stage installation
+            uv pip install --system -r requirements/dev.txt \
+                --extra-index-url ${PYTORCH_INDEX} ${PRERELEASE_FLAG}; \
+        fi; \
     fi
 
 # install development dependencies (for testing)
