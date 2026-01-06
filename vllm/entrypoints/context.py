@@ -767,7 +767,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.encoding = get_encoding()
         self.last_tok = None
         self.first_tok_of_message = True
-        self.last_delta = None
+        self.last_content_delta = None
 
     @property
     def messages(self) -> list:
