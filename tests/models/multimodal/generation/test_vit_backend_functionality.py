@@ -15,7 +15,7 @@ from transformers import AutoProcessor
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import encode_image_url
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
@@ -178,8 +178,7 @@ def build_dots_ocr_prompt(images, config):
     """Build Dots.OCR specific prompt with OCR instructions."""
     # Use only stop_sign image for Dots.OCR
     image = images[0]  # Already filtered to stop_sign
-
-    image_url = f"data:image/jpeg;base64,{encode_image_base64(image)}"
+    image_url = encode_image_url(image)
 
     placeholders = [{"type": "image_url", "image_url": {"url": image_url}}]
     messages = [
@@ -204,9 +203,7 @@ def build_processor_prompt(images, config):
         config["model_name"], trust_remote_code=True
     )
 
-    image_urls = [
-        f"data:image/jpeg;base64,{encode_image_base64(img)}" for img in images
-    ]
+    image_urls = [encode_image_url(img) for img in images]
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
         {
@@ -225,9 +222,7 @@ def build_processor_prompt(images, config):
 
 def build_ovis_prompt(images, config):
     """Build Ovis2.5 specific prompt with custom format."""
-    image_urls = [
-        f"data:image/jpeg;base64,{encode_image_base64(img)}" for img in images
-    ]
+    image_urls = [encode_image_url(img) for img in images]
 
     placeholders = "\n".join(
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)

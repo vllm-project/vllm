@@ -87,8 +87,12 @@ logger = init_logger(__name__)
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
-    from nixl._api import nixl_agent as NixlWrapper
-    from nixl._bindings import nixlXferTelemetry
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent as NixlWrapper
+        from nixl._bindings import nixlXferTelemetry
+    else:
+        from rixl._api import nixl_agent as NixlWrapper
+        from rixl._bindings import nixlXferTelemetry
 
     logger.info("NIXL is available")
 except ImportError:
@@ -98,7 +102,10 @@ except ImportError:
 
 
 try:
-    from nixl._api import nixl_agent_config
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent_config
+    else:
+        from rixl._api import nixl_agent_config
 except ImportError:
     nixl_agent_config = None
     logger.warning("NIXL agent config is not available")
@@ -467,7 +474,7 @@ class NixlConnectorScheduler:
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
         )
         assert vllm_config.kv_transfer_config is not None
         if current_platform.device_type == "cpu":
