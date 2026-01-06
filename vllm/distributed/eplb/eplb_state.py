@@ -423,7 +423,7 @@ class EplbState:
         # Set the policy based on the selected eplb algorithm type.
         policy_type = self.parallel_config.eplb_config.policy
         self.policy = EPLB_POLICIES[policy_type]
-        logger.debug("Selected EPLB policy: %d", policy_type)
+        logger.debug("Selected EPLB policy: %s", policy_type)
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (

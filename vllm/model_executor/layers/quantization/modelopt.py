@@ -752,13 +752,17 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
+
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe
+                self.moe,
+                use_deepseek_fp8_block_scale=False,
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -1452,6 +1456,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
         ):
+            # TP case: avoid convert to ModularKernelMethod - to be refactored.
+            if self.moe.dp_size == 1:
+                return None
             # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
                 self.moe
