@@ -1376,7 +1376,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--custom-output-len",
         type=int,
         default=256,
-        help="Number of output tokens per request, used only for custom dataset.",
+        help="Default number of output tokens per request, when not specified "
+        "in the dataset. Used only for custom dataset.",
     )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
@@ -2030,6 +2031,7 @@ class CustomDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
+            new_output_len = item.get("output_tokens", output_len)
 
             # apply template
             if not skip_chat_template:
@@ -2044,7 +2046,7 @@ class CustomDataset(BenchmarkDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len,
+                    expected_output_len=new_output_len,
                     request_id=request_id_prefix + str(i),
                 )
             )
