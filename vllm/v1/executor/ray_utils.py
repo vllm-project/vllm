@@ -103,8 +103,11 @@ try:
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTensors
-            if isinstance(output, IntermediateTensors|JaxIntermediateTensors):
+            from tpu_inference.models.jax.jax_intermediate_tensor import (
+                JaxIntermediateTensors,
+            )
+
+            if isinstance(output, IntermediateTensors | JaxIntermediateTensors):
                 return scheduler_output, grammar_output, output
 
             if isinstance(output, AsyncModelRunnerOutput):
