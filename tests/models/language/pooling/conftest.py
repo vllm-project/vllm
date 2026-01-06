@@ -20,7 +20,7 @@ def pytest_sessionstart(session):
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
-    torch.set_float32_matmul_precision("highest")
+    torch.set_float32_matmul_precision("high")
     warnings.warn(
         "ROCm: Disabled flash_sdp and mem_efficient_sdp, enabled math_sdp "
         "to avoid HuggingFace Transformers accuracy issues",
