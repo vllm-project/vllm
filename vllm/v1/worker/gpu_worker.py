@@ -415,12 +415,6 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
-        from vllm.config import set_current_vllm_config
-
-        with set_current_vllm_config(self.vllm_config):
-            self._compile_or_warm_up_model_impl()
-
-    def _compile_or_warm_up_model_impl(self) -> None:
         warmup_sizes = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:

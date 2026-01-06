@@ -1177,9 +1177,9 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1316,9 +1316,9 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     data_parallel_size = 1
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 

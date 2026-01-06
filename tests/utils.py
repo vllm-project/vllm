@@ -726,13 +726,13 @@ def init_test_distributed_environment(
     # is already set and only create a default one if needed.
     from vllm.config import (
         VllmConfig,
-        _current_vllm_config,
+        get_current_vllm_config_or_none,
         set_current_vllm_config,
     )
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
 
-    if _current_vllm_config is not None:
+    if get_current_vllm_config_or_none() is not None:
         # Config already set, use it directly
         init_distributed_environment(
             world_size=pp_size * tp_size,
