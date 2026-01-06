@@ -189,6 +189,49 @@ class BlockTable:
                 out=self.slot_mapping.np[: req_indices.shape[0]],
             )
 
+    def compute_slot_mapping_gpu(
+        self, req_indices: torch.Tensor, positions: torch.Tensor
+    ) -> None:
+        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        if total_cp_world_size > 1:
+            virtual_block_size = self.block_size * total_cp_world_size
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req
+                + positions // virtual_block_size
+            )
+
+            block_numbers = self.block_table.gpu.view(-1)[block_table_indices]
+            virtual_block_offsets = positions % virtual_block_size
+            mask = (
+                virtual_block_offsets
+                // self.cp_kv_cache_interleave_size
+                % total_cp_world_size
+                == total_cp_rank
+            )
+            block_offsets = (
+                virtual_block_offsets
+                // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+                * self.cp_kv_cache_interleave_size
+                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            )
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(
+                mask, slot_mapping, -1
+            )
+        else:
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req + positions // self.block_size
+            )
+
+            block_numbers = self.block_table.gpu.view(-1)[block_table_indices]
+            block_offsets = positions % self.block_size
+            torch.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.gpu[: req_indices.shape[0]],
+            )
+
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
 
@@ -325,6 +368,12 @@ class MultiGroupBlockTable:
     ) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(req_indices, positions)
+
+    def compute_slot_mapping_gpu(
+        self, req_indices: torch.Tensor, positions: torch.Tensor
+    ) -> None:
+        for block_table in self.block_tables:
+            block_table.compute_slot_mapping_gpu(req_indices, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

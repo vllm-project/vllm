@@ -323,6 +323,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
