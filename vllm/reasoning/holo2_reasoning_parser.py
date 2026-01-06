@@ -46,9 +46,10 @@ class Holo2ReasoningParser(ReasoningParser):
         # all requests in the structured output manager. So it is important that without
         # user specified chat template args, the default thinking is True.
 
-        enable_thinking = bool(chat_kwargs.get("thinking", True))
-
-        if enable_thinking:
+        thinking = bool(chat_kwargs.get("thinking", True))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", True))
+        thinking = thinking and enable_thinking
+        if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
             self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
