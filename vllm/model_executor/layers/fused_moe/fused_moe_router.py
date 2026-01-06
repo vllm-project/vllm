@@ -30,9 +30,9 @@ class FusedMoERouter(ABC):
         router logits.
 
         Returns:
-            (topk_weights, topk_ids, zero_expert_result)
-            (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-            The weights, expert ids, and (optional) zero expert computation result.
+            (topk_weights, topk_ids)
+            (tuple[torch.Tensor, torch.Tensor]):
+            The weights and expert ids computation result.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
