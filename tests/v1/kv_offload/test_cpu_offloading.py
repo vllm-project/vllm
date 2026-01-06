@@ -19,8 +19,7 @@ ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
 if current_platform.is_cuda():
     ATTN_BACKENDS.append("FLASHINFER")
-
-if current_platform.is_rocm():
+elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
 
 
