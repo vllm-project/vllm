@@ -22,7 +22,7 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     max_shared_mem = ops.get_max_shared_memory_per_block_device_attribute(gpu)
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
-    assert max_shared_mem > 0, "max_shared_mem can not be zero"
+    assert max_shared_mem > 0, "max_shared_mem cannot be zero"
     return int(max_shared_mem)
 
 
@@ -66,27 +66,43 @@ class MemorySnapshot:
     torch_memory: int = 0
     non_torch_memory: int = 0
     timestamp: float = 0.0
+
+    device: torch.types.Device = None
     auto_measure: bool = True
 
     def __post_init__(self) -> None:
+        if self.device is None:
+            from vllm.platforms import current_platform
+
+            device_fn = current_platform.current_device
+            assert device_fn is not None
+            self.device_ = torch.device(device_fn())
+        else:
+            self.device_ = torch.device(self.device)
+
         if self.auto_measure:
             self.measure()
 
     def measure(self) -> None:
         from vllm.platforms import current_platform
 
+        device = self.device_
+
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats().get("allocated_bytes.all.peak", 0)
+        self.torch_peak = torch.cuda.memory_stats(device).get(
+            "allocated_bytes.all.peak", 0
+        )
 
-        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info(device)
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
             current_platform.is_cuda()
-            and current_platform.get_device_capability() in shared_sysmem_device_mem_sms
+            and current_platform.get_device_capability(device.index)
+            in shared_sysmem_device_mem_sms
         ):
             # On UMA (Orin, Thor and Spark) platform,
             # where both CPU and GPU rely on system memory,
@@ -106,12 +122,18 @@ class MemorySnapshot:
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.cuda.memory_reserved()
+        self.torch_memory = torch.cuda.memory_reserved(device)
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+        if self.device_ != other.device_:
+            raise ValueError(
+                "The two snapshots should be from the same device! "
+                f"Found: {self.device_} vs. {other.device_}"
+            )
+
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             free_memory=self.free_memory - other.free_memory,
@@ -120,6 +142,7 @@ class MemorySnapshot:
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
             timestamp=self.timestamp - other.timestamp,
+            device=self.device_,
             auto_measure=False,
         )
 
@@ -131,11 +154,15 @@ class MemoryProfilingResult:
     non_kv_cache_memory: int = 0
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
-    weights_memory: float = 0
+    weights_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
-    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
-    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __post_init__(self) -> None:
+        device = self.before_create.device_
+
+        self.before_profile = MemorySnapshot(device=device, auto_measure=False)
+        self.after_profile = MemorySnapshot(device=device, auto_measure=False)
 
     def __repr__(self) -> str:
         return (
@@ -152,9 +179,12 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-    baseline_snapshot: MemorySnapshot, weights_memory: int
+    baseline_snapshot: MemorySnapshot,
+    weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
-    """Memory profiling context manager.
+    """
+    Memory profiling context manager.
+
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.
         Note that, before loading the model weights, we also initialize the device
@@ -194,21 +224,24 @@ def memory_profiling(
     b. 2 GiB reserved for the peak activation tensors (category 2)
     c. 1 GiB used by non-torch components (category 3)
 
-    The memory used for loading weights (a.) is directly given from the argument `weights_memory`.
+    The memory used for loading weights (a.) is directly given from the
+    argument `weights_memory`.
 
-    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
+    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]`
+    during profiling gives (b.).
 
-    The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """  # noqa
+    The increase of `non_torch_memory` from creating the current vLLM instance
+    until after profiling to get (c.).
+    """
     gc.collect()
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_peak_memory_stats(baseline_snapshot.device_)
 
-    result = MemoryProfilingResult()
-
-    result.before_create = baseline_snapshot
-    # the part of memory used for holding the model weights
-    result.weights_memory = weights_memory
+    result = MemoryProfilingResult(
+        before_create=baseline_snapshot,
+        # the part of memory used for holding the model weights
+        weights_memory=weights_memory,
+    )
 
     result.before_profile.measure()
 
@@ -229,4 +262,4 @@ def memory_profiling(
     peak_activation_memory = result.torch_peak_increase
     result.non_kv_cache_memory = (
         non_torch_memory + peak_activation_memory + result.weights_memory
-    )  # noqa
+    )

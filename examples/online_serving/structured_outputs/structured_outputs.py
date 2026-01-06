@@ -112,7 +112,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
         "messages": [
             {
                 "role": "user",
-                "content": "Generate an SQL query to show the 'username' and 'email'from the 'users' table.",
+                "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
             }
         ],
         "extra_body": {

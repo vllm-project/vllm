@@ -463,21 +463,27 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 # the tag for the part of model being compiled,
 # e.g. backbone/eagle_head
 model_tag: str = "backbone"
+model_is_encoder: bool = False
 
 
 @contextmanager
-def set_model_tag(tag: str):
+def set_model_tag(tag: str, is_encoder: bool = False):
     """Context manager to set the model tag."""
     global model_tag
+    global model_is_encoder
     assert tag != model_tag, (
         f"Model tag {tag} is the same as the current tag {model_tag}."
     )
     old_tag = model_tag
+    old_is_encoder = model_is_encoder
+
     model_tag = tag
+    model_is_encoder = is_encoder
     try:
         yield
     finally:
         model_tag = old_tag
+        model_is_encoder = old_is_encoder
 
 
 class VllmBackend:
@@ -514,6 +520,7 @@ class VllmBackend:
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        is_encoder: bool = False,
     ):
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -522,6 +529,9 @@ class VllmBackend:
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
+
+        # Mark compilation for encoder.
+        self.is_encoder = is_encoder or model_is_encoder
 
         # Passes to run on the graph post-grad.
         self.pass_manager = resolve_obj_by_qualname(
@@ -620,7 +630,7 @@ class VllmBackend:
         os.makedirs(cache_dir, exist_ok=True)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_rank = vllm_config.parallel_config.data_parallel_index
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
@@ -788,7 +798,7 @@ class VllmBackend:
             or not self.compilation_config.cudagraph_copy_inputs
         ):
             return VllmSerializableFunction(
-                graph, example_inputs, self.prefix, self.split_gm
+                graph, example_inputs, self.prefix, self.split_gm, self.is_encoder
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -826,5 +836,5 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return VllmSerializableFunction(
-            graph, example_inputs, self.prefix, copy_and_call
+            graph, example_inputs, self.prefix, copy_and_call, self.is_encoder
         )
