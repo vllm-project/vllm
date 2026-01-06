@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from collections.abc import Sequence
 from typing import cast
 
 import torch
 import torch.nn as nn
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_AUDIO_LEN_S = 655
 DEFAULT_MERGE_FACTOR = 4
