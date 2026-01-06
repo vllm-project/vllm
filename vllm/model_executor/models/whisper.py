@@ -540,7 +540,7 @@ class WhisperEncoder(nn.Module):
         # Input to MHA must be B x T x D
         if input_is_batched or self.is_causal:
             # Models using WhisperEncoder may handle batching internally.
-            # If WhisperEncoder is causal sequences
+            # If WhisperEncoder is causal, sequences
             # are not padded to have identical seq length (T)
             # => concat over feature dim
             hidden_states = torch.cat(hidden_states)
