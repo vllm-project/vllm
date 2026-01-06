@@ -710,7 +710,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 else LMCacheMPRequestState.READY
             )
             # Clean up lookup future in scheduler adapter
-            self.scheduler_adapter._cleanup_lookup_result(request.request_id)
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
