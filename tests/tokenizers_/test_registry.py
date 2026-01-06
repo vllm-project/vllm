@@ -75,3 +75,12 @@ def test_customized_tokenizer():
     assert tokenizer.bos_token_id == 0
     assert tokenizer.eos_token_id == 1
     assert tokenizer.pad_token_id == 2
+
+
+def test_resolve_tokenizer_args_grok2(tmp_path: Path):
+    (tmp_path / "tokenizer.tok.json").write_text("{}", encoding="utf-8")
+
+    tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(tmp_path)
+
+    assert tokenizer_mode == "grok2"
+    assert tokenizer_name == tmp_path
