@@ -572,201 +572,6 @@ class GlmAsrEncoder(nn.Module):
         return loaded_params
 
 
-# GPU-accelerated Whisper Feature Extractor
-
-
-class GPUWhisperFeatureExtractor:
-    """
-    GPU-accelerated Whisper feature extractor using PyTorch.
-    Computes log-mel spectrogram matching WhisperFeatureExtractor output.
-
-    This implementation reuses the mel filterbank from HuggingFace's
-    WhisperFeatureExtractor to ensure numerical precision (1e-5 tolerance).
-    The key optimization is caching the window and mel_filters tensors on GPU
-    to avoid repeated CPU->GPU transfers.
-
-    Key parameters (Whisper defaults):
-        - n_fft: 400 (25ms window at 16kHz)
-        - hop_length: 160 (10ms hop at 16kHz)
-        - n_mels: 80
-        - chunk_length: 30 seconds
-        - sampling_rate: 16000
-    """
-
-    def __init__(
-        self,
-        hf_feature_extractor: WhisperFeatureExtractor,
-        device: str | torch.device = "cuda",
-    ):
-        # Copy parameters from HF feature extractor
-        self.feature_size = hf_feature_extractor.feature_size
-        self.sampling_rate = hf_feature_extractor.sampling_rate
-        self.hop_length = hf_feature_extractor.hop_length
-        self.chunk_length = hf_feature_extractor.chunk_length
-        self.n_fft = hf_feature_extractor.n_fft
-        self.padding_value = hf_feature_extractor.padding_value
-        self.device = torch.device(device) if isinstance(device, str) else device
-
-        # Derived parameters
-        self.n_samples = self.chunk_length * self.sampling_rate  # 480000 for 30s
-        self.nb_max_frames = self.n_samples // self.hop_length  # 3000 frames
-
-        # Store HF's mel_filters (numpy float64) for precision
-        # This is precomputed by HF using librosa-compatible mel_filter_bank
-        self._mel_filters_np: np.ndarray = hf_feature_extractor.mel_filters
-
-        # Cached GPU tensors (lazily initialized)
-        self._window: torch.Tensor | None = None
-        self._mel_filters_T: torch.Tensor | None = None  # Transposed & contiguous
-        self._current_device_str: str | None = None
-
-    def _ensure_buffers(self, device: torch.device) -> None:
-        """Lazily initialize and cache buffers on the target device."""
-        # Use string comparison for stable device checking
-        device_str = str(device)
-        if self._current_device_str == device_str:
-            return
-
-        self._window = torch.hann_window(self.n_fft, device=device)
-        # Convert from numpy float64, transpose, and make contiguous for optimal matmul
-        # HF mel_filters is [n_mels, n_freqs], we need [n_freqs, n_mels] for matmul
-        # Using .contiguous() ensures optimal memory layout for GPU matmul
-        self._mel_filters_T = (
-            torch.from_numpy(self._mel_filters_np)
-            .to(device=device, dtype=torch.float32)
-            .T.contiguous()
-        )
-        self._current_device_str = device_str
-
-    def __call__(
-        self,
-        raw_speech: list[np.ndarray] | np.ndarray | torch.Tensor,
-        sampling_rate: int | None = None,
-        padding: str = "max_length",
-        max_length: int | None = None,
-        return_attention_mask: bool = True,
-        return_tensors: str = "pt",
-        device: str | torch.device | None = None,
-    ) -> BatchFeature:
-        """
-        Extract log-mel spectrogram features from audio.
-
-        Args:
-            raw_speech: Audio waveform(s), can be list of arrays or batched
-            sampling_rate: Expected sample rate (must match self.sampling_rate)
-            padding: Padding strategy ('max_length' or 'longest')
-            max_length: Max samples (default: self.n_samples = 30s * 16kHz)
-            return_attention_mask: Whether to return attention mask
-            return_tensors: Output format ('pt' for PyTorch)
-            device: Device for computation (default: self.device)
-
-        Returns:
-            BatchFeature with 'input_features' and optionally 'attention_mask'
-        """
-        if sampling_rate is not None and sampling_rate != self.sampling_rate:
-            raise ValueError(
-                f"Expected sampling_rate={self.sampling_rate}, got {sampling_rate}"
-            )
-
-        device = torch.device(device) if device else self.device
-        max_length = max_length or self.n_samples
-
-        # Convert inputs to list of 1D tensors
-        if isinstance(raw_speech, np.ndarray):
-            raw_speech = [raw_speech] if raw_speech.ndim == 1 else list(raw_speech)
-        elif isinstance(raw_speech, torch.Tensor):
-            raw_speech = (
-                [raw_speech.numpy()]
-                if raw_speech.ndim == 1
-                else [s.numpy() for s in raw_speech]
-            )
-
-        batch_size = len(raw_speech)
-
-        # Get actual lengths before padding
-        lengths = [len(s) for s in raw_speech]
-
-        # Pad/truncate to max_length
-        if padding == "max_length":
-            target_length = max_length
-        else:  # 'longest'
-            target_length = min(max(lengths), max_length)
-
-        # Create padded batch tensor
-        padded_waveforms = torch.zeros(
-            batch_size, target_length, dtype=torch.float32, device=device
-        )
-        attention_mask = torch.zeros(
-            batch_size, target_length, dtype=torch.int32, device=device
-        )
-
-        for i, waveform in enumerate(raw_speech):
-            if isinstance(waveform, np.ndarray):
-                waveform = torch.from_numpy(waveform)
-            waveform = waveform.to(device=device, dtype=torch.float32)
-
-            # Truncate if needed
-            actual_len = min(len(waveform), target_length)
-            padded_waveforms[i, :actual_len] = waveform[:actual_len]
-            attention_mask[i, :actual_len] = 1
-
-        # Extract features on GPU
-        input_features = self._extract_fbank_features(padded_waveforms)
-
-        # Rescale attention mask from samples to frames
-        # STFT produces L//hop_length + 1 frames, but we drop the last one
-        frame_attention_mask = attention_mask[:, :: self.hop_length]
-        # Trim to match actual frame count (we drop last frame in _extract)
-        if attention_mask.shape[1] % self.hop_length != 0:
-            frame_attention_mask = frame_attention_mask[:, :-1]
-
-        result: dict[str, Any] = {"input_features": input_features}
-        if return_attention_mask:
-            result["attention_mask"] = frame_attention_mask
-
-        return BatchFeature(data=result, tensor_type=return_tensors)
-
-    def _extract_fbank_features(self, waveforms: torch.Tensor) -> torch.Tensor:
-        """
-        Compute log-mel spectrogram for batched waveforms.
-
-        Args:
-            waveforms: [batch, samples] float32 tensor on target device
-
-        Returns:
-            [batch, n_mels, frames] float32 tensor (log-mel spectrogram)
-        """
-        device = waveforms.device
-        self._ensure_buffers(device)
-
-        # STFT: [batch, samples] -> [batch, n_fft//2+1, frames] complex
-        stft = torch.stft(
-            waveforms,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            window=self._window,
-            return_complex=True,
-        )
-
-        # Power spectrogram, drop last frame (matching HF implementation)
-        magnitudes = stft[..., :-1].abs() ** 2  # [batch, n_freqs, frames]
-
-        # Apply mel filterbank: [n_freqs, n_mels] @ [batch, n_freqs, frames]
-        # -> [batch, n_mels, frames]
-        # _mel_filters_T is pre-transposed and contiguous for optimal performance
-        mel_spec = torch.matmul(self._mel_filters_T, magnitudes)
-
-        # Log scale with floor
-        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-
-        # Per-sample normalization (max - 8.0 floor, then scale)
-        max_val = log_spec.amax(dim=(1, 2), keepdim=True)
-        log_spec = torch.maximum(log_spec, max_val - 8.0)
-        log_spec = (log_spec + 4.0) / 4.0
-
-        return log_spec
-
-
 class GlmAsrFeatureInputs(TensorSchema):
     """
     Dimensions:
@@ -923,25 +728,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
     """
     GLM-ASR processor that inherits directly from BaseMultiModalProcessor
     for better performance and cleaner implementation.
-    Uses GPU-accelerated feature extraction for improved throughput.
     """
-
-    # Shared GPU feature extractor instance (lazy initialized)
-    _gpu_feature_extractor: GPUWhisperFeatureExtractor | None = None
-
-    @classmethod
-    def _get_gpu_feature_extractor(
-        cls,
-        hf_feature_extractor: WhisperFeatureExtractor,
-        device: str = "cuda",
-    ) -> GPUWhisperFeatureExtractor:
-        """Get or create GPU feature extractor matching HF config."""
-        if cls._gpu_feature_extractor is None:
-            cls._gpu_feature_extractor = GPUWhisperFeatureExtractor(
-                hf_feature_extractor=hf_feature_extractor,
-                device=device,
-            )
-        return cls._gpu_feature_extractor
 
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
@@ -1026,31 +813,13 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 end = min((i + 1) * window_size, time_cap)
                 flat_chunks.append(audio_el[start:end])
 
-        # ===== GPU Feature Extraction =====
-        # Check if CUDA is available, fallback to CPU if not
-        use_gpu = torch.cuda.is_available()
-        device = "cuda" if use_gpu else "cpu"
-
-        if use_gpu:
-            # Use GPU-accelerated feature extractor
-            gpu_extractor = self._get_gpu_feature_extractor(
-                hf_feature_extractor, device=device
-            )
-            audio_inputs = gpu_extractor(
-                flat_chunks,
-                sampling_rate=sampling_rate,
-                return_attention_mask=True,
-                return_tensors="pt",
-            )
-        else:
-            # Fallback to HF CPU implementation
-            audio_inputs = hf_feature_extractor(
-                flat_chunks,
-                sampling_rate=sampling_rate,
-                return_tensors="pt",
-                padding=True,
-                return_attention_mask=True,
-            )
+        audio_inputs = hf_feature_extractor(
+            flat_chunks,
+            sampling_rate=sampling_rate,
+            return_tensors="pt",
+            padding=True,
+            return_attention_mask=True,
+        )
 
         # ===== Process attention mask =====
         padding_mask = audio_inputs.pop("attention_mask")
