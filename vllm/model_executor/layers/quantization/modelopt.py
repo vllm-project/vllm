@@ -775,6 +775,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         layer.orig_dtype = params_dtype
+        layer.num_experts = num_experts
 
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
