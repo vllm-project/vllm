@@ -14,7 +14,7 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -268,7 +268,9 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(tag="weights"):
+        with self._maybe_get_memory_pool_context(
+            tag="weights"
+        ) and set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -413,6 +415,12 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(self.vllm_config):
+            self._compile_or_warm_up_model_impl()
+
+    def _compile_or_warm_up_model_impl(self) -> None:
         warmup_sizes = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
