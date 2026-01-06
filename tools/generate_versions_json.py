@@ -13,12 +13,16 @@ Usage:
 
 Options:
     --check    Verify versions.json matches Dockerfile (for CI validation)
+
+Requirements:
+    pip install dockerfile-parse
 """
 
 import json
-import re
 import sys
 from pathlib import Path
+
+from dockerfile_parse import DockerfileParser
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
@@ -44,16 +48,38 @@ TRACKED_ARGS = [
 
 
 def parse_dockerfile_args(dockerfile_path: Path) -> dict[str, str]:
-    """Extract ARG defaults from Dockerfile."""
-    args = {}
-    content = dockerfile_path.read_text()
+    """Extract ARG defaults from Dockerfile using dockerfile-parse."""
+    parser = DockerfileParser(path=str(dockerfile_path))
 
-    # Match ARG NAME=value patterns (handles quotes and no quotes)
-    pattern = r"^ARG\s+(\w+)=(['\"]?)([^'\"\n]+)\2\s*$"
-    for match in re.finditer(pattern, content, re.MULTILINE):
-        name, _, value = match.groups()
-        if name in TRACKED_ARGS and name not in args:
-            args[name] = value
+    # Extract ARGs from structure (more reliable for multi-stage Dockerfiles)
+    args = {}
+    for item in parser.structure:
+        if item["instruction"] != "ARG":
+            continue
+
+        value = item["value"]
+        if "=" not in value:
+            continue
+
+        # Parse ARG NAME=value (handle quotes)
+        name, _, default = value.partition("=")
+        name = name.strip()
+
+        if name not in TRACKED_ARGS:
+            continue
+        if name in args:
+            # Keep first occurrence
+            continue
+
+        # Strip surrounding quotes if present
+        default = default.strip()
+        if (default.startswith('"') and default.endswith('"')) or (
+            default.startswith("'") and default.endswith("'")
+        ):
+            default = default[1:-1]
+
+        if default:
+            args[name] = default
 
     return args
 
