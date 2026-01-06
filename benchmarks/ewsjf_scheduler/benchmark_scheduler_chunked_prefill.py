@@ -1,4 +1,6 @@
+import json
 # import multiprocessing
+import random
 import os
 import time
 import asyncio
@@ -43,7 +45,7 @@ async def send_requests_with_rate_limit(engine, prompts, sampling_params, reques
     return tasks
 
 
-async def main_ewsjf(queues_config, prompts, model, rates, tensor_parallel_size, sampling_params):
+async def main_ewsjf_chunked_prefill(queues_config, prompts, model, rates, tensor_parallel_size, sampling_params):
 
     # clustering:
     # data = np.array(dataset['train']['in_len_tokens_llama'])
@@ -53,58 +55,22 @@ async def main_ewsjf(queues_config, prompts, model, rates, tensor_parallel_size,
     external_parameters = {"queues_config": queues_config, "step_size": 1500}
     engine_args = AsyncEngineArgs(
         model=model,
-        scheduler_cls=SCHEDULER_CLS['ewsjf'],
+        scheduler_cls=SCHEDULER_CLS['chunked_prefill'],
+        # scheduler_cls=SCHEDULER_CLS['chunked_prefill_decode'],
         external_parameters=external_parameters,
         tensor_parallel_size=tensor_parallel_size,
-        max_num_batched_tokens=7000,
+        max_num_batched_tokens=8000,
         # Maximum number of tokens to be processed in a single iteration.
         # This config has no static default. If left unspecified by the user,
         # it will be set in `EngineArgs.create_engine_config` based on the usage context.
-        # long_prefill_token_threshold=8000,
+        long_prefill_token_threshold=8000,
         # For chunked prefill, a request is considered long if the prompt is
         # longer than this number of tokens.
         enable_chunked_prefill=True,
     )
 
     for i in range(len(rates)):
-        await run_engine(engine_args, prompts, sampling_params, rates[i], "EWSJF")
-
-async def main_sjf(prompts, model, rates, tensor_parallel_size, sampling_params):
-
-    engine_args = AsyncEngineArgs(
-        model=model,
-        scheduler_cls=SCHEDULER_CLS['sjf'],
-        tensor_parallel_size=tensor_parallel_size,
-        max_num_batched_tokens=7000,
-        # long_prefill_token_threshold=8000,
-        enable_chunked_prefill=True,
-    )
-
-    for i in range(len(rates)):
-        await run_engine(engine_args, prompts, sampling_params, rates[i], "SJF")
-
-
-async def main_fcfs(prompts, model, rates, tensor_parallel_size, sampling_params):
-
-    engine_args = AsyncEngineArgs(
-        model=model,
-        tensor_parallel_size=tensor_parallel_size,
-        max_num_batched_tokens=7000,
-        # long_prefill_token_threshold=8000,
-        enable_chunked_prefill=True,
-
-    )
-
-    for i in range(len(rates)):
-        await run_engine(engine_args, prompts, sampling_params, rates[i], "FCFS")
-
-
-async def main(queues_config, prompts, model, rates, tensor_parallel_size, sampling_params):
-    await main_ewsjf(queues_config, prompts, model, rates, tensor_parallel_size, sampling_params)
-
-    await main_sjf(prompts, model, rates, tensor_parallel_size, sampling_params)
-
-    await main_fcfs(prompts, model, rates, tensor_parallel_size, sampling_params)
+        await run_engine(engine_args, prompts, sampling_params, rates[i], "EWSJF_chunked_prefill")
 
 
 async def run_engine(engine_args, prompts, sampling_params, rate, scheduler_name):
@@ -116,9 +82,7 @@ async def run_engine(engine_args, prompts, sampling_params, rate, scheduler_name
     # Send requests with rate limiting
     tasks = await send_requests_with_rate_limit(engine, prompts, sampling_params, requests_per_second=rate)
     # Wait for all requests to complete
-    end_sending = time.time()
-
-    print(f"Waiting for all requests to complete... time: {end_sending-start}")
+    print("Waiting for all requests to complete...")
     outputs = await asyncio.gather(*tasks)
     end = time.time()
 
@@ -241,71 +205,15 @@ if __name__ == "__main__":
                  {'boundaries': (1802, 1864)},
                  {'boundaries': (1865, 1927)},
                  {'boundaries': (1928, 2000)}]
-    queues_30_1000_7500 = [
-        {'boundaries': (1000, 1216)},
-        {'boundaries': (1217, 1433)},
-        {'boundaries': (1434, 1650)},
-        {'boundaries': (1651, 1867)},
-        {'boundaries': (1868, 2084)},
-        {'boundaries': (2085, 2301)},
-        {'boundaries': (2302, 2518)},
-        {'boundaries': (2519, 2735)},
-        {'boundaries': (2736, 2952)},
-        {'boundaries': (2953, 3169)},
-        {'boundaries': (3170, 3386)},
-        {'boundaries': (3387, 3603)},
-        {'boundaries': (3604, 3820)},
-        {'boundaries': (3821, 4037)},
-        {'boundaries': (4038, 4254)},
-        {'boundaries': (4255, 4471)},
-        {'boundaries': (4472, 4688)},
-        {'boundaries': (4689, 4905)},
-        {'boundaries': (4906, 5122)},
-        {'boundaries': (5123, 5339)},
-        {'boundaries': (5340, 5556)},
-        {'boundaries': (5557, 5773)},
-        {'boundaries': (5774, 5990)},
-        {'boundaries': (5991, 6207)},
-        {'boundaries': (6208, 6424)},
-        {'boundaries': (6425, 6641)},
-        {'boundaries': (6642, 6858)},
-        {'boundaries': (6859, 7075)},
-        {'boundaries': (7076, 7292)},
-        {'boundaries': (7293, 7500)}
-    ]
-    queues_30_1000_7500_2 = [
-        {'boundaries': (500, 1000)},
-        {'boundaries': (1001, 1500)},
-        {'boundaries': (1501, 2000)},
-        {'boundaries': (2001, 2500)},
-        {'boundaries': (2501, 3000)},
-        {'boundaries': (3001, 3500)},
-        {'boundaries': (3501, 4000)},
-        {'boundaries': (4001, 4500)},
-        {'boundaries': (4501, 5000)},
-        {'boundaries': (5001, 5500)},
-        {'boundaries': (5501, 6000)},
-        {'boundaries': (6001, 6500)},
-        {'boundaries': (6501, 7000)},
-        {'boundaries': (7001, 7500)},
-        {'boundaries': (7501, 8000)},
-    ]
 
-    # dataset = load_dataset("ChayaLevi/data-100-2000")
+    dataset = load_dataset("ChayaLevi/data-100-2000")
     # dataset = load_dataset("ChayaLevi/data-100-16000")
-    # prompts = list(dataset['train']['input'])
-
-    # dataset = pd.read_csv("/home/chaya/data_30000_100_2000_.csv")
-    dataset = pd.read_csv("/home/chaya/data_10000_1000_7500.csv")
-    prompts = list(dataset['input'])
-
+    prompts = list(dataset['train']['input'])
     # prompt = prompts[:1000]
 
-    rates = [10,20]#[10, 20, 40, 60, 100, 200, 500]
-    model = "meta-llama/Meta-Llama-3-8B" #"meta-llama/Meta-Llama-3-8B" #"Qwen/Qwen2.5-7B-Instruct"
+    rates = [100]
+    model = "meta-llama/Meta-Llama-3-8B" #"Qwen/Qwen2.5-7B-Instruct",
     tensor_parallel_size = 1
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100, min_tokens=1)
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)#, max_tokens=100, min_tokens=1)
 
-    asyncio.run(main_sjf(prompts, model, rates, tensor_parallel_size, sampling_params))
-    # asyncio.run(main_ewsjf(queues_30_1000_7500_2, prompts, model, rates, tensor_parallel_size, sampling_params))
-    # asyncio.run(main(queues_30_100_16000, prompts, model, rates, tensor_parallel_size, sampling_params))
+    asyncio.run(main_ewsjf_chunked_prefill(queues_30_100_16000, prompts, model, rates, tensor_parallel_size, sampling_params))
