@@ -876,7 +876,6 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
-                "cpu_gptq",
                 "cpu_awq",
             ]
             quantization_methods = [
