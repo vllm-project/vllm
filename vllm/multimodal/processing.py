@@ -27,7 +27,6 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -1186,6 +1185,8 @@ class InputProcessingContext:
             from transformers.processing_utils import ProcessorMixin
 
             typ = ProcessorMixin
+
+        from vllm.tokenizers.mistral import MistralTokenizer
 
         tokenizer = self.tokenizer
         if isinstance(tokenizer, MistralTokenizer):
