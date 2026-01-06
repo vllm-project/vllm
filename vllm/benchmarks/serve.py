@@ -856,7 +856,9 @@ async def benchmark(
             )
             for pos in positions:
                 before_val = spec_decode_metrics_before.accepted_per_pos.get(pos, 0)
-                after_val = spec_decode_metrics_after.accepted_per_pos.get(pos, before_val)
+                after_val = spec_decode_metrics_after.accepted_per_pos.get(
+                    pos, before_val
+                )
                 delta_pos = after_val - before_val
                 per_pos_rates.append(delta_pos / delta_drafts)
 
