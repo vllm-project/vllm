@@ -297,7 +297,7 @@ def test_sparse_backend_decode_correctness(
     positions = np.arange(starts[-1], dtype=np.int32) - np.repeat(
         starts[:-1], seg_lengths
     )
-    seq_lengths = np.asarray(common_attn_metadata.seq_lens_cpu, dtype=np.int32)
+    seq_lengths = np.asarray(common_attn_metadata.seq_lens.cpu(), dtype=np.int32)
     prefix_lengths = seq_lengths - seg_lengths
     positions += np.repeat(prefix_lengths, seg_lengths)
 
