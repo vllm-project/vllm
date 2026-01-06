@@ -76,14 +76,14 @@ class GlmAsrRotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding for GLM-ASR encoder.
 
-    Pre-computes cos/sin cache and uses vLLM's ApplyRotaryEmb CustomOp
-    for efficient rotary embedding application.
+    Computes rotary position embeddings on-demand for efficiency.
+    Only caches inv_freq as a buffer; cos/sin are computed during forward
+    to avoid wasted computation during initialization and ensure correct
+    device placement.
     """
 
-    def __init__(self, config, device: torch.device | None = None):
+    def __init__(self, config) -> None:
         super().__init__()
-        self.config = config
-        self.max_seq_len_cached = config.max_position_embeddings
 
         # Compute inverse frequencies following transformers implementation
         head_dim = getattr(
@@ -107,64 +107,28 @@ class GlmAsrRotaryEmbedding(nn.Module):
 
         self.dim = dim
         self.head_dim = head_dim
-        self.base = base
 
-        # Compute the inverse frequencies exactly as transformers does
-        inv_freq = 1.0 / (
-            base
-            ** (
-                torch.arange(0, dim, 2, dtype=torch.int64).to(
-                    device=device, dtype=torch.float
-                )
-                / dim
-            )
-        )
+        # Only cache inv_freq; cos/sin computed on-demand in correct device
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # Pre-compute cos/sin cache for efficiency
-        self._set_cos_sin_cache(self.max_seq_len_cached, device)
-
-        # Use vLLM's ApplyRotaryEmb CustomOp for efficient rotary embedding
-        # enforce_enable=True ensures the op is always enabled (important for ViT)
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            is_neox_style=True,
-        )
-
-    def _set_cos_sin_cache(
-        self, seq_len: int, device: torch.device | None = None
-    ) -> None:
-        """Pre-compute cos and sin cache for given sequence length."""
-        self.max_seq_len_cached = seq_len
-
-        # Create position indices
-        t = torch.arange(seq_len, device=device, dtype=torch.float32)
-        # Compute frequencies: [seq_len, dim/2]
-        freqs = torch.outer(t, self.inv_freq.to(device=device, dtype=torch.float32))
-
-        # Compute and cache cos/sin (shape: [seq_len, dim/2])
-        # ApplyRotaryEmb expects cos/sin with shape [seq_len, rotary_dim/2]
-        cos = freqs.cos() * self.attention_scaling
-        sin = freqs.sin() * self.attention_scaling
-
-        self.register_buffer("cos_cached", cos, persistent=False)
-        self.register_buffer("sin_cached", sin, persistent=False)
-
-    def get_cos_sin(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, seq_len: int) -> torch.Tensor:
         """
-        Get cos and sin tensors for a given sequence length.
+        Compute rotary position frequencies for given sequence length.
 
         Args:
-            seq_len: The sequence length to get embeddings for.
+            seq_len: The sequence length to compute embeddings for.
 
         Returns:
-            Tuple of (cos, sin) tensors with shape [seq_len, dim/2]
+            Frequency tensor with shape [seq_len, dim/2]. Use .cos() and
+            .sin() to get the rotary embedding components.
         """
-        # Extend cache if needed
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len, device=self.cos_cached.device)
-
-        return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
+        # Compute on the same device as inv_freq (automatically correct after .to())
+        seq = torch.arange(
+            seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs * self.attention_scaling
 
 
 class GlmAsrAttention(nn.Module):
@@ -398,7 +362,17 @@ class GlmAsrEncoderLayer(nn.Module):
 
 
 class _GlmAsrEncoderOutput:
-    """Simple output container compatible with transformers' BaseModelOutput."""
+    """
+    Simple output container compatible with transformers' BaseModelOutput.
+
+    This lightweight container holds the encoder output and is compatible
+    with the transformers library's output format while being more efficient
+    than a full dataclass.
+
+    Attributes:
+        last_hidden_state: Final layer hidden states from the encoder.
+            Shape: [batch_size, seq_len, hidden_size]
+    """
 
     __slots__ = ("last_hidden_state",)
 
@@ -507,11 +481,10 @@ class GlmAsrEncoder(nn.Module):
         hidden_states = hidden_states.transpose(1, 2)
         output_seq_len = hidden_states.shape[1]
 
-        # Get cos/sin from rotary embedding cache
-        cos, sin = self.rotary_emb.get_cos_sin(output_seq_len)
-        # Match dtype with hidden states
-        cos = cos.to(dtype=hidden_states.dtype)
-        sin = sin.to(dtype=hidden_states.dtype)
+        # Compute rotary position embeddings on-demand
+        freqs = self.rotary_emb(output_seq_len)
+        cos = freqs.cos().to(dtype=hidden_states.dtype)
+        sin = freqs.sin().to(dtype=hidden_states.dtype)
 
         # Apply transformer layers
         for encoder_layer in self.layers:
@@ -605,6 +578,19 @@ GlmAsrInputs: TypeAlias = GlmAsrFeatureInputs | GlmAsrEmbeddingInputs
 
 
 class GlmAsrMultiModalProjector(nn.Module):
+    """
+    Projects audio encoder outputs to language model hidden space.
+
+    This projector uses a two-layer MLP to map audio features from the
+    encoder's intermediate size to the language model's hidden size.
+    Uses vLLM's parallel linear layers for tensor parallelism support.
+
+    Architecture:
+        - Linear layer: intermediate_size -> hidden_size * 2
+        - Activation function (e.g., GELU)
+        - Linear layer: hidden_size * 2 -> hidden_size
+    """
+
     def __init__(
         self,
         config: GlmAsrConfig,
@@ -634,6 +620,13 @@ class GlmAsrMultiModalProjector(nn.Module):
 
 
 class GlmAsrProcessingInfo(BaseProcessingInfo):
+    """
+    Processing information provider for GLM-ASR model.
+
+    Provides access to model configuration, processor, and feature extractor
+    needed for audio preprocessing and multimodal integration.
+    """
+
     def get_hf_config(self) -> GlmAsrConfig:
         return self.ctx.get_hf_config(GlmAsrConfig)
 
@@ -650,6 +643,14 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
 
 
 class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
+    """
+    Builder for dummy inputs used in profiling and testing.
+
+    Generates dummy text prompts and audio data that match the expected
+    format for GLM-ASR model inputs. Used for memory profiling and
+    performance benchmarking.
+    """
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         hf_processor = self.info.get_hf_processor()
@@ -679,6 +680,20 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
 
 
 def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    """
+    Configure multimodal field batching strategy for GLM-ASR.
+
+    Determines how to batch audio inputs based on whether chunking is used.
+    When chunk_counts is present, features are flattened across chunks;
+    otherwise, they are batched normally.
+
+    Args:
+        hf_inputs: Dictionary of preprocessed inputs from HuggingFace processor.
+
+    Returns:
+        Dictionary mapping field names to MultiModalFieldConfig objects
+        that specify batching behavior.
+    """
     chunk_counts = hf_inputs.get("chunk_counts")
     if chunk_counts is not None:
         return dict(
@@ -700,6 +715,13 @@ def _glmasr_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 
 class GlmAsrMultiModalDataParser(MultiModalDataParser):
+    """
+    Custom parser for GLM-ASR multimodal data.
+
+    Extends the base parser to handle GLM-ASR specific audio data formats,
+    including both pre-computed audio embeddings and raw audio features.
+    """
+
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[Any],
@@ -730,7 +752,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         feature_extractor: WhisperFeatureExtractor,
         processor: GlmAsrProcessor,
     ) -> list[int]:
-        """Calculate chunk counts for each audio."""
         sampling_rate = feature_extractor.sampling_rate
         chunk_length = feature_extractor.chunk_length
         max_audio_len = getattr(processor, "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S)
@@ -1054,6 +1075,7 @@ class GlmAsrForConditionalGeneration(
         return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        ""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
