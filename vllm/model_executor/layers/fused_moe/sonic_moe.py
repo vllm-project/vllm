@@ -126,6 +126,8 @@ def permute_weights_for_sonic(w: torch.Tensor) -> torch.Tensor:
 
     Reference: https://github.com/Dao-AILab/sonic-moe/issues/12
     """
+    if not w.is_contiguous():
+        w = w.contiguous()
     E, two_N, K = w.shape
     N = two_N // 2
     w_reshaped = w.view(E, 2, N, K)
@@ -228,6 +230,8 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         3. Down projection
         4. Router-weighted combination
         """
+        if expert_map is not None:
+            raise ValueError("Sonic MoE does not support expert_map/EP.")
         if activation not in ("silu", "silu_and_mul"):
             raise ValueError(
                 f"Sonic MoE only supports silu/silu_and_mul activation, "
@@ -331,9 +335,6 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
 
-_kernel_cache: dict[torch.dtype, mk.FusedMoEModularKernel] = {}
-
-
 def sonic_moe_forward(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -354,12 +355,10 @@ def sonic_moe_forward(
         )
 
     dtype = hidden_states.dtype
-    if dtype not in _kernel_cache:
-        _kernel_cache[dtype] = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            SonicMoeExperts(out_dtype=dtype),
-        )
-    fused_experts = _kernel_cache[dtype]
+    fused_experts = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        SonicMoeExperts(out_dtype=dtype),
+    )
 
     return fused_experts(
         hidden_states=hidden_states,

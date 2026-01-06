@@ -103,6 +103,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             sonic_supported
             and sonic_requested
             and current_platform.has_device_capability(90)
+            and self.moe.is_act_and_mul
             and not self.moe.has_bias
             and not self.moe.moe_parallel_config.use_ep
             and not self.flashinfer_cutlass_moe_enabled
@@ -119,6 +120,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             elif self.moe.moe_parallel_config.use_ep:
                 logger.debug_once(
                     "Sonic MoE disabled because expert parallelism is enabled."
+                )
+            elif not self.moe.is_act_and_mul:
+                logger.debug_once(
+                    "Sonic MoE disabled because is_act_and_mul is False."
                 )
 
     @property
