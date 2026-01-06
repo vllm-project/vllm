@@ -181,9 +181,16 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
+    # Whether any of the scheduled requests use structured output.
+    # Set only in async scheduling case.
+    has_structured_output_requests: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
+
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
