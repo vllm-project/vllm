@@ -85,9 +85,16 @@ def _get_moe_intermediate_size(config) -> int:
     return getattr(config, "moe_intermediate_size", config.intermediate_size)
 
 
-def _is_grok1_arch(config) -> bool:
-    architectures = getattr(config, "architectures", None) or []
-    return bool(architectures) and architectures[0] == "Grok1ModelForCausalLM"
+def _get_grok_version(config) -> str:
+    """Detect Grok version from HF config using multiple heuristics."""
+    # Check for Grok2-specific attributes (both for robust detection)
+    has_residual_moe = getattr(config, "residual_moe", False)
+    has_moe_intermediate_size = hasattr(config, "moe_intermediate_size")
+
+    if has_residual_moe or has_moe_intermediate_size:
+        return "grok2"
+
+    return "grok1"  # Default to Grok1
 
 
 def _get_rope_parameters(config) -> dict[str, Any] | None:
@@ -426,7 +433,16 @@ class Grok1DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Grok1Model(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        ckpt_gate_proj_name: str = "linear",
+        ckpt_down_proj_name: str = "linear_1",
+        ckpt_up_proj_name: str = "linear_v",
+        weight_name_remapping: dict[str, str] | None = None,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -436,6 +452,12 @@ class Grok1Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
+
+        # Store expert naming for weight loading
+        self.ckpt_gate_proj_name = ckpt_gate_proj_name
+        self.ckpt_down_proj_name = ckpt_down_proj_name
+        self.ckpt_up_proj_name = ckpt_up_proj_name
+        self.weight_name_remapping = weight_name_remapping or {}
 
         self.vocab_size = config.vocab_size
 
@@ -497,14 +519,13 @@ class Grok1Model(nn.Module):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Map Grok1's unique expert parameter names to standard names
+        # Map expert parameter names to standard names
         num_experts = _get_num_experts(self.config)
-        is_grok1 = _is_grok1_arch(self.config)
         return FusedMoE.make_expert_params_mapping(
             self,
-            ckpt_gate_proj_name="linear" if is_grok1 else "w1",
-            ckpt_down_proj_name="linear_1" if is_grok1 else "w2",
-            ckpt_up_proj_name="linear_v" if is_grok1 else "w3",
+            ckpt_gate_proj_name=self.ckpt_gate_proj_name,
+            ckpt_down_proj_name=self.ckpt_down_proj_name,
+            ckpt_up_proj_name=self.ckpt_up_proj_name,
             num_experts=num_experts,
         )
 
@@ -522,10 +543,10 @@ class Grok1Model(nn.Module):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-            if ".self_attn." in name:
-                name = name.replace(".self_attn.", ".attn.")
-            if ".block_sparse_moe." in name:
-                name = name.replace(".block_sparse_moe.", ".moe_block.")
+            # Apply version-specific weight name remapping
+            for old_pattern, new_pattern in self.weight_name_remapping.items():
+                if old_pattern in name:
+                    name = name.replace(old_pattern, new_pattern)
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
@@ -615,20 +636,28 @@ class Grok1Model(nn.Module):
         return loaded_params
 
 
-class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GrokBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    """Base class for Grok models with shared logic."""
+
     fall_back_to_pt_during_load = False
 
+    # Subclasses should override these
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
     }
+
+    # Expert weight naming - subclasses override these
+    ckpt_gate_proj_name: str = "linear"
+    ckpt_down_proj_name: str = "linear_1"
+    ckpt_up_proj_name: str = "linear_v"
+
+    def get_weight_name_remapping(self) -> dict[str, str]:
+        """Return weight name remapping for this version. Override in subclasses."""
+        return {}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -637,11 +666,15 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         quant_config = vllm_config.quant_config
 
         self.config = config
-
         self.quant_config = quant_config
 
         self.model = Grok1Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            ckpt_gate_proj_name=self.ckpt_gate_proj_name,
+            ckpt_down_proj_name=self.ckpt_down_proj_name,
+            ckpt_up_proj_name=self.ckpt_up_proj_name,
+            weight_name_remapping=self.get_weight_name_remapping(),
         )
 
         self.lm_head = ParallelLMHead(
@@ -701,3 +734,70 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+
+class Grok1ForCausalLM(GrokBaseForCausalLM):
+    """Grok1-specific implementation."""
+
+    # Grok1 expert weight naming
+    ckpt_gate_proj_name = "linear"
+    ckpt_down_proj_name = "linear_1"
+    ckpt_up_proj_name = "linear_v"
+
+    def get_weight_name_remapping(self) -> dict[str, str]:
+        # Grok1 uses standard naming, no remapping needed
+        return {}
+
+
+class Grok2ForCausalLM(GrokBaseForCausalLM):
+    """Grok2-specific implementation."""
+
+    # Grok2 has additional packed modules for MLP
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # Grok2 expert weight naming
+    ckpt_gate_proj_name = "w1"
+    ckpt_down_proj_name = "w2"
+    ckpt_up_proj_name = "w3"
+
+    def get_weight_name_remapping(self) -> dict[str, str]:
+        # Grok2 checkpoint uses different naming conventions
+        return {
+            ".self_attn.": ".attn.",
+            ".block_sparse_moe.": ".moe_block.",
+        }
+
+
+# Version dispatch mapping
+_GROK_VERSIONS: dict[str, type[GrokBaseForCausalLM]] = {
+    "grok1": Grok1ForCausalLM,
+    "grok2": Grok2ForCausalLM,
+}
+
+
+class GrokForCausalLM(GrokBaseForCausalLM):
+    """Factory class that dispatches to version-specific implementation."""
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        version = _get_grok_version(config)
+
+        instance_cls = _GROK_VERSIONS.get(version)
+        if instance_cls is None:
+            raise ValueError(f"Unsupported Grok version: {version}")
+
+        # Merge class attributes for LoRA/quantization compatibility
+        cls.packed_modules_mapping = dict(cls.packed_modules_mapping)
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
