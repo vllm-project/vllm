@@ -245,6 +245,7 @@ class Scheduler(SchedulerInterface):
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
         )
+        # TODO: need check for resume requests
         if request.num_output_tokens == 0:  # prefill
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
             # must be a multiple of `block_size`.

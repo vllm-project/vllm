@@ -803,6 +803,7 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(self.kv_cache_spec, MambaSpec)
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
+            # TODO: need comments
             last_state_block_idx = self.last_state_block_idx.get(request_id)
             if (
                 last_state_block_idx is not None
