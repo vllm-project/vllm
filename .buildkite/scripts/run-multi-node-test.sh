@@ -56,7 +56,7 @@ start_nodes() {
                 GPU_DEVICES+=','
             fi
         done
-        if [ "$IS_ROCM" -eq 0]; then
+        if [ "$IS_ROCM" -eq 0 ]; then
             GPU_DEVICES+='"'
         fi
 
