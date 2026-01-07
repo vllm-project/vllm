@@ -1376,8 +1376,9 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--custom-output-len",
         type=int,
         default=256,
-        help="Default number of output tokens per request, when not specified "
-        "in the dataset. Used only for custom dataset.",
+        help="Number of output tokens per request. Unless it is set to -1, the "
+        "value overrides potential output length loaded from the dataset. It is "
+        "used only for custom dataset.",
     )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
@@ -2031,7 +2032,23 @@ class CustomDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
-            new_output_len = item.get("output_tokens", output_len)
+
+            new_output_len = output_len
+            if output_len is None or output_len == -1:
+                # check that the request has an 'output_tokens' field
+                if "output_tokens" not in item:
+                    raise ValueError(
+                        "If no output length is provided the "
+                        "custom dataset must contain an 'output_tokens' field."
+                    )
+                # Use number of output tokens from the request data
+                try:
+                    new_output_len = int(item["output_tokens"])
+                except (ValueError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid value for 'output_tokens' in custom dataset: "
+                        f"'{item['output_tokens']}'. Must be an integer."
+                    ) from e
 
             # apply template
             if not skip_chat_template:
