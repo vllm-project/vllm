@@ -52,9 +52,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
+        return (0, 1, 2, 3) if include_num_layers_dimension else (0, 1, 2)
 
 
 @dataclass
