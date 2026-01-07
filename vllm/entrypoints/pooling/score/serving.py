@@ -55,13 +55,11 @@ class ServingScores(OpenAIServing):
         *,
         request_logger: RequestLogger | None,
         score_template: str | None = None,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.score_template = score_template
 
@@ -498,27 +496,22 @@ class ServingScores(OpenAIServing):
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        try:
-            final_res_batch = await self._run_scoring(
-                request.data_1,
-                request.data_2,
-                request,
-                request_id,
-                raw_request,
-            )
-            if isinstance(final_res_batch, ErrorResponse):
-                return final_res_batch
+        final_res_batch = await self._run_scoring(
+            request.data_1,
+            request.data_2,
+            request,
+            request_id,
+            raw_request,
+        )
+        if isinstance(final_res_batch, ErrorResponse):
+            return final_res_batch
 
-            return self.request_output_to_score_response(
-                final_res_batch,
-                request_id,
-                created_time,
-                self.models.model_name(),
-            )
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
+        return self.request_output_to_score_response(
+            final_res_batch,
+            request_id,
+            created_time,
+            self.models.model_name(),
+        )
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -539,30 +532,25 @@ class ServingScores(OpenAIServing):
         request_id = f"rerank-{self._base_request_id(raw_request)}"
         documents = request.documents
 
-        try:
-            final_res_batch = await self._run_scoring(
-                request.query,
-                documents,
-                request,
-                request_id,
-                raw_request,
-            )
-            if isinstance(final_res_batch, ErrorResponse):
-                return final_res_batch
+        final_res_batch = await self._run_scoring(
+            request.query,
+            documents,
+            request,
+            request_id,
+            raw_request,
+        )
+        if isinstance(final_res_batch, ErrorResponse):
+            return final_res_batch
 
-            top_n = request.top_n if request.top_n > 0 else len(final_res_batch)
+        top_n = request.top_n if request.top_n > 0 else len(final_res_batch)
 
-            return self.request_output_to_rerank_response(
-                final_res_batch,
-                request_id,
-                self.models.model_name(),
-                documents,
-                top_n,
-            )
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
+        return self.request_output_to_rerank_response(
+            final_res_batch,
+            request_id,
+            self.models.model_name(),
+            documents,
+            top_n,
+        )
 
     def request_output_to_score_response(
         self,

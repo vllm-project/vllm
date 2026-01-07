@@ -49,10 +49,7 @@ router = APIRouter()
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    try:
-        generator = await handler.create_tokenize(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+    generator = await handler.create_tokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

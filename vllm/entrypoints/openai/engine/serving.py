@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-import sys
 import time
-import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -38,10 +36,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
+    GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.context import (
@@ -62,6 +60,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranslationRequest,
 )
+from vllm.entrypoints.openai.utils import create_error_response
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -94,7 +93,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
@@ -129,15 +128,6 @@ from vllm.utils.async_utils import (
     merge_async_iterators,
 )
 from vllm.utils.mistral import is_mistral_tokenizer
-
-
-class GenerationError(Exception):
-    """raised when finish_reason indicates internal server error (500)"""
-
-    def __init__(self, message: str = "Internal server error"):
-        super().__init__(message)
-        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-
 
 logger = init_logger(__name__)
 
@@ -234,7 +224,6 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
     ):
         super().__init__()
 
@@ -244,8 +233,6 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-
-        self.log_error_stack = log_error_stack
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -535,78 +522,70 @@ class OpenAIServing:
         """Schedule the request and get the result generator."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        try:
-            trace_headers = (
-                None
-                if ctx.raw_request is None
-                else await self._get_trace_headers(ctx.raw_request.headers)
+        trace_headers = (
+            None
+            if ctx.raw_request is None
+            else await self._get_trace_headers(ctx.raw_request.headers)
+        )
+
+        pooling_params = self._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
+
+        if ctx.engine_prompts is None:
+            return self.create_error_response("Engine prompts not available")
+
+        for i, engine_prompt in enumerate(ctx.engine_prompts):
+            request_id_item = f"{ctx.request_id}-{i}"
+
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=pooling_params,
+                lora_request=ctx.lora_request,
             )
 
-            pooling_params = self._create_pooling_params(ctx)
-            if isinstance(pooling_params, ErrorResponse):
-                return pooling_params
+            generator = self.engine_client.encode(
+                engine_prompt,
+                pooling_params,
+                request_id_item,
+                lora_request=ctx.lora_request,
+                trace_headers=trace_headers,
+                priority=getattr(ctx.request, "priority", 0),
+            )
 
-            if ctx.engine_prompts is None:
-                return self.create_error_response("Engine prompts not available")
+            generators.append(generator)
 
-            for i, engine_prompt in enumerate(ctx.engine_prompts):
-                request_id_item = f"{ctx.request_id}-{i}"
+        ctx.result_generator = merge_async_iterators(*generators)
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                )
-
-                generator = self.engine_client.encode(
-                    engine_prompt,
-                    pooling_params,
-                    request_id_item,
-                    lora_request=ctx.lora_request,
-                    trace_headers=trace_headers,
-                    priority=getattr(ctx.request, "priority", 0),
-                )
-
-                generators.append(generator)
-
-            ctx.result_generator = merge_async_iterators(*generators)
-
-            return None
-
-        except Exception as e:
-            return self.create_error_response(e)
+        return None
 
     async def _collect_batch(
         self,
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
-        try:
-            if ctx.engine_prompts is None:
-                return self.create_error_response("Engine prompts not available")
+        if ctx.engine_prompts is None:
+            return self.create_error_response("Engine prompts not available")
 
-            num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[PoolingRequestOutput | None]
-            final_res_batch = [None] * num_prompts
+        num_prompts = len(ctx.engine_prompts)
+        final_res_batch: list[PoolingRequestOutput | None]
+        final_res_batch = [None] * num_prompts
 
-            if ctx.result_generator is None:
-                return self.create_error_response("Result generator not available")
+        if ctx.result_generator is None:
+            return self.create_error_response("Result generator not available")
 
-            async for i, res in ctx.result_generator:
-                final_res_batch[i] = res
+        async for i, res in ctx.result_generator:
+            final_res_batch[i] = res
 
-            if None in final_res_batch:
-                return self.create_error_response(
-                    "Failed to generate results for all prompts"
-                )
+        if None in final_res_batch:
+            return self.create_error_response(
+                "Failed to generate results for all prompts"
+            )
 
-            ctx.final_res_batch = [res for res in final_res_batch if res is not None]
+        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-            return None
-
-        except Exception as e:
-            return self.create_error_response(e)
+        return None
 
     def create_error_response(
         self,
@@ -615,53 +594,7 @@ class OpenAIServing:
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
-                status_code = HTTPStatus.NOT_IMPLEMENTED
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
-
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=sanitize_message(message),
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
-        )
+        return create_error_response(message, err_type, status_code, param)
 
     def create_streaming_error_response(
         self,
@@ -688,16 +621,6 @@ class OpenAIServing:
                 request_id,
             )
             raise GenerationError("Internal server error")
-
-    def _convert_generation_error_to_response(
-        self, e: GenerationError
-    ) -> ErrorResponse:
-        """Convert GenerationError to ErrorResponse."""
-        return self.create_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError

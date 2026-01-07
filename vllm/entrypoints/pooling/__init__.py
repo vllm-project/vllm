@@ -72,7 +72,6 @@ def init_pooling_state(
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
                 trust_request_chat_template=args.trust_request_chat_template,
-                log_error_stack=args.log_error_stack,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
@@ -86,7 +85,6 @@ def init_pooling_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "embed" in supported_tasks
         else None
@@ -99,7 +97,6 @@ def init_pooling_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
         else None
@@ -114,7 +111,6 @@ def init_pooling_state(
             state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None
