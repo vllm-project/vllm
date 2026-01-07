@@ -54,10 +54,16 @@ def _compilation_context():
     original_cache_size = torch._dynamo.config.cache_size_limit
     original_accumulated_cache = torch._dynamo.config.accumulated_cache_size_limit
 
+    original_capture_dynamic_output_shape_ops = getattr(
+        torch._dynamo.config, "capture_dynamic_output_shape_ops", None
+    )
+
     try:
-        # Set higher cache limits for compilation
-        torch._dynamo.config.cache_size_limit = 2048
-        torch._dynamo.config.accumulated_cache_size_limit = 8192
+        if (
+            envs.VLLM_MLA_EXPOSED_SPLIT
+            and original_capture_dynamic_output_shape_ops is not None
+        ):
+            torch._dynamo.config.capture_dynamic_output_shape_ops = True
 
         # Patch guard manager
         torch._C._dynamo.guards.GuardManager.add_global_state_guard = (
@@ -77,6 +83,13 @@ def _compilation_context():
         )
         torch._dynamo.config.cache_size_limit = original_cache_size
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
+        if (
+            envs.VLLM_MLA_EXPOSED_SPLIT
+            and original_capture_dynamic_output_shape_ops is not None
+        ):
+            torch._dynamo.config.capture_dynamic_output_shape_ops = (
+                original_capture_dynamic_output_shape_ops
+            )
 
 
 class TorchCompileWithNoGuardsWrapper:
@@ -181,11 +194,18 @@ class TorchCompileWithNoGuardsWrapper:
                 msg += "upgrade PyTorch version to use AOT compile."
                 logger.warning(msg)
 
+        dynamic_compile = envs.VLLM_MLA_EXPOSED_SPLIT
+
+        if envs.VLLM_MLA_EXPOSED_SPLIT and hasattr(
+            torch._dynamo.config, "capture_dynamic_output_shape_ops"
+        ):
+            torch._dynamo.config.capture_dynamic_output_shape_ops = True
+
         with aot_context:
             self._compiled_callable = torch.compile(
                 compiled_ptr,
                 fullgraph=True,
-                dynamic=False,
+                dynamic=dynamic_compile,
                 backend=backend,
                 options=options,
             )
