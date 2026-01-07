@@ -236,7 +236,7 @@ def test_select_common_block_size_no_valid_option():
         GPUModelRunner.select_common_block_size(48, attn_groups)
 
 
-def test_update_states_new_request(model_runner, dist_init):
+def test_update_states_new_request(default_vllm_config, model_runner, dist_init):
     req_id = "req_0"
 
     # new req
