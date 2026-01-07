@@ -1070,6 +1070,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
+
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
@@ -1115,6 +1116,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
+
             if AITER_TOPK_SIGMOID_FOUND:
                 direct_register_custom_op(
                     op_name="rocm_aiter_topk_sigmoid",

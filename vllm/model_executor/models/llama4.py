@@ -70,7 +70,9 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return dispatch_topk_sigmoid_routing_func()(gating_output, topk)
+        topk_sigmoid_func = dispatch_topk_sigmoid_routing_func()
+
+        return topk_sigmoid_func(gating_output, topk)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
