@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_gib
 
 from .inputs import (
     MultiModalBatchedField,
@@ -130,9 +131,9 @@ class MultiModalCache:
         if debug:
             leaf_count = json_count_leaves(value)
             logger.debug(
-                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                "Calculated size of %s to be %s GiB (%d leaves)",
                 type(value),
-                size / GiB_bytes,
+                format_gib(size),
                 leaf_count,
             )
 
