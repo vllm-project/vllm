@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.parser.responses_parser import (
-    get_streamable_responses_parser,
+    get_responses_parser_for_simple_context,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -282,7 +282,7 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
-        self.parser = get_streamable_responses_parser(
+        self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
             response_messages=response_messages,
             reasoning_parser_cls=reasoning_parser_cls,
@@ -303,6 +303,9 @@ class ParsableContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
+
+        # Store the last finish_reason to determine response status
+        self.finish_reason: str | None = None
 
     def _update_num_reasoning_tokens(self) -> None:
         """Update reasoning token count based on parser's last delta message."""
@@ -399,6 +402,8 @@ class ParsableContext(ConversationContext):
         self._update_prefill_token_usage(output)
         self._update_decode_token_usage(output)
 
+        # Store the finish_reason from the output
+        self.finish_reason = output.outputs[0].finish_reason
         # Process each token through the parser
         output_token_ids = output.outputs[0].token_ids
         for i, token_id in enumerate(output_token_ids):
@@ -414,7 +419,7 @@ class ParsableContext(ConversationContext):
         if output.finished:
             self.parser.response_messages.extend(self.parser.final_output)
             self.parser.reset()
-
+        
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""

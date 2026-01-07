@@ -711,7 +711,7 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = context.num_tool_output_tokens
 
             # Check finish reason from the parser
-            if context.parser.finish_reason == "length":
+            if context.finish_reason == "length":
                 status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)

@@ -91,10 +91,10 @@ def mock_request():
 
 
 @pytest.fixture
-def mock_streamable_parser():
-    """Set up a mock StreamableResponsesParser."""
+def mock_responses_parser():
+    """Set up a mock ResponsesParser."""
     with patch(
-        "vllm.entrypoints.context.get_streamable_responses_parser"
+        "vllm.entrypoints.context.get_responses_parser_for_simple_context"
     ) as mock_factory:
         parser = MagicMock()
         parser.response_messages = []
@@ -124,7 +124,7 @@ def create_parsable_context(
 
 
 def test_parsable_context_init(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test ParsableContext initialization."""
     context = create_parsable_context(
@@ -142,7 +142,7 @@ def test_parsable_context_init(
 
 
 def test_parsable_context_single_turn_token_counting(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test token counting behavior for a single turn."""
     context = create_parsable_context(
@@ -175,7 +175,7 @@ def test_parsable_context_single_turn_token_counting(
 
 @pytest.mark.asyncio
 async def test_parsable_context_multi_turn_token_counting(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test token counting behavior across multiple turns with tool output."""
     context = create_parsable_context(
@@ -246,7 +246,7 @@ async def test_parsable_context_multi_turn_token_counting(
 
 
 def test_parsable_context_empty_output_tokens(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test behavior when RequestOutput has empty output tokens."""
     context = create_parsable_context(
@@ -269,7 +269,7 @@ def test_parsable_context_empty_output_tokens(
 
 
 def test_parsable_context_missing_prompt_token_ids(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test behavior when RequestOutput has None prompt_token_ids."""
     context = create_parsable_context(
@@ -292,7 +292,7 @@ def test_parsable_context_missing_prompt_token_ids(
 
 
 def test_parsable_context_reasoning_tokens_counting(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test that reasoning tokens are counted correctly."""
     context = create_parsable_context(
@@ -300,7 +300,7 @@ def test_parsable_context_reasoning_tokens_counting(
     )
 
     # Mock parser to simulate reasoning channel
-    mock_streamable_parser.current_channel = "analysis"
+    mock_responses_parser.current_channel = "analysis"
 
     mock_output = create_mock_request_output(
         prompt_token_ids=[1, 2, 3],
@@ -316,7 +316,7 @@ def test_parsable_context_reasoning_tokens_counting(
 
 
 def test_parsable_context_zero_tokens_edge_case(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test behavior with all zero token counts."""
     context = create_parsable_context(
@@ -341,7 +341,7 @@ def test_parsable_context_zero_tokens_edge_case(
 
 @pytest.mark.asyncio
 async def test_parsable_context_single_turn_no_tool_output(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test that first turn never generates tool output tokens."""
     context = create_parsable_context(
@@ -367,7 +367,7 @@ async def test_parsable_context_single_turn_no_tool_output(
 
 @pytest.mark.asyncio
 async def test_parsable_context_negative_tool_tokens_edge_case(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test edge case where calculation could result in negative tool
     tokens. We should log an error and clamp the value to 0."""
@@ -413,7 +413,7 @@ async def test_parsable_context_negative_tool_tokens_edge_case(
 
 
 def test_parsable_context_append_tool_output(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test append_tool_output method."""
     context = create_parsable_context(
@@ -426,11 +426,11 @@ def test_parsable_context_append_tool_output(
     context.append_tool_output(tool_output)
 
     # Verify tool output was added to parser response_messages
-    assert tool_output == mock_streamable_parser.response_messages
+    assert tool_output == mock_responses_parser.response_messages
 
 
 def test_parsable_context_need_builtin_tool_call(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test need_builtin_tool_call method for different tool types."""
     context = create_parsable_context(
@@ -441,7 +441,7 @@ def test_parsable_context_need_builtin_tool_call(
     mock_msg = MagicMock()
     mock_msg.type = "function_call"
     mock_msg.name = "code_interpreter"
-    mock_streamable_parser.response_messages = [mock_msg]
+    mock_responses_parser.response_messages = [mock_msg]
 
     assert context.need_builtin_tool_call() is True
 
@@ -468,14 +468,14 @@ def test_parsable_context_need_builtin_tool_call(
 
 
 def test_parsable_context_parser_reset_on_finished(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test that parser is reset when output is finished."""
     context = create_parsable_context(
         mock_tokenizer, mock_reasoning_parser_cls, mock_request
     )
 
-    mock_streamable_parser.final_output = [{"type": "message", "content": "test"}]
+    mock_responses_parser.final_output = [{"type": "message", "content": "test"}]
 
     mock_output = create_mock_request_output(
         prompt_token_ids=[1, 2, 3],
@@ -486,11 +486,11 @@ def test_parsable_context_parser_reset_on_finished(
     context.append_output(mock_output)
 
     # Verify parser.reset() was called
-    mock_streamable_parser.reset.assert_called_once()
+    mock_responses_parser.reset.assert_called_once()
 
 
 def test_parsable_context_parser_not_reset_when_not_finished(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test that parser is not reset when output is not finished."""
     context = create_parsable_context(
@@ -506,11 +506,11 @@ def test_parsable_context_parser_not_reset_when_not_finished(
     context.append_output(mock_output)
 
     # Verify parser.reset() was not called
-    mock_streamable_parser.reset.assert_not_called()
+    mock_responses_parser.reset.assert_not_called()
 
 
 def test_parsable_context_render_for_completion_not_implemented(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test that render_for_completion raises NotImplementedError."""
     context = create_parsable_context(
@@ -580,14 +580,14 @@ def test_turn_metrics_copy_and_reset():
 
 @pytest.mark.asyncio
 async def test_parsable_context_call_tool_empty_messages(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test call_tool returns empty list when no messages."""
     context = create_parsable_context(
         mock_tokenizer, mock_reasoning_parser_cls, mock_request
     )
 
-    mock_streamable_parser.response_messages = []
+    mock_responses_parser.response_messages = []
 
     result = await context.call_tool()
     assert result == []
@@ -595,7 +595,7 @@ async def test_parsable_context_call_tool_empty_messages(
 
 @pytest.mark.asyncio
 async def test_parsable_context_init_tool_sessions(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test init_tool_sessions with tool server."""
     context = create_parsable_context(
@@ -630,7 +630,7 @@ async def test_parsable_context_init_tool_sessions(
 
 @pytest.mark.asyncio
 async def test_parsable_context_cleanup_session(
-    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_streamable_parser
+    mock_tokenizer, mock_reasoning_parser_cls, mock_request, mock_responses_parser
 ):
     """Test cleanup_session method."""
     context = create_parsable_context(
