@@ -151,7 +151,7 @@ class GritLMMeanPool(nn.Module):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerHeadOutput:
+    ) -> TokenPoolingMethodOutput:
         prompt_lens = pooling_metadata.prompt_lens
         instr_lens = torch.tensor(
             [
