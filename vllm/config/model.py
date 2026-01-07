@@ -102,7 +102,7 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
-    model_weights: str | None = None
+    model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object 
     storage (e.g., RunAI) to preserve the original URI while `model` points to 
     the local directory."""
@@ -693,7 +693,7 @@ class ModelConfig:
         """
 
         # Skip if model_weights is already set (model already pulled)
-        if self.model_weights is not None:
+        if self.model_weights:
             return
 
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
