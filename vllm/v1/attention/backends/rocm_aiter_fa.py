@@ -337,7 +337,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        seq_lens = common_attn_metadata.seq_lens_cpu
+        seq_lens = common_attn_metadata.seq_lens.cpu()
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -367,7 +367,7 @@ class AiterFlashAttentionMetadataBuilder(
         if num_extends > 0:
             num_extends_slice = slice(num_decodes, num_decodes + num_extends)
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
-            seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[num_extends_slice]
+            seq_lens_for_extend = seq_lens[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
             swa_metadata = None
             if self.aot_sliding_window is not None:
