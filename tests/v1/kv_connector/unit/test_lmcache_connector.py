@@ -25,6 +25,7 @@ def mock_lmcache_engine_event():
             lora_id,
             block_size,
             medium,
+            lora_name,
         ):
             self.block_hashes = block_hashes
             self.parent_block_hash = parent_block_hash
@@ -32,6 +33,7 @@ def mock_lmcache_engine_event():
             self.lora_id = lora_id
             self.block_size = block_size
             self.medium = medium
+            self.lora_name = lora_name
 
     return MockEvent(
         block_hashes=["hash1", "hash2"],
@@ -40,6 +42,7 @@ def mock_lmcache_engine_event():
         lora_id=None,
         block_size=16,
         medium="GPU",
+        lora_name=None,
     )
 
 
@@ -109,6 +112,7 @@ class TestGetKVConnectorKVCacheEvents:
         assert events[0].lora_id is None
         assert events[0].block_size == 16
         assert events[0].medium == "GPU"
+        assert events[0].lora_name is None
 
     def test_converts_multiple_events(self, mock_connector):
         """Test conversion of multiple events from lmcache engine format."""
@@ -121,6 +125,7 @@ class TestGetKVConnectorKVCacheEvents:
                 self.lora_id = None
                 self.block_size = 16
                 self.medium = "GPU"
+                self.lora_name = None
 
         events = [MockEvent(i) for i in range(5)]
         mock_connector._lmcache_engine.get_kv_events.return_value = events
@@ -150,6 +155,7 @@ class TestGetKVConnectorKVCacheEvents:
                 self.lora_id = 42
                 self.block_size = 32
                 self.medium = "DISK"
+                self.lora_name = "lora_example"
 
         mock_connector._lmcache_engine.get_kv_events.return_value = [
             MockEventWithLora()
@@ -166,6 +172,7 @@ class TestGetKVConnectorKVCacheEvents:
         assert event.lora_id == 42
         assert event.block_size == 32
         assert event.medium == "DISK"
+        assert event.lora_name == "lora_example"
 
     def test_handles_none_parent_block_hash(self, mock_connector):
         """Test handling of events with None parent_block_hash."""
@@ -178,6 +185,7 @@ class TestGetKVConnectorKVCacheEvents:
                 self.lora_id = None
                 self.block_size = 16
                 self.medium = "GPU"
+                self.lora_name = None
 
         mock_connector._lmcache_engine.get_kv_events.return_value = [
             MockEventNoParent()
@@ -223,6 +231,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events.add_events([event])
 
@@ -243,6 +252,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         existing_events.add_events([event1])
         existing_events.add_events([event1])  # Simulate 2 workers reporting
@@ -258,6 +268,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         new_events.add_events([event2])
 
@@ -288,6 +299,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         new_events.add_events([event])
 
@@ -309,6 +321,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events1.add_events([event1])
         output1 = KVConnectorOutput(kv_cache_events=events1)
@@ -323,6 +336,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events2.add_events([event2])
         output2 = KVConnectorOutput(kv_cache_events=events2)
@@ -337,6 +351,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events3.add_events([event3])
         output3 = KVConnectorOutput(kv_cache_events=events3)
@@ -358,6 +373,7 @@ class TestUpdateConnectorOutput:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         events1.add_events([event1])
         output1 = KVConnectorOutput(kv_cache_events=events1)
@@ -397,6 +413,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         event2 = BlockStored(
             block_hashes=["hash2"],
@@ -405,6 +422,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events.add_events([event1, event2])
         mock_connector._kv_cache_events = kv_events
@@ -431,6 +449,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         uncommon_event = BlockStored(
             block_hashes=["hash_uncommon"],
@@ -439,6 +458,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # All 3 workers report common_event
@@ -469,6 +489,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events1.add_events([event1])
         mock_connector._kv_cache_events = kv_events1
@@ -491,6 +512,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         kv_events2.add_events([event2])
         mock_connector._kv_cache_events = kv_events2
@@ -510,6 +532,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
         event2 = BlockStored(
             block_hashes=["hash2"],
@@ -518,6 +541,7 @@ class TestTakeEvents:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # Worker 1 reports event1
@@ -572,6 +596,7 @@ class TestIntegrationScenarios:
                 self.lora_id = None
                 self.block_size = 16
                 self.medium = "GPU"
+                self.lora_name = None
 
         # Worker 1
         mock_connector._lmcache_engine.get_kv_events.return_value = [
@@ -628,6 +653,7 @@ class TestIntegrationScenarios:
                 self.lora_id = None
                 self.block_size = 16
                 self.medium = "GPU"
+                self.lora_name = None
 
         for cycle in range(3):
             # Get events
@@ -667,6 +693,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker1_unique_event = BlockStored(
@@ -676,6 +703,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker2_unique_event = BlockStored(
@@ -685,6 +713,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         worker3_unique_event = BlockStored(
@@ -694,6 +723,7 @@ class TestIntegrationScenarios:
             block_size=16,
             lora_id=None,
             medium="GPU",
+            lora_name=None,
         )
 
         # Create events for each worker

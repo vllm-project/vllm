@@ -23,6 +23,7 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
@@ -126,21 +127,13 @@ class CpuPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: str | None,
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        use_mm_prefix: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-        if use_mla:
+        if attn_selector_config.use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
@@ -200,6 +193,8 @@ class CpuPlatform(Platform):
             )
 
         scheduler_config = vllm_config.scheduler_config
+        # async scheduling is not required on CPU
+        scheduler_config.async_scheduling = False
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
@@ -395,7 +390,7 @@ class CpuPlatform(Platform):
         if env_key in os.environ and os.environ[env_key] != "":
             visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
             allowed_numa_nodes_list = [
-                x for x in visible_nodes if x in allowed_cpu_id_list
+                x for x in sorted(list(set(visible_nodes))) if x in allowed_numa_nodes
             ]
 
         return allowed_numa_nodes_list, logical_cpu_list
