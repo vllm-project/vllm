@@ -114,6 +114,7 @@ def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch)
         dict(
             structured_outputs=struct_outputs,
             logprobs=2,
+            presence_penalty=-1.0,
         ),
     ]
 
