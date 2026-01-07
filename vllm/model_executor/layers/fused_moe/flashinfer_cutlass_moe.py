@@ -165,10 +165,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
-                self.g1_alphas,
-                self.a2_gscale,
-                self.g2_alphas,
-                self.a1_gscale,
+                self.g1_alphas,  # w13_weight_scale * w13_input_scale
+                self.a2_gscale,  # 1.0 / w2_input_scale
+                self.g2_alphas,  # w2_weight_scale * w2_input_scale
+                self.a1_scale,
             ]
 
             a1q_scale = None  # not passing input_sf in fp8

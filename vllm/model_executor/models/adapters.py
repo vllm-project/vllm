@@ -394,9 +394,9 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
             hf_config.num_labels = len(tokens)
             text_config.num_labels = len(tokens)
 
-        # `llm as reranker` defaults to not using pad_token
-        use_pad_token = getattr(text_config, "use_pad_token", False)
-        text_config.use_pad_token = use_pad_token
+        # `llm as reranker` defaults to not using separating token.
+        use_sep_token = getattr(text_config, "use_sep_token", False)
+        text_config.use_sep_token = use_sep_token
 
 
 def load_weights_using_from_2_way_softmax(
