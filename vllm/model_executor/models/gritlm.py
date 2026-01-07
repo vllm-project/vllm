@@ -187,7 +187,7 @@ class GritLMPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head(
+    def head(
         self,
         pooled_data: TokenPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
@@ -200,7 +200,7 @@ class GritLMPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self._head(pooled_data, pooling_metadata)
+        pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
 
