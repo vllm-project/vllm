@@ -15,7 +15,10 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    get_fp8_min_max,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
 )
@@ -748,12 +751,7 @@ def per_token_group_quant_fp8(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    # Using the default value (240.0) from pytorch will cause accuracy
-    # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm
-    # platforms that use the torch.float8_e4mefnuz dtype.
-    finfo = torch.finfo(dtype)
-    fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
-    fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
