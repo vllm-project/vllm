@@ -1952,9 +1952,12 @@ class Scheduler(SchedulerInterface):
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = len(block_ids) * self.block_size
-            # Handle the case where num request tokens less than one block.
+            # FIXME this should only be changed if hma is enabled support_hma check here!
+            # (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            # Get number of blocks on full attention layer, we can retrieve at most
+            # this many tokens
+            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size            # Handle the case where num request tokens less than one block.
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1
