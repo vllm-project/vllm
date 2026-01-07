@@ -13,7 +13,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolerNormalize,
     PoolingParamsUpdate,
-    TokenPoolerHead,
     TokenPoolerHeadOutput,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -179,7 +178,7 @@ class GritLMPooler(Pooler):
         super().__init__()
 
         self.pooling = GritLMMeanPool(model_config)
-        self.head = TokenPoolerHead(PoolerNormalize())
+        self.activation = PoolerNormalize()
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return self.pooling.get_supported_tasks()
@@ -187,14 +186,22 @@ class GritLMPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
+    def _head(self, pooled_output: torch.Tensor):
+        return self.activation(pooled_output)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
+        pooled_output = self.pooling(hidden_states, pooling_metadata)
+
+        if isinstance(pooled_output, list):
+            pooled_output = [self._head(output) for output in pooled_output]
+        else:
+            pooled_output = self._head(pooled_output)
+
+        return pooled_output
 
 
 @default_pooling_type("MEAN")
