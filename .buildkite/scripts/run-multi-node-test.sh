@@ -2,6 +2,17 @@
 
 set -euox pipefail
 
+# To detect ROCm
+# Check multiple indicators:
+if [ -e /dev/kfd ] || \
+    [ -d /opt/rocm ] || \
+    command -v rocm-smi &> /dev/null || \
+    [ -n "$ROCM_HOME" ]; then
+    IS_ROCM=1
+else
+    IS_ROCM=0
+fi
+
 if [[ $# -lt 4 ]]; then
     echo "Usage: .buildkite/scripts/run-multi-node-test.sh WORKING_DIR NUM_NODES NUM_GPUS DOCKER_IMAGE COMMAND1 COMMAND2 ... COMMANDN"
     exit 1
@@ -26,20 +37,6 @@ for command in "${COMMANDS[@]}"; do
     echo "$command"
 done
 
-# Function to detect ROCm
-is_rocm() {
-    # Check multiple indicators
-    if [ -e /dev/kfd ] || \
-       [ -d /opt/rocm ] || \
-       command -v rocm-smi &> /dev/null || \
-       [ -n "$ROCM_HOME" ]; then
-        return 1  # true
-    else
-        return 0  # false
-    fi
-}
-
-IS_ROCM=$(is_rocm)
 
 start_network() {
     docker network create --subnet=192.168.10.0/24 docker-net
