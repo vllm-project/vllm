@@ -304,6 +304,9 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         w1_scale=pc1,
         w2_scale=pc2,
     )
+    if a_dtype == "bf16" and w_dtype == "mx4":
+        quant_config.use_mxfp4_w4a16 = True
+        quant_config.ocp_mx_scheme = "w_mxfp4"
 
     out_triton_monolithic = triton_kernel_moe_forward(
         hidden_states=x_tri,
