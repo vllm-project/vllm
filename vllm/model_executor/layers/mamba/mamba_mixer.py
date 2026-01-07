@@ -244,7 +244,7 @@ class MambaMixer(MambaBase, CustomOp):
 
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+            attn_metadata = attn_metadata.get(self.prefix)
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, Mamba1AttentionMetadata)
                 query_start_loc_p = attn_metadata.query_start_loc_p
