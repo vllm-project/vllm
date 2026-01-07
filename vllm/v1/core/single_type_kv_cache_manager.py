@@ -66,6 +66,10 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
 
+    @classmethod
+    def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
+        return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -125,9 +129,8 @@ class SingleTypeKVCacheManager(ABC):
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
         # the allocated request, so we must count it in the free-capacity check.
-        num_evictable_blocks = sum(
-            blk.ref_cnt == 0 and not blk.is_null
-            for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
+        num_evictable_blocks = self._get_num_evictable_blocks(
+            new_computed_blocks[num_skipped_new_computed_blocks:]
         )
         return num_new_blocks + num_evictable_blocks
 
@@ -865,12 +868,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     # speculative blocks.
                     num_new_blocks = 1 + self.num_speculative_blocks
 
-            # If a computed block of a request is an eviction candidate (in the
-            # free queue and ref_cnt == 0), it will be changed from a free block
-            # to a computed block when the request is allocated, so we also count
-            # it as needed to be allocated.
-            num_evictable_computed_blocks = sum(
-                blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
+            num_evictable_computed_blocks = self._get_num_evictable_blocks(
+                new_computed_blocks
             )
             return num_new_blocks + num_evictable_computed_blocks
 
