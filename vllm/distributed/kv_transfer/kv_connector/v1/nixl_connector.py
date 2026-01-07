@@ -57,6 +57,7 @@ from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -333,7 +334,7 @@ class NixlConnector(KVConnectorBase_V1):
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
-                NixlConnectorScheduler(vllm_config, self.engine_id)
+                NixlConnectorScheduler(vllm_config, self.engine_id, kv_cache_config)
             )
             self.connector_worker: NixlConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
@@ -515,10 +516,11 @@ class NixlConnector(KVConnectorBase_V1):
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: Optional["KVCacheConfig"] = None):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
+        self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -551,11 +553,34 @@ class NixlConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
+        # Gather Sliding Window sizes for each kv cache group (if any) 
+        # in number of blocks per SW group.
+        sw_sizes_tokens = [group.kv_cache_spec.sliding_window if isinstance(group.kv_cache_spec, SlidingWindowSpec) else 0 for group in kv_cache_config.kv_cache_groups]
+        self.sw_sizes = [n_tokens // self.block_size for n_tokens in sw_sizes_tokens]
+        print(f"sw_sizes: {self.sw_sizes}\n", flush=True)
+
     def shutdown(self):
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    
+    def get_sw_clippped_blocks(self, block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+        """
+        Clip the number of blocks to the sliding window size for each kv cache group 
+        that employs SWA. 
+        This is necessary because the KV Cache manager initially allocates blocks for 
+        the entire sequence length, and successively cleans up blocks that are outside
+        the window prior to the `request_finished_all_groups` hook.
+        """
+        # NOTE (NickLucche) This logic is currently handled at the connector level 
+        # because offloading connectors might want to receive the whole sequence even
+        # for SWA groups. We will abstract this logic once the interface is more stable
+        assert len(block_ids) == len(self.sw_sizes), "Number of KV cache groups must match"
+        print("CLIPPING BLOCKS", block_ids)
+        print("to ", tuple([blocks[-self.sw_sizes[i]:] for i, blocks in enumerate(block_ids)]), "\n", flush=True)
+        return tuple([blocks[-self.sw_sizes[i]:] for i, blocks in enumerate(block_ids)])
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
@@ -705,10 +730,19 @@ class NixlConnectorScheduler:
                     # a full prefix cache hit on the D worker. We need to call
                     # send_notif in _read_blocks to free the memory on the P.
                     local_block_ids = (
-                        blocks.get_unhashed_block_ids()
+                        blocks.get_unhashed_block_ids_all_groups()
                         if num_external_tokens > 0
                         else []
                     )
+                    local_block_ids = self.get_sw_clippped_blocks(local_block_ids)
+                    # FIXME we're allocating one more here for the SWA ones, which break len(local)==len(remote)..?
+                    # this is still 17
+                    print(
+                        f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n",
+                        flush=True,
+                    )
+                    # ok so if num_external_tokens==0, we just record the request here but dont actually
+                    # read from worker, just send_notif
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
                         request,
@@ -750,9 +784,11 @@ class NixlConnectorScheduler:
             req = req_to_save
 
             assert req.kv_transfer_params is not None
+            new_block_id_groups = self.get_sw_clippped_blocks(new_block_id_groups)
             meta.add_new_req_to_save(
                 request_id=req_id,
-                local_block_ids=new_block_id_groups[0],
+                # FIXME new_block_id_groups[0] when hma is off?
+                local_block_ids=new_block_id_groups,
                 kv_transfer_params=req.kv_transfer_params,
             )
             assert scheduler_output.num_scheduled_tokens is not None
@@ -777,6 +813,8 @@ class NixlConnectorScheduler:
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
+        if len(meta.reqs_to_recv) > 0:
+            print("build_connector_meta", meta.reqs_to_recv, "\n", flush=True)
 
         return meta
 
@@ -838,6 +876,12 @@ class NixlConnectorScheduler:
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
+            # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
+            # trimming down after allocating for the whole sequence length. 
+            # Here we "unpad" blocks to send the actual remote blocks to be read.
+            # Equal to `get_sw_clippped_blocks` in functionality but for P, after 
+            # manager has cleaned up blocks and marked them as null.
+            block_ids = tuple([block for block in group if block != 0] for group in block_ids)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
