@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.1.1-complete
 ARG TRITON_BRANCH="57c693b6"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="89075173"
@@ -15,7 +15,7 @@ ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 #TODO: When patch has been upstreamed, switch to the main repo/branch
 # ARG RIXL_BRANCH="<TODO>"
 # ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG RIXL_BRANCH="50d63d94"
+ARG RIXL_BRANCH="wheel_update"
 ARG RIXL_REPO="https://github.com/vcave/RIXL.git"
 # Needed by RIXL
 ARG ETCD_BRANCH="7c6e714f"
@@ -98,12 +98,16 @@ ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 
+RUN apt-get -y update && apt-get -y install pkg-config
+RUN apt-get update && apt-get install liblzma-dev -y
+
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
-    && pip install -r requirements.txt && git submodule update --init --recursive \
-    && python3 tools/amd_build/build_amd.py \
-    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install -r requirements.txt && git submodule update --init --recursive 
+RUN cd pytorch && python3 tools/amd_build/build_amd.py 
+RUN cd pytorch && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
+
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \

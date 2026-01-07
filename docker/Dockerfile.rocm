@@ -1,5 +1,5 @@
 # default base image
-ARG REMOTE_VLLM="0"
+ARG REMOTE_VLLM="1"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 
@@ -48,9 +48,11 @@ ONBUILD RUN git clone ${VLLM_REPO} \
                && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
+
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+
 # Build vLLM
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
@@ -66,6 +68,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/ep_kernels/amd_wideep /amd_wideep
 
 # -----------------------
 # Test vLLM image
@@ -144,6 +147,12 @@ ARG BASE_IMAGE
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
+COPY --from=export_vllm /amd_wideep ${COMMON_WORKDIR}/vllm/amd_wideep
+
+# WideEP deps installation
+RUN apt-get update -q -y && apt-get install -q -y \
+    autoconf automake libtool flex libibverbs-dev
+RUN cd ${COMMON_WORKDIR}/vllm/amd_wideep && ./install_dependencies.sh
 
 ENV TOKENIZERS_PARALLELISM=false
 
@@ -152,6 +161,7 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
 
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
