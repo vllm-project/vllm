@@ -1240,6 +1240,7 @@ class Qwen3VLForConditionalGeneration(
             "gate_proj",
             "up_proj",
         ],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     supports_encoder_tp_data = True
@@ -2087,9 +2088,28 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.merger",
+            connector=["visual.merger", "visual.deepstack_merger_list"],
             tower_model="visual.",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
 
     @classmethod
     def get_language_model_spec(cls) -> tuple[nn.Module | None, str | None]:

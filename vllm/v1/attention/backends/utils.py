@@ -100,6 +100,8 @@ class CommonAttentionMetadata:
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
+    _num_computed_tokens_cache: torch.Tensor | None = None
+
     @property
     @deprecated(
         """
@@ -129,6 +131,13 @@ class CommonAttentionMetadata:
             )
             self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
         return self._num_computed_tokens_cpu
+
+    def compute_num_computed_tokens(self) -> torch.Tensor:
+        """Compute num_computed_tokens on device (seq_lens - query_lens)."""
+        if self._num_computed_tokens_cache is None:
+            query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
+            self._num_computed_tokens_cache = self.seq_lens - query_lens
+        return self._num_computed_tokens_cache
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
     def unpadded(
@@ -833,6 +842,15 @@ def subclass_attention_backend(
     return type(
         name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
     )
+
+
+def subclass_attention_backend_with_overrides(
+    name_prefix: str,
+    attention_backend_cls: type[AttentionBackend],
+    overrides: dict[str, Any],
+) -> type[AttentionBackend]:
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+    return type(name, (attention_backend_cls,), overrides)
 
 
 def split_decodes_prefills_and_extends(

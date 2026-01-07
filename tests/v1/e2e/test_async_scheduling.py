@@ -31,8 +31,9 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 
 default_params = dict(
     temperature=0.0,  # greedy
-    max_tokens=23,
-    min_tokens=18,
+    max_tokens=30,
+    # spec decoding currently doesn't support min_tokens
+    # min_tokens=28,
 )
 
 
@@ -87,7 +88,7 @@ def test_without_spec_decoding(
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
@@ -101,12 +102,19 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     # Set small draft model len to force doesn't-fit-in-drafter case.
     spec_config_short = spec_config | {"max_model_len": 50}
 
+    struct_outputs = StructuredOutputsParams(json=sample_json_schema)
+
     test_sampling_params = [
         dict(),
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, presence_penalty=-1.0),
+        dict(structured_outputs=struct_outputs),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
+        ),
     ]
 
     # test_preemption, executor, async_scheduling,
@@ -158,8 +166,7 @@ def run_tests(
 
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
-        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
-        torch.backends.cuda.matmul.allow_tf32 = False
+        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
