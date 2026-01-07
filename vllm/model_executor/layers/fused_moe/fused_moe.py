@@ -598,7 +598,6 @@ def _silu_and_mul(
     _config = {
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,
-        "BLOCK_SIZE": 1024,
     }
 
     def grid(meta: Mapping[str, int]) -> tuple[int, int]:
@@ -610,6 +609,7 @@ def _silu_and_mul(
         x_ptr=input,
         x_stride=input.stride(0),
         d=d,
+        BLOCK_SIZE=1024,
         **_config,
     )
 
@@ -825,6 +825,14 @@ def invoke_fused_moe_triton_kernel(
 
     config = config.copy()
     config["SPLIT_K"] = 1
+
+    pdl_config = {
+        "IS_PRIMARY": IS_PRIMARY,
+        "USE_GDC": USE_GDC,
+        "launch_pdl": USE_GDC,
+    }
+
+    config |= pdl_config
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
@@ -2335,7 +2343,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
-        if quant_config is None:
+
+        self.enable_pdl = False
+        if self.quant_dtype is None:
             self.enable_pdl = (
                 current_platform.is_cuda()
                 and current_platform.has_device_capability(90)
@@ -2475,6 +2485,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
             B_bias=self.w1_bias,
             IS_PRIMARY=True,
+            USE_GDC=self.enable_pdl,
         )
 
         self.activation(
@@ -2513,6 +2524,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
             IS_PRIMARY=False,
+            USE_GDC=self.enable_pdl,
         )
 
         # separate function is required for MoE + LoRA
@@ -2526,7 +2538,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> None:
         assert output.size(-1) * 2 == input.size(-1)
         if activation == "silu":
-            _silu_and_mul(output, input)
+            _silu_and_mul(output, input, use_gdc=self.enable_pdl)
         elif activation == "gelu":
             torch.ops._C.gelu_and_mul(output, input)
         elif activation == "swigluoai":
