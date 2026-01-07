@@ -1095,13 +1095,20 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             num_tokens = int(grid_thw.prod()) // merge_length
             return [placeholder[modality]] * num_tokens
 
+        # Only create prompt updates for modalities that are present in BOTH mm_items AND out_mm_kwargs
+        # out_mm_kwargs may be empty for embeddings (passthrough data), so we need to check both
+        available_modalities = [
+            modality for modality in ("image", "video")
+            if modality in mm_items and modality in out_mm_kwargs
+        ]
+
         return [
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
                 replacement=partial(get_replacement_qwen2vl, modality=modality),
             )
-            for modality in ("image", "video")
+            for modality in available_modalities
         ]
 
     def _get_mm_fields_config(

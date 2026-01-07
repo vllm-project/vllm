@@ -1555,7 +1555,35 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         modality: str,
         num_items: int,
+        mm_items: MultiModalDataItems | None = None,
+        is_embedding: bool = False,
     ) -> None:
+        """
+        Validate that the number of items for a modality doesn't exceed limits.
+        
+        Args:
+            modality: The modality name (e.g., "image", "video")
+            num_items: The number of items to validate
+            mm_items: Optional MultiModalDataItems to check if this is an embedding.
+                      If provided and the modality contains embeddings, validation
+                      is skipped when enable_mm_embeds=True.
+            is_embedding: If True, indicates this is an embedding modality (used
+                         when mm_items is not available, e.g., in chat_utils).
+        """
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        
+        # Check if this is an embedding modality
+        if mm_config.enable_mm_embeds:
+            # Check via is_embedding parameter (for chat_utils where mm_items isn't available)
+            if is_embedding:
+                return
+            
+            # Check via mm_items (for processing.py where mm_items is available)
+            if mm_items is not None and modality in mm_items:
+                modality_items = mm_items[modality]
+                if isinstance(modality_items, (EmbeddingItems, DictEmbeddingItems)):
+                    return
+        
         supported_limit = self.supported_mm_limits.get(modality, 0)
         allowed_limit = self.allowed_mm_limits.get(modality, 0)
 
@@ -1563,7 +1591,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             supported_limit = allowed_limit
 
         limit = min(supported_limit, allowed_limit)
-
+        
         if num_items > limit:
             msg = f"At most {limit} {modality}(s) may be provided in one prompt."
 
@@ -1585,6 +1613,23 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
+        # #region agent log
+        import json
+        with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "D",
+                "location": "processing.py:1440",
+                "message": "After parse_mm_data - checking mm_items",
+                "data": {
+                    "mm_items_keys": list(mm_items.keys()),
+                    "mm_items_dict": {k: type(v).__name__ for k, v in mm_items.items()},
+                    "mm_data_keys": list(mm_data.keys()) if mm_data else []
+                },
+                "timestamp": __import__('time').time() * 1000
+            }) + '\n')
+        # #endregion
         mm_config = self.info.ctx.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
             for modality, items in mm_items.items():
@@ -1595,8 +1640,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
 
         for modality, items in mm_items.items():
-            self.validate_num_items(modality, len(items))
+            # validate_num_items now handles embedding detection internally
+            self.validate_num_items(modality, len(items), mm_items=mm_items)
 
+        # #region agent log
+        with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "D",
+                "location": "processing.py:1460",
+                "message": "After validation - final mm_items",
+                "data": {
+                    "mm_items_keys": list(mm_items.keys()),
+                    "mm_items_dict": {k: type(v).__name__ for k, v in mm_items.items()}
+                },
+                "timestamp": __import__('time').time() * 1000
+            }) + '\n')
+        # #endregion
         return mm_items
 
     @abstractmethod
@@ -1650,15 +1711,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> MultiModalPromptUpdates:
+        # Filter out embedding modalities - they don't need prompt updates
+        # This prevents KeyError in model's _get_prompt_updates when accessing
+        # out_mm_kwargs[modality] for embeddings (HF processor doesn't produce
+        # output for embedding modalities)
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if mm_config.enable_mm_embeds:
+            filtered_mm_items = MultiModalDataItems({
+                k: v for k, v in mm_items.items()
+                if not isinstance(v, (EmbeddingItems, DictEmbeddingItems))
+            })
+        else:
+            filtered_mm_items = mm_items
+
         unbound_prompt_updates = self._get_prompt_updates(
-            mm_items=mm_items,
+            mm_items=filtered_mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             out_mm_kwargs=out_mm_kwargs,
         )
 
         mm_prompt_updates = self._bind_and_group_updates(
             unbound_prompt_updates,
-            mm_items.get_all_counts(),
+            filtered_mm_items.get_all_counts(),
         )
 
         for modality, prompt_updates in mm_prompt_updates.items():
@@ -2245,9 +2319,38 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_item_counts: Mapping[str, int],
+        mm_items: MultiModalDataItems | None = None,
     ) -> None:
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        
         for modality, item_count in mm_item_counts.items():
             items = mm_kwargs.get(modality, [])
+
+            # Skip validation for embedding modalities when enable_mm_embeds=True
+            # Embeddings are passthrough data and don't appear in mm_kwargs
+            if mm_config.enable_mm_embeds and mm_items is not None:
+                if modality in mm_items:
+                    modality_items = mm_items[modality]
+                    if isinstance(modality_items, (EmbeddingItems, DictEmbeddingItems)):
+                        # #region agent log
+                        import json
+                        with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "F",
+                                "location": "processing.py:2140",
+                                "message": "Skipping mm_kwargs validation for embedding modality",
+                                "data": {
+                                    "modality": modality,
+                                    "item_count": item_count,
+                                    "mm_kwargs_items_len": len(items),
+                                    "is_embedding": True
+                                },
+                                "timestamp": __import__('time').time() * 1000
+                            }) + '\n')
+                        # #endregion
+                        continue
 
             if len(items) != item_count:
                 raise RuntimeError(
@@ -2264,9 +2367,38 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_updates: MultiModalPromptUpdates,
         mm_item_counts: Mapping[str, int],
+        mm_items: MultiModalDataItems | None = None,
     ) -> None:
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_updates.get(modality, [])
+
+            # Skip validation for embedding modalities when enable_mm_embeds=True
+            # Embeddings don't require prompt updates (they're passthrough data)
+            if mm_config.enable_mm_embeds and mm_items is not None:
+                if modality in mm_items:
+                    modality_items = mm_items[modality]
+                    if isinstance(modality_items, (EmbeddingItems, DictEmbeddingItems)):
+                        # #region agent log
+                        import json
+                        with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "G",
+                                "location": "processing.py:2160",
+                                "message": "Skipping mm_updates validation for embedding modality",
+                                "data": {
+                                    "modality": modality,
+                                    "item_count": item_count,
+                                    "placeholders_len": len(placeholders),
+                                    "is_embedding": True
+                                },
+                                "timestamp": __import__('time').time() * 1000
+                            }) + '\n')
+                        # #endregion
+                        continue
 
             if len(placeholders) != item_count:
                 raise RuntimeError(
@@ -2283,9 +2415,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_item_counts: Mapping[str, int],
+        mm_items: MultiModalDataItems | None = None,
     ) -> None:
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+
         for modality, item_count in mm_item_counts.items():
             placeholders = mm_placeholders.get(modality, [])
+
+            # Skip validation for embedding modalities when enable_mm_embeds=True
+            # Embeddings don't require prompt placeholders (they're passthrough data)
+            if mm_config.enable_mm_embeds and mm_items is not None:
+                if modality in mm_items:
+                    modality_items = mm_items[modality]
+                    if isinstance(modality_items, (EmbeddingItems, DictEmbeddingItems)):
+                        continue
 
             if len(placeholders) != item_count:
                 raise RuntimeError(
@@ -2304,22 +2447,38 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        # #region agent log
+        import json
+        with open('/workspace/vllm/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "D",
+                "location": "processing.py:2162",
+                "message": "Before get_all_counts - checking mm_items",
+                "data": {
+                    "mm_items_keys": list(mm_items.keys()),
+                    "mm_items_dict": {k: type(v).__name__ for k, v in mm_items.items()}
+                },
+                "timestamp": __import__('time').time() * 1000
+            }) + '\n')
+        # #endregion
         mm_item_counts = mm_items.get_all_counts()
-        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
-        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts, mm_items=mm_items)
+        self._validate_mm_updates(mm_prompt_updates, mm_item_counts, mm_items=mm_items)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts, mm_items=mm_items)
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts, mm_items=mm_items)
 
         return prompt_ids, mm_placeholders
 

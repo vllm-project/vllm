@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.encoder_cache_manager import (
+    EncoderCacheManager,
+    EncoderDecoderCacheManager,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -247,3 +250,120 @@ def test_encoder_cache_mask_based_retrieval():
 
     assert num_embeds_before == 0
     assert num_embeds_in_range == 2
+
+def test_embedding_only_mode_budget_bypass():
+    manager = EncoderCacheManager(cache_size=1000, enable_mm_embeds=True)
+    req = MockRequest("req1", ["img1"], [256])
+
+    assert manager.can_allocate(
+        req, 0, encoder_compute_budget=1, num_embeds_to_schedule=0
+    )
+
+    manager.allocate(req, 0)
+    assert "img1" in manager.cached
+    assert manager.num_free_slots == 1000 - 256
+
+
+@pytest.mark.parametrize(
+    "budget,num_embeds,expected_result,description",
+    [
+        # Insufficient budget: request exceeds compute budget
+        (100, 256, False, "budget insufficient: 256 > 100"),
+        # Sufficient budget: request fits within compute budget
+        (300, 256, True, "budget sufficient: 256 <= 300"),
+    ],
+)
+def test_normal_mode_budget_enforcement(
+    budget, num_embeds, expected_result, description
+):
+    manager = EncoderCacheManager(cache_size=1000, enable_mm_embeds=False)
+    req = MockRequest("req1", ["img1"], [num_embeds])
+
+    result = manager.can_allocate(req, 0, budget, 0)
+    assert result == expected_result, description
+
+
+@pytest.mark.parametrize(
+    "enable_mm_embeds,budget,num_embeds,expected_result",
+    [
+        # Case 1: enable_mm_embeds=False even with budget=1
+        (
+            False,
+            1,
+            10,
+            False,
+        ),
+        # Case 2: budget not minimal even with enable_mm_embeds=True
+        (
+            True,
+            100,
+            256,
+            False,
+        ),
+    ],
+)
+def test_no_false_embedding_only_detection(
+    enable_mm_embeds, budget, num_embeds, expected_result
+):
+    cache_size = 1000 if enable_mm_embeds else 100
+    manager = EncoderCacheManager(
+        cache_size=cache_size, enable_mm_embeds=enable_mm_embeds
+    )
+    req = MockRequest("req1", ["img1"], [num_embeds])
+
+    result = manager.can_allocate(req, 0, budget, 0)
+    assert result == expected_result
+
+
+def test_embedding_only_mode_cache_space_limits():
+    manager = EncoderCacheManager(cache_size=100, enable_mm_embeds=True)
+
+    req = MockRequest("req1", ["img1"], [256])
+
+    encoder_compute_budget = 1
+    num_embeds_to_schedule = 0
+
+    assert not manager.can_allocate(
+        req, 0, encoder_compute_budget, num_embeds_to_schedule
+    )
+
+    manager2 = EncoderCacheManager(cache_size=300, enable_mm_embeds=True)
+    assert manager2.can_allocate(req, 0, encoder_compute_budget, num_embeds_to_schedule)
+
+
+def test_encoder_decoder_embedding_only_mode():
+    manager = EncoderDecoderCacheManager(cache_size=500, enable_mm_embeds=True)
+
+    req = MockRequest("req1", ["emb1"], [256])
+
+    encoder_compute_budget = 1
+    num_embeds_to_schedule = 0
+
+    assert manager.can_allocate(req, 0, encoder_compute_budget, num_embeds_to_schedule)
+
+    manager.allocate(req, 0)
+    assert manager.num_free_slots == 500 - 256
+
+
+def test_embedding_only_full_workflow():
+    manager = EncoderCacheManager(cache_size=1000, enable_mm_embeds=True)
+
+    req1 = MockRequest("req1", ["img1", "img2"], [256, 256])
+    req2 = MockRequest("req2", ["img3"], [256])
+
+    encoder_compute_budget = 1
+
+    assert manager.can_allocate(req1, 0, encoder_compute_budget, 0)
+    manager.allocate(req1, 0)
+
+    assert manager.can_allocate(req1, 1, encoder_compute_budget, 256)
+    manager.allocate(req1, 1)
+
+    assert manager.can_allocate(req2, 0, encoder_compute_budget, 512)
+    manager.allocate(req2, 0)
+
+    assert manager.num_free_slots == 1000 - 768
+    assert len(manager.cached) == 3
+
+    manager.free(req1)
+    assert manager.num_freeable_slots == 1000 - 256

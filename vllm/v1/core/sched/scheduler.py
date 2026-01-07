@@ -176,6 +176,14 @@ class Scheduler(SchedulerInterface):
             mm_registry=mm_registry,
         )
 
+        # Extract enable_mm_embeds flag for embedding-only mode detection
+        enable_mm_embeds = False
+        if (
+            vllm_config.model_config is not None
+            and vllm_config.model_config.multimodal_config is not None
+        ):
+            enable_mm_embeds = vllm_config.model_config.multimodal_config.enable_mm_embeds
+
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed) for MM models as well as encoder-decoder
         # transformers.
@@ -184,9 +192,15 @@ class Scheduler(SchedulerInterface):
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
         self.encoder_cache_manager = (
-            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+            EncoderDecoderCacheManager(
+                cache_size=encoder_cache_size,
+                enable_mm_embeds=enable_mm_embeds,
+            )
             if self.is_encoder_decoder
-            else EncoderCacheManager(cache_size=encoder_cache_size)
+            else EncoderCacheManager(
+                cache_size=encoder_cache_size,
+                enable_mm_embeds=enable_mm_embeds,
+            )
         )
         # For encoder-decoder models, allocate the maximum number of tokens for Cross
         # Attn blocks, as for Whisper its input is always padded to the maximum length.
