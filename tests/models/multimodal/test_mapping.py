@@ -15,6 +15,20 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+def get_tied_weight_names(model: PreTrainedModel) -> set[str]:
+    """
+    Get names of weights that are tied to other weights.
+    Uses HuggingFace's internal _tied_weights_keys attribute.
+    """
+    tied_names = set()
+
+    # HuggingFace models track tied weights in _tied_weights_keys
+    if hasattr(model, "_tied_weights_keys") and model._tied_weights_keys:
+        tied_names.update(model._tied_weights_keys)
+
+    return tied_names
+
+
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
     """Create weights from safetensors checkpoint metadata"""
     metadata = try_get_safetensors_metadata(repo)
@@ -83,6 +97,8 @@ def test_hf_model_weights_mapper(model_arch: str):
     hf_dummy_model = create_dummy_model(model_id, model_arch)
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
+    # Get tied weight names (these may be relative to submodules)
+    tied_weight_names = get_tied_weight_names(hf_dummy_model)
     mapper: WeightsMapper = model_cls.hf_to_vllm_mapper
 
     mapped_original_weights = mapper.apply(original_weights)
@@ -96,6 +112,19 @@ def test_hf_model_weights_mapper(model_arch: str):
     # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
 
+    # Tied weights may appear in named_parameters() but not in the checkpoint
+    # since they share memory with another parameter.
+    # _tied_weights_keys stores names relative to submodules, so we need to
+    # check if weight names end with the tied weight pattern.
+    weights_to_remove = set()
+    for weight_name in weight_names:
+        for tied_name in tied_weight_names:
+            if (
+                weight_name.endswith(tied_name) or weight_name.endswith(f".{tied_name}")
+            ) and weight_name not in ref_weight_names:
+                weights_to_remove.add(weight_name)
+                break
+    weight_names -= weights_to_remove
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names
     assert not weights_missing and not weights_unmapped, (
