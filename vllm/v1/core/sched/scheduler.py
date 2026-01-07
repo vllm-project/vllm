@@ -2049,8 +2049,13 @@ class Scheduler(SchedulerInterface):
             marked_invalid_block = False
             req_id = request.request_id
             req_block_ids = self.kv_cache_manager.get_block_ids(req_id)
+<<<<<<< HEAD
             is_hma = len(req_block_ids) > 1
             # Assume FA group is present to infer number of computed tokens
+=======
+            # Assume FA group is present to infer number of computed tokens
+            # TODO this is not padded for SW right?
+>>>>>>> fcfac315a (HMA upstream)
             fa_blocks = req_block_ids[self._full_attention_group_idx]
             max_num_blocks = len(fa_blocks)
             # We iterate only over blocks that may contain externally computed
@@ -2075,9 +2080,15 @@ class Scheduler(SchedulerInterface):
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
+<<<<<<< HEAD
             for idx, block_id in enumerate(all_req_block_ids):
                 if idx >= req_num_computed_blocks:
                     break
+=======
+            # For the purpose of marking blocks as invalid, only report FA ones to
+            # handle blocks<>tokens mapping consistently.
+            for idx, block_id in zip(range(req_num_computed_blocks), fa_blocks):
+>>>>>>> fcfac315a (HMA upstream)
                 if block_id not in invalid_block_ids:
                     continue
 
@@ -2100,6 +2111,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 marked_invalid_block = True
+<<<<<<< HEAD
                 if is_hma:
                     # TODO (NickLucche) HMA: Partial recovery is not supported because
                     # SW blocks only cover a suffix of the original sequence.
@@ -2121,6 +2133,26 @@ class Scheduler(SchedulerInterface):
                     request.num_external_computed_tokens -= num_affected_tokens
                     if evict_blocks:
                         blocks_to_evict.update(fa_blocks[idx:])
+=======
+                # Truncate the computed tokens at the first failed block
+                request.num_computed_tokens = idx * self.block_size
+                num_affected_tokens = (
+                    req_num_computed_tokens - request.num_computed_tokens
+                )
+                total_affected_tokens += num_affected_tokens
+                request.num_external_computed_tokens -= num_affected_tokens
+                # Collect invalid block and all downstream dependent blocks, across
+                # all groups.
+                if evict_blocks:
+                    # Assuming groups are not padded, do SW-aware eviction, example:
+                    # FA: [A B C D C]
+                    # SW: [      E F]
+                    # =>Evict E only when failure index <= E.
+                    for group in req_block_ids:
+                        offset = max_num_blocks - len(group)
+                        start_idx = max(0, idx - offset)
+                        blocks_to_evict.update(group[start_idx:])
+>>>>>>> fcfac315a (HMA upstream)
 
             if is_affected:
                 if not marked_invalid_block:
