@@ -519,8 +519,8 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - pytest -v -s -m 'not skip_v1' samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s 'not skip_v1' samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
