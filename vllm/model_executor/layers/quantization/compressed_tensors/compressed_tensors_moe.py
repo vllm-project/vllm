@@ -368,9 +368,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
         ):
             logger.warning_once(
-                "w13_weight_global_scale must match w13_weight_global_scale. "
+                "w1_weight_global_scale must match w3_weight_global_scale. "
                 "Accuracy may be affected.",
-                scope="local",
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
