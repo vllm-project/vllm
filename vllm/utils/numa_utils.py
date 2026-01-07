@@ -7,6 +7,10 @@ worker processes to optimize performance on multi-socket systems. It uses a
 technique of wrapping the Python executable with numactl to ensure all memory
 allocations happen on the correct NUMA node.
 
+Supports two modes:
+1. Manual binding: User specifies NUMA nodes via --numa-node 0 0 1 1
+2. Auto binding: Use --numa-node-auto to detect GPU-to-NUMA topology via NVML
+
 Based on SGLang's NUMA binding implementation.
 """
 
@@ -16,6 +20,7 @@ import os
 import random
 import time
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +28,29 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
+
+
+@cache
+def get_auto_numa_nodes() -> list[int] | None:
+    """Auto-detect NUMA nodes for all GPUs using NVML.
+
+    Returns:
+        List of NUMA node IDs (one per GPU), or None if detection fails
+    """
+    from vllm.platforms import current_platform
+
+    # Check if platform supports NUMA node detection
+    if not hasattr(current_platform, "get_all_device_numa_nodes"):
+        logger.warning(
+            "Platform %s does not support NUMA node detection",
+            type(current_platform).__name__,
+        )
+        return None
+
+    numa_nodes = current_platform.get_all_device_numa_nodes()
+    if numa_nodes is not None:
+        logger.info("Auto-detected NUMA nodes for GPUs: %s", numa_nodes)
+    return numa_nodes
 
 
 @contextmanager
@@ -52,16 +80,22 @@ def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
     Requires:
         - numactl must be installed on the system
         - Multiprocessing must use 'spawn' start method (not fork)
-        - vllm_config.parallel_config.numa_node must be set
+        - vllm_config.parallel_config.numa_node or numa_node_auto must be set
     """
     parallel_config = vllm_config.parallel_config
 
-    if (numa_nodes := parallel_config.numa_node) is not None:
+    # Get NUMA nodes from config or auto-detect
+    numa_nodes = parallel_config.numa_node
+    if numa_nodes is None and parallel_config.numa_node_auto:
+        numa_nodes = get_auto_numa_nodes()
+
+    if numa_nodes is not None:
         # Validate array bounds
         if local_rank >= len(numa_nodes):
             raise ValueError(
                 f"local_rank {local_rank} exceeds numa_node array size "
-                f"{len(numa_nodes)}. Ensure --numa-node has enough elements."
+                f"{len(numa_nodes)}. Ensure --numa-node has enough elements "
+                "or check that CUDA_VISIBLE_DEVICES matches your GPU count."
             )
 
         numa_node = numa_nodes[local_rank]
