@@ -124,7 +124,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens = torch.tensor(
                 [common_prefix_len], dtype=torch.int32, device=self.device
             )
-            suffix_kv_lens = common_attn_metadata.seq_lens_cpu - common_prefix_len
+            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
