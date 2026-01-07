@@ -25,6 +25,7 @@ import time
 from collections.abc import AsyncGenerator
 
 import grpc
+import uvloop
 from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
@@ -520,7 +521,7 @@ def main():
 
     # Run server
     try:
-        asyncio.run(serve_grpc(args))
+        uvloop.run(serve_grpc(args))
     except Exception as e:
         logger.exception("Server failed: %s", e)
         sys.exit(1)

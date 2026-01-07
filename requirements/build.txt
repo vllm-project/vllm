@@ -9,4 +9,4 @@ wheel
 jinja2>=3.1.6
 regex
 build
-grpcio-tools>=1.75.1
+grpcio-tools>=1.76.0

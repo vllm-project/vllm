@@ -411,7 +411,6 @@ async def test_abort_request(grpc_client):
                 was_aborted = complete.finish_reason == "abort"
             else:
                 was_aborted = False
-            print(response)
 
     async def abort_after_delay():
         # Small delay to ensure generate has started
