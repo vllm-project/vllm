@@ -133,7 +133,7 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_model_manager(dist_init, dummy_model, device):
+def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -417,7 +417,9 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
+def test_lru_cache_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model, device, tmp_path
+):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -640,7 +642,7 @@ def test_worker_adapter_manager(
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_packed_loras(dist_init, dummy_model_gate_up, device):
+def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model_lora = create_packed_lora(
         1,

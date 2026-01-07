@@ -429,7 +429,9 @@ def test_update_states_no_changes(default_vllm_config, model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_unscheduled(model_runner, dist_init):
+def test_update_states_request_unscheduled(
+    default_vllm_config, model_runner, dist_init
+):
     req_ids = ("req_0", "req_1")
 
     # new reqs
@@ -466,7 +468,7 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_ids[1])
 
 
-def test_kv_cache_stride_order(monkeypatch, model_runner):
+def test_kv_cache_stride_order(default_vllm_config, monkeypatch, model_runner):
     # This test checks if GPUModelRunner initializes correctly when an attention
     # backend enforces a non-default KV cache stride order.
     n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
@@ -515,7 +517,7 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
             assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
 
 
-def test_update_config(model_runner):
+def test_update_config(default_vllm_config, model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
@@ -524,7 +526,9 @@ def test_update_config(model_runner):
         model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
-def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
+def test_load_model_weights_inplace(
+    default_vllm_config, dist_init, model_runner, model_runner_2
+):
     # In this test, model_runner loads model + weights in one go, while
     # model_runner_2 loads dummy weights first then load real weights inplace
     model_runner.load_model()
@@ -541,12 +545,12 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     )
 
 
-def test_reload_weights_before_load_model(model_runner):
+def test_reload_weights_before_load_model(default_vllm_config, model_runner):
     with pytest.raises(AssertionError):
         model_runner.reload_weights()
 
 
-def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -573,7 +577,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -600,7 +604,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -627,7 +631,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_without_kv_sharing():
+def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -694,7 +698,7 @@ def test_init_kv_cache_without_kv_sharing():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-def test_init_kv_cache_with_kv_sharing_valid():
+def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -1047,7 +1051,7 @@ def test_input_batch_with_kernel_block_sizes():
             assert block_table.block_size == kernel_size
 
 
-def test_hybrid_cache_integration(model_runner, dist_init):
+def test_hybrid_cache_integration(default_vllm_config, model_runner, dist_init):
     """Test hybrid cache architecture integration with GPUModelRunner."""
     # Create a new model runner with hybrid cache configuration
     vllm_config = get_vllm_config()
