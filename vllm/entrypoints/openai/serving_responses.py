@@ -175,7 +175,6 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
-        exclude_log_deltas: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(

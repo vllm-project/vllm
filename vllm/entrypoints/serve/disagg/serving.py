@@ -51,7 +51,6 @@ class ServingTokens(OpenAIServing):
         log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
-        exclude_log_deltas: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,

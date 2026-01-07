@@ -1068,7 +1068,6 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
-            exclude_log_deltas=args.exclude_log_deltas,
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
@@ -1225,7 +1224,6 @@ async def init_app_state(
             log_error_stack=args.log_error_stack,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_log_outputs=args.enable_log_outputs,
-            exclude_log_deltas=args.exclude_log_deltas,
             force_no_detokenize=args.tokens_only,
         )
         if "generate" in supported_tasks
