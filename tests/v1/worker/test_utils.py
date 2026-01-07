@@ -6,7 +6,7 @@ import torch
 from vllm.v1.worker.utils import bind_kv_cache
 
 
-def test_bind_kv_cache():
+def test_bind_kv_cache(default_vllm_config):
     from vllm.attention.layer import Attention
 
     ctx = {
@@ -34,7 +34,7 @@ def test_bind_kv_cache():
     assert runner_kv_caches[3] is kv_cache["layers.3.self_attn"]
 
 
-def test_bind_kv_cache_non_attention():
+def test_bind_kv_cache_non_attention(default_vllm_config):
     from vllm.attention.layer import Attention
 
     # example from Jamba PP=2
