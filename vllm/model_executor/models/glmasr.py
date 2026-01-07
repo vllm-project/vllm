@@ -442,12 +442,12 @@ class GlmAsrEncoder(nn.Module):
             Tuple of (output after conv1, output after conv2)
         """
         # Conv1: kernel=3, stride=1, padding=1
-        output_lengths = (input_lengths + 2 * 1 - 3) // 1 + 1
+        output_lengths_conv1 = (input_lengths + 2 * 1 - 3) // 1 + 1
 
         # Conv2: kernel=3, stride=2, padding=1
-        output_lengths = (output_lengths + 2 * 1 - 3) // 2 + 1
+        output_lengths_conv2 = (output_lengths_conv1 + 2 * 1 - 3) // 2 + 1
 
-        return input_lengths, output_lengths
+        return output_lengths_conv1, output_lengths_conv2
 
     def forward(self, input_features: torch.Tensor) -> _GlmAsrEncoderOutput:
         """
