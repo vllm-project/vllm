@@ -165,6 +165,7 @@ class MoEMixin(MixtureOfExperts):
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
+                    self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,

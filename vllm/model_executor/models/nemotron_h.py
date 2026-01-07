@@ -636,6 +636,7 @@ class NemotronHModel(nn.Module):
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
                 #   using non-gated MoE
+                self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="",
