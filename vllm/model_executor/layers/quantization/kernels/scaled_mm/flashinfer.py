@@ -48,7 +48,7 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         B: torch.Tensor,
         out_dtype: torch.dtype,
         As: torch.Tensor,
-        Bs: torch.Tensor | None,
+        Bs: torch.Tensor,
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
