@@ -121,10 +121,6 @@ VLM_TEST_SETTINGS = {
         ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[
-            pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")
-        ],
     ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
@@ -528,6 +524,31 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
+    ),
+    "isaac": VLMTestInfo(
+        models=["PerceptronAI/Isaac-0.1"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: (
+            f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        img_idx_to_prompt=lambda idx: "<image>",
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image>Please describe the image shortly.",
+                "cherry_blossom": "<vlm_image>Please infer the season with reason.",
+            }
+        ),
+        multi_image_prompt=(
+            "Picture 1: <vlm_image>\n"
+            "Picture 2: <vlm_image>\n"
+            "Describe these two images with one paragraph respectively."
+        ),
+        enforce_eager=False,
+        max_model_len=4096,
+        max_num_seqs=2,
+        hf_model_kwargs={"device_map": "auto"},
+        patch_hf_runner=model_utils.isaac_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
