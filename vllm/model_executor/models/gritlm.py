@@ -4,7 +4,6 @@ from collections.abc import Set
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
@@ -12,6 +11,7 @@ from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     Pooler,
     PoolerNormalize,
+    PoolingMethod,
     PoolingParamsUpdate,
     TokenPoolerHeadOutput,
     TokenPoolingMethodOutput,
@@ -27,7 +27,7 @@ from .interfaces_base import default_pooling_type
 logger = init_logger(__name__)
 
 
-class GritLMMeanPool(nn.Module):
+class GritLMMeanPool(PoolingMethod):
     """As `MeanPool`, but only includes non-instruction tokens."""
 
     def __init__(self, model_config: ModelConfig):
