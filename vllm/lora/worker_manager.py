@@ -20,6 +20,9 @@ from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
+# Flag to track if we need to invalidate caches after first LoRA load
+_first_lora_load = True
+
 
 class WorkerLoRAManager:
     """WorkerLoRAManager that manages LoRA models on the worker side.
@@ -196,6 +199,26 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+    
+    def invalidate_compilation_caches(self) -> None:
+        """
+        Manually invalidate all compilation caches (CUDA graphs and torch.compile).
+        
+        This should be called after loading LoRA adapters if you want to force
+        recompilation to ensure the CUDA graphs include LoRA operations.
+        
+        Note: Cache invalidation happens automatically on the first LoRA load.
+        This method is provided for cases where you need explicit control or
+        want to force recompilation after modifying adapters.
+        """
+        logger.info("Manually invalidating compilation caches")
+        try:
+            from vllm.compilation.cache_invalidation import invalidate_all_caches
+            model = self._adapter_manager.model
+            invalidate_all_caches(model)
+        except Exception as e:
+            logger.error("Failed to invalidate compilation caches: %s", e)
+            raise
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
@@ -244,7 +267,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        global _first_lora_load
+        is_new_adapter = lora_request.lora_int_id not in self.list_adapters()
+
+        if is_new_adapter:
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
@@ -265,4 +291,42 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
             )
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        
+        # Invalidate compilation caches after loading the first LoRA adapter
+        # to ensure CUDA graphs and torch.compile capture the LoRA operations
+        if is_new_adapter and _first_lora_load:
+            _first_lora_load = False
+            
+            # Check if cache invalidation is disabled
+            from vllm.compilation.cache_invalidation import (
+                invalidate_all_caches,
+                is_cache_invalidation_disabled,
+            )
+            
+            if is_cache_invalidation_disabled():
+                logger.warning(
+                    "First LoRA adapter loaded (id=%d) but automatic cache "
+                    "invalidation is disabled via "
+                    "VLLM_DISABLE_LORA_CACHE_INVALIDATION. "
+                    "LoRA operations may not be optimized with CUDA graphs.",
+                    lora_request.lora_int_id
+                )
+            else:
+                logger.info(
+                    "First LoRA adapter loaded (id=%d). Invalidating "
+                    "compilation caches to ensure CUDA graph optimization "
+                    "includes LoRA operations.",
+                    lora_request.lora_int_id
+                )
+                try:
+                    model = self._adapter_manager.model
+                    invalidate_all_caches(model)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to invalidate compilation caches after "
+                        "LoRA load: %s. LoRA operations may not be "
+                        "optimized with CUDA graphs.",
+                        e
+                    )
+        
         return loaded
