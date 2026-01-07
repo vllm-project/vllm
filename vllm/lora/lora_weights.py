@@ -202,11 +202,18 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
         w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
 
-        # For non-gated MoE, reuse w1 tensors for w3 to avoid memory waste
-        # w3_lora_a_lst and w3_lora_b_lst are not relevant in this case
+        # All w1, w2, w3 have the same scaling factor.
+        scaling = lora_alpha / rank
+        last_scaling = scaling
+
         if is_non_gated_moe:
+            # For non-gated MoE, reuse w1 tensors for w3 to avoid memory waste
+            # w3_lora_a_lst and w3_lora_b_lst are not relevant in this case
             w3_lora_a = w1_lora_a
             w3_lora_b = w1_lora_b
+
+            # For non-gated MoE, avoid double-scaling by setting w3's scaling to 1.
+            last_scaling = 1.0
         else:
             w3_lora_a = torch.stack(w3_lora_a_lst, dim=0)
             w3_lora_b = torch.stack(w3_lora_b_lst, dim=0)
@@ -217,6 +224,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora_alpha, lora_alpha, lora_alpha],
             [w1_lora_a, w2_lora_a, w3_lora_a],
             [w1_lora_b, w2_lora_b, w3_lora_b],
+            scaling=[scaling, scaling, last_scaling],
         )
         return obj
 
