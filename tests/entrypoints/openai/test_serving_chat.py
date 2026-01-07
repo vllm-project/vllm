@@ -33,6 +33,7 @@ from .utils import (
 )
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
 
 
 @pytest.fixture(scope="module")
@@ -64,7 +65,8 @@ def exclude_tools_when_tool_choice_none(request) -> bool:
 
 @pytest.fixture(scope="module")
 def default_server_args(
-    with_tool_parser: bool, exclude_tools_when_tool_choice_none: bool
+    with_tool_parser: bool,
+    exclude_tools_when_tool_choice_none: bool,
 ):
     args = [
         # use half precision for speed and memory savings in CI environment
@@ -96,9 +98,27 @@ def gptoss_server(default_server_args: list[str]):
         yield remote_server
 
 
+@pytest.fixture(scope="module")
+def gptoss_speculative_server(default_server_args: list[str]):
+    server_args = default_server_args + [
+        "--speculative-config",
+        f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+        f'"method": "eagle3", "num_speculative_tokens": 3}}',
+        "--attention-backend=TRITON_ATTN",
+    ]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
+
+
 @pytest_asyncio.fixture
 async def gptoss_client(gptoss_server):
     async with gptoss_server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest_asyncio.fixture
+async def gptoss_speculative_client(gptoss_speculative_server):
+    async with gptoss_speculative_server.get_async_client() as async_client:
         yield async_client
 
 
@@ -410,6 +430,34 @@ async def test_gpt_oss_tool_choice_none(
 
     msg = tool_choice_none.choices[0].message
     assert len(msg.tool_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_gpt_oss_speculative_reasoning_leakage(
+    gptoss_speculative_client: OpenAI,
+    with_tool_parser: bool,
+):
+    if not with_tool_parser:
+        pytest.skip("skip non-tool for array content tests")
+
+    messages = [
+        {"role": "user", "content": "Calculate 2+2. Return the answer 4 only."},
+    ]
+
+    stream = await gptoss_speculative_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        stream=True,
+        temperature=0.0,
+    )
+
+    content = ""
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content += delta.content
+
+    assert content.strip() == "4"
 
 
 MODEL_NAME = "openai-community/gpt2"
