@@ -44,6 +44,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        weight: float = 1.0,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -135,6 +136,11 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
+        # WFQ scheduling attributes
+        self.weight = weight
+        self.virtual_start_time: float = 0.0
+        self.virtual_finish_time: float = 0.0
+
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
     @classmethod
@@ -158,6 +164,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            weight=getattr(request, "weight", 1.0),
         )
 
     def append_output_token_ids(
@@ -229,9 +236,26 @@ class Request:
 
     def __lt__(self, other: "Request") -> bool:
         """
-        Compare two requests based on priority, arrival time, and request ID.
-        Used in priority scheduling.
+        Compare two requests based on scheduling policy.
+
+        For WFQ scheduling: compares by virtual_finish_time.
+        For priority scheduling: compares by priority, arrival time, and request ID.
         """
+        # WFQ scheduling: compare by virtual_finish_time if both are set
+        if (
+            hasattr(self, "virtual_finish_time")
+            and hasattr(other, "virtual_finish_time")
+            and self.virtual_finish_time > 0.0
+            and other.virtual_finish_time > 0.0
+        ):
+            if self.virtual_finish_time != other.virtual_finish_time:
+                return self.virtual_finish_time < other.virtual_finish_time
+            # Tie-breaker: use request_id for determinism
+            if self.request_id != other.request_id:
+                return self.request_id < other.request_id
+            return id(self) < id(other)
+
+        # Priority/FCFS scheduling: original comparison logic
         if self.priority != other.priority:
             return self.priority < other.priority
         if self.arrival_time != other.arrival_time:
