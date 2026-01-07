@@ -729,14 +729,14 @@ class NixlConnectorScheduler:
                     # If remote_blocks and num_external_tokens = 0, we have
                     # a full prefix cache hit on the D worker. We need to call
                     # send_notif in _read_blocks to free the memory on the P.
+
+                    # TODO sync with Chen on prefix cache + HMA
                     local_block_ids = (
                         blocks.get_unhashed_block_ids_all_groups()
                         if num_external_tokens > 0
                         else []
                     )
                     local_block_ids = self.get_sw_clippped_blocks(local_block_ids)
-                    # FIXME we're allocating one more here for the SWA ones, which break len(local)==len(remote)..?
-                    # this is still 17
                     print(
                         f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n",
                         flush=True,
@@ -1048,10 +1048,6 @@ class NixlConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
-        # List of block window sizes for each layer for local attention
-        self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
 
         # Get the attention backend from the first layer
@@ -1487,28 +1483,6 @@ class NixlConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
-
-        # TODO(mgoin): Hybrid memory allocator is currently disabled for
-        # models with local attention (Llama 4). Can remove this once enabled.
-        if self.model_config.hf_config.model_type == "llama4":
-            from transformers import Llama4TextConfig
-
-            assert isinstance(self.model_config.hf_text_config, Llama4TextConfig)
-            llama4_config = self.model_config.hf_text_config
-            no_rope_layers = llama4_config.no_rope_layers
-            chunk_size = llama4_config.attention_chunk_size
-            chunk_block_size = math.ceil(chunk_size / self.block_size)
-            for layer_idx in range(self.num_layers):
-                # no_rope_layers[layer_idx] == 0 means NoPE (global)
-                # Any other value means RoPE (local chunked)
-                is_local_attention = no_rope_layers[layer_idx] != 0
-                block_window = chunk_block_size if is_local_attention else None
-                self.block_window_per_layer.append(block_window)
-            logger.debug(
-                "Llama 4 block window per layer mapping: %s",
-                self.block_window_per_layer,
-            )
-            assert len(self.block_window_per_layer) == self.num_layers
 
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
@@ -2339,55 +2313,15 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
-        local_block_descs_ids: np.ndarray
-        remote_block_descs_ids: np.ndarray
-
-        if not self.block_window_per_layer:
-            # Default case: assume global attention
-            remote_block_descs_ids = self._get_block_descs_ids(
-                dst_engine_id,
-                remote_block_ids,
-            )
-            local_block_descs_ids = self._get_block_descs_ids(
-                self.engine_id,
-                local_block_ids,
-                block_size_ratio=block_size_ratio,
-            )
-        else:
-            # TODO(mgoin): remove this once we have hybrid memory allocator
-            # Optimization for models with local attention (Llama 4)
-            local_descs_list = []
-            remote_descs_list = []
-            for layer_idx, block_window in enumerate(self.block_window_per_layer):
-                # For each layer:
-                if block_window is None:
-                    # If not chunked, we just use the
-                    # full block lists (global attention)
-                    layer_local_block_ids = local_block_ids
-                    layer_remote_block_ids = remote_block_ids
-                else:
-                    # If chunked, get the last block_window blocks
-                    layer_local_block_ids = local_block_ids[-block_window:]
-                    layer_remote_block_ids = remote_block_ids[-block_window:]
-
-                # Get descs ids for the layer.
-                layer_local_desc_ids = self._get_block_descs_ids(
-                    self.engine_id,
-                    layer_local_block_ids,
-                    layer_idx,
-                    block_size_ratio=block_size_ratio,
-                )
-                layer_remote_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id,
-                    layer_remote_block_ids,
-                    layer_idx,
-                )
-
-                local_descs_list.append(layer_local_desc_ids)
-                remote_descs_list.append(layer_remote_desc_ids)
-
-            local_block_descs_ids = np.concatenate(local_descs_list)
-            remote_block_descs_ids = np.concatenate(remote_descs_list)
+        remote_block_descs_ids = self._get_block_descs_ids(
+            dst_engine_id,
+            remote_block_ids,
+        )
+        local_block_descs_ids = self._get_block_descs_ids(
+            self.engine_id,
+            local_block_ids,
+            block_size_ratio=block_size_ratio,
+        )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -2447,30 +2381,22 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(
         self,
         engine_id: str,
-        block_ids: list[int],
-        layer_idx: int | None = None,
+        block_ids: tuple[list[int], ...],
         block_size_ratio: float | None = None,
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
-        If layer_idx is provided, we use the region_ids for the given layer.
-        Otherwise, we use all regions.
+        When HMA is enabled number of descriptors across kv cache groups might differ.
+        A single flattened array is returned for all groups anyway.
         """
-        if layer_idx is None:
-            region_ids = np.arange(self.num_regions)
-        else:
-            assert layer_idx < self.num_layers
-            if self.num_layers < self.num_regions:
-                # If we have more regions than layers, we assume that
-                # the regions are organized as [K0, V0, K1, V1, ...]
-                # and we select K_i and V_i
-                assert 2 * self.num_layers == self.num_regions
-                region_ids = np.arange(2 * layer_idx, 2 * layer_idx + 2)
-            else:
-                # Otherwise, we assume we have MLA and select i-th layer
-                assert self.num_layers == self.num_regions
-                region_ids = np.arange(layer_idx, layer_idx + 1)
-
+        region_ids = np.arange(self.num_regions)
+        # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
+        # layers from different groups share the same kv tensor.
+        # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be read across all regions,
+        # same for [3], but group0-group1 blocks will always differ (different areas).
+        # Therefore we can just flatten the block_ids and compute the descs ids for all
+        # groups at once.
+        print("get_block_descs_ids", block_ids, "\n")
         num_blocks = self.dst_num_blocks[engine_id]
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
