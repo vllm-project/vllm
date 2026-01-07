@@ -578,8 +578,11 @@ class LLM:
         lora_request: list[LoRARequest] | LoRARequest | None,
         prompts: list[TokensPrompt | TextPrompt],
         beam_width: int,
-    ) -> list[LoRARequest | None]:
+    ) -> list[LoRARequest] | None:
         """Get the optional lora request corresponding to each prompt."""
+        if lora_request is None:
+            return None
+
         if isinstance(lora_request, Sequence):
             if len(lora_request) != len(prompts):
                 raise ValueError(
@@ -587,7 +590,7 @@ class LLM:
                 )
             return [lr for lr in lora_request for _ in range(beam_width)]
 
-        if lora_request is None or isinstance(lora_request, LoRARequest):
+        if isinstance(lora_request, LoRARequest):
             return [lora_request] * beam_width * len(prompts)
 
         raise TypeError(f"Invalid lora_request type {type(lora_request)}")
@@ -670,8 +673,8 @@ class LLM:
         input_ids = torch.full(
             (batch_size, prompt_max_len), pad_token_id, dtype=torch.long, device=device
         )
-        for i, seq in enumerate(token_prompts):
-            token_ids = seq["prompt_token_ids"]
+        for i, token_prompt in enumerate(token_prompts):
+            token_ids = token_prompt["prompt_token_ids"]
             token_tensor = torch.tensor(
                 token_ids, dtype=torch.long, device=input_ids.device
             )
@@ -875,13 +878,13 @@ class LLM:
             batch_outputs = []
             for j in range(num_return_sequences):
                 idx = i * num_return_sequences + j
-                seq = seq_token_lists[idx]
+                seq_tokens = seq_token_lists[idx]
                 score = beam_scores[idx].item() if idx < len(beam_scores) else 0.0
                 batch_outputs.append(
                     BeamSearchSequence(
                         text=decoded_texts[idx],
                         logprobs=[],
-                        tokens=seq,
+                        tokens=seq_tokens,
                         cum_logprob=score,
                     )
                 )
