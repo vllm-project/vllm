@@ -113,7 +113,11 @@ class RayDistributedExecutor(Executor):
         """
         if self.scheduler_config.async_scheduling:
             return 2
-        return self.parallel_config.pipeline_parallel_size
+        # Note(qcs): when async send is enabled, we need one extra batch
+        # to fill the pipeline and avoid stalls.
+        return self.parallel_config.pipeline_parallel_size + (
+            1 - self.parallel_config.disable_pp_async_send
+        )
 
     def shutdown(self) -> None:
         if logger:
