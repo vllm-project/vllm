@@ -384,6 +384,7 @@ class OpenPanguMLAAttention(nn.Module):
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
             indexer=None,
+            indexer_rotary_emb=None,
             is_sparse=False,
             topk_indices_buffer=None,
         )
