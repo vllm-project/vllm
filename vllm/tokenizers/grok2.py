@@ -21,7 +21,7 @@ from transformers.utils import chat_template_utils as hf_chat_utils
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
-from .protocol import TokenizerLike
+from .protocol import ChatCompletionMessageParam, TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -421,7 +421,7 @@ class Grok2Tokenizer(TokenizerLike):
 
     def apply_chat_template(
         self,
-        conversation: list[dict[str, Any]],
+        messages: list[ChatCompletionMessageParam],
         tools: list[dict[str, Any]] | None = None,
         chat_template: str | None = None,
         tokenize: bool = False,
@@ -433,7 +433,7 @@ class Grok2Tokenizer(TokenizerLike):
                 "No chat template available. Provide `chat_template` explicitly."
             )
         prompt = hf_chat_utils.apply_chat_template(
-            conversation=conversation,
+            conversation=messages,
             chat_template=template,
             tools=tools,
             **kwargs,
