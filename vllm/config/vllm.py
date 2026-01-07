@@ -444,6 +444,7 @@ class VllmConfig:
 
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
+        model_config.model_arch_config = model_config.get_model_arch_config()
 
         return replace(self, model_config=model_config)
 
@@ -1263,12 +1264,6 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def recalculate_max_model_len(self, max_model_len: int):
-        # Can only be called in try_verify_and_update_config
-        model_config = self.model_config
-        max_model_len = model_config.get_and_verify_max_len(max_model_len)
-        self.model_config.max_model_len = max_model_len
-
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -1449,7 +1444,9 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current vLLM config is not set.")
+        # Use stack level 2 so the log contains the line of the caller,
+        # so it's easier to track down the source of the warning.
+        logger.warning("Current vLLM config is not set.", stacklevel=2)
         return VllmConfig()
     return _current_vllm_config
 
