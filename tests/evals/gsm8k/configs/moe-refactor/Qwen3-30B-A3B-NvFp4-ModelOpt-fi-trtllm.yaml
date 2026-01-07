@@ -1,0 +1,8 @@
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2"
+env:
+  VLLM_USE_FLASHINFER_MOE_FP4: "1"
+  VLLM_FLASHINFER_MOE_BACKEND: "latency"

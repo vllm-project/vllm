@@ -9,7 +9,7 @@ import operator
 import os
 import pprint
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
@@ -90,7 +90,7 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, compilation_config: CompilationConfig):
+    def __init__(self, compilation_config: CompilationConfig) -> None:
         self.cache: dict[tuple[Range, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
@@ -100,7 +100,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, compile_range: Range):
+    def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -115,7 +115,7 @@ class CompilerManager:
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
-    ):
+    ) -> None:
         """
         Initialize the cache directory for the compiler.
 
@@ -143,7 +143,7 @@ class CompilerManager:
                 # do not use eval(), it is unsafe.
                 cache = ast.literal_eval(f.read())
 
-            def check_type(value, ty):
+            def check_type(value: Any, ty: type) -> None:
                 if not isinstance(value, ty):
                     raise TypeError(f"Expected {ty} but got {type(value)} for {value}")
 
@@ -165,7 +165,7 @@ class CompilerManager:
             cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
         )
 
-    def save_to_file(self):
+    def save_to_file(self) -> None:
         if self.disable_cache or not self.is_cache_updated:
             return
         printer = pprint.PrettyPrinter(indent=4)
@@ -198,7 +198,7 @@ class CompilerManager:
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs,
+        example_inputs: list[Any],
         additional_inductor_config,
         compilation_config: CompilationConfig,
         compile_range: Range,
@@ -373,7 +373,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         compile_submod_names: list[str],
         vllm_config: VllmConfig,
         vllm_backend: "VllmBackend",
-    ):
+    ) -> None:
         super().__init__(module)
         from torch._guards import detect_fake_mode
 
@@ -385,7 +385,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
-    def run(self, *args):
+    def run(self, *args: Any) -> Any:
         # maybe instead just assert inputs are fake?
         fake_args = [
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
@@ -467,7 +467,7 @@ model_is_encoder: bool = False
 
 
 @contextmanager
-def set_model_tag(tag: str, is_encoder: bool = False):
+def set_model_tag(tag: str, is_encoder: bool = False) -> Generator[None, None, None]:
     """Context manager to set the model tag."""
     global model_tag
     global model_is_encoder
@@ -521,7 +521,7 @@ class VllmBackend:
         vllm_config: VllmConfig,
         prefix: str = "",
         is_encoder: bool = False,
-    ):
+    ) -> None:
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
         # e.g. language_model, vision_model, etc.
@@ -558,7 +558,7 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
-    def configure_post_pass(self):
+    def configure_post_pass(self) -> None:
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -580,7 +580,7 @@ class VllmBackend:
         self.inductor_config[self.pass_key] = self.pass_manager
 
     def __call__(
-        self, graph: fx.GraphModule, example_inputs
+        self, graph: fx.GraphModule, example_inputs: Sequence[Any]
     ) -> VllmSerializableFunction:
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.

@@ -28,7 +28,6 @@ EMBEDDING_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        dtype="float32",
     )
 ]
 

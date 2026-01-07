@@ -90,6 +90,12 @@ class PoolingMetadata:
 
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
+    def get_pooling_cursor(self) -> PoolingCursor:
+        pooling_cursor = self.pooling_cursor
+        assert pooling_cursor is not None, "Should call `build_pooling_cursor` first"
+
+        return pooling_cursor
+
     def build_pooling_cursor(
         self,
         num_scheduled_tokens_np: np.ndarray,
