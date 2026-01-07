@@ -28,7 +28,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
-from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -43,8 +43,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
     get_masked_input_and_mask,
 )
-from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .utils import DummyLoRAManager
 
@@ -261,11 +261,11 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(
         max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
     )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(vocab_size, 256)
@@ -360,11 +360,11 @@ def test_lm_head_logits_processor(
 
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(
         max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
     )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
 
     def _pretest():
         linear = ParallelLMHead(
@@ -480,13 +480,13 @@ def test_linear_replicated(
 
     max_loras = 8
     torch.set_default_device(device)
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(
         max_loras=max_loras,
         max_lora_rank=8,
         lora_dtype=torch.float16,
     )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
 
     def create_random_linear_replicated_layer():
         linear = ReplicatedLinear(4096, 4096, bias=False, params_dtype=torch.float16)
@@ -587,14 +587,14 @@ def test_linear_parallel(
 
     max_loras = 8
     torch.set_default_device(device)
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(
         max_loras=max_loras,
         max_lora_rank=8,
         fully_sharded_loras=fully_shard,
         lora_dtype=torch.float16,
     )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -712,14 +712,14 @@ def test_column_parallel_packed(
 
     max_loras = 8
     torch.set_default_device(device)
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(
         max_loras=max_loras,
         max_lora_rank=8,
         fully_sharded_loras=fully_shard,
         lora_dtype=torch.float16,
     )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
 
     def create_column_parallel_packed_layer():
         if repeats == 2:

@@ -124,7 +124,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens = torch.tensor(
                 [common_prefix_len], dtype=torch.int32, device=self.device
             )
-            suffix_kv_lens = common_attn_metadata.seq_lens_cpu - common_prefix_len
+            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
@@ -152,7 +152,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -165,7 +169,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set --attention-config.backend=FLEX_ATTENTION to use "
+                "Set --attention-backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 

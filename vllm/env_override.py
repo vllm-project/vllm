@@ -363,6 +363,30 @@ def _update_scheduler_patched(self) -> None:
         self.scheduler = Scheduler(self.operations)
 
 
+# ===================================================
+# torch 2.9 Inductor get_raw_stream workaround
+# ===================================================
+# Workaround for TorchInductor autotune using get_raw_stream() without defining it.
+# This occurs when compile_sizes > 1 in compilation_config.
+# For more context, see https://github.com/vllm-project/vllm/issues/30905.
+def _patch_get_raw_stream_if_needed():
+    """Workaround for TorchInductor autotune get_raw_stream() bug."""
+    from vllm.utils.torch_utils import is_torch_equal
+
+    # Only apply the patch for torch 2.9.0 or 2.9.1
+    if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
+        import builtins
+
+        # Check if CUDA functionality is available without initializing CUDA
+        # _cuda_getCurrentRawStream only exists in CUDA builds of PyTorch
+        if hasattr(torch._C, "_cuda_getCurrentRawStream"):
+            from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
+
+            builtins.get_raw_stream = _get_raw_stream
+
+
+_patch_get_raw_stream_if_needed()
+
 if is_torch_equal("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering

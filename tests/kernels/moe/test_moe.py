@@ -60,6 +60,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
@@ -231,8 +233,9 @@ def test_fused_moe(
     padding: bool,
     chunk_size: int,
     monkeypatch,
+    workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
@@ -486,6 +489,7 @@ def test_mixtral_moe(
     monkeypatch.setenv("MASTER_ADDR", "localhost")
     monkeypatch.setenv("MASTER_PORT", "12345")
     init_distributed_environment()
+    init_workspace_manager(torch.cuda.current_device())
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()
@@ -531,6 +535,11 @@ def test_mixtral_moe(
             )
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+
+        # FIXME (zyongye) fix this after we move self.kernel
+        # assignment in FusedMoE.__init__
+
+        vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
 
         # Run forward passes for both MoE blocks
         hf_states, _ = hf_moe.forward(hf_inputs)

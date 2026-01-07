@@ -144,9 +144,9 @@ class KVConnectorFactory:
 # only load the files corresponding to the current connector.
 
 KVConnectorFactory.register_connector(
-    "SharedStorageConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
-    "SharedStorageConnector",
+    "ExampleConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.example_connector",
+    "ExampleConnector",
 )
 
 KVConnectorFactory.register_connector(
