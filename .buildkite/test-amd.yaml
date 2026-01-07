@@ -1252,6 +1252,8 @@ steps:
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
