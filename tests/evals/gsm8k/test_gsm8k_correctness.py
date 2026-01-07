@@ -78,7 +78,7 @@ def test_gsm8k_correctness(config_filename):
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=600,
+        max_wait_seconds=eval_config.get("startup_max_wait_seconds", 600),
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")

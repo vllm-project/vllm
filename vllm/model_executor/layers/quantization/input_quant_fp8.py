@@ -7,15 +7,14 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 
-# Using the default value (240.0) from pytorch will cause accuracy
-# issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
 _FP8_DTYPE = current_platform.fp8_dtype()
-_FP8_FINFO = torch.finfo(_FP8_DTYPE)
-_FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
-_FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
+_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
