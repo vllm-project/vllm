@@ -311,37 +311,36 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
+                cache_config.mamba_cache_mode = (
+                    "all" if model_config.supports_mamba_prefix_caching else "align"
+                )
+                logger.warning(
+                    "Mamba cache mode is set to '%s' for %s by default "
+                    "when prefix caching is enabled",
+                    cache_config.mamba_cache_mode,
+                    model_config.architecture,
+                )
+            if (
+                cache_config.mamba_cache_mode == "all"
+                and not model_config.supports_mamba_prefix_caching
+            ):
                 cache_config.mamba_cache_mode = "align"
                 logger.warning(
-                    "Mamba cache mode is set to 'align' by default when prefix "
-                    "caching is enabled"
+                    "Hybrid or mamba-based model detected without support "
+                    "for prefix caching with Mamba cache 'all' mode: "
+                    "falling back to 'align' mode."
                 )
-            if cache_config.mamba_cache_mode == "all":
-                if model_config.supports_mamba_prefix_caching:
-                    logger.info(
-                        "Warning: Prefix caching is currently enabled. "
-                        "Its support for Mamba layers is experimental. "
-                        "Please report any issues you may observe."
-                    )
-                else:
-                    logger.info(
-                        "Hybrid or mamba-based model detected without "
-                        "support for prefix caching: disabling."
-                    )
-                    cache_config.enable_prefix_caching = False
-            elif cache_config.mamba_cache_mode == "align":
-                logger.info(
-                    "Warning: Mamba cache mode 'align' with prefix caching is"
-                    " currently enabled. Its support is experimental. "
-                    "Please report any issues you may observe."
-                )
+            if cache_config.mamba_cache_mode == "align":
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-            else:
-                raise ValueError(
-                    f"unknown mamba cache mode: {cache_config.mamba_cache_mode}"
-                )
+            logger.info(
+                "Warning: Prefix caching with Mamba cache '%s' "
+                "mode is currently enabled. "
+                "Its support for Mamba layers is experimental. "
+                "Please report any issues you may observe.",
+                cache_config.mamba_cache_mode,
+            )
         else:
             if cache_config.mamba_cache_mode != "none":
                 cache_config.mamba_cache_mode = "none"
