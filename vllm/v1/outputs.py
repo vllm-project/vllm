@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -91,7 +91,9 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
+TokenPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+TokensPoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+PoolerOutput: TypeAlias = TokenPoolerOutput | TokensPoolerOutput
 
 
 @dataclass
