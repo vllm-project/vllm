@@ -73,7 +73,6 @@ class OAIAttention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            dtype=torch.float32,
             rope_parameters={
                 "rope_theta": config.rope_parameters["rope_theta"],
                 "rope_type": "yarn",
