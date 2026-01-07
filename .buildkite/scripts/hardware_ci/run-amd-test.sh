@@ -165,7 +165,7 @@ fi
 # --ignore=entrypoints/openai/test_models.py <= Fails on MI250 but passes on MI300 as of 2025-03-13
 
 
-PARALLEL_JOB_COUNT=8
+PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-8}
 MYPYTHONPATH=".."
 
 # Test that we're launching on the machine that has
@@ -176,45 +176,70 @@ if [[ -z "$render_gid" ]]; then
   exit 1
 fi
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs.
+# check if the command contains shard flag
+# If Buildkite parallelism is active (PARALLEL_JOB_COUNT > 1 from Buildkite), 
+# each Buildkite job runs its assigned shard - don't parallelize further.
+# If no Buildkite parallelism (defaulted to 8), run all shards in parallel on this host.
 if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used
-  commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
-  for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
-    # assign shard-id for each shard
-    commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
-    echo "Shard ${GPU} commands:$commands_gpu"
+  if [[ -n "$BUILDKITE_PARALLEL_JOB_COUNT" ]] && [[ "$BUILDKITE_PARALLEL_JOB_COUNT" -gt 1 ]]; then
+    # Buildkite is handling parallelism - just run the single assigned shard
+    echo "Buildkite parallelism active (job $BUILDKITE_PARALLEL_JOB of $BUILDKITE_PARALLEL_JOB_COUNT)"
+    echo "Commands: $commands"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
-        --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
-        --network=host \
-        --shm-size=16gb \
-        --group-add "$render_gid" \
-        --rm \
-        -e HIP_VISIBLE_DEVICES="${GPU}" \
-        -e HF_TOKEN \
-        -e AWS_ACCESS_KEY_ID \
-        -e AWS_SECRET_ACCESS_KEY \
-        -v "${HF_CACHE}:${HF_MOUNT}" \
-        -e "HF_HOME=${HF_MOUNT}" \
-        -e "PYTHONPATH=${MYPYTHONPATH}" \
-        --name "${container_name}_${GPU}" \
-        "${image_name}" \
-        /bin/bash -c "${commands_gpu}" \
-        |& while read -r line; do echo ">>Shard $GPU: $line"; done &
-    PIDS+=($!)
-  done
-  #wait for all processes to finish and collect exit codes
-  for pid in "${PIDS[@]}"; do
-    wait "${pid}"
-    STATUS+=($?)
-  done
-  for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
-      echo "One of the processes failed with $st"
-      exit "${st}"
-    fi
-  done
+            --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+            --network=host \
+            --shm-size=16gb \
+            --group-add "$render_gid" \
+            --rm \
+            -e HF_TOKEN \
+            -e AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY \
+            -v "${HF_CACHE}:${HF_MOUNT}" \
+            -e "HF_HOME=${HF_MOUNT}" \
+            -e "PYTHONPATH=${MYPYTHONPATH}" \
+            --name "${container_name}" \
+            "${image_name}" \
+            /bin/bash -c "${commands}"
+  else
+    # No Buildkite parallelism - run all shards in parallel on this host using all GPUs
+    commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
+    for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
+      # assign shard-id for each shard
+      commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
+      echo "Shard ${GPU} commands:$commands_gpu"
+      echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+      docker run \
+          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --network=host \
+          --shm-size=16gb \
+          --group-add "$render_gid" \
+          --rm \
+          -e HIP_VISIBLE_DEVICES="${GPU}" \
+          -e HF_TOKEN \
+          -e AWS_ACCESS_KEY_ID \
+          -e AWS_SECRET_ACCESS_KEY \
+          -v "${HF_CACHE}:${HF_MOUNT}" \
+          -e "HF_HOME=${HF_MOUNT}" \
+          -e "PYTHONPATH=${MYPYTHONPATH}" \
+          --name "${container_name}_${GPU}" \
+          "${image_name}" \
+          /bin/bash -c "${commands_gpu}" \
+          |& while read -r line; do echo ">>Shard $GPU: $line"; done &
+      PIDS+=($!)
+    done
+    #wait for all processes to finish and collect exit codes
+    for pid in "${PIDS[@]}"; do
+      wait "${pid}"
+      STATUS+=($?)
+    done
+    for st in "${STATUS[@]}"; do
+      if [[ ${st} -ne 0 ]]; then
+        echo "One of the processes failed with $st"
+        exit "${st}"
+      fi
+    done
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
