@@ -269,24 +269,8 @@ def make_fp8_moe_kernel(
     # Delayed import is required since the oracle is imported
     # by CPU backends which cannot import all of these experts.
     # TODO: update the experts to make this not happen.
-    from vllm.model_executor.layers.fused_moe import (
-        TritonExperts,
-        TritonOrDeepGemmExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-        FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-        MarlinExperts,
-    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoEP,
-    )
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-        AiterExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
-        TritonOrCutlassExperts,
     )
 
     # NOTE(rob): this is a WIP refactor. We are first migrating
@@ -296,6 +280,10 @@ def make_fp8_moe_kernel(
     # NOTE(rob): in progress migrating all into this format.
     use_inplace = True
     if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+            FlashInferExperts,
+        )
+
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(
                 defer_input_quant=moe_quant_config.is_block_quantized
@@ -314,17 +302,29 @@ def make_fp8_moe_kernel(
         use_inplace = False
 
     elif fp8_backend == Fp8MoeBackend.AITER:
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            AiterExperts,
+        )
+
         kernel = mk.FusedMoEModularKernel(
             # TODO: make defer_input_quant an attr of the AiterExperts
             MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
             AiterExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.MARLIN:
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            MarlinExperts,
+        )
+
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             MarlinExperts(quant_config=moe_quant_config),
         )
     elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
+        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
+            TritonOrCutlassExperts,
+        )
+
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             TritonOrCutlassExperts(
@@ -337,11 +337,19 @@ def make_fp8_moe_kernel(
             ),
         )
     elif fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe import (
+            TritonOrDeepGemmExperts,
+        )
+
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             TritonOrDeepGemmExperts(quant_config=moe_quant_config),
         )
     else:
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            TritonExperts,
+        )
+
         assert fp8_backend == Fp8MoeBackend.TRITON
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
