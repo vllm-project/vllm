@@ -255,7 +255,15 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        return self.forward_cuda(hidden_states, q_fp8, k, weights)
+        if current_platform.is_cuda():
+            return self.forward_cuda(hidden_states, q_fp8, k, weights)
+        elif current_platform.is_rocm():
+            return self.forward_hip(hidden_states, q_fp8, k, weights)
+        else:
+            raise NotImplementedError(
+                "SparseAttnIndexer native forward is only implemented for "
+                "CUDA and ROCm platform."
+            )
 
     def forward_cuda(
         self,
