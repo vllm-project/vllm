@@ -225,10 +225,9 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
   int const threads = 256;
   int const blocks = (num_experts + threads - 1) / threads;
 
-  auto const* offsets_ptr =
-      static_cast<const int64_t*>(expert_first_token_offset.data_ptr());
-  auto* ps1_ptr = static_cast<int32_t*>(problem_sizes1.data_ptr());
-  auto* ps2_ptr = static_cast<int32_t*>(problem_sizes2.data_ptr());
+  auto const* offsets_ptr = expert_first_token_offset.data_ptr<int64_t>();
+  auto* ps1_ptr = problem_sizes1.data_ptr<int32_t>();
+  auto* ps2_ptr = problem_sizes2.data_ptr<int32_t>();
 
   VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes_from_expert_offsets<SwapAB>
