@@ -554,7 +554,13 @@ class GPUModelRunner(
 
         # Only relevant for multimodal models
         if self.supports_mm_inputs:
-            self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+            # Double buffer to avoid race condition: previous iteration's async
+            # copy may still be reading from CPU while current iteration writes.
+            self.is_mm_embed_buffers = [
+                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
+                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
+            ]
+            self.is_mm_embed_idx = 0
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -2337,8 +2343,13 @@ class GPUModelRunner(
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        # Swap to the other buffer to avoid race condition with previous
+        # iteration's async copy that may still be reading from CPU.
+        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx
+        is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
+
         mm_embeds = list[torch.Tensor]()
-        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
@@ -2416,7 +2427,7 @@ class GPUModelRunner(
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
