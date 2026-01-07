@@ -505,6 +505,26 @@ class Fp8LinearMethod(LinearMethodBase):
                 if not hasattr(layer, "_loaded_numel"):
                     layer._loaded_numel = 0
 
+                    # when the first `loaded_weight` is about to be
+                    # loaded to `param`, materialize `param` just-in-time
+                    weight = ModelWeightParameter(
+                        data=torch.empty(
+                            output_size_per_partition,
+                            input_size_per_partition,
+                            dtype=params_dtype,
+                            device=layer._load_device,
+                        ),
+                        input_dim=1,
+                        output_dim=0,
+                        weight_loader=patched_weight_loader,
+                    )
+                    layer.register_parameter("weight", weight)
+                    del layer._load_device
+
+                # refresh the reference to `param` to reflect just-in-time
+                # materialization
+                param = layer.weight
+
                 # load the current weight chunk
                 copy_numel_counter = CopyNumelCounter()
                 with copy_numel_counter:
@@ -525,17 +545,22 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 return res
 
-            # For non-serialized checkpoints, use original dtype
             weight = ModelWeightParameter(
                 data=torch.empty(
                     output_size_per_partition,
                     input_size_per_partition,
+                    # materialized just-in-time in `patched_weight_loader`
+                    device="meta",
+                    # For non-serialized checkpoints, use original dtype
                     dtype=params_dtype,
                 ),
                 input_dim=1,
                 output_dim=0,
                 weight_loader=patched_weight_loader,
             )
+            # stash the correct device for `patched_weight_loader`
+            layer._load_device = torch.get_default_device()
+
         layer.register_parameter("weight", weight)
 
         # If checkpoint is serialized fp8, load them.
@@ -1388,6 +1413,49 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             if not hasattr(layer, "_loaded_numel"):
                 layer._loaded_numel = 0
 
+                # save the ids of original w13 and w2 so that we can
+                # distinguish which one `param` should map to further
+                # down in this file
+                layer._w13_weight_orig_id = id(layer.w13_weight)
+                layer._w2_weight_orig_id = id(layer.w2_weight)
+
+                # when the first `loaded_weight` is about to be
+                # loaded to `param`, materialize `param` just-in-time
+
+                w13_weight = torch.nn.Parameter(
+                    torch.empty(
+                        num_experts,
+                        2 * intermediate_size_per_partition,
+                        hidden_size,
+                        dtype=params_dtype,
+                        device=layer._load_device,
+                    ),
+                    requires_grad=False,
+                )
+                layer.register_parameter("w13_weight", w13_weight)
+                set_weight_attrs(w13_weight, extra_weight_attrs)
+
+                w2_weight = torch.nn.Parameter(
+                    torch.empty(
+                        num_experts,
+                        hidden_size,
+                        intermediate_size_per_partition,
+                        dtype=params_dtype,
+                        device=layer._load_device,
+                    ),
+                    requires_grad=False,
+                )
+                layer.register_parameter("w2_weight", w2_weight)
+                set_weight_attrs(w2_weight, extra_weight_attrs)
+                del layer._load_device
+
+            # refresh the reference to `param` to reflect just-in-time
+            # materialization
+            if id(param) == layer._w13_weight_orig_id:
+                param = layer.w13_weight
+            elif id(param) == layer._w2_weight_orig_id:
+                param = layer.w2_weight
+
             # load the current weight chunk
             copy_numel_counter = CopyNumelCounter()
             with copy_numel_counter:
@@ -1402,6 +1470,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
                 # Delete the bookkeeping
                 del layer._loaded_numel
+                del layer._w13_weight_orig_id
+                del layer._w2_weight_orig_id
                 # Prevent the usual `process_weights_after_loading` call
                 # from doing anything
                 layer._already_called_process_weights_after_loading = True
@@ -1417,6 +1487,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
+                # materialized just-in-time in `patched_weight_loader`
+                device="meta",
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -1429,12 +1501,16 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
+                # materialized just-in-time in `patched_weight_loader`
+                device="meta",
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        # stash the correct device for `patched_weight_loader`
+        layer._load_device = torch.get_default_device()
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
