@@ -21,8 +21,6 @@ def get_tied_weight_names(model: PreTrainedModel) -> set[str]:
     Uses HuggingFace's internal _tied_weights_keys attribute.
     """
     tied_names = set()
-
-    # HuggingFace models track tied weights in _tied_weights_keys
     if hasattr(model, "_tied_weights_keys") and model._tied_weights_keys:
         tied_names.update(model._tied_weights_keys)
 
@@ -97,7 +95,6 @@ def test_hf_model_weights_mapper(model_arch: str):
     hf_dummy_model = create_dummy_model(model_id, model_arch)
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
-    # Get tied weight names (these may be relative to submodules)
     tied_weight_names = get_tied_weight_names(hf_dummy_model)
     mapper: WeightsMapper = model_cls.hf_to_vllm_mapper
 
@@ -108,8 +105,6 @@ def test_hf_model_weights_mapper(model_arch: str):
     ref_weight_names = set(map(lambda x: x[0], mapped_original_weights))
     weight_names = set(map(lambda x: x[0], mapped_hf_converted_weights))
     buffer_names = set(map(lambda x: x[0], mapped_hf_converted_buffers))
-
-    # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
 
     # Tied weights may appear in named_parameters() but not in the checkpoint
