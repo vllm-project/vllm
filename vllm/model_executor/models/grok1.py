@@ -36,6 +36,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -66,7 +67,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.logger import init_logger
 
 # Default Grok1-specific constants, overridden by config values if present
 DEFAULT_ATTN_OUTPUT_MULTIPLIER = 0.08838834764831845
