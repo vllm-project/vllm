@@ -88,3 +88,5 @@ open-clip-torch==2.32.0
 perceptron==0.1.4
 # Required for the multi-modal models test
 timm==1.0.17
+# Required for plugins test
+albumentations==1.4.6
