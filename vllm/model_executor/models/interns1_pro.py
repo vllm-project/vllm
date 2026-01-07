@@ -63,7 +63,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
     Qwen3MoeForCausalLM,
     Qwen3MoeMLP,
@@ -76,6 +75,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
+from .qwen3_vl_moe import Qwen3VLMoeMixtureOfExperts
 from .utils import (
     extract_layer_index,
     is_pp_missing_parameter,
@@ -87,7 +87,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class InternS1_1_ProcessingInfo(Qwen3VLProcessingInfo):
+class InternS1ProProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -115,7 +115,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-def apply_rotary_pos_emb_sep(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb_sep(q, k, cos, sin, unsqueeze_dim=1):
     num_groups = int(q.shape[unsqueeze_dim] // cos.shape[unsqueeze_dim])
     cos_rep = repeat_kv(cos, num_groups)
     sin_rep = repeat_kv(sin, num_groups)
@@ -124,7 +124,7 @@ def apply_rotary_pos_emb_sep(q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
     return q_embed, k_embed
 
 
-class Qwen3MoeAttention(nn.Module):
+class InternS1ProMoeAttention(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -255,7 +255,7 @@ class Qwen3MoeAttention(nn.Module):
         return output
 
 
-class Qwen3MoeDecoderLayer(nn.Module):
+class InternS1ProMoeDecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -264,7 +264,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
-        self.self_attn = Qwen3MoeAttention(
+        self.self_attn = InternS1ProMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -328,14 +328,12 @@ class Qwen3MoeDecoderLayer(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
-        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
-        # otherwise (seq_len, ).
         "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     }
 )
-class Qwen3MoeLLMModel(nn.Module):
+class InternS1ProMoeLLMModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -392,7 +390,9 @@ class Qwen3MoeLLMModel(nn.Module):
         # build layers
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            lambda prefix: InternS1ProMoeDecoderLayer(
+                vllm_config=vllm_config, prefix=prefix
+            ),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -653,12 +653,12 @@ class Qwen3MoeLLMModel(nn.Module):
         return loaded_params
 
 
-class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
+class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3MoeForCausalLM, self).__init__()
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
-        self.model = Qwen3MoeLLMModel(
+        self.model = InternS1ProMoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.lm_head = ParallelLMHead(
@@ -675,54 +675,12 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.language_model.model.layers:
-            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
-
-    def set_moe_parameters(self):
-        self.expert_weights = []
-
-        self.moe_layers = []
-        example_moe = None
-        for layer in self.language_model.model.layers:
-            if hasattr(layer, "mlp") and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                example_moe = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-
-        if example_moe is None:
-            raise RuntimeError("No Qwen3Moe layer found in the language_model.")
-
-        # Set MoE hyperparameters
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_shared_experts = 0
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3VLMultiModalProcessor,
-    info=InternS1_1_ProcessingInfo,
+    info=InternS1ProProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class InternS1_1_ForConditionalGeneration(
+class InternS1ProForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
@@ -761,7 +719,7 @@ class InternS1_1_ForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        self.language_model = Qwen3MoeLLMForCausalLM(
+        self.language_model = InternS1ProMoeLLMForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
         )
         # Whether to include the gate_up_proj mapping is determined by

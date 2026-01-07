@@ -729,8 +729,8 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Intern-S1-1
-def run_interns1_1(questions: list[str], modality: str) -> ModelRequestData:
+# Intern-S1-Pro
+def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "internlm-private/InternS1_1_1T_A22_1217"
 
     engine_args = EngineArgs(
@@ -1878,7 +1878,7 @@ model_example_map = {
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
-    "interns1_1": run_interns1_1,
+    "interns1_pro": run_interns1_pro,
     "internvl_chat": run_internvl,
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
