@@ -314,6 +314,7 @@ class FusedMoE(CustomOp):
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
+        router_logits_dtype: Data type for router logits buffers.
     """
 
     def __init__(
@@ -348,6 +349,7 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: int | None = None,
+        router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
@@ -559,6 +561,7 @@ class FusedMoE(CustomOp):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
@@ -1509,7 +1512,9 @@ class FusedMoE(CustomOp):
         )
 
         self.batched_router_logits = torch.zeros(
-            logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            logits_shape,
+            dtype=moe.router_logits_dtype,
+            device=torch.cuda.current_device(),
         )
 
     def select_experts(
@@ -1899,11 +1904,11 @@ class FusedMoE(CustomOp):
                 )
 
                 post_quant_allgather = (
-                    has_flashinfer_trtllm_fused_moe()
-                    and self.quant_method is not None
+                    self.quant_method is not None
                     and self.dp_size > 1
                     and self.use_ep
                     and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
+                    and has_flashinfer_trtllm_fused_moe()
                 )
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
@@ -2002,6 +2007,7 @@ class FusedMoE(CustomOp):
     @classmethod
     def make_expert_params_mapping(
         cls,
+        model: torch.nn.Module,
         ckpt_gate_proj_name: str,
         ckpt_down_proj_name: str,
         ckpt_up_proj_name: str,
@@ -2020,13 +2026,19 @@ class FusedMoE(CustomOp):
             )
         )
 
+        base_layer = (
+            "base_layer."
+            if any(".base_layer." in name for name, _ in model.named_parameters())
+            else ""
+        )
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_"
+                f"experts.{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else "experts.w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.",
+                else f"experts.{base_layer}w2_",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )
