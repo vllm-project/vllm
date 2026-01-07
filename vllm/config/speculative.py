@@ -401,6 +401,9 @@ class SpeculativeConfig:
                             model_type="eagle",
                         )
                         self.draft_model_config.hf_config = eagle_config
+                        self.draft_model_config.model_arch_config = (
+                            self.draft_model_config.get_model_arch_config()
+                        )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
