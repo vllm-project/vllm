@@ -233,7 +233,10 @@ class RequestTracker:
         elif isinstance(new_block_ids, list):
             pass
         else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
+            raise ValueError(
+                f"Unsupported new_block_ids type {type(new_block_ids)}: "
+                f"should be None[list[int], ...], tuple or list[int]."
+            )
         self.allocated_block_ids.extend(new_block_ids)
 
         # When a request is scheduled again, and the number of new tokens
