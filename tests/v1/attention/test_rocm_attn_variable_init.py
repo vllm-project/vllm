@@ -15,6 +15,13 @@ See: https://github.com/vllm-project/vllm/pull/31118
 
 import pytest
 
+from vllm.platforms import current_platform
+
+# Skip on non-ROCm platforms
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
+
 
 class TestVariableInitializationPattern:
     """Test that variables are properly initialized before conditional blocks."""
