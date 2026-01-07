@@ -4,8 +4,7 @@
 K2-VL Model Configuration.
 
 This configuration supports video-chunk as an internal modality type.
-A video-chunk is the smallest independently processable unit of video,
-typically 4 frames per chunk (temporal_merge_kernel_size=4).
+A video-chunk is the smallest independently processable unit of video.
 """
 
 from transformers import DeepseekV3Config
@@ -89,22 +88,15 @@ class K2VLConfig(PretrainedConfig):
     """K2-VL model configuration.
 
     K2-VL extends Kimi-VL with video support using video-chunks.
-    A video-chunk consists of multiple consecutive frames (default: 4)
+    A video-chunk consists of multiple consecutive frames
     that are processed together with temporal pooling.
 
     Args:
         vision_config: Configuration for the vision tower and projector.
         text_config: Configuration for the text model (DeepseekV3).
-
-        Video-Chunk Parameters:
-            temporal_merge_kernel_size: Number of frames per video chunk.
-            sample_fps: Video sampling frame rate.
-            timestamp_mode: Format for chunk timestamps.
-
-        Other Parameters:
-            ignore_index: The ignore index for the loss function.
-            media_placeholder_token_id: The token ID for media placeholders.
-            pad_token_id: The token ID for padding.
+        ignore_index: The ignore index for the loss function.
+        media_placeholder_token_id: The token ID for media placeholders.
+        pad_token_id: The token ID for padding.
     """
 
     model_type = "k2_vl"
@@ -113,11 +105,6 @@ class K2VLConfig(PretrainedConfig):
         self,
         vision_config: dict | K2VLVisionConfig | None = None,
         text_config: dict | DeepseekV3Config | None = None,
-        # Video-chunk parameters
-        temporal_merge_kernel_size: int = 4,
-        sample_fps: float = 2.0,
-        timestamp_mode: str = "hh:mm:ss.fff",
-        # Other parameters
         ignore_index: int = -100,
         media_placeholder_token_id: int = 163605,
         pad_token_id: int = 0,
@@ -138,11 +125,6 @@ class K2VLConfig(PretrainedConfig):
         elif isinstance(text_config, dict):
             text_config = DeepseekV3Config(**text_config)
         self.text_config: DeepseekV3Config = text_config
-
-        # Video-chunk config
-        self.temporal_merge_kernel_size = temporal_merge_kernel_size
-        self.sample_fps = sample_fps
-        self.timestamp_mode = timestamp_mode
 
         # Other config
         self.ignore_index = ignore_index
