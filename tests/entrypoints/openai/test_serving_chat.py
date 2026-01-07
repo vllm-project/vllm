@@ -452,11 +452,17 @@ async def test_gpt_oss_speculative_reasoning_leakage(
     )
 
     content = ""
+    reasoning_content = ""
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.content:
             content += delta.content
 
+        chunk_reasoning = getattr(delta, "reasoning", None)
+        if chunk_reasoning:
+            reasoning_content += delta.reasoning
+
+    assert len(reasoning_content) > 0, "No reasoning was generated."
     assert content.strip() == "4"
 
 

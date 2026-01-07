@@ -52,6 +52,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.serving_chat_stream_harmony import (
+    TokenState,
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.serving_engine import (
@@ -816,12 +817,12 @@ class OpenAIServingChat(OpenAIServing):
                         prev_recipient = harmony_parser.current_recipient
 
                         # Track accumulated content per token with their state
-                        token_states: list[tuple[str | None, str | None, str]] = []
+                        token_states: list[TokenState] = []
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
                             token_delta = harmony_parser.last_content_delta or ""
                             token_states.append(
-                                (
+                                TokenState(
                                     harmony_parser.current_channel,
                                     harmony_parser.current_recipient,
                                     token_delta,

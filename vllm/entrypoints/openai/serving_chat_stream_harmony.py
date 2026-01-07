@@ -7,6 +7,8 @@ This module handles the extraction of DeltaMessage objects from
 harmony parser state during streaming chat completions.
 """
 
+from typing import NamedTuple
+
 from openai_harmony import StreamableParser
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -17,9 +19,15 @@ from vllm.entrypoints.openai.protocol import (
 )
 
 
+class TokenState(NamedTuple):
+    channel: str | None
+    recipient: str | None
+    text: str
+
+
 def extract_harmony_streaming_delta(
     harmony_parser: StreamableParser,
-    token_states: list[tuple[str | None, str | None, str]],
+    token_states: list[TokenState],
     prev_recipient: str | None,
     include_reasoning: bool,
 ) -> tuple[DeltaMessage | None, bool]:
@@ -28,39 +36,44 @@ def extract_harmony_streaming_delta(
 
     Args:
         harmony_parser: The StreamableParser instance tracking parse state
-        token_states: List of (channel, recipient, text) tuples for each token
+        token_states: List of TokenState tuples for each token
         prev_recipient: Previous recipient for detecting tool call transitions
         include_reasoning: Whether to include reasoning content
 
     Returns:
         A tuple of (DeltaMessage or None, tools_streamed_flag)
     """
+
+    if not token_states:
+        return None, False
+
     tools_streamed = False
 
     # Group consecutive tokens with same channel/recipient
-    groups: list[dict[str, str | None]] = []
-    for channel, recipient, text in token_states:
-        if (
-            groups
-            and groups[-1]["channel"] == channel
-            and groups[-1]["recipient"] == recipient
-        ):
-            current_text = groups[-1]["text"] or ""
-            groups[-1]["text"] = current_text + text
+    groups: list[TokenState] = []
+
+    current_channel = token_states[0].channel
+    current_recipient = token_states[0].recipient
+    current_text = token_states[0].text
+
+    for i in range(1, len(token_states)):
+        state = token_states[i]
+        if state.channel == current_channel and state.recipient == current_recipient:
+            current_text += state.text
         else:
-            groups.append(
-                {
-                    "channel": channel,
-                    "recipient": recipient,
-                    "text": text,
-                }
-            )
+            groups.append(TokenState(current_channel, current_recipient, current_text))
+            current_channel = state.channel
+            current_recipient = state.recipient
+            current_text = state.text
+
+    groups.append(TokenState(current_channel, current_recipient, current_text))
 
     # Process each group and create delta messages
     delta_message = None
     combined_content = ""
     combined_reasoning = ""
     tool_messages = []
+    content_encountered = False
 
     # Calculate base_index once before the loop
     # This counts completed tool calls in messages
@@ -85,21 +98,18 @@ def extract_harmony_streaming_delta(
         ongoing_tool_index = None
 
     for group in groups:
-        group_channel = group["channel"]
-        group_recipient = group["recipient"]
-        group_text = group["text"]
-
-        if group_channel == "final":
-            combined_content += group_text or ""
+        if group.channel == "final":
+            combined_content += group.text
+            content_encountered = True
         elif (
-            (group_channel == "commentary" or group_channel == "analysis")
-            and group_recipient
-            and group_recipient.startswith("functions.")
+            (group.channel == "commentary" or group.channel == "analysis")
+            and group.recipient
+            and group.recipient.startswith("functions.")
         ):
             opened_new_call = False
-            if prev_recipient != group_recipient:
+            if prev_recipient != group.recipient:
                 # New tool call - emit the opening message
-                tool_name = group_recipient.split("functions.", 1)[1]
+                tool_name = group.recipient.split("functions.", 1)[1]
                 tool_messages.append(
                     DeltaToolCall(
                         id=make_tool_call_id(),
@@ -112,11 +122,11 @@ def extract_harmony_streaming_delta(
                     )
                 )
                 opened_new_call = True
-                prev_recipient = group_recipient
+                prev_recipient = group.recipient
                 # Increment for subsequent new tool calls
                 next_tool_index += 1
 
-            if group_text:
+            if group.text:
                 # Stream arguments for the ongoing tool call
                 if opened_new_call:
                     # Just opened in this group
@@ -134,19 +144,20 @@ def extract_harmony_streaming_delta(
                 tool_messages.append(
                     DeltaToolCall(
                         index=tool_call_index,
-                        function=DeltaFunctionCall(arguments=group_text),
+                        function=DeltaFunctionCall(arguments=group.text),
                     )
                 )
-        elif group_channel == "commentary":
+        elif group.channel == "commentary":
             # Tool call preambles meant to be shown to the user
-            combined_content += group_text or ""
-        elif group_channel == "analysis" and include_reasoning:
-            combined_reasoning += group_text or ""
+            combined_content += group.text
+            content_encountered = True
+        elif group.channel == "analysis" and include_reasoning:
+            combined_reasoning += group.text
 
     # Combine all non-empty fields into a single message
-    if combined_content or combined_reasoning or tool_messages:
+    if content_encountered or combined_reasoning or tool_messages:
         delta_kwargs: dict[str, str | list[DeltaToolCall]] = {}
-        if combined_content:
+        if content_encountered:
             delta_kwargs["content"] = combined_content
         if combined_reasoning:
             delta_kwargs["reasoning"] = combined_reasoning

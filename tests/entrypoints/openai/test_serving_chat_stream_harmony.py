@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.entrypoints.openai.serving_chat_stream_harmony import (
+    TokenState,
     extract_harmony_streaming_delta,
 )
 
@@ -42,12 +43,14 @@ class TestExtractHarmonyStreamingDelta:
     def test_final_channel_returns_content_delta(self, delta_text, expected_content):
         """Test that final channel returns a DeltaMessage with content."""
         parser = MockStreamableParser()
+
+        # Updated to use TokenState list
+        token_states = [TokenState(channel="final", recipient=None, text=delta_text)]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel="final",
-            cur_recipient=None,
+            token_states=token_states,
             prev_recipient=None,
-            delta_text=delta_text,
             include_reasoning=False,
         )
 
@@ -65,18 +68,19 @@ class TestExtractHarmonyStreamingDelta:
     def test_analysis_channel_reasoning(self, include_reasoning, expected_has_message):
         """Test analysis channel respects include_reasoning flag."""
         parser = MockStreamableParser()
+        text = "Let me think..."
+        token_states = [TokenState(channel="analysis", recipient=None, text=text)]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel="analysis",
-            cur_recipient=None,
+            token_states=token_states,
             prev_recipient=None,
-            delta_text="Let me think...",
             include_reasoning=include_reasoning,
         )
 
         if expected_has_message:
             assert delta_message is not None
-            assert delta_message.reasoning == "Let me think..."
+            assert delta_message.reasoning == text
         else:
             assert delta_message is None
         assert tools_streamed is False
@@ -88,12 +92,14 @@ class TestExtractHarmonyStreamingDelta:
         mock_make_tool_call_id.return_value = "call_test123"
         parser = MockStreamableParser()
 
+        token_states = [
+            TokenState(channel=channel, recipient="functions.get_weather", text="")
+        ]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel=channel,
-            cur_recipient="functions.get_weather",
+            token_states=token_states,
             prev_recipient=None,
-            delta_text="",
             include_reasoning=False,
         )
 
@@ -111,20 +117,25 @@ class TestExtractHarmonyStreamingDelta:
     def test_tool_call_argument_streaming(self, channel):
         """Test streaming tool call arguments (same recipient)."""
         parser = MockStreamableParser()
+        args_text = '{"location": "Paris"}'
+
+        token_states = [
+            TokenState(
+                channel=channel, recipient="functions.get_weather", text=args_text
+            )
+        ]
 
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel=channel,
-            cur_recipient="functions.get_weather",
+            token_states=token_states,
             prev_recipient="functions.get_weather",
-            delta_text='{"location": "Paris"}',
             include_reasoning=False,
         )
 
         assert delta_message is not None
         tool_call = delta_message.tool_calls[0]
         assert tool_call.id is None
-        assert tool_call.function.arguments == '{"location": "Paris"}'
+        assert tool_call.function.arguments == args_text
         assert tool_call.index == 0
         assert tools_streamed is True
 
@@ -133,12 +144,14 @@ class TestExtractHarmonyStreamingDelta:
         """Test empty delta_text with same recipient returns None."""
         parser = MockStreamableParser()
 
+        token_states = [
+            TokenState(channel=channel, recipient="functions.get_weather", text="")
+        ]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel=channel,
-            cur_recipient="functions.get_weather",
+            token_states=token_states,
             prev_recipient="functions.get_weather",
-            delta_text="",
             include_reasoning=False,
         )
 
@@ -154,12 +167,14 @@ class TestExtractHarmonyStreamingDelta:
         ]
         parser = MockStreamableParser(messages=messages)
 
+        token_states = [
+            TokenState(channel="commentary", recipient="functions.tool2", text="args")
+        ]
+
         delta_message, _ = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel="commentary",
-            cur_recipient="functions.tool2",
+            token_states=token_states,
             prev_recipient="functions.tool2",
-            delta_text="args",
             include_reasoning=False,
         )
 
@@ -173,15 +188,18 @@ class TestExtractHarmonyStreamingDelta:
         ],
     )
     def test_returns_tool_call_preambles(self, channel, recipient):
-        """Test that invalid channel/recipient combinations return None."""
+        """Test that invalid tool recipient on commentary is treated as content."""
         parser = MockStreamableParser()
         delta_text = "some text"
+
+        token_states = [
+            TokenState(channel=channel, recipient=recipient, text=delta_text)
+        ]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel=channel,
-            cur_recipient=recipient,
+            token_states=token_states,
             prev_recipient=None,
-            delta_text=delta_text,
             include_reasoning=True,
         )
 
@@ -199,12 +217,14 @@ class TestExtractHarmonyStreamingDelta:
         """Test that invalid channel/recipient combinations return None."""
         parser = MockStreamableParser()
 
+        token_states = [
+            TokenState(channel=channel, recipient=recipient, text="some text")
+        ]
+
         delta_message, tools_streamed = extract_harmony_streaming_delta(
             harmony_parser=parser,
-            cur_channel=channel,
-            cur_recipient=recipient,
+            token_states=token_states,
             prev_recipient=None,
-            delta_text="some text",
             include_reasoning=True,
         )
 
