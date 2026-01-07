@@ -49,6 +49,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     - Generate: Streaming text generation
     - Embed: Embeddings (TODO)
     - HealthCheck: Health probe
+    - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
     """
@@ -166,6 +167,27 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         logger.debug("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
         return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
+
+    async def Abort(
+        self,
+        request: vllm_engine_pb2.AbortRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> vllm_engine_pb2.AbortResponse:
+        """
+        Out-of-band abort requests.
+
+        Args:
+            request: The AbortRequest protobuf
+            context: gRPC context
+
+        Returns:
+            AbortResponse protobuf
+        """
+        request_ids = request.request_ids
+        logger.debug("Abort requests: %s", request_ids)
+
+        await self.async_llm.abort(request_ids)
+        return vllm_engine_pb2.AbortResponse()
 
     async def GetModelInfo(
         self,

@@ -391,3 +391,56 @@ async def test_generate_error_handling(grpc_client):
     assert len(responses) == 1
     assert responses[0].HasField("error")
     assert "top_p must be in (0, 1], got -33.0" in responses[0].error.message
+
+
+@pytest.mark.asyncio
+async def test_abort_request(grpc_client):
+    """Test the out-of-band Abort RPC."""
+    request_id = "test-abort-1"
+
+    # Start a long-running streaming generate request
+    generate_request = vllm_engine_pb2.GenerateRequest(
+        request_id=request_id,
+        tokenized=vllm_engine_pb2.TokenizedInput(
+            original_text="Hello",
+            input_ids=[15496],
+        ),
+        sampling_params=vllm_engine_pb2.SamplingParams(
+            temperature=0.0,
+            min_tokens=500,
+            max_tokens=500,  # Request many tokens to ensure it runs long enough
+        ),
+        stream=True,
+    )
+
+    # Track whether we were aborted
+    was_aborted = False
+    received_chunks = 0
+
+    async def run_generate():
+        nonlocal was_aborted, received_chunks
+        async for response in grpc_client.Generate(generate_request):
+            if response.HasField("chunk"):
+                received_chunks += 1
+
+            if response.HasField("complete"):
+                complete = response.complete
+                was_aborted = complete.finish_reason == "abort"
+            else:
+                was_aborted = False
+            print(response)
+
+    async def abort_after_delay():
+        # Small delay to ensure generate has started
+        await asyncio.sleep(0.1)
+        abort_request = vllm_engine_pb2.AbortRequest(request_ids=[request_id])
+        await grpc_client.Abort(abort_request)
+
+    # Run generate and abort concurrently
+    await asyncio.gather(run_generate(), abort_after_delay())
+
+    # The request should have been aborted (received error with "aborted" message)
+    # and finished early due to the abort
+    assert was_aborted and received_chunks < 500, (
+        "Request should have been aborted before generating all 500 tokens"
+    )
