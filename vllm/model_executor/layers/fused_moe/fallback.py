@@ -30,12 +30,20 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         return self.fallback_experts.activation_formats
 
     def supports_chunking(self) -> bool:
+        assert (
+            self.experts.supports_chunking()
+            == self.fallback_experts.supports_chunking()
+        )
         return (
             self.experts.supports_chunking()
             and self.fallback_experts.supports_chunking()
         )
 
     def supports_expert_map(self) -> bool:
+        assert (
+            self.experts.supports_expert_map()
+            == self.fallback_experts.supports_expert_map()
+        )
         return (
             self.experts.supports_expert_map()
             and self.fallback_experts.supports_expert_map()
