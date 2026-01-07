@@ -54,7 +54,7 @@ class AiterTritonMLAImpl(AiterMLAImpl):
             k,
             v,
             softmax_scale=softmax_scale,
-            return_softmax_lse=return_softmax_lse,
+            return_lse=return_softmax_lse,
             **kwargs,
         )
         # Transpose the LSE if Triton MHA is used:
