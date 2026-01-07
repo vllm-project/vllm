@@ -48,6 +48,10 @@ def is_valid_kv_cache_layout(value: str) -> bool:
 
 
 
+# Cache for lazy sync subclasses to avoid repeated type() calls
+_lazy_sync_class_cache: dict[tuple[type, str], type] = {}
+
+
 def make_lazy_sync_tensor_property(
     obj: object,
     prop_name: str,
@@ -69,25 +73,33 @@ def make_lazy_sync_tensor_property(
         event.record()
         make_lazy_sync_tensor_property(metadata, "query_start_loc_cpu", cpu_buf, event)
     """
-    # Stash tensor and event under private names
-    val_slot = f"_lazy_{prop_name}_val"
-    ev_slot = f"_lazy_{prop_name}_ev"
-    setattr(obj, val_slot, tensor)
-    setattr(obj, ev_slot, event)
+    base_cls = obj.__class__
+    cache_key = (base_cls, prop_name)
 
-    def getter(self):
-        ev = getattr(self, ev_slot, None)
-        if ev is not None:
-            ev.synchronize()
-            setattr(self, ev_slot, None)
-        return getattr(self, val_slot)
+    # Get or create cached subclass
+    lazy_cls = _lazy_sync_class_cache.get(cache_key)
+    if lazy_cls is None:
+        val_slot = f"_lazy_{prop_name}_val"
+        ev_slot = f"_lazy_{prop_name}_ev"
 
-    # Create one-off subclass with property override
-    obj.__class__ = type(
-        f"{obj.__class__.__name__}_LazySync",
-        (obj.__class__,),
-        {prop_name: property(getter)},
-    )
+        def getter(self, _val=val_slot, _ev=ev_slot):
+            ev = getattr(self, _ev, None)
+            if ev is not None:
+                ev.synchronize()
+                setattr(self, _ev, None)
+            return getattr(self, _val)
+
+        lazy_cls = type(
+            f"{base_cls.__name__}_LazySync",
+            (base_cls,),
+            {prop_name: property(getter)},
+        )
+        _lazy_sync_class_cache[cache_key] = lazy_cls
+
+    # Stash tensor and event, then switch class
+    setattr(obj, f"_lazy_{prop_name}_val", tensor)
+    setattr(obj, f"_lazy_{prop_name}_ev", event)
+    obj.__class__ = lazy_cls
 
 
 @functools.lru_cache
