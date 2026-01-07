@@ -129,10 +129,19 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
-    "flashinfer", "nvfp4_block_scale_interleave"
+    "flashinfer.fp4_quantization", "block_scale_interleave"
 )
+
+block_scale_interleave = _lazy_import_wrapper(
+    "flashinfer.fp4_quantization", "block_scale_interleave"
+)
+
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
+)
+
+trtllm_mxintw4a16_block_scale_moe = _lazy_import_wrapper(
+    "flashinfer", "trtllm_mxintw4a16__moe"
 )
 
 # Special case for autotune since it returns a context manager
@@ -196,6 +205,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
