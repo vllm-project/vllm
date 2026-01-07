@@ -142,16 +142,16 @@ response = client.chat.completions.create(
 
 ### Proportional Fairness
 
-WFQ provides **proportional fairness**, meaning:
+WFQ provides proportional fairness, meaning:
 
-- A request with `weight=2.0` receives **2x** the resources of a `weight=1.0` request
-- A request with `weight=0.5` receives **0.5x** (half) the resources of a `weight=1.0` request
+- A request with `weight=2.0` receives 2x the resources of a `weight=1.0` request
+- A request with `weight=0.5` receives 0.5x (half) the resources of a `weight=1.0` request
 
 ### Virtual Time Computation
 
 Internally, WFQ computes:
 
-```
+```text
 virtual_start = max(global_virtual_time, request_arrival_time)
 virtual_finish = virtual_start + (tokens_needed / weight)
 ```
@@ -217,7 +217,7 @@ output = llm.generate(prompt, SamplingParams(max_tokens=100, weight=weight))
 
 ### No Starvation
 
-WFQ **guarantees** that all requests eventually make progress, regardless of weight:
+WFQ guarantees that all requests eventually make progress, regardless of weight:
 
 - Low-weight requests are not indefinitely blocked by high-weight requests
 - Global virtual time advances monotonically, ensuring fairness over time
@@ -226,7 +226,7 @@ WFQ **guarantees** that all requests eventually make progress, regardless of wei
 
 When a request is preempted (e.g., due to KV cache eviction):
 
-- WFQ **preserves** the request's virtual times
+- WFQ preserves the request's virtual times
 - The request resumes without penalty
 - Fairness is maintained across preemption events
 
@@ -310,7 +310,7 @@ WFQ considers total tokens (prompt + output). Very long prompts may affect fairn
 
 ### 3. No Time-Based Guarantees
 
-WFQ provides proportional fairness, **not** latency guarantees:
+WFQ provides proportional fairness, not latency guarantees:
 
 - Cannot guarantee "request completes in X seconds"
 - Fairness is relative to other requests in the queue
@@ -393,12 +393,14 @@ SamplingParams(
 
 ## Further Reading
 
-- [WFQ Algorithm](https://en.wikipedia.org/wiki/Weighted_fair_queueing)
-- [Generalized Processor Sharing (GPS)](https://en.wikipedia.org/wiki/Generalized_processor_sharing)
+- [WFQ Algorithm](<https://en.wikipedia.org/wiki/Weighted_fair_queueing>)
+- [Generalized Processor Sharing (GPS)](<https://en.wikipedia.org/wiki/Generalized_processor_sharing>)
 - vLLM Documentation: Advanced Scheduling
 
 ---
 
 **Version**: vLLM v0.x.x
+
 **Status**: Experimental Feature
-**Feedback**: Please report issues at https://github.com/vllm-project/vllm/issues
+
+**Feedback**: Please report issues at <https://github.com/vllm-project/vllm/issues>

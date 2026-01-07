@@ -12,6 +12,7 @@
 This document outlines the design for adding Weighted Fair Queuing (WFQ) scheduling policy to vLLM's v1 scheduler architecture. WFQ provides fairness guarantees by preventing large requests from starving smaller ones, while maintaining backward compatibility with existing FCFS and Priority scheduling policies.
 
 **Key Benefits:**
+
 - Fairness: Guarantees proportional resource allocation based on request weights
 - Starvation Prevention: Ensures all requests make progress regardless of size
 - Flexibility: User-configurable weights per request
@@ -23,7 +24,7 @@ This document outlines the design for adding Weighted Fair Queuing (WFQ) schedul
 
 ### 2.1 Current Scheduler Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        Scheduler                             │
 │  ┌────────────────────────────────────────────────────────┐ │
@@ -58,7 +59,7 @@ This document outlines the design for adding Weighted Fair Queuing (WFQ) schedul
 
 ### 2.2 Request Lifecycle
 
-```
+```text
 Request Arrival → add_request()
                       │
                       ▼
@@ -107,13 +108,14 @@ Request Arrival → add_request()
 
 **Core Principle:** Each request tracks virtual start/finish times. Scheduler selects request with smallest virtual_finish_time.
 
-```
+```text
 virtual_start = max(global_virtual_time, request_arrival_time)
 virtual_finish = virtual_start + (tokens_needed / weight)
 global_virtual_time += tokens_scheduled / weight
 ```
 
 **Why this works:**
+
 - Higher weight → smaller virtual_finish → scheduled earlier
 - Equal weights → degenerates to FCFS
 - Prevents starvation: all requests eventually have smallest virtual_finish
@@ -257,6 +259,7 @@ def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
 ## 5. Request Comparison for Heap
 
 Current Request comparison (from reading source):
+
 ```python
 # In Request class
 def __lt__(self, other: "Request") -> bool:
@@ -267,6 +270,7 @@ def __lt__(self, other: "Request") -> bool:
 ```
 
 **WFQ Extension:**
+
 ```python
 def __lt__(self, other: "Request") -> bool:
     """Compare requests for heap operations.
@@ -297,7 +301,7 @@ def __lt__(self, other: "Request") -> bool:
 | **Preemption** | Request returns after preemption | Preserve virtual_finish_time in prepend_request() |
 | **Empty Queue** | pop/peek from empty queue | Raise IndexError (consistent with Priority queue) |
 | **Partial Prefill** | Request scheduled with partial tokens | Recompute virtual_finish after each iteration |
-| **Equal Virtual Finish** | Two requests same virtual_finish_time | Fallback to arrival_time (from __lt__) |
+| **Equal Virtual Finish** | Two requests same virtual_finish_time | Fallback to arrival_time (from **lt**) |
 | **Virtual Time Overflow** | Long-running system | Use float64, overflow at ~10^308 (not practical) |
 
 ---
@@ -305,6 +309,7 @@ def __lt__(self, other: "Request") -> bool:
 ## 7. Testing Strategy
 
 ### 7.1 Unit Tests
+
 ```python
 # tests/v1/core/test_wfq_scheduler.py
 
@@ -325,6 +330,7 @@ def test_wfq_empty_queue_raises():
 ```
 
 ### 7.2 Integration Tests
+
 ```python
 def test_wfq_with_chunked_prefill():
     """WFQ works correctly with partial token scheduling."""
@@ -334,6 +340,7 @@ def test_wfq_with_prefix_caching():
 ```
 
 ### 7.3 Benchmarking
+
 ```python
 # benchmarks/scheduler_policies/benchmark_wfq.py
 
@@ -362,52 +369,55 @@ def benchmark_overhead(num_requests=10000):
 ### 8.2 Expected Performance
 
 **Throughput:** < 5% degradation vs FCFS (heap operations are fast)
+
 **Fairness:** 30-40% improvement in Jain's Index
+
 **Latency (p50):** < 10% increase (fair distribution may delay some)
-**Latency (p99):** **Improvement** (no long tail from starvation)
+
+**Latency (p99):** Improvement (no long tail from starvation)
 
 ---
 
 ## 9. Critical Questions
 
 1. **Preemption Semantics**: When a request is preempted and returns via `prepend_request()`, should we:
-   - (A) Preserve original virtual_finish_time? ✅ **Preferred** (maintains fairness)
+   - (A) Preserve original virtual_finish_time? Preferred (maintains fairness)
    - (B) Recompute virtual_finish_time? (could penalize preempted requests)
 
 2. **Partial Prefill Updates**: After scheduling partial tokens, should we:
-   - (A) Recompute virtual_finish based on remaining tokens? ✅ **Preferred**
+   - (A) Recompute virtual_finish based on remaining tokens? Preferred
    - (B) Keep original virtual_finish? (doesn't account for work done)
 
 3. **Weight Bounds**: Should we enforce min/max weight limits?
-   - (A) No limits (trust users) ✅ **Preferred** (simpler)
+   - (A) No limits (trust users) Preferred (simpler)
    - (B) Enforce 0.1 <= weight <= 10.0 (prevent abuse)
 
 4. **Backward Compatibility**: How to handle requests from API without weight?
-   - (A) Default weight=1.0 ✅ **Implemented**
+   - (A) Default weight=1.0 Implemented
    - (B) Reject requests (too strict)
 
 5. **Virtual Time Units**: Should virtual time be:
-   - (A) Dimensionless (current design) ✅ **Preferred**
+   - (A) Dimensionless (current design) Preferred
    - (B) In units of seconds (adds complexity)
 
 6. **Integration with Priority**: What if request has both priority AND weight?
-   - (A) WFQ policy ignores priority field ✅ **Preferred** (clean separation)
-   - (B) Combine both (weight * priority_factor) (too complex)
+   - (A) WFQ policy ignores priority field Preferred (clean separation)
+   - (B) Combine both (weight \* priority_factor) (too complex)
 
 7. **Spec Decoding**: For speculative tokens, should weight apply to:
-   - (A) Total tokens (prompt + accepted_spec) ✅ **Preferred**
+   - (A) Total tokens (prompt + accepted_spec) Preferred
    - (B) Only prompt tokens (inconsistent)
 
 8. **Token Estimation**: How to estimate tokens_needed for virtual_finish?
-   - (A) prompt_tokens + max_tokens ✅ **Current design**
+   - (A) prompt_tokens + max_tokens Current design
    - (B) Use sampling_params.min_tokens (more accurate but complex)
 
 9. **KV Cache Interaction**: Should cache hits affect virtual time?
-   - (A) No, virtual time based on total tokens ✅ **Preferred** (simpler)
+   - (A) No, virtual time based on total tokens Preferred (simpler)
    - (B) Yes, reduce tokens_needed by cache hits (complex)
 
 10. **Heap Reordering**: After partial scheduling, should we re-heapify?
-    - (A) Yes, always maintain heap property ✅ **Required for correctness**
+    - (A) Yes, always maintain heap property Required for correctness
     - (B) No, only on next pop (incorrect)
 
 ---
@@ -415,29 +425,34 @@ def benchmark_overhead(num_requests=10000):
 ## 10. Implementation Checklist
 
 ### Phase 1: Core Implementation
+
 - [ ] Create `wfq_queue.py` with WFQRequestQueue class
 - [ ] Add `weight` attribute to Request class
 - [ ] Update `SchedulingPolicy` enum
 - [ ] Update `create_request_queue()` factory
-- [ ] Extend Request.__lt__() for virtual_finish_time comparison
+- [ ] Extend Request.**lt**() for virtual_finish_time comparison
 
 ### Phase 2: Configuration
+
 - [ ] Update `SchedulerConfig.policy` type to include "wfq"
 - [ ] Add validation for policy value
 - [ ] Update docstrings
 
 ### Phase 3: Testing
+
 - [ ] Unit tests for WFQRequestQueue (15-20 tests)
 - [ ] Integration tests with Scheduler (5-10 tests)
 - [ ] Benchmarking suite
 
 ### Phase 4: Documentation
+
 - [ ] Algorithm explanation
 - [ ] Configuration guide
 - [ ] Performance characteristics
 - [ ] Migration guide (FCFS → WFQ)
 
 ### Phase 5: PR Preparation
+
 - [ ] Code review and cleanup
 - [ ] Type checking (mypy)
 - [ ] Linting (ruff)
@@ -450,7 +465,7 @@ def benchmark_overhead(num_requests=10000):
 
 1. **WFQ Original Paper**: Demers, A., Keshav, S., & Shenker, S. (1989). "Analysis and Simulation of a Fair Queueing Algorithm"
 2. **vLLM Paper**: Kwon, W., et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention"
-3. **vLLM Codebase**: https://github.com/vllm-project/vllm
+3. **vLLM Codebase**: <https://github.com/vllm-project/vllm>
 
 ---
 
@@ -462,4 +477,4 @@ def benchmark_overhead(num_requests=10000):
 
 ---
 
-**End of Design Document**
+End of Design Document

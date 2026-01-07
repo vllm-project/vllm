@@ -12,16 +12,19 @@
 **File**: `vllm/config/scheduler.py`
 
 **Current Policy Type:**
+
 ```python
 SchedulerPolicy = Literal["fcfs", "priority"]
 ```
 
 **Updated Policy Type:**
+
 ```python
 SchedulerPolicy = Literal["fcfs", "priority", "wfq"]
 ```
 
 **Current policy field:**
+
 ```python
 @config
 @dataclass
@@ -35,6 +38,7 @@ class SchedulerConfig:
 ```
 
 **Updated policy field:**
+
 ```python
 @config
 @dataclass
@@ -53,12 +57,14 @@ class SchedulerConfig:
 **Decision**: Do NOT add WFQ-specific configuration fields (e.g., `wfq_default_weight`)
 
 **Rationale:**
+
 1. **Simplicity**: Additional config increases complexity
 2. **API-driven**: Weight should be per-request (set by client), not global
 3. **Backward Compatibility**: Default weight=1.0 is sufficient
 4. **Consistency**: FCFS and Priority policies have no extra config
 
 **Alternative Considered:**
+
 ```python
 # REJECTED: Too complex, not needed
 wfq_default_weight: float = 1.0
@@ -74,7 +80,8 @@ wfq_max_weight: float = 10.0
 
 **File**: `vllm/v1/request.py`
 
-**Add to `Request.__init__()`:**
+**Add to `Request.**init**()`:**
+
 ```python
 def __init__(
     self,
@@ -113,9 +120,11 @@ def __init__(
 ### 2.2 Validation Strategy
 
 **Option A: No validation** (Trust client, raise errors on invalid usage)
+
 - **Selected**: Simpler, consistent with other attributes (priority, arrival_time)
 
-**Option B: Validate in __init__()**
+**Option B: Validate in **init**()**
+
 ```python
 # REJECTED: Too restrictive
 if weight <= 0:
@@ -133,6 +142,7 @@ if weight > 1000:
 **Solution**: Default parameter `weight=1.0` ensures backward compatibility
 
 **Test**:
+
 ```python
 # Old code (still works)
 req = Request(request_id="1", prompt_token_ids=[1,2,3], ...)
@@ -145,7 +155,7 @@ req = Request(request_id="1", prompt_token_ids=[1,2,3], weight=2.0, ...)
 
 ## 3. Request Comparison Update
 
-### 3.1 Current __lt__ Implementation
+### 3.1 Current **lt** Implementation
 
 ```python
 def __lt__(self, other: "Request") -> bool:
@@ -159,7 +169,7 @@ def __lt__(self, other: "Request") -> bool:
     return id(self) < id(other)
 ```
 
-### 3.2 Updated __lt__ for WFQ Support
+### 3.2 Updated **lt** for WFQ Support
 
 ```python
 def __lt__(self, other: "Request") -> bool:
@@ -191,6 +201,7 @@ def __lt__(self, other: "Request") -> bool:
 ```
 
 **Key Design Decision:**
+
 - Check `hasattr()` for forward/backward compatibility
 - Check `> 0.0` to distinguish initialized vs uninitialized
 - Fallback to original comparison for FCFS/Priority queues
@@ -202,6 +213,7 @@ def __lt__(self, other: "Request") -> bool:
 ### 4.1 How Clients Specify Weight
 
 **Current API (EngineCoreRequest):**
+
 ```python
 @dataclass
 class EngineCoreRequest:
@@ -213,6 +225,7 @@ class EngineCoreRequest:
 ```
 
 **Extended API:**
+
 ```python
 @dataclass
 class EngineCoreRequest:
@@ -225,6 +238,7 @@ class EngineCoreRequest:
 ```
 
 **Request.from_engine_core_request() update:**
+
 ```python
 @classmethod
 def from_engine_core_request(
@@ -291,9 +305,9 @@ self.weight: Optional[float] = None
 | `vllm/config/scheduler.py` | Update policy docstring | ~5 | Low |
 | `vllm/v1/request.py` | Add weight parameter | ~1 | Low |
 | `vllm/v1/request.py` | Add WFQ attributes | ~3 | Low |
-| `vllm/v1/request.py` | Update __lt__ method | ~10 | Medium |
+| `vllm/v1/request.py` | Update **lt** method | ~10 | Medium |
 | `vllm/v1/engine.py` | Add weight to EngineCoreRequest | ~1 | Low |
-| **Total** | **22 lines** | **Low-Med** |
+| **Total** | | **22 lines** | **Low-Med** |
 
 **Migration Path**: Zero-change migration (all defaults maintain current behavior)
 
@@ -315,4 +329,4 @@ self.weight: Optional[float] = None
 
 ---
 
-**End of Configuration Specification**
+End of Configuration Specification
