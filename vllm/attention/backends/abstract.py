@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
-class AttentionType:
+class AttentionType(str, Enum):
     """
     Attention type.
     Use string to be compatible with `torch.compile`.
@@ -193,7 +194,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int | None,
+        block_size: int,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -207,7 +208,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int | None,
+        block_size: int,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -290,6 +291,11 @@ class AttentionLayer(Protocol):
 
 
 class AttentionImpl(ABC, Generic[T]):
+    # Required attributes that all impls should have
+    num_heads: int
+    head_size: int
+    scale: float
+
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
