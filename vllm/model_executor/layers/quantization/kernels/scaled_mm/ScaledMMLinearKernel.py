@@ -67,8 +67,8 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         raise NotImplementedError
 
     def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
-        assert self.can_implement(c)
-        assert self.is_supported()
+        assert self.can_implement(c)[0]
+        assert self.is_supported()[0]
         self.config = c
         self.layer_param_names = layer_param_names
 
