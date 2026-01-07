@@ -133,10 +133,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch(
             hidden_states,
