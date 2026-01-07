@@ -1,4 +1,4 @@
-model_name: "RedHatAI/Qwen3-30B-A3B-NVFP4"
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
 accuracy_threshold: 0.88
 num_questions: 1319
 num_fewshot: 5
