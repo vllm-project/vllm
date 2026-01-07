@@ -77,12 +77,11 @@ def run_qwen3_vl_reranker() -> RerankModelData:
             "is_original_qwen3_reranker": True,
         },
     )
-    # FIXME(Isotr0py): Align with HF
-    # chat_template_path = "qwen3_vl_reranker.jinja"
-    # chat_template = (TEMPLATE_HOME / chat_template_path).read_text()
+    chat_template_path = "qwen3_vl_reranker.jinja"
+    chat_template = (TEMPLATE_HOME / chat_template_path).read_text()
     return RerankModelData(
         engine_args=engine_args,
-        # chat_template=chat_template,
+        chat_template=chat_template,
     )
 
 
