@@ -1059,15 +1059,12 @@ class GlmAsrForConditionalGeneration(
         chunk_embeddings = torch.split(
             masked_audio_features, audio_output_lengths.flatten().tolist()
         )
-        result = _group_audio_embeddings(chunk_embeddings, chunk_counts)
-
-        return result
+        return _group_audio_embeddings(chunk_embeddings, chunk_counts)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        ""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
