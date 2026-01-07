@@ -1153,6 +1153,9 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
+        # .mixer.attn.{k,v}_scale
+        (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
         (r"\.([kv])_scale$", r".attn.\1_scale"),
     ]
