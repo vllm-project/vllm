@@ -461,7 +461,6 @@ def load_weights_using_from_2_way_softmax(
     ) - model.lm_head.weight.data[[false_id]].to(torch.float32)
 
     param = model.score.weight
-    print(score_weight.shape, param.shape)
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
