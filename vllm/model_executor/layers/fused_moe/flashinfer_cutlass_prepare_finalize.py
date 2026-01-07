@@ -184,13 +184,14 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
-        if not self.use_dp and quant_config.quant_dtype == "nvfp4":
+        is_nvfp4 = quant_config.quant_dtype == "nvfp4"
+        if not self.use_dp and is_nvfp4:
             return a1, None, None, topk_ids, topk_weights
 
         if not self.use_deepseek_fp8_block_scale:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                quant_config.a1_gscale,
+                quant_config.a1_gscale if is_nvfp4 else quant_config.a1_scale,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -222,7 +223,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 topk_weights, topk_ids, a1q = gathered
                 a1q_scale = None
 
-        if quant_config.quant_dtype == "nvfp4" and a1q_scale is not None:
+        if is_nvfp4 and a1q_scale is not None:
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
