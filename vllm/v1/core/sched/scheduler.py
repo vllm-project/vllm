@@ -336,10 +336,16 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        partial_prefill_metadata = self._build_partial_prefill_metadata()
-        partial_prefill_slot_budget = self._get_prefill_slot_budget(
-            partial_prefill_metadata
-        )
+        # Partial prefill related.
+        if self.enable_concurrent_partial_prefill_scheduling:
+            partial_prefill_metadata = self._build_partial_prefill_metadata()
+            partial_prefill_slot_budget = self._get_prefill_slot_budget(
+                partial_prefill_metadata
+            )
+        else:
+            partial_prefill_metadata = None
+            partial_prefill_slot_budget = None
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -624,9 +630,9 @@ class Scheduler(SchedulerInterface):
                 )
                 if (
                     self.enable_concurrent_partial_prefill_scheduling
-                    and partial_prefill_metadata is not None
                     and waiting_req_prefill_state is not None
                     and waiting_req_prefill_state.is_prefill
+                    and partial_prefill_metadata is not None
                     and not partial_prefill_metadata.can_schedule(
                         waiting_req_prefill_state.remaining_tokens
                     )
@@ -827,10 +833,10 @@ class Scheduler(SchedulerInterface):
                         any_request.request_id
                     )
                 )
-        # reorder scheduled prefills to have finishing ones first
-        self.running = self._order_finishing_prefills_first(
-            self.running, num_scheduled_tokens
-        )
+        # # reorder scheduled prefills to have finishing ones first
+        # self.running = self._order_finishing_prefills_first(
+        #     self.running, num_scheduled_tokens
+        # )
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
@@ -1007,15 +1013,9 @@ class Scheduler(SchedulerInterface):
             num_output_tokens=num_output_tokens,
         )
 
-    def _build_partial_prefill_metadata(self) -> PartialPrefillMetadata | None:
+    def _build_partial_prefill_metadata(self) -> PartialPrefillMetadata:
         """Build a speculative PartialPrefillMetadata based on the
         current running and waiting queues."""
-        if (
-            not self.scheduler_config.enable_chunked_prefill
-            or self.scheduler_config.max_num_partial_prefills <= 1
-        ):
-            return None
-
         max_partial_prefills = self.scheduler_config.max_num_partial_prefills
         long_limit = self.scheduler_config.max_long_partial_prefills
         threshold = self.scheduler_config.long_prefill_token_threshold
@@ -1052,10 +1052,6 @@ class Scheduler(SchedulerInterface):
             if prefill_state.is_long_prefill:
                 waiting_long_prefills += 1
             prefills += 1
-
-        if prefills == 0:
-            return None
-
         return PartialPrefillMetadata(
             schedulable_prefills=min(prefills, max_partial_prefills),
             long_prefills=long_prefills,
@@ -1065,17 +1061,11 @@ class Scheduler(SchedulerInterface):
             long_prefill_threshold=threshold,
         )
 
-    def _get_prefill_slot_budget(
-        self, metadata: PartialPrefillMetadata | None
-    ) -> int | None:
-        if metadata is None:
-            return None
+    def _get_prefill_slot_budget(self, metadata: PartialPrefillMetadata) -> int | None:
         index = min(
             metadata.schedulable_prefills,
             len(self._prefill_slot_budgets) - 1,
         )
-        if index <= 0:
-            return None
         return self._prefill_slot_budgets[index]
 
     def _order_finishing_prefills_first(
@@ -1120,11 +1110,11 @@ class Scheduler(SchedulerInterface):
         )
         is_prefill = self._is_prefill_with_tokens(request, num_computed_tokens)
         threshold = self.scheduler_config.long_prefill_token_threshold
-        is_long_prefill = remaining_tokens > threshold
+        is_long_prefill = is_prefill and remaining_tokens > threshold
         return PrefillState(
             is_prefill=is_prefill,
             remaining_tokens=remaining_tokens,
-            is_long_prefill=is_prefill and is_long_prefill,
+            is_long_prefill=is_long_prefill,
         )
 
     @staticmethod
