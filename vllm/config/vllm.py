@@ -1123,9 +1123,14 @@ class VllmConfig:
                         range(8, min(max_cudagraph_capture_size + 1, 256), 8)
                     )
                 if max_cudagraph_capture_size >= 256:
-                    # Step size 16 for larger batch sizes
+                    # Step size 16 for medium batch sizes, up to 1024(not included)
                     cudagraph_capture_sizes += list(
-                        range(256, max_cudagraph_capture_size + 1, 16)
+                        range(256, min(max_cudagraph_capture_size + 1, 1024), 16)
+                    )
+                if max_cudagraph_capture_size >= 1024:
+                    # Step size 64 for larger batch sizes
+                    cudagraph_capture_sizes += list(
+                        range(1024, max_cudagraph_capture_size + 1, 64)
                     )
 
             if (
