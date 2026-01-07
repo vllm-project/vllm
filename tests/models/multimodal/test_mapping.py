@@ -20,11 +20,34 @@ def get_tied_weight_names(model: PreTrainedModel) -> set[str]:
     Get names of weights that are tied to other weights.
     Uses HuggingFace's internal _tied_weights_keys attribute.
     """
-    tied_names = set()
-    if hasattr(model, "_tied_weights_keys") and model._tied_weights_keys:
-        tied_names.update(model._tied_weights_keys)
+    tied_keys = getattr(model, "_tied_weights_keys", None)
+    return set(tied_keys) if tied_keys else set()
 
-    return tied_names
+
+def filter_tied_weights(
+    weight_names: set[str],
+    ref_weight_names: set[str],
+    tied_weight_names: set[str],
+) -> set[str]:
+    """
+    Remove tied weights that appear in named_parameters() but not in checkpoint.
+
+    In transformers v5+, tied weights (e.g., lm_head tied to embed_tokens) appear
+    separately in named_parameters() even though only one copy is stored in the
+    checkpoint. _tied_weights_keys stores names relative to submodules, so we
+    match by suffix (e.g., "lm_head.weight" matches "language_model.lm_head.weight").
+    """
+    if not tied_weight_names:
+        return weight_names
+
+    def is_tied_and_missing(name: str) -> bool:
+        if name in ref_weight_names:
+            return False
+        return any(
+            name == tied or name.endswith(f".{tied}") for tied in tied_weight_names
+        )
+
+    return {name for name in weight_names if not is_tied_and_missing(name)}
 
 
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
@@ -107,19 +130,11 @@ def test_hf_model_weights_mapper(model_arch: str):
     buffer_names = set(map(lambda x: x[0], mapped_hf_converted_buffers))
     ref_weight_names -= buffer_names
 
-    # Tied weights may appear in named_parameters() but not in the checkpoint
-    # since they share memory with another parameter.
-    # _tied_weights_keys stores names relative to submodules, so we need to
-    # check if weight names end with the tied weight pattern.
-    weights_to_remove = set()
-    for weight_name in weight_names:
-        for tied_name in tied_weight_names:
-            if (
-                weight_name.endswith(tied_name) or weight_name.endswith(f".{tied_name}")
-            ) and weight_name not in ref_weight_names:
-                weights_to_remove.add(weight_name)
-                break
-    weight_names -= weights_to_remove
+    # Filter out tied weights that don't exist in the checkpoint
+    weight_names = filter_tied_weights(
+        weight_names, ref_weight_names, tied_weight_names
+    )
+
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names
     assert not weights_missing and not weights_unmapped, (
