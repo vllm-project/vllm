@@ -39,7 +39,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.k2vl_vit import (
     K2VLMultiModalProjector,
     MoonViT3dPretrainedModel,
-    vision_tower_forward_auto,
+    vision_tower_forward,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -335,7 +335,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # Build vision tower directly with K2VLVisionConfig
         self.vision_tower = MoonViT3dPretrainedModel(
             config.vision_config,
-            self.use_data_parallel,
+            multimodal_config=model_config.multimodal_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.vision_tower = self.vision_tower.to(
@@ -410,7 +410,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self, media_input: K2VLMediaPixelInputs
     ) -> list[torch.Tensor]:
         # NOTE(moyan): This forward will automatically batch the forward pass internally
-        media_features = vision_tower_forward_auto(
+        media_features = vision_tower_forward(
             self.vision_tower,
             media_input["pixel_values"],
             media_input["grid_thws"],

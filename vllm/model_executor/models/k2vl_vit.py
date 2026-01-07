@@ -19,103 +19,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import is_flash_attn_2_available
 
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+from vllm.config import MultiModalConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.configs.k2vl import K2VLConfig, K2VLVisionConfig
-
-# Flash attention imports
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_varlen_func
-else:
-    flash_attn_varlen_func = None
 
 KIMIV_VT_INFER_MAX_PATCH_NUM = 16328
 logger = init_logger(__name__)
 
 
-def multihead_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_cu_seqlens: torch.Tensor | None = None,
-    k_cu_seqlens: torch.Tensor | None = None,
-    max_seqlen_q: int | None = None,
-    max_seqlen_k: int | None = None,
-    deterministic: bool = False,
-):
-    """Multi-head attention using flash attention 2.
 
-    Args:
-        q, k, v: tensor of shape (batch_size, seqlen, num_heads, head_dim),
-            or (tot_seqlens, num_heads, head_dim) if packing.
-        q_cu_seqlens (torch.Tensor): cumulative sequence lengths of q.
-            The first element should be 0 and the last element should be q.shape[0].
-        k_cu_seqlens (torch.Tensor): cumulative sequence lengths of k.
-            The first element should be 0 and the last element should be k.shape[0].
-
-    Returns:
-        output: shape (batch_size, seqlen, dim) or (tot_seqlens, dim) if packing,
-            where dim = num_heads * head_dim
-    """
-    attn_out = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        q_cu_seqlens,
-        k_cu_seqlens,
-        max_seqlen_q,
-        max_seqlen_k,
-        causal=False,
-        deterministic=deterministic,
-    )
-    if isinstance(attn_out, tuple):
-        attn_out = attn_out[0]
-
-    attn_out = attn_out.flatten(start_dim=-2)
-
-    return attn_out
-
-
-def eager_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    q_cu_seqlens: torch.Tensor | None = None,
-    k_cu_seqlens: torch.Tensor | None = None,
-    **kwargs,
-) -> torch.Tensor:
-    seq_length = q.shape[0]
-    attention_mask = torch.zeros(
-        [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-    )
-    for i in range(1, len(q_cu_seqlens)):
-        attention_mask[
-            ...,
-            q_cu_seqlens[i - 1] : q_cu_seqlens[i],
-            q_cu_seqlens[i - 1] : q_cu_seqlens[i],
-        ] = True
-    q = q.transpose(0, 1)
-    k = k.transpose(0, 1)
-    v = v.transpose(0, 1)
-
-    attn_weight = q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])
-    attn_weight += attention_mask
-    attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32).to(q.dtype)
-
-    attn_output = attn_weight @ v
-    attn_output = attn_output.transpose(0, 1)
-    attn_output = attn_output.reshape(seq_length, -1)
-    return attn_output
-
-
-VL_VISION_ATTENTION_FUNCTIONS = {
-    "flash_attention_2": multihead_attention,
-    "eager": eager_attention,
-}
 
 
 def _apply_rope_input_validation(x, freqs_cis):
@@ -385,97 +308,155 @@ class Rope2DPosEmbRepeated(nn.Module):
 
 
 class MLP2(nn.Module):
-    """Two-layer MLP."""
+    """Two-layer MLP with tensor parallel support."""
 
-    def __init__(self, dims: list[int], activation, bias=True):
+    def __init__(
+        self,
+        dims: list[int],
+        activation,
+        bias: bool = True,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         assert len(dims) == 3
-        self.fc0 = nn.Linear(dims[0], dims[1], bias=bias)
-        self.fc1 = nn.Linear(dims[1], dims[2], bias=bias)
+        self.use_data_parallel = use_data_parallel
+        self.fc0 = ColumnParallelLinear(
+            dims[0],
+            dims[1],
+            bias=bias,
+            prefix=maybe_prefix(prefix, "fc0"),
+            disable_tp=self.use_data_parallel,
+        )
+        self.fc1 = RowParallelLinear(
+            dims[1],
+            dims[2],
+            bias=bias,
+            prefix=maybe_prefix(prefix, "fc1"),
+            disable_tp=self.use_data_parallel,
+        )
         self.activation = activation
-        for m in [self.fc0, self.fc1]:
-            nn.init.trunc_normal_(m.weight, std=math.sqrt(2 / m.in_features))
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc0(x)
+        x, _ = self.fc0(x)
         x = self.activation(x)
-        return self.fc1(x)
+        x, _ = self.fc1(x)
+        return x
 
 
 class MoonViTEncoderLayer(nn.Module):
-    """Single encoder layer for MoonViT."""
+    """Single encoder layer for MoonViT with TP/DP support."""
 
     def __init__(
         self,
         num_heads: int,
         hidden_dim: int,
         mlp_dim: int,
+        prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
         *,
-        attn_implementation: str = "flash_attention_2",
         activation=F.gelu,
         attn_bias: bool = False,
     ):
         super().__init__()
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
+
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
         self.hidden_size_per_attention_head = self.hidden_dim // self.num_heads
-        self.attn_implementation = attn_implementation
+        self.tp_size = (
+            1 if self.use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        self.num_attention_heads_per_partition = divide(num_heads, self.tp_size)
 
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
-        self.mlp = MLP2([hidden_dim, mlp_dim, hidden_dim], activation)
-        self.wqkv = nn.Linear(hidden_dim, hidden_dim * 3, bias=attn_bias)
-        self.wo = nn.Linear(hidden_dim, hidden_dim, bias=attn_bias)
+        self.mlp = MLP2(
+            [hidden_dim, mlp_dim, hidden_dim],
+            activation,
+            prefix=f"{prefix}.mlp",
+            use_data_parallel=self.use_data_parallel,
+        )
+        self.wqkv = QKVParallelLinear(
+            hidden_size=hidden_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=attn_bias,
+            prefix=f"{prefix}.wqkv",
+            disable_tp=self.use_data_parallel,
+        )
+        self.wo = RowParallelLinear(
+            hidden_dim,
+            hidden_dim,
+            bias=attn_bias,
+            prefix=f"{prefix}.wo",
+            disable_tp=self.use_data_parallel,
+        )
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
+            head_size=self.hidden_size_per_attention_head,
+            multimodal_config=multimodal_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def attention_qkvpacked(
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,
         rope_freqs_cis: torch.Tensor | None = None,
     ):
-        """Compute self-attention with packed QKV."""
-        xqkv = self.wqkv(x)
+        """Compute self-attention with packed QKV.
+
+        Args:
+            x (torch.Tensor): (seqlen, hidden_dim)
+            cu_seqlens (torch.Tensor): cumulative sequence lengths
+        """
+        seq_length = x.size(0)
+        xqkv, _ = self.wqkv(x)
 
         qkv_shape = xqkv.size()[:-1] + (
             3,
-            self.num_heads,
+            self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head,
         )
-        # xqkv: (batch_size, seqlen, 3, nheads, headdim)
+        # xqkv: (seqlen, 3, nheads, headdim)
         xqkv = xqkv.view(*qkv_shape)
         xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
         xq, xk = apply_rope(xq, xk, rope_freqs_cis)
 
-        attn_func = VL_VISION_ATTENTION_FUNCTIONS[self.attn_implementation]
-        attn_out = attn_func(
-            xq,
-            xk,
-            xv,
-            q_cu_seqlens=cu_seqlens,
-            k_cu_seqlens=cu_seqlens,
-            max_seqlen_k=max_seqlen,
-            max_seqlen_q=max_seqlen,
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        attn_out = self.attn(
+            xq.unsqueeze(0),
+            xk.unsqueeze(0),
+            xv.unsqueeze(0),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
-
-        attn_out = self.wo(attn_out)
+        attn_out = attn_out.reshape(
+            seq_length,
+            self.num_attention_heads_per_partition
+            * self.hidden_size_per_attention_head,
+        )
+        attn_out, _ = self.wo(attn_out)
         return attn_out
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
         rope_freqs_cis: torch.Tensor | None = None,
     ):
         residual = hidden_states
         hidden_states = self.norm0(hidden_states)
 
         hidden_states = self.attention_qkvpacked(
-            hidden_states, cu_seqlens, max_seqlen, rope_freqs_cis
+            hidden_states, cu_seqlens, rope_freqs_cis
         )
         hidden_states = residual + hidden_states
 
@@ -487,6 +468,7 @@ class MoonViTEncoderLayer(nn.Module):
         return hidden_states
 
 
+
 class MoonViT3dEncoder(nn.Module):
     """Full encoder stack for MoonViT 3D."""
 
@@ -496,6 +478,8 @@ class MoonViT3dEncoder(nn.Module):
         num_layers: int,
         block_cfg: dict,
         video_attn_type: str = "spatial_temporal",
+        prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -507,7 +491,14 @@ class MoonViT3dEncoder(nn.Module):
             block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512
         )
         self.blocks = nn.ModuleList(
-            [MoonViTEncoderLayer(**block_cfg) for _ in range(num_layers)]
+            [
+                MoonViTEncoderLayer(
+                    multimodal_config=multimodal_config,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
+                    **block_cfg,
+                )
+                for layer_idx in range(num_layers)
+            ]
         )
         self.final_layernorm = nn.LayerNorm(hidden_dim)
 
@@ -527,12 +518,11 @@ class MoonViT3dEncoder(nn.Module):
             )
         )
 
-        max_seqlen = lengths.max()
         cu_seqlens = lengths.to(hidden_states.device).cumsum(dim=0, dtype=torch.int32)
 
         for block in self.blocks:
             hidden_states = block(
-                hidden_states, cu_seqlens, max_seqlen, rope_freqs_cis=rope_freqs_cis
+                hidden_states, cu_seqlens, rope_freqs_cis=rope_freqs_cis
             )
 
         hidden_states = self.final_layernorm(hidden_states)
@@ -576,7 +566,14 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
     _supports_sdpa = True
 
-    def __init__(self, config, *inputs, **kwargs):
+    def __init__(
+        self,
+        config,
+        multimodal_config: MultiModalConfig | None = None,
+        prefix: str = "",
+        *inputs,
+        **kwargs,
+    ):
         super().__init__(config, *inputs, **kwargs)
         config = deepcopy(config)
         self.merge_kernel_size = config.merge_kernel_size
@@ -601,11 +598,10 @@ class MoonViT3dPretrainedModel(PreTrainedModel):
                 "mlp_dim": config.intermediate_size,
                 "activation": get_act_fn("gelu_pytorch_tanh"),
                 "attn_bias": True,
-                "attn_implementation": getattr(
-                    config, "_attn_implementation", "flash_attention_2"
-                ),
             },
             video_attn_type=config.video_attn_type,
+            prefix=maybe_prefix(prefix, "encoder"),
+            multimodal_config=multimodal_config,
         )
 
     def forward(
