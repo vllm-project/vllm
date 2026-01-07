@@ -544,7 +544,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -574,6 +574,27 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           not 0.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def adjust_N_for_activation(N: int, activation: str) -> int:
+        """
+        Calculate the output dimension for the activation function.
+
+        For *_no_mul activations (e.g. relu2_no_mul),
+        there's no gate/up split, so output size equals input size (N).
+
+        For regular gated activations (e.g., silu, gelu, swigluoai),
+        output size is N // 2 due to gate × activation(up) multiplication.
+
+        Args:
+            N: The intermediate size (width of w1/w3 weights).
+            activation: The activation function name.
+
+        Returns:
+            The output dimension after activation.
+        """
+        is_no_mul = activation.endswith("_no_mul")
+        return N if is_no_mul else N // 2
 
     def activation(
         self, activation: str, output: torch.Tensor, input: torch.Tensor
@@ -757,7 +778,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.

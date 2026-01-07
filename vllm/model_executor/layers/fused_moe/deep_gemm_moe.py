@@ -143,7 +143,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
@@ -152,9 +152,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         assert M_sum % block_m == 0
 
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M_sum, max(activation_out_dim, K))
         workspace2 = (M_sum, max(N, K))
         output = (M, K)

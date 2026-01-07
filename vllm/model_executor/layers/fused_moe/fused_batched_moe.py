@@ -673,7 +673,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
@@ -868,14 +868,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dp, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dp, K)

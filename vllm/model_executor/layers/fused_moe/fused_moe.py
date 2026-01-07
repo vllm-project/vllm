@@ -2096,12 +2096,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # For NO_MUL activations (e.g., silu_no_mul), we need full N size
-        # For regular activations with gated multiplication, N // 2 suffices
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M, topk, max(N, K))
         workspace2 = (M, topk, max(activation_out_dim, K))
         output = (M, K)
@@ -2177,10 +2174,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-        # For NO_MUL activations, there's no gate/up split,
-        # so output size equals input size
-        is_no_mul_activation = activation.endswith("_no_mul")
-        cache2_dim = N if is_no_mul_activation else N // 2
+        cache2_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
             workspace13, (num_tokens * top_k_num, cache2_dim)
         )

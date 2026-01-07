@@ -378,11 +378,9 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, max(N, K))
         workspace2 = (M * topk, max(activation_out_dim, K))
         output = (M, K)
@@ -440,13 +438,11 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         assert num_dp is not None
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (self.max_experts_per_worker, M * num_dp, max(N, K))
         workspace2 = (
             self.max_experts_per_worker,
@@ -787,11 +783,9 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()
         output: tuple[int, ...] = ()
@@ -1135,11 +1129,9 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str = "silu",
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # For NO_MUL activations, we need full N size for activation output
-        is_no_mul_activation = activation.endswith("_no_mul")
-        activation_out_dim = N if is_no_mul_activation else N // 2
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M * topk, max(N, K))
         workspace2 = (M * topk, max(activation_out_dim, K))
         output = (M, K)
