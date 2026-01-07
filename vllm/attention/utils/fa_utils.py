@@ -90,8 +90,10 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
 
 
 def flash_attn_supports_fp8() -> bool:
-    cap = current_platform.get_device_capability()
-    return get_flash_attn_version() == 3 and cap is not None and cap.major == 9
+    return (
+        get_flash_attn_version() == 3
+        and current_platform.is_device_capability_family(90)
+    )
 
 
 def flash_attn_supports_sinks() -> bool:
@@ -110,8 +112,9 @@ def flash_attn_supports_mla():
                 is_fa_version_supported,
             )
 
-            cap = current_platform.get_device_capability()
-            return is_fa_version_supported(3) and cap is not None and cap[0] == 9
+            return is_fa_version_supported(
+                3
+            ) and current_platform.is_device_capability_family(90)
         except (ImportError, AssertionError):
             pass
     return False
