@@ -238,6 +238,7 @@ def maybe_roundup_hidden_size(
     quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
     is_lora_enabled: bool,
+    activation: str,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -271,7 +272,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
+        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled, activation)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -409,6 +410,7 @@ class FusedMoE(CustomOp):
             quant_config,
             self.moe_parallel_config,
             is_lora_enabled=self.vllm_config.lora_config is not None,
+            activation=activation,
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -554,6 +556,7 @@ class FusedMoE(CustomOp):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
+            activation=activation,
             in_dtype=moe_in_dtype,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
