@@ -18,10 +18,11 @@ from huggingface_hub.utils import (
 from transformers import BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
-from .protocol import ChatCompletionMessageParam, TokenizerLike
+from .protocol import TokenizerLike
 
 logger = init_logger(__name__)
 
