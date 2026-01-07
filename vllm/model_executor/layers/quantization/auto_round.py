@@ -56,22 +56,22 @@ class AutoRoundConfig(QuantizationConfig):
         if weight_bits not in self.SUPPORTED_BITS:
             raise ValueError(
                 f"Unsupported weight_bits: {weight_bits}, "
-                f"currently only support  {self.SUPPORTED_BITS}"
+                f"currently only support {self.SUPPORTED_BITS}."
             )
         if data_type not in self.SUPPORTED_DTYPES:
             raise ValueError(
-                f"Unsupported data_type: {data_type},"
-                f" currently only support  {self.SUPPORTED_DTYPES}"
+                f"Unsupported data_type: {data_type}, "
+                f"currently only support {self.SUPPORTED_DTYPES}."
             )
         if packing_format not in self.SUPPORTED_FORMATS:
             raise ValueError(
                 f"Unsupported packing_format: {packing_format}, "
-                f"currently only support  {self.SUPPORTED_FORMATS}"
+                f"currently only support {self.SUPPORTED_FORMATS}."
             )
         if backend not in self.SUPPORTED_BACKENDS:
             raise ValueError(
-                f"Unsupported backend: {backend},  "
-                f"currently only support  {self.SUPPORTED_BACKENDS}"
+                f"Unsupported backend: {backend}, "
+                f"currently only support {self.SUPPORTED_BACKENDS}."
             )
 
         self.weight_bits = weight_bits
