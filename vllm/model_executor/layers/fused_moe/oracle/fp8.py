@@ -102,13 +102,9 @@ def select_fp8_moe_backend(
             return Fp8MoeBackend.FLASHINFER_CUTLASS
 
     # weight-only path for older GPUs without native FP8
-    use_marlin = (
-        not current_platform.has_device_capability(89)
-        or envs.VLLM_TEST_FORCE_FP8_MARLIN
-    )
-    if current_platform.is_rocm():
-        use_marlin = False
-    if use_marlin:
+    if (
+        current_platform.is_cuda() and not current_platform.has_device_capability(89)
+    ) or envs.VLLM_TEST_FORCE_FP8_MARLIN:
         logger.info_once(_make_log_backend("Marlin"), scope="local")
         return Fp8MoeBackend.MARLIN
 
@@ -277,9 +273,6 @@ def make_fp8_moe_kernel(
         TritonExperts,
         TritonOrDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-        CutlassExpertsFp8,
-    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
@@ -291,6 +284,9 @@ def make_fp8_moe_kernel(
     )
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
+        TritonOrCutlassExperts,
     )
 
     # NOTE(rob): this is a WIP refactor. We are first migrating
@@ -331,7 +327,7 @@ def make_fp8_moe_kernel(
     elif fp8_backend == Fp8MoeBackend.VLLM_CUTLASS:
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            CutlassExpertsFp8(
+            TritonOrCutlassExperts(
                 out_dtype=moe_config.in_dtype,
                 e=layer.local_num_experts,
                 n=layer.intermediate_size_per_partition,

@@ -62,7 +62,7 @@ class TritonOrCutlassExperts(FallbackExperts):
                 expert_tokens_meta,
             )
 
-    def select_gemm_impl(
+    def _select_experts_impl(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
