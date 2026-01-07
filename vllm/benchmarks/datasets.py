@@ -1960,10 +1960,12 @@ class CustomDataset(BenchmarkDataset):
     Implements the Custom dataset.  Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
-    {"prompt": "What is the capital of India?"}
-    {"prompt": "What is the capital of Iran?"}
-    {"prompt": "What is the capital of China?"}
+    {"prompt": "What is the capital of India?", "output_tokens": 10}
+    {"prompt": "What is the capital of Iran?", "output_tokens": 1520}
+    {"prompt": "What is the capital of China?", "output_tokens": 819}
     ```
+    Note that 'output_tokens' column is optional and has to be provided only if
+    'custom-output-len' argument is None or -1.
     """
 
     def __init__(self, **kwargs) -> None:
