@@ -145,7 +145,7 @@ def select_fp8_moe_backend(
         logger.info_once(_make_log_backend("ROCm AITER"), scope="local")
         return Fp8MoeBackend.AITER
 
-    if allow_vllm_cutlass and cutlass_group_gemm_supported():
+    if allow_vllm_cutlass and not block_quant and cutlass_group_gemm_supported():
         logger.info_once(_make_log_backend("vLLM CUTLASS"), scope="local")
         return Fp8MoeBackend.VLLM_CUTLASS
 
