@@ -21,6 +21,15 @@ from vllm.v1.serial_utils import UtilityResult
 # so form part of the external API.
 FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
 
+EEP_NOTIFICATION_CALL_ID = -1
+
+
+class EEPNotificationType(enum.Enum):
+    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
+    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
+    RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
+    SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
+
 
 class FinishReason(enum.IntEnum):
     """
@@ -212,6 +221,10 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+    new_data_parallel_master_port_list: list[int]
+    new_stateless_world_group_port_list: list[list[int]]
+    new_stateless_dp_group_port_list: list[list[int]]
+    new_stateless_ep_group_port_list: list[list[int]]
 
 
 class ReconfigureRankType(enum.IntEnum):

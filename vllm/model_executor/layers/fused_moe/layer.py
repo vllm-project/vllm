@@ -644,6 +644,7 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        self.base_quant_method = self.quant_method
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
@@ -658,7 +659,7 @@ class FusedMoE(CustomOp):
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
-        prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
+        prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
         )
         if prepare_finalize is not None:
@@ -666,7 +667,7 @@ class FusedMoE(CustomOp):
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
             self.quant_method = FusedMoEModularMethod.make(
-                self, self.quant_method, prepare_finalize, self.shared_experts
+                self, self.base_quant_method, prepare_finalize, self.shared_experts
             )
 
     @property
