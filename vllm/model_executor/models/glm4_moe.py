@@ -197,6 +197,7 @@ class Glm4MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            router_logits_dtype=torch.float32,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -495,6 +496,7 @@ class Glm4MoeModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

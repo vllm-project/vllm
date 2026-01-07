@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.attention.backends.mla.common import MLACommonBackend
-from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-    AiterMLAImpl,
-    AiterMLAMetadataBuilder,
-)
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend, AiterMLAImpl
 
 
-class AiterTritonMLABackend(MLACommonBackend):
+class AiterTritonMLABackend(AiterMLABackend):
     @staticmethod
     def get_name() -> str:
         return "AITER_TRITON_MLA"
@@ -15,10 +11,6 @@ class AiterTritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["AiterTritonMLAImpl"]:
         return AiterTritonMLAImpl
-
-    @staticmethod
-    def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
-        return AiterMLAMetadataBuilder
 
 
 class AiterTritonMLAImpl(AiterMLAImpl):
@@ -62,7 +54,7 @@ class AiterTritonMLAImpl(AiterMLAImpl):
             k,
             v,
             softmax_scale=softmax_scale,
-            return_lse=return_softmax_lse,
+            return_softmax_lse=return_softmax_lse,
             **kwargs,
         )
         # Transpose the LSE if Triton MHA is used:

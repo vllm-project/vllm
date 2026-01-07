@@ -10,6 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
+    AttentionMetadata,
     MultipleOf,
 )
 from vllm.attention.backends.utils import get_mla_dims
@@ -124,7 +125,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class FlashMLASparseMetadata:
+class FlashMLASparseMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
     max_seq_len: int
@@ -511,7 +512,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # For pure decode batches, prefill_request_id will be None
         # For mixed batches, it will have -1 for decode and request_id for prefill
         if num_prefills > 0:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             seq_lens = common_attn_metadata.seq_lens
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -718,7 +719,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         )
         self.softmax_scale = scale
         assert indexer is not None
-        self.topk_indices_buffer = indexer.topk_indices_buffer
+        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability_family(100) else 64
 
         if kv_cache_dtype == "fp8_ds_mla":
@@ -980,6 +981,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
+        assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)

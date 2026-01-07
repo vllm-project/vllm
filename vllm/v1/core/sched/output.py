@@ -2,10 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING
-
-from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
 
@@ -129,19 +126,6 @@ class CachedRequestData:
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
-    @cached_property
-    @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
-    def resumed_from_preemption(self) -> list[bool]:
-        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
-
-    @cached_property
-    @deprecated("This will be removed in v0.14, use `all_token_ids` instead.")
-    def resumed_req_token_ids(self) -> list[list[int] | None]:
-        return [
-            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
-            for req_id in self.req_ids
-        ]
-
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
@@ -197,9 +181,16 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
+    # Whether any of the scheduled requests use structured output.
+    # Set only in async scheduling case.
+    has_structured_output_requests: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
+
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
