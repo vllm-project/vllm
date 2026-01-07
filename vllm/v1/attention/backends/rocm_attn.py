@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -157,6 +158,13 @@ class RocmAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # ROCM paged attention kernel only supports block sizes 16 and 32
+        # due to shared memory (LDS) constraints on AMD GPUs.
+        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+        return [16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
