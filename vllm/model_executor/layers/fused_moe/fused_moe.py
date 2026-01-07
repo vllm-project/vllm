@@ -1350,8 +1350,8 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    scoring_func: str = "softmax",
     indices_type: torch.dtype | None = None,
+    scoring_func: str = "softmax",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -1398,8 +1398,8 @@ def fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
-    scoring_func: str = "softmax",
     indices_type: torch.dtype | None = None,
+    scoring_func: str = "softmax",
 ):
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
@@ -1444,8 +1444,14 @@ def fused_topk_bias(
         else:
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
+    if scoring_func == "softmax":
+        scores = gating_output.softmax(dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     n_routed_experts = gating_output.shape[-1]
-    scores = gating_output.softmax(dim=-1)
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
