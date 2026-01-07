@@ -310,3 +310,143 @@ if __name__ == "__main__":
     print(phy2log)
 
     test_basic_rebalance()
+
+
+def _make_phy_replicas_idx_from_phy2log(phy2log: torch.Tensor) -> torch.Tensor:
+    """Create replicas indices mapping from phy2log"""
+    pr = torch.zeros_like(phy2log)
+    for layer in range(phy2log.shape[0]):
+        seen: dict[int, int] = {}
+        row = phy2log[layer].tolist()
+        for i, expert in enumerate(row):
+            r = seen.get(expert, 0)
+            pr[layer, i] = r
+            seen[expert] = r + 1
+    return pr
+
+
+def _validate_intragpu_rearrangement(
+    old_global_expert_indices: torch.Tensor,
+    new_phy2log: torch.Tensor,
+    new_phy_replicas_idx: torch.Tensor,
+    post_phy2log: torch.Tensor,
+    post_phy_replicas_idx: torch.Tensor,
+    num_ranks: int,
+    slots_per_gpu: int,
+):
+    # Per-GPU checks
+    for gpu_idx in range(num_ranks):
+        start = gpu_idx * slots_per_gpu
+        end = start + slots_per_gpu
+        old_seg = old_global_expert_indices[0, start:end]
+        new_seg = new_phy2log[0, start:end]
+        new_rnk = new_phy_replicas_idx[0, start:end]
+        post_seg = post_phy2log[0, start:end]
+        post_rnk = post_phy_replicas_idx[0, start:end]
+
+        # Pairwise equality for (expert, rank) pairs to ensure nothing is lost
+        def sorted_pairs(seg: torch.Tensor, rnk: torch.Tensor):
+            pairs = list(zip(seg.tolist(), rnk.tolist()))
+            pairs.sort()
+            return pairs
+
+        assert sorted_pairs(post_seg, post_rnk) == sorted_pairs(new_seg, new_rnk), (
+            f"Per-GPU pairs of (expert,rank) must match new mapping for GPU {gpu_idx}"
+        )
+
+        # For experts that remain on the same GPU, the old slot is preserved
+        # for at least one occurrence; rank at that slot must be valid for that expert
+        old_list = old_seg.tolist()
+        new_list = new_seg.tolist()
+        post_list = post_seg.tolist()
+        remained = set(old_list) & set(new_list)
+        new_ranks_for_expert: dict[int, list[int]] = {}
+        for v, r in zip(new_list, new_rnk.tolist()):
+            new_ranks_for_expert.setdefault(v, []).append(r)
+        for expert in remained:
+            old_pos = old_list.index(expert)
+            assert post_list[old_pos] == expert, (
+                f"Expert {expert} on GPU {gpu_idx} should stay at old slot {old_pos}"
+            )
+            # Rank at preserved slot must be one of the ranks
+            # the expert has in new mapping
+            assert post_rnk.tolist()[old_pos] in new_ranks_for_expert[expert], (
+                f"Rank for expert {expert} at preserved slot on GPU {gpu_idx} "
+                "must come from new mapping"
+            )
+
+
+@pytest.mark.parametrize(
+    "num_ranks, slots_per_gpu, old_phy2log, new_phy2log",
+    [
+        pytest.param(
+            # Setup: 2 GPUs, 4 slots each, 1 layer
+            # Old mapping: GPU0 -> [0,1,2,3], GPU1 -> [4,5,6,7]
+            # New mapping shuffles within GPU0 and brings 4,5 into GPU0.
+            # GPU0 new -> [1,5,0,4]; GPU1 new -> [6,2,7,3]
+            2,
+            4,
+            torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]]),
+            torch.tensor([[1, 5, 0, 4, 6, 2, 7, 3]]),
+            id="simple",
+        ),
+        pytest.param(
+            # Setup: 2 GPUs, 5 slots each (total 10 physical experts), 1 layer
+            # Old mapping:
+            #   GPU0 -> [0, 1, 0, 2, 3]  (expert 0 duplicated)
+            #   GPU1 -> [4, 5, 6, 1, 2]
+            # New mapping reorders within GPUs and moves some experts across GPUs,
+            # while still including duplicates:
+            #   GPU0 new -> [0, 5, 4, 0, 1]  (expert 0 duplicated, 4/5 incoming)
+            #   GPU1 new -> [6, 2, 3, 2, 1]  (expert 2 duplicated)
+            2,
+            5,
+            torch.tensor([[0, 1, 0, 2, 3, 4, 5, 6, 1, 2]]),
+            torch.tensor([[0, 5, 4, 0, 1, 6, 2, 3, 2, 1]]),
+            id="duplicates",
+        ),
+        pytest.param(
+            # Setup: 3 GPUs, 4 slots each (total 12 physical experts), 1 layer
+            # Old mapping:
+            #   GPU0 -> [0, 1, 2, 3]
+            #   GPU1 -> [0, 1, 2, 3]
+            #   GPU2 -> [0, 1, 2, 3]
+            # New mapping decides to use one expert on 2 GPUs and shuffles
+            # experts on the third GPU,
+            #   GPU0 new -> [0, 0, 0, 0]
+            #   GPU1 new -> [0, 0, 0, 0]
+            #   GPU2 new -> [1, 2, 3, 0]
+            3,
+            4,
+            torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]]),
+            torch.tensor([[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0]]),
+            id="skewed_expert",
+        ),
+    ],
+)
+def test_preserve_intragpu_slots(
+    num_ranks: int,
+    slots_per_gpu: int,
+    old_phy2log: torch.Tensor,
+    new_phy2log: torch.Tensor,
+):
+    """Experts that stay on a GPU keep their old slots; incoming not lost."""
+    phy_replicas_idx = _make_phy_replicas_idx_from_phy2log(new_phy2log)
+
+    post_phy2log, post_phy_replicas_idx = DefaultEplbPolicy.preserve_intragpu_slots(
+        new_phy2log, phy_replicas_idx, num_ranks, old_phy2log
+    )
+
+    # Shapes preserved
+    assert post_phy2log.shape == new_phy2log.shape
+    assert post_phy_replicas_idx.shape == phy_replicas_idx.shape
+
+    _validate_intragpu_rearrangement(
+        old_phy2log,
+        new_phy2log,
+        phy_replicas_idx,
+        post_phy2log,
+        post_phy_replicas_idx,
+        num_ranks,
+        slots_per_gpu,
+    )
