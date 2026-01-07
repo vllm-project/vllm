@@ -67,8 +67,9 @@ class CustomOp(nn.Module):
         return self.forward_native(*args, **kwargs)
 
     def forward_cpu(self, *args, **kwargs):
-        # By default, we assume that CPU ops are compatible with CUDA ops.
-        return self.forward_cuda(*args, **kwargs)
+        # By default, we assume that CPU ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
 
     def forward_tpu(self, *args, **kwargs):
         # By default, we assume that TPU ops are compatible with the

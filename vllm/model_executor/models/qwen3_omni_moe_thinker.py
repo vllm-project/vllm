@@ -750,18 +750,20 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             # https://github.com/huggingface/transformers/pull/41473
             mm_kwargs = dict(mm_kwargs)
             tok_kwargs = dict(tok_kwargs)
+            mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
+            mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
             if Version(TRANSFORMERS_VERSION) < Version("4.58.0"):
                 # Extract audio_sample_rate before restructuring
                 audio_sample_rate = mm_kwargs.pop("audio_sample_rate", None)
 
                 # move truncation to audio_kwargs level to avoid conflict
                 # with tok_kwargs
-                mm_kwargs["audio_kwargs"] = {
-                    "truncation": mm_kwargs.pop("truncation", False)
-                }
-                mm_kwargs["text_kwargs"] = {
-                    "truncation": tok_kwargs.pop("truncation", False)
-                }
+                mm_kwargs["audio_kwargs"].setdefault(
+                    "truncation", mm_kwargs.pop("truncation", False)
+                )
+                mm_kwargs["text_kwargs"].setdefault(
+                    "truncation", tok_kwargs.pop("truncation", False)
+                )
 
                 # Validate and conditionally pass audio_sample_rate
                 # WhisperFeatureExtractor has a fixed sampling rate, and vLLM's
@@ -1371,8 +1373,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             return inputs_embeds
 
         deepstack_input_embeds = None
-        # TODO (ywang96): support overlapping modalitiy embeddings so that
-        # `use_audio_in_video` will work on V1.
         # split the feat dim to obtain multi-scale visual feature
         has_vision_embeddings = [
             embeddings.shape[-1] != self.config.text_config.hidden_size
