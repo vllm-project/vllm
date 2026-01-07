@@ -20,6 +20,7 @@ from vllm.model_executor.layers.pooler import (
     PoolingParamsUpdate,
     PoolingType,
     TokenPoolerHeadOutput,
+    TokenPoolingMethodOutput,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -304,7 +305,7 @@ class ModernBertPooler(Pooler):
 
     def _head(
         self,
-        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooled_data: TokenPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         if isinstance(pooled_data, list):

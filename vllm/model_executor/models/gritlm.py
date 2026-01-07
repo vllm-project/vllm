@@ -14,6 +14,7 @@ from vllm.model_executor.layers.pooler import (
     PoolerNormalize,
     PoolingParamsUpdate,
     TokenPoolerHeadOutput,
+    TokenPoolingMethodOutput,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.tasks import PoolingTask
@@ -188,7 +189,7 @@ class GritLMPooler(Pooler):
 
     def _head(
         self,
-        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooled_data: TokenPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         return self.activation(pooled_data)

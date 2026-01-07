@@ -32,6 +32,7 @@ ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 
 TokenPoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 TokensPoolingMethodOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+TokensPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
 PoolingMethodOutput: TypeAlias = TokenPoolingMethodOutput | TokensPoolingMethodOutput
 
 TokenPoolerHeadOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -430,7 +431,7 @@ class TokenPoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,
-        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooled_data: TokenPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         raise NotImplementedError
@@ -451,7 +452,7 @@ class EmbeddingPoolerHead(TokenPoolerHead):
 
     def forward(
         self,
-        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooled_data: TokenPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         if isinstance(pooled_data, list):
@@ -625,7 +626,7 @@ class TokensPoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,
-        pooled_data: torch.Tensor | None,
+        pooled_data: TokensPoolingMethodOutputItem,
         pooling_param: PoolingParams,
     ) -> TokensPoolerHeadOutput:
         raise NotImplementedError
@@ -646,7 +647,7 @@ class TokenEmbeddingPoolerHead(TokensPoolerHead):
 
     def forward(
         self,
-        pooled_data: torch.Tensor | None,
+        pooled_data: TokensPoolingMethodOutputItem,
         pooling_param: PoolingParams,
     ) -> TokensPoolerHeadOutput:
         # for unfinished chunked prefill
@@ -694,7 +695,7 @@ class TokenClassifierPoolerHead(TokensPoolerHead):
 
     def forward(
         self,
-        pooled_data: torch.Tensor | None,
+        pooled_data: TokensPoolingMethodOutputItem,
         pooling_param: PoolingParams,
     ) -> TokensPoolerHeadOutput:
         # for unfinished chunked prefill
