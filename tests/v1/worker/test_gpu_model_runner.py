@@ -280,7 +280,7 @@ def test_update_states_request_finished(default_vllm_config, model_runner, dist_
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(model_runner, dist_init):
+def test_update_states_request_resumed(default_vllm_config, model_runner, dist_init):
     req_id = "req_0"
 
     # new req
