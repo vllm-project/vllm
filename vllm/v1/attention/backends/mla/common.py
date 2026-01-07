@@ -203,9 +203,8 @@ from vllm.attention.backends.abstract import (
     AttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.utils.fa_utils import get_flash_attn_version
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
