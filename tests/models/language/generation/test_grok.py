@@ -18,7 +18,6 @@ def _grok2_dummy_overrides(hf_config):
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
             "head_dim": 64,
-            "vocab_size": 4096,
         }
     )
     return hf_config
