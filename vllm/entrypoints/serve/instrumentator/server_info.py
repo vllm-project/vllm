@@ -24,7 +24,7 @@ def _get_vllm_env_vars():
 
     vllm_envs = {}
     for key in dir(envs):
-        if key.startswith("VLLM_"):
+        if key.startswith("VLLM_") and "KEY" not in key:
             value = getattr(envs, key, None)
             if value is not None:
                 value = normalize_value(value)
