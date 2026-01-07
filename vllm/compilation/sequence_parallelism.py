@@ -41,8 +41,8 @@ class _SequenceParallelPatternHelper:
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
-    ):
+        device: str | None,
+    ) -> None:
         self.epsilon = epsilon
         self.dtype = dtype
         self.device = device
@@ -64,7 +64,7 @@ class _SequenceParallelPatternHelper:
 
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
@@ -74,7 +74,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
         return [input, arg3_1]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
             arg3_1: torch.Tensor,
@@ -100,7 +100,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
@@ -162,7 +162,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: str | None,
     ):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
@@ -203,7 +203,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
