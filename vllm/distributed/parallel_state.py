@@ -1529,22 +1529,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 
