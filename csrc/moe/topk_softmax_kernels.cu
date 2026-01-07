@@ -431,6 +431,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         row_chunk[ii] = row_chunk[ii] * reciprocal_row_sum;
       }
     } else if (SCORING_FUNC == SCORING_SIGMOID) {
+#pragma unroll
       for (int ii = 0; ii < VPT; ++ii)
       {
         row_chunk[ii] = 1.0f / (1.0f + __expf(-row_chunk[ii]));
@@ -729,14 +730,13 @@ void dispatch_topk_launch(
     std::optional<torch::Tensor> bias,
     int scoring_func, cudaStream_t stream)
 {
-    // Validate bias if provided - must always be float32
     const float* bias_ptr = nullptr;
     if (bias.has_value()) {
       const torch::Tensor& bias_tensor = bias.value();
+      TORCH_CHECK(bias_tensor.scalar_type() == at::ScalarType::Float, "bias tensor must be float32");
       TORCH_CHECK(bias_tensor.dim() == 1, "bias tensor must be 1D");
       TORCH_CHECK(bias_tensor.size(0) == num_experts, "bias size mismatch, expected: ", num_experts);
       TORCH_CHECK(bias_tensor.is_contiguous(), "bias tensor must be contiguous");
-      TORCH_CHECK(bias_tensor.scalar_type() == at::ScalarType::Float, "bias tensor must be float32");
       bias_ptr = bias_tensor.data_ptr<float>();
     }
 
