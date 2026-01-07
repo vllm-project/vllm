@@ -23,7 +23,6 @@ from vllm.utils.system_utils import find_loaded_library
 
 logger = init_logger(__name__)
 
-
 cumem_available = False
 try:
     from vllm.cumem_allocator import (
