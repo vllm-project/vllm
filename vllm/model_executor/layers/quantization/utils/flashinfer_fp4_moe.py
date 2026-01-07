@@ -260,7 +260,6 @@ def flashinfer_trtllm_fp4_moe(
     topk_group: int | None,
     custom_routing_function: object | None,
     e_score_correction_bias: torch.Tensor | None,
-    weight_attr_name: str = "weight",
 ) -> torch.Tensor:
     """
     Apply FlashInfer TensorRT-LLM FP4 MoE kernel.
@@ -319,13 +318,13 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
         ).flatten(),
-        gemm1_weights=getattr(layer, f"w13_{weight_attr_name}"),
+        gemm1_weights=layer.w13_weight,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
         gemm1_alpha=None,
         gemm1_beta=None,
         gemm1_clamp_limit=None,
-        gemm2_weights=getattr(layer, f"w2_{weight_attr_name}"),
+        gemm2_weights=layer.w2_weight,
         gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
         gemm2_bias=None,
         output1_scale_scalar=layer.g1_scale_c.data,
@@ -354,7 +353,6 @@ def flashinfer_trtllm_fp4_routed_moe(
     topk_weights: torch.Tensor,
     top_k: int,
     global_num_experts: int,
-    weight_attr_name: str = "weight",
 ) -> torch.Tensor:
     """
     Apply FlashInfer TensorRT-LLM FP4 MoE kernel. Uses packed
@@ -398,13 +396,13 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
         ).flatten(),
-        gemm1_weights=getattr(layer, f"w13_{weight_attr_name}"),
+        gemm1_weights=layer.w13_weight,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
         gemm1_alpha=None,
         gemm1_beta=None,
         gemm1_clamp_limit=None,
-        gemm2_weights=getattr(layer, f"w2_{weight_attr_name}"),
+        gemm2_weights=layer.w2_weight,
         gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
         gemm2_bias=None,
         output1_scale_scalar=layer.g1_scale_c.data,

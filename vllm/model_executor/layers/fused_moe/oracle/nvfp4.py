@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_flashinfer_fp4_cutedsl_moe_available,
     is_flashinfer_fp4_cutlass_moe_available,
+    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
+    prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
@@ -105,6 +107,121 @@ def select_nvfp4_moe_backend() -> NvFp4MoeBackend:
     return backend
 
 
+def convert_to_nvfp4_moe_kernel_format(
+    nvfp4_backend: NvFp4MoeBackend,
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+    a13_scale: torch.Tensor | None,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_scale_2: torch.Tensor,
+    a2_scale: torch.Tensor | None,
+    is_act_and_mul: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    if (
+        nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
+        or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
+    ):
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            a13_scale,
+            w2,
+            w2_scale,
+            w2_scale_2,
+            a2_scale,
+        ) = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+            backend=nvfp4_backend,
+            layer=layer,
+            w13=w13,
+            w13_scale=w13_scale,
+            w13_scale_2=w13_scale_2,
+            a13_scale=a13_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_scale_2=w2_scale_2,
+            a2_scale=a2_scale,
+            is_act_and_mul=is_act_and_mul,
+        )
+    elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
+        a13_scale = None
+        a2_scale = None
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            w2,
+            w2_scale,
+            w2_scale_2,
+        ) = prepare_nvfp4_moe_layer_for_marlin(
+            layer=layer,
+            w13=w13,
+            w13_scale=w13_scale,
+            w13_scale_2=w13_scale_2,
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_scale_2=w2_scale_2,
+        )
+    else:
+        raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
+
+    return (
+        w13,
+        w13_scale,
+        w13_scale_2,
+        a13_scale,
+        w2,
+        w2_scale,
+        w2_scale_2,
+        a2_scale,
+    )
+
+
+def make_nvfp4_moe_quant_config(
+    backend: NvFp4MoeBackend,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+    w2_scale_2: torch.Tensor,
+    a13_scale: torch.Tensor,
+    a2_scale: torch.Tensor,
+) -> FusedMoEQuantConfig | None:
+    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
+    if backend in UNSUPPORTED:
+        return None
+
+    elif backend == NvFp4MoeBackend.MARLIN:
+        return nvfp4_w4a16_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+        )
+
+    g1_alphas = a13_scale * w13_scale_2
+    g2_alphas = a2_scale * w2_scale_2
+    return nvfp4_moe_quant_config(
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        a1_gscale=(1.0 / a13_scale),
+        a2_gscale=(1.0 / a2_scale),
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+
+
 def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     quant_config: FusedMoEQuantConfig,
@@ -156,37 +273,4 @@ def make_nvfp4_moe_kernel(
         )
 
     else:
-        return None
-
-
-def make_nvfp4_moe_quant_config(
-    backend: NvFp4MoeBackend,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w13_scale_2: torch.Tensor,
-    w2_scale_2: torch.Tensor,
-    a13_scale: torch.Tensor,
-    a2_scale: torch.Tensor,
-) -> FusedMoEQuantConfig | None:
-    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
-    if backend in UNSUPPORTED:
-        return None
-
-    elif backend == NvFp4MoeBackend.MARLIN:
-        return nvfp4_w4a16_moe_quant_config(
-            g1_alphas=w13_scale_2,
-            g2_alphas=w2_scale_2,
-            w1_scale=w13_scale,
-            w2_scale=w2_scale,
-        )
-
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
-    return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
-        w1_scale=w13_scale,
-        w2_scale=w2_scale,
-    )
+        raise ValueError(f"Unknown NvFp4 MoE backend: {backend}")

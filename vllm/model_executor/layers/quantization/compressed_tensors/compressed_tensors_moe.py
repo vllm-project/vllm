@@ -44,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
+    convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
@@ -58,7 +59,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -71,9 +71,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_make_workspace_new,
     marlin_moe_permute_scales,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
@@ -352,6 +349,19 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
+        # requires this naming convention. However, the name change breaks
+        # reloading because the state dict no longer matches disk. Once we
+        # remove MKM, we should revert this change to ensure compatibility.
+        layer.w13_weight = torch.nn.Parameter(
+            layer.w13_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w13_weight_packed")
+
+        layer.w2_weight = torch.nn.Parameter(
+            layer.w2_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w2_weight_packed")
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
@@ -364,67 +374,40 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
-        if (
-            self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
-            or self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
-        ):
-            (
-                w13,
-                w13_scale,
-                w13_scale_2,
-                a13_scale,
-                w2,
-                w2_scale,
-                w2_scale_2,
-                a2_scale,
-            ) = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
-                backend=self.nvfp4_backend,
-                layer=layer,
-                w13=layer.w13_weight_packed,
-                w13_scale=layer.w13_weight_scale,
-                w13_scale_2=(1.0 / w13_weight_global_scale),
-                a13_scale=(1.0 / layer.w13_input_global_scale),
-                w2=layer.w2_weight_packed,
-                w2_scale=layer.w2_weight_scale,
-                w2_scale_2=(1.0 / layer.w2_weight_global_scale),
-                a2_scale=(1.0 / layer.w2_input_global_scale),
-                is_act_and_mul=self.moe.is_act_and_mul,
-            )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            a13_scale = None
-            a2_scale = None
-            (
-                w13,
-                w13_scale,
-                w13_scale_2,
-                w2,
-                w2_scale,
-                w2_scale_2,
-            ) = prepare_nvfp4_moe_layer_for_marlin(
-                layer=layer,
-                w13=layer.w13_weight_packed,
-                w13_scale=layer.w13_weight_scale,
-                w13_scale_2=(1.0 / w13_weight_global_scale),
-                w2=layer.w2_weight_packed,
-                w2_scale=layer.w2_weight_scale,
-                w2_scale_2=(1.0 / layer.w2_weight_global_scale),
-            )
-        else:
-            raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
+        # Shuffle weights into the NvFp4 kernel format.
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            a13_scale,
+            w2,
+            w2_scale,
+            w2_scale_2,
+            a2_scale,
+        ) = convert_to_nvfp4_moe_kernel_format(
+            nvfp4_backend=self.nvfp4_backend,
+            layer=layer,
+            w13=layer.w13_weight,
+            w13_scale=layer.w13_weight_scale,
+            w13_scale_2=(1.0 / w13_weight_global_scale),
+            a13_scale=(1.0 / layer.w13_input_global_scale),
+            w2=layer.w2_weight,
+            w2_scale=layer.w2_weight_scale,
+            w2_scale_2=(1.0 / layer.w2_weight_global_scale),
+            a2_scale=(1.0 / layer.w2_input_global_scale),
+            is_act_and_mul=self.moe.is_act_and_mul,
+        )
 
-        replace_parameter(layer, "w13_weight_packed", w13)
+        replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_packed", w2)
+        replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-
-        # NOTE(rob): these are not used in the weight re-loading
-        # process, and therefore do not need to be Parameters.
-        # Should I delete the old ones?
         layer.w13_weight_scale_2 = w13_scale_2
         layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
+        # Initialize the kernel that will be called in apply().
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         use_dp = self.moe.dp_size > 1
         if self.moe_quant_config is not None and not use_dp:
@@ -504,7 +487,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_group=layer.topk_group,
                 custom_routing_function=layer.custom_routing_function,
                 e_score_correction_bias=layer.e_score_correction_bias,
-                weight_attr_name="weight_packed",
             )
 
         # Hidden_states in select_experts is only used to extract metadata
@@ -527,14 +509,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
-                weight_attr_name="weight_packed",
             )
         else:
             assert self.kernel is not None
             return self.kernel(
                 x,
-                layer.w13_weight_packed,
-                layer.w2_weight_packed,
+                layer.w13_weight,
+                layer.w2_weight,
                 topk_weights,
                 topk_ids,
                 inplace=False,

@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     FLASHINFER_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
+    convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
@@ -45,7 +46,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
-    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     select_nvfp4_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -70,7 +70,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
-    prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1637,54 +1636,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
-        if (
-            self.nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
-            or self.nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
-        ):
-            (
-                w13,
-                w13_scale,
-                w13_scale_2,
-                a13_scale,
-                w2,
-                w2_scale,
-                w2_scale_2,
-                a2_scale,
-            ) = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
-                backend=self.nvfp4_backend,
-                layer=layer,
-                w13=layer.w13_weight,
-                w13_scale=layer.w13_weight_scale,
-                w13_scale_2=w13_weight_scale_2,
-                a13_scale=layer.w13_input_scale,
-                w2=layer.w2_weight,
-                w2_scale=layer.w2_weight_scale,
-                w2_scale_2=layer.w2_weight_scale_2,
-                a2_scale=layer.w2_input_scale,
-                is_act_and_mul=self.moe.is_act_and_mul,
-            )
-        elif self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
-            # TODO(rob): update marlin prepare to match fp8 moe.
-            a13_scale = None
-            a2_scale = None
-            (
-                w13,
-                w13_scale,
-                w13_scale_2,
-                w2,
-                w2_scale,
-                w2_scale_2,
-            ) = prepare_nvfp4_moe_layer_for_marlin(
-                layer=layer,
-                w13=layer.w13_weight,
-                w13_scale=layer.w13_weight_scale,
-                w13_scale_2=w13_weight_scale_2,
-                w2=layer.w2_weight,
-                w2_scale=layer.w2_weight_scale,
-                w2_scale_2=layer.w2_weight_scale_2,
-            )
-        else:
-            raise ValueError(f"Unknown NvFp4 backend for MoE: {self.nvfp4_backend}")
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            a13_scale,
+            w2,
+            w2_scale,
+            w2_scale_2,
+            a2_scale,
+        ) = convert_to_nvfp4_moe_kernel_format(
+            nvfp4_backend=self.nvfp4_backend,
+            layer=layer,
+            w13=layer.w13_weight,
+            w13_scale=layer.w13_weight_scale,
+            w13_scale_2=w13_weight_scale_2,
+            a13_scale=layer.w13_input_scale,
+            w2=layer.w2_weight,
+            w2_scale=layer.w2_weight_scale,
+            w2_scale_2=layer.w2_weight_scale_2,
+            a2_scale=layer.w2_input_scale,
+            is_act_and_mul=self.moe.is_act_and_mul,
+        )
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
