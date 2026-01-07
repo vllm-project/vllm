@@ -186,22 +186,21 @@ class GritLMPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head(self, pooled_output: torch.Tensor):
-        return self.activation(pooled_output)
+    def _head(
+        self,
+        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolerHeadOutput:
+        return self.activation(pooled_data)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self._head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 @default_pooling_type("MEAN")

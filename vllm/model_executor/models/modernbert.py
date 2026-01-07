@@ -19,6 +19,7 @@ from vllm.model_executor.layers.pooler import (
     PoolingMethod,
     PoolingParamsUpdate,
     PoolingType,
+    TokenPoolerHeadOutput,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -301,23 +302,28 @@ class ModernBertPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = pooled_output.to(self.dense.weight.dtype)
-        return self.norm(self.act(self.dense(pooled_output)))
+    def _head_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        pooled_data = pooled_data.to(self.dense.weight.dtype)
+        return self.norm(self.act(self.dense(pooled_data)))
+
+    def _head(
+        self,
+        pooled_data: list[torch.Tensor] | torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolerHeadOutput:
+        if isinstance(pooled_data, list):
+            return [self._head_chunk(data) for data in pooled_data]
+
+        return self._head_chunk(pooled_data)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self._head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 @default_pooling_type("CLS")
