@@ -100,7 +100,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
     from .bitblas import BitBLASConfig
@@ -156,8 +155,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
-        "auto-round": AutoRoundConfig,
         "rtn": RTNConfig,
+        "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
