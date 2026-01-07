@@ -1201,7 +1201,7 @@ class OpenAIServingChat(OpenAIServing):
                                     delta_message.tool_calls[0].function.arguments
                                 )
 
-                            # GLM 4 parsers with MTP on won't work properly if 
+                            # GLM 4 parsers with MTP on won't work properly if
                             # falling back to the original autocomplete logic.
                             actual_call = tool_parser.streamed_args_for_tool[index]
                             remaining_call = ""
