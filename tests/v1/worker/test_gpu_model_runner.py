@@ -398,7 +398,7 @@ def test_get_nans_in_logits(default_vllm_config, model_runner, dist_init):
     assert result == {"req_0": 2, "req_1": 0}
 
 
-def test_update_states_no_changes(model_runner, dist_init):
+def test_update_states_no_changes(default_vllm_config, model_runner, dist_init):
     req_id = "req_0"
 
     # new req
