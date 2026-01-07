@@ -8,25 +8,6 @@ from torch.nn.parameter import Parameter
 from .base import RotaryEmbedding
 
 
-def fope_coef_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-    from vllm.distributed import (
-        get_tensor_model_parallel_rank,
-        get_tensor_model_parallel_world_size,
-    )
-
-    world_size = get_tensor_model_parallel_world_size()
-    rank = get_tensor_model_parallel_rank()
-    num_key_value_heads = loaded_weight.size(0)
-
-    if num_key_value_heads < world_size:
-        n_replicate = world_size // num_key_value_heads
-        world_size = num_key_value_heads
-        rank = rank // n_replicate
-
-    loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
-    param.copy_(loaded_weight)
-
-
 class FourierRotaryEmbedding(RotaryEmbedding):
     def __init__(
         self,
@@ -63,12 +44,8 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             torch.empty(num_key_value_heads, self.input_dim, self.output_dim),
             requires_grad=False,
         )
-        self.cos_coef.weight_loader = (
-            lambda param, loaded_weight: fope_coef_weight_loader(param, loaded_weight)
-        )
-        self.sin_coef.weight_loader = (
-            lambda param, loaded_weight: fope_coef_weight_loader(param, loaded_weight)
-        )
+        self.cos_coef.weight_loader = self.fope_coef_weight_loader
+        self.sin_coef.weight_loader = self.fope_coef_weight_loader
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -96,7 +73,7 @@ class FourierRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
         self.inv_freq = self._compute_inv_freq(self.base)
-        # FIXME: zhouxinyu, implement FoPE cos/sin cache computation
+        # TODO: zhouxinyu, implement FoPE cos/sin cache computation
         return torch.zeros(1)
 
     def apply_rotary_emb(self):
@@ -118,14 +95,13 @@ class FourierRotaryEmbedding(RotaryEmbedding):
     def forward_native(self, x: torch.Tensor, positions: torch.Tensor):
         # expand x, positions to additional batch size dim
         if x.dim() == 2:
-            # (seq_len, hidden_size) -> (bsz=1, seq_len, hidden_size)
+            # (seq_len, hidden_size) -> (bsz, seq_len, hidden_size)
             x = x.unsqueeze(0)
         if positions.dim() == 1:
-            # (seq_len) -> (bsz=1, seq_len)
+            # (seq_len) -> (bsz, seq_len)
             positions = positions.unsqueeze(0)
 
         # Core RoPE block
-
         inv_freq_expanded = (
             self.inv_freq[None, :, None].float().expand(positions.shape[0], -1, 1)
         )  # (40) -> (1, 40, 1) -> (bsz, 40, 1)
@@ -181,5 +157,23 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
     def forward_cuda(self, x: torch.Tensor, positions: torch.Tensor):
-        # FIXME, zhouxinyu, implement FoPE cuda forward computation
+        # TODO, zhouxinyu, implement FoPE cuda forward computation
         return self.forward_native(x, positions)
+
+    def fope_coef_weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+
+        world_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank()
+        num_key_value_heads = loaded_weight.size(0)
+
+        if num_key_value_heads < world_size:
+            n_replicate = world_size // num_key_value_heads
+            world_size = num_key_value_heads
+            rank = rank // n_replicate
+
+        loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
+        param.copy_(loaded_weight)

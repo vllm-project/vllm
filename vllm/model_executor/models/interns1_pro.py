@@ -49,9 +49,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -189,7 +186,8 @@ class InternS1ProMoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+        # TODO: zhouxinyu, use vllm ApplyRotaryEmb
+        # self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,
@@ -212,45 +210,32 @@ class InternS1ProMoeAttention(nn.Module):
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        # q, k = self.rotary_emb(positions, q, k)
 
         # hidden_states: (seq_len, hidden_size), (8192, 2048)
         # q: (seq_len, q_size), (8192, 1024)
-        # k: (seq_len, kv_size), (8192, 128)
-        # v: (seq_len, kv_size), (8192, 128)
-        # cos: (bsz, seq_len, num_kv_heads, kv_size), (1, 8192, 1, 128)
-        # sin: (bsz, seq_len, num_kv_heads, kv_size), (1, 8192, 1, 128)
+        # k, v: (seq_len, kv_size), (8192, 128)
+        # cos, sin: (bsz, seq_len, num_kv_heads, kv_size), (1, 8192, 1, 128)
 
         # apply rotary embedding sep head
-        q = q.unflatten(
-            -1, (self.num_heads, self.head_dim)
-        )  # (seq_len, num_heads, head_dim), (8192, 8, 128)
-        k = k.unflatten(
-            -1, (self.num_kv_heads, self.head_dim)
-        )  # (seq_len, num_kv_heads, head_dim), (8192, 1, 128)
-        v = v.unflatten(
-            -1, (self.num_kv_heads, self.head_dim)
-        )  # (seq_len, num_kv_heads, head_dim), (8192, 1, 128)
-        q = q.unsqueeze(0)  # (bsz, seq_len, num_heads, head_dim), (1, 8192, 8, 128)
-        k = k.unsqueeze(0)  # (bsz, seq_len, num_kv_heads, head_dim), (1, 8192, 1, 128)
-        v = v.unsqueeze(0)  # (bsz, seq_len, num_kv_heads, head_dim), (1, 8192, 1, 128)
-        # cos, sin: (bsz, seq_len, num_kv_heads, head_dim), (1, 8192, 1, 128)
-        cos = rotary_pos_emb_cos
-        sin = rotary_pos_emb_sin
+        # q: (bsz, seq_len, num_heads, head_dim), (1, 8192, 8, 128)
+        q = q.unflatten(-1, (self.num_heads, self.head_dim)).unsqueeze(0)
+        # k, v: (bsz, seq_len, num_kv_heads, head_dim), (1, 8192, 1, 128)
+        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim)).unsqueeze(0)
+        v = v.unflatten(-1, (self.num_kv_heads, self.head_dim)).unsqueeze(0)
         q, k = apply_rotary_pos_emb_sep(
             q,
             k,
-            cos,
-            sin,
+            rotary_pos_emb_cos,
+            rotary_pos_emb_sin,
         )
-        q = q.squeeze(0)  # (seq_len, num_heads, head_dim), (8192, 8, 128)
-        k = k.squeeze(0)  # (seq_len, num_kv_heads, head_dim), (8192, 1, 128)
-        v = v.squeeze(0)  # (seq_len, num_kv_heads, head_dim), (8192, 1, 128)
-        q = q.flatten(1, 2)  # (seq_len, q_size), (8192, 1024)
-        k = k.flatten(1, 2)  # (seq_len, kv_size), (8192, 128)
-        v = v.flatten(1, 2)  # (seq_len, kv_size), (8192, 128)
+        # q: (seq_len, num_heads, head_dim), (8192, 8*128)
+        q = q.squeeze(0).flatten(1, 2)
+        # k, v: (seq_len, num_kv_heads, head_dim), (8192, 1*128)
+        k = k.squeeze(0).flatten(1, 2)
+        v = v.squeeze(0).flatten(1, 2)
 
-        attn_output = self.attn(q, k, v)  # (seq_len, q_size), (8192, 1024)
+        # (seq_len, q_size), (8192, 1024)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
