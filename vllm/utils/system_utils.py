@@ -293,4 +293,5 @@ def find_loaded_library(lib_name) -> str | None:
     assert filename.rpartition(".so")[0].startswith(lib_name), (
         f"Unexpected filename: {filename} for library {lib_name}"
     )
+
     return path
