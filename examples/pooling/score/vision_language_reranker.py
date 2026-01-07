@@ -40,7 +40,6 @@ def run_jinavl_reranker() -> RerankModelData:
     )
     return RerankModelData(
         engine_args=engine_args,
-        image_placeholder="",
     )
 
 
