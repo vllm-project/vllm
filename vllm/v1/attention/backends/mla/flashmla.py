@@ -148,7 +148,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: torch.Tensor | None,
+        cp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
@@ -194,12 +194,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
-            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
         )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_pcp: bool = True
 
     def __init__(
         self,
