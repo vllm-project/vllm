@@ -585,7 +585,7 @@ class LLM:
                 raise ValueError(
                     "Lora request list should be the same length as the prompts"
                 )
-            return [[lr] * beam_width for lr in lora_request]
+            return [lr for lr in lora_request for _ in range(beam_width)]
 
         if lora_request is None or isinstance(lora_request, LoRARequest):
             return [lora_request] * beam_width * len(prompts)
@@ -756,9 +756,6 @@ class LLM:
                 "reflect instance-level progress."
             )
         for _ in token_iter:
-            if cur_len == 67:
-                _ = 1
-
             # a. Forward current tokens, obtain the logits
             is_first_step = cur_len == decoder_prompt_len
 

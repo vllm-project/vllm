@@ -233,7 +233,7 @@ def _get_top_k_continuations(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     output_log_probs = torch.full(
         (batch_size * num_beams, logprobs_size),
-        1e-9,
+        -1.0e9,
         dtype=torch.float32,
         device=running_sequences.device,
     )
