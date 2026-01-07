@@ -200,11 +200,11 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
+    AttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.utils.fa_utils import get_flash_attn_version
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -245,13 +245,15 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+    )
 
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func
+        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
 
 try:
@@ -380,7 +382,7 @@ D = TypeVar("D", bound=MLACommonDecodeMetadata)
 
 
 @dataclass
-class MLACommonMetadata(Generic[D]):
+class MLACommonMetadata(AttentionMetadata, Generic[D]):
     """Metadata for MLACommon.
 
     NOTE: Please read the comment at the top of the file before trying to
@@ -428,7 +430,7 @@ class MLACommonMetadata(Generic[D]):
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
-A = TypeVar("A")
+A = TypeVar("A", bound=AttentionMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
@@ -467,6 +469,27 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
+    )
+
+
+@dataclass
+class MLADims:
+    q_lora_rank: int | None
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
+
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
     )
 
 
@@ -615,7 +638,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._fi_prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)
+                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
             )
 
         if self._use_trtllm_ragged_prefill:
@@ -789,7 +812,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill_metadata = None
         if num_prefills > 0:
-            num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
+            num_computed_tokens_cpu = (
+                common_attn_metadata.compute_num_computed_tokens().cpu()
+            )
 
             reqs_start = num_decodes  # prefill_start
 
@@ -870,7 +895,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     )
                     # Note(qcs): The max local context lengths
                     # padded to `dcp_local_block_size`.
-                    padded_local_context_lens_cpu = (
+                    padded_local_context_lens_cpu: torch.Tensor = (
                         cdiv(
                             context_lens_cpu,
                             self.dcp_virtual_block_size,
@@ -1195,9 +1220,11 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
             # v with 0s to match the qk head dim for attention backends that do
             # not support different headdims
             # We don't need to pad V if we are on a hopper system with FA3
-            self._pad_v = get_flash_attn_version() is None or not (
-                get_flash_attn_version() == 3
-                and current_platform.get_device_capability()[0] == 9
+            device_capability = current_platform.get_device_capability()
+            self._pad_v = self.vllm_flash_attn_version is None or not (
+                self.vllm_flash_attn_version == 3
+                and device_capability is not None
+                and device_capability[0] == 9
             )
 
         if self.dcp_world_size == 1:
