@@ -1,18 +1,15 @@
 name: macOS Apple Silicon Smoke Test
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:  # Manual trigger
 
 jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -22,29 +19,28 @@ jobs:
             pyproject.toml
           python-version: '3.12'
 
-      - name: Create virtual environment
+      - name: Install dependencies
         run: |
-          uv venv
-          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install -r requirements/cpu-build.txt
+          uv pip install -r requirements/cpu.txt
 
-      - name: Install dependencies and build vLLM
-        run: |
-          uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install -e .
+      - name: Build vLLM
+        run: uv pip install -v -e .
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
       - name: Verify installation
         run: |
           python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
 
       - name: Smoke test vllm serve
+        timeout-minutes: 10
         run: |
           # Start server in background
           vllm serve Qwen/Qwen3-0.6B \
-            --max-model-len=2K \
+            --max-model-len=2048 \
             --load-format=dummy \
-            --hf-overrides '{"num_hidden_layers": 2}' \
             --enforce-eager \
             --port 8000 &
 
