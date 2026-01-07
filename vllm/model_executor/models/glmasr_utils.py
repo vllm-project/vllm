@@ -14,27 +14,6 @@ DEFAULT_MERGE_FACTOR = 4
 DEFAULT_CONV_PARAMS = [(1, 3, 1), (1, 3, 2)]
 
 
-def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    Repeat key/value tensors for Grouped Query Attention.
-
-    Args:
-        hidden_states: [batch, num_kv_heads, seq_len, head_dim]
-        n_rep: Number of repetitions
-
-    Returns:
-        [batch, num_kv_heads * n_rep, seq_len, head_dim]
-    """
-    if n_rep == 1:
-        return hidden_states
-
-    batch, num_kv_heads, slen, head_dim = hidden_states.shape
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_kv_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
-
-
 def _calculate_conv_output_length(
     input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
 ) -> torch.Tensor:

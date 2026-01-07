@@ -11,6 +11,7 @@ from transformers import BatchFeature
 from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -58,7 +59,6 @@ from .glmasr_utils import (
     _get_audio_output_lengths_for_tower,
     _group_audio_embeddings,
     _normalize_chunk_counts,
-    _repeat_kv,
 )
 from .interfaces import (
     MultiModalEmbeddings,
@@ -133,7 +133,10 @@ class GlmAsrRotaryEmbedding(nn.Module):
 class GlmAsrAttention(nn.Module):
     """
     Optimized Multi-headed Grouped Query Attention for GLM-ASR.
-    Uses vLLM's QKVParallelLinear and ApplyRotaryEmb for better performance.
+
+    Uses vLLM's QKVParallelLinear for fused projections, ApplyRotaryEmb for
+    rotary position embeddings, and MMEncoderAttention for hardware-optimized
+    attention computation with automatic backend selection.
     """
 
     def __init__(
@@ -146,11 +149,10 @@ class GlmAsrAttention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
+        self.num_kv_heads = getattr(
+            config, "num_key_value_heads", config.num_attention_heads
+        )
         self.head_dim = self.hidden_size // self.num_heads
-        self.num_kv_groups = self.num_heads // self.num_kv_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_rank = self.num_heads // self.tp_size
@@ -180,6 +182,15 @@ class GlmAsrAttention(nn.Module):
         # Use vLLM's ApplyRotaryEmb CustomOp
         # enforce_enable=True ensures the op is always enabled (important for ViT)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
+
+        # Use vLLM's MMEncoderAttention for hardware-optimized attention
+        # Automatically selects Flash Attention, SDPA, or Pallas based on device
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_heads_per_rank,
+            head_size=self.head_dim,
+            num_kv_heads=self.num_kv_heads_per_rank,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -217,33 +228,11 @@ class GlmAsrAttention(nn.Module):
         q = self.apply_rotary_emb(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
         k = self.apply_rotary_emb(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
 
-        # Transpose to [batch, num_heads, seq, head_dim] for attention
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # MMEncoderAttention expects [batch, seq, num_heads, head_dim]
+        # It handles GQA internally via repeat_interleave
+        attn_output = self.attn(q, k, v)
 
-        # Handle GQA: repeat k/v if needed
-        if self.num_kv_groups > 1:
-            k = _repeat_kv(k, self.num_kv_groups)
-            v = _repeat_kv(v, self.num_kv_groups)
-
-        # Ensure contiguous for optimal SDPA/Flash Attention performance
-        # Non-contiguous tensors can cause fallback to slower implementations
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-
-        # Scaled dot-product attention (uses Flash Attention when available)
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=False,
-        )
-
-        # Reshape back
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        # Reshape back to [batch, seq, hidden_size]
         attn_output = attn_output.view(batch_size, seq_len, -1)
 
         # Output projection
