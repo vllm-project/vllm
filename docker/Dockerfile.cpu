@@ -15,11 +15,11 @@
 # Build arguments:
 #   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
 #   VLLM_CPU_DISABLE_AVX512=false (default)|true
-#   VLLM_CPU_AVX2=false (default)|true|1 (for cross-compilation)
-#   VLLM_CPU_AVX512=false (default)|true|1 (for cross-compilation)
-#   VLLM_CPU_AVX512BF16=false (default)|true
-#   VLLM_CPU_AVX512VNNI=false (default)|true
-#   VLLM_CPU_AMXBF16=false |true (default)
+#   VLLM_CPU_AVX2=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512BF16=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512VNNI=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AMXBF16=false (default)|true (for cross-compilation)
 #
 
 ######################### COMMON BASE IMAGE #########################
@@ -132,10 +132,10 @@ FROM base AS vllm-test-deps
 WORKDIR /workspace/vllm
 
 # Copy test requirements
-COPY requirements/test.in requirements/test.in
+COPY requirements/test.in requirements/cpu-test.in
 
 # TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
-RUN cp requirements/test.in requirements/cpu-test.in && \
+RUN \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \
       case "$(uname -m)" in \

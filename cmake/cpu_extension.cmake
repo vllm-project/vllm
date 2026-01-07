@@ -107,11 +107,11 @@ else()
     find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
 
     # Support cross-compilation by allowing override via environment variables
-    if (ENABLE_AVX2 AND (ENABLE_AVX2 STREQUAL "1" OR ENABLE_AVX2 STREQUAL "true"))
+    if (ENABLE_AVX2)
         set(AVX2_FOUND ON)
         message(STATUS "AVX2 support enabled via VLLM_CPU_AVX2 environment variable")
     endif()
-    if (ENABLE_AVX512 AND (ENABLE_AVX512 STREQUAL "1" OR ENABLE_AVX512 STREQUAL "true"))
+    if (ENABLE_AVX512)
         set(AVX512_FOUND ON)
         message(STATUS "AVX512 support enabled via VLLM_CPU_AVX512 environment variable")
     endif()
