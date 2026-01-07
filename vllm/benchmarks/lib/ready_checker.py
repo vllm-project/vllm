@@ -75,4 +75,4 @@ async def wait_for_endpoint(
             # test with a new input in the next step
             input_i = (input_i + 1) % len(test_inputs)
 
-    return output, None
+    return output
