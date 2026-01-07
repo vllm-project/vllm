@@ -85,7 +85,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # The base_layer type is ColumnParallelLinear or
         # MergedColumnParallelLinear, their weight sharding logic is
         # inconsistent when TP is greater than 1.
-        self.is_merged_col_linear = type(base_layer) is MergedColumnParallelLinear
+        self.is_merged_col_linear = isinstance(base_layer, MergedColumnParallelLinear)
         self.output_size = self.base_layer.output_size_per_partition
         # There is only one LoRA layer
         self.n_slices = 1
@@ -155,8 +155,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
+        return isinstance(source_layer, ColumnParallelLinear) or (
+            isinstance(source_layer, MergedColumnParallelLinear)
             and len(packed_modules_list) == 1
         )
 
@@ -275,7 +275,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         return (
-            type(source_layer) is MergedColumnParallelLinear
+            isinstance(source_layer, MergedColumnParallelLinear)
             and len(packed_modules_list) == 2
         )
 
@@ -575,3 +575,4 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
             model_config=model_config,
             decorate=False,
         )
+
