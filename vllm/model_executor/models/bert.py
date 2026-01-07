@@ -99,20 +99,17 @@ class BertPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        pooled_data = self.dense(pooled_data)
-        pooled_data = self.activation(pooled_data)
-        return pooled_data
-
     def _head(
         self,
         pooled_data: list[torch.Tensor] | torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         if isinstance(pooled_data, list):
-            return [self._head_chunk(data) for data in pooled_data]
+            pooled_data = torch.stack(pooled_data)
 
-        return self._head_chunk(pooled_data)
+        pooled_data = self.dense(pooled_data)
+        pooled_data = self.activation(pooled_data)
+        return pooled_data
 
     def forward(
         self,
