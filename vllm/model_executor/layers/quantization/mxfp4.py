@@ -783,7 +783,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_weight = w13_weight
             layer.w2_weight = w2_weight
         else:
-            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+            raise ValueError(
+                f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
+                f"should be one of: {list(Mxfp4Backend)}."
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
