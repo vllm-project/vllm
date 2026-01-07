@@ -39,9 +39,11 @@ async def show_server_info(
 ):
     vllm_config: VllmConfig = raw_request.app.state.vllm_config
     server_info = {
-        "vllm_config": str(vllm_config)
-        if config_format == "text"
-        else PydanticVllmConfig.dump_python(vllm_config, mode="json", fallback=str),
+        "vllm_config": (
+            str(vllm_config)
+            if config_format == "text"
+            else PydanticVllmConfig.dump_python(vllm_config, mode="json", fallback=str)
+        ),
         # fallback=str is needed to handle e.g. torch.dtype
         "vllm_env": _get_vllm_env_vars(),
     }
