@@ -97,7 +97,16 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "model."
         ),
     )
-
+    continue_final_message: bool = Field(
+        default=False,
+        description=(
+            "If this is set, the chat will be formatted so that the final "
+            "message in the chat is open-ended, without any EOS tokens. The "
+            "model will continue this message rather than starting a new one. "
+            'This allows you to "prefill" part of the model\'s response for it. '
+            "Cannot be used at the same time as `add_generation_prompt`."
+        ),
+    )
     add_special_tokens: bool = Field(
         default=False,
         description=(

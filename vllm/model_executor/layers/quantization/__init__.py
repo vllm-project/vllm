@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "deepspeedfp",
-    "tpu_int8",
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
@@ -38,7 +37,6 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "petit_nvfp4",
-    "cpu_gptq",
     "cpu_awq",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
@@ -109,7 +107,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
-    from .cpu_wna16 import CPUAWQConfig, CPUGPTQConfig
+    from .cpu_wna16 import CPUAWQConfig
     from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
@@ -130,12 +128,10 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
-    from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
-        "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
@@ -162,7 +158,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
-        "cpu_gptq": CPUGPTQConfig,
         "cpu_awq": CPUAWQConfig,
     }
     # Update the `method_to_config` with customized quantization methods.

@@ -499,7 +499,6 @@ class MooncakeConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
         )
-        self._use_pallas = self.kv_topo._use_pallas
 
         self.zmq_ctx = zmq.Context()
         self.async_zmq_ctx = zmq.asyncio.Context()
@@ -915,6 +914,6 @@ def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:
     # This logic is now centralized
     return (
         envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
-        + vllm_config.parallel_config.data_parallel_rank
+        + vllm_config.parallel_config.data_parallel_index
         * vllm_config.parallel_config.tensor_parallel_size
     )

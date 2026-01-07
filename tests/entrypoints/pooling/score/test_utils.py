@@ -51,9 +51,9 @@ def llm_reranker_model_config():
         CROSS_ENCODER_MODEL_ID,
         runner="pooling",
     )
-    # use_pad_token is a property that reads from hf_config,
+    # use_sep_token is a property that reads from hf_config,
     # so we set it there to override the default (True)
-    config.hf_config.use_pad_token = False
+    config.hf_config.use_sep_token = False
     return config
 
 
@@ -230,7 +230,7 @@ class TestGetScorePrompt:
             cross_encoder_tokenizer, full_prompt, engine_prompt
         )
 
-    def test_fallback_with_pad_token(
+    def test_fallback_with_sep_token(
         self,
         cross_encoder_model_config,
         cross_encoder_tokenizer,
@@ -238,7 +238,7 @@ class TestGetScorePrompt:
         mock_model_no_score_template,
     ):
         """Test fallback path when ChatTemplateResolutionError
-        and use_pad_token=True."""
+        and use_sep_token=True."""
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -250,7 +250,7 @@ class TestGetScorePrompt:
             ),
         ):
             full_prompt, engine_prompt = get_score_prompt(
-                cross_encoder_model_config,  # use_pad_token=True
+                cross_encoder_model_config,  # use_sep_token=True
                 cross_encoder_tokenizer,
                 tokenization_kwargs,
                 "query",
@@ -281,7 +281,7 @@ class TestGetScorePrompt:
             add_special_tokens=False,
         )
 
-    def test_fallback_without_pad_token(
+    def test_fallback_without_sep_token(
         self,
         llm_reranker_model_config,
         cross_encoder_tokenizer,
@@ -289,7 +289,7 @@ class TestGetScorePrompt:
         mock_model_no_score_template,
     ):
         """Test fallback path when ChatTemplateResolutionError
-        and use_pad_token=False."""
+        and use_sep_token=False."""
         with (
             patch(
                 "vllm.model_executor.model_loader.get_model_cls",
@@ -301,7 +301,7 @@ class TestGetScorePrompt:
             ),
         ):
             full_prompt, engine_prompt = get_score_prompt(
-                llm_reranker_model_config,  # use_pad_token=False
+                llm_reranker_model_config,  # use_sep_token=False
                 cross_encoder_tokenizer,
                 tokenization_kwargs,
                 "query",

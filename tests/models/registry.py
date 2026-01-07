@@ -355,6 +355,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniCPM3ForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
+    "MiniCPM4ForCausalLM": _HfExamplesInfo(
+        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+    ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-Text-01",
@@ -401,6 +404,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Embedded-7B-V1.1", trust_remote_code=True
+    ),
+    "PanguProMoEV2ForCausalLM": _HfExamplesInfo(
+        "",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "PanguUltraMoEForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
@@ -647,6 +655,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
+    "GlmAsrForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-ASR-Nano-2512",
+        trust_remote_code=True,
+        min_transformers_version="5.0",
+    ),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b"
     ),
@@ -894,6 +907,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},

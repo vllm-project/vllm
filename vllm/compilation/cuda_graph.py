@@ -219,6 +219,7 @@ class CUDAGraphWrapper:
             # runtime modes.
             return self.runnable(*args, **kwargs)
 
+        assert batch_descriptor is not None
         if batch_descriptor not in self.concrete_cudagraph_entries:
             # create a new entry for this batch descriptor
             self.concrete_cudagraph_entries[batch_descriptor] = CUDAGraphEntry(

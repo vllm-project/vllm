@@ -8,6 +8,7 @@ import torch
 import vllm.v1.attention.backends.rocm_aiter_fa  # noqa: F401
 from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
@@ -104,7 +105,7 @@ def test_varlen_with_paged_kv(
     if not is_flash_attn_varlen_func_available():
         pytest.skip("flash_attn_varlen_func required to run this test.")
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]

@@ -523,6 +523,7 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -838,7 +839,9 @@ class EngineArgs:
             **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
-            "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
+            "--enable-expert-parallel",
+            "-ep",
+            **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -1574,6 +1577,7 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
@@ -1712,6 +1716,7 @@ class EngineArgs:
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
         )
 
         # Compilation config overrides
