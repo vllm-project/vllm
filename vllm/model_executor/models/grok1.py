@@ -176,7 +176,7 @@ class Grok1MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        router_logit_soft_cap: float | None = None,
+        router_logit_soft_cap: float = 0.0,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
         tp_size: int | None = None,
@@ -217,7 +217,7 @@ class Grok1MoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        if self.router_logit_soft_cap is not None and self.router_logit_soft_cap > 0:
+        if self.router_logit_soft_cap > 0:
             router_logits = self.router_logit_soft_cap * F.tanh(
                 router_logits / self.router_logit_soft_cap
             )
