@@ -124,7 +124,7 @@ def test_rotary_embedding(
 
 
 @torch.inference_mode()
-def test_rope_module_cache():
+def test_rope_module_cache(default_vllm_config):
     MAX_POSITIONS = [123, 1234]
     ROPE_THETAS = [10000, 1000000]
     ROPE_PARAMETERS = (
