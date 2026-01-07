@@ -250,7 +250,7 @@ def create_chunked_local_attention_backend(
             self._virtual_seqlens = torch.zeros(
                 num_vb_ub, dtype=torch.int32, device=device
             )
-            self._cu_virtual_seqlens_q = torch.zeros(
+            self._virtual_query_start_loc = torch.zeros(
                 num_vb_ub + 1, dtype=torch.int32, device=device
             )
             self._virtual_batch_to_batch_mapping = torch.zeros(
@@ -268,7 +268,7 @@ def create_chunked_local_attention_backend(
             )
 
             # Pinned memory buffer for async GPU->CPU copy of cu_virtual_seqlens_q
-            self._cu_virtual_seqlens_q_cpu = torch.zeros(
+            self._virtual_query_start_loc_cpu = torch.zeros(
                 num_vb_ub + 1, dtype=torch.int32, pin_memory=True
             )
 
@@ -320,7 +320,7 @@ def create_chunked_local_attention_backend(
                 cu_num_vb,
                 block_table,
                 self._virtual_seqlens,
-                self._cu_virtual_seqlens_q,
+                self._virtual_query_start_loc,
                 self._virtual_batches_block_table,
                 self._virtual_batch_to_batch_mapping,
                 self._virtual_batch_block_indices,
@@ -334,42 +334,24 @@ def create_chunked_local_attention_backend(
 
             # Pad cu_virtual_seqlens_q for FULL CG (must be monotonic)
             total_tokens = int(query_start_loc_cpu[-1])
-            self._cu_virtual_seqlens_q[num_vb_ub + 1 :].fill_(total_tokens)
+            self._virtual_query_start_loc[num_vb_ub + 1 :].fill_(total_tokens)
 
             # Compute query_start_loc_cpu for virtual batches.
-            # We handle two cases differently to avoid CPU<>GPU sync:
-            #
-            # 1. Uniform single token decode case (max_q_len == 1):
-            #    Each request has exactly 1 query token, so each produces exactly
-            #    1 virtual batch. Therefore cu_virtual_seqlens = [0, 1, 2, ..., N]
-            #    which is identical to input query_start_loc_cpu. Reuse it.
-            #
-            # 2. Spec-decode / Prefill case (max_q_len > 1):
-            #    Requests may span multiple chunks, so we need GPU-computed values.
-            #    We use non-blocking D2H copy + lazy sync: the CPU tensor is wrapped
-            #    so accessing it synchronizes exactly once on first access. This way
-            #    backends like FlashAttn (which don't use query_start_loc_cpu) never
-            #    block, while backends that do block only when actually accessing it.
+            # Uniform decode (max_q_len == 1): reuse input directly.
+            # Prefill/spec-decode: async D2H copy with lazy sync on access.
             max_q_len = common_attn_metadata.max_query_len
-            use_lazy_sync = max_q_len > 1
-
-            if use_lazy_sync:
-                # Async copy to pinned memory - will sync lazily on access
-                cpu_buf = self._cu_virtual_seqlens_q_cpu[: num_vb_ub + 1]
-                cpu_buf.copy_(
-                    self._cu_virtual_seqlens_q[: num_vb_ub + 1], non_blocking=True
-                )
-                sync_event = torch.cuda.Event()
-                sync_event.record()
-                cu_virtual_seqlens_q_cpu = cpu_buf
+            if max_q_len == 1:
+                virtual_query_start_loc_cpu = query_start_loc_cpu
             else:
-                # Uniform decode: reuse input directly (no copy needed)
-                cu_virtual_seqlens_q_cpu = query_start_loc_cpu
+                # this buffer will get lazily populated below
+                virtual_query_start_loc_cpu = self._virtual_query_start_loc_cpu[
+                    : num_vb_ub + 1
+                ]
 
             # Build metadata with virtual batch tensors
             cm = CommonAttentionMetadata(
-                query_start_loc=self._cu_virtual_seqlens_q[: num_vb_ub + 1],
-                query_start_loc_cpu=cu_virtual_seqlens_q_cpu,
+                query_start_loc=self._virtual_query_start_loc[: num_vb_ub + 1],
+                query_start_loc_cpu=virtual_query_start_loc_cpu,
                 seq_lens=self._virtual_seqlens[:num_vb_ub],
                 num_reqs=num_vb_ub,
                 num_actual_tokens=common_attn_metadata.num_actual_tokens,
@@ -380,33 +362,45 @@ def create_chunked_local_attention_backend(
                 causal=True,
             )
 
-            # Wrap CPU tensor with lazy sync if needed
-            if use_lazy_sync:
-                make_lazy_sync_tensor_property(
-                    cm, "query_start_loc_cpu", cpu_buf, sync_event
+            # lazily populate the cpu buffer if needed
+            if max_q_len > 1:
+                # Add a hook to copy on the first access to query_start_loc_cpu so
+                # for backends that don't use it, never sync.
+                cm._virtual_query_start_loc_cpu_copied = False
+
+                def _get_cpu(self):
+                    if not cm._virtual_query_start_loc_cpu_copied:
+                        virtual_query_start_loc_cpu.copy_(
+                            self.query_start_loc[: num_vb_ub + 1]
+                        )
+                        cm._virtual_query_start_loc_cpu_copied = True
+                    return virtual_query_start_loc_cpu
+
+                cm.__class__ = type(
+                    "CM_LazySync",
+                    (cm.__class__,),
+                    {"query_start_loc_cpu": property(_get_cpu)},
                 )
 
             metadata = super().build(common_prefix_len, cm, fast_build)
 
-            # Clone indices onto metadata so they're stable for
-            # update_block_table (different layers have different builders)
-            metadata._virtual_batch_to_batch_mapping = (
-                self._virtual_batch_to_batch_mapping[:num_vb_ub].clone()
-            )
-            # Only keep the columns we actually use (clamped to max_blocks_per_seq)
-            metadata._virtual_batch_block_indices = self._virtual_batch_block_indices[
+            # Create closure to build virtual batches block table on demand
+            # Clone indices so they're stable (different layers have different builders)
+            batch_mapping = self._virtual_batch_to_batch_mapping[:num_vb_ub].clone()
+            block_indices = self._virtual_batch_block_indices[
                 :num_vb_ub, :pages_per_vb
             ].clone()
+
+            def make_virtual_batches_block_table(blk_table: torch.Tensor):
+                return blk_table[batch_mapping.unsqueeze(1), block_indices]
+
+            metadata.make_virtual_batches_block_table = make_virtual_batches_block_table
             return metadata
 
         def update_block_table(
             self, metadata, blk_table: torch.Tensor, slot_mapping: torch.Tensor
         ):
-            # Use cloned indices stored on metadata (stable across builders)
-            new_block_table = blk_table[
-                metadata._virtual_batch_to_batch_mapping.unsqueeze(1),
-                metadata._virtual_batch_block_indices,
-            ]
+            new_block_table = metadata.make_virtual_batches_block_table(blk_table)
             return super().update_block_table(metadata, new_block_table, slot_mapping)
 
     attn_backend = subclass_attention_backend(
