@@ -626,7 +626,7 @@ class TokensPoolerHead(nn.Module, ABC):
     def forward(
         self,
         pooled_data: torch.Tensor | None,
-        pooling_metadata: PoolingMetadata,
+        pooling_param: PoolingParams,
     ) -> TokensPoolerHeadOutput:
         raise NotImplementedError
 
