@@ -12,7 +12,7 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import VLLMValidationError
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike

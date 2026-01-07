@@ -754,7 +754,7 @@ class OpenAIServing:
         if isinstance(message, Exception):
             exc = message
 
-            from vllm.entrypoints.openai.protocol import VLLMValidationError
+            from vllm.exceptions import VLLMValidationError
 
             if isinstance(exc, VLLMValidationError):
                 err_type = "BadRequestError"

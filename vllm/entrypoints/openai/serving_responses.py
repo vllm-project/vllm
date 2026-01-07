@@ -373,7 +373,7 @@ class OpenAIServingResponses(OpenAIServing):
             NotImplementedError,
         ) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
