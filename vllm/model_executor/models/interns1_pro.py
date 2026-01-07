@@ -196,11 +196,12 @@ class InternS1ProMoeAttention(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        # qkv: (8192, 1280)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # hidden_states: (seq_len, hidden_size), (8192, 2048)
+        # cos, sin: (bsz, seq_len, num_kv_heads, kv_size), (1, 8192, 1, 128)
+        # qkv: (8192, 1280)
         # q: (seq_len, q_size), (8192, 1024)
-        # k: (seq_len, kv_size), (8192, 128)
-        # v: (seq_len, kv_size), (8192, 128)
+        # k, v: (seq_len, kv_size), (8192, 128)
 
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
@@ -211,12 +212,7 @@ class InternS1ProMoeAttention(nn.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
-        # hidden_states: (seq_len, hidden_size), (8192, 2048)
-        # q: (seq_len, q_size), (8192, 1024)
-        # k, v: (seq_len, kv_size), (8192, 128)
-        # cos, sin: (bsz, seq_len, num_kv_heads, kv_size), (1, 8192, 1, 128)
-
-        # apply rotary embedding sep head
+        # Apply rotary embedding sep head
         # q: (bsz, seq_len, num_heads, head_dim), (1, 8192, 8, 128)
         q = q.unflatten(-1, (self.num_heads, self.head_dim)).unsqueeze(0)
         # k, v: (bsz, seq_len, num_kv_heads, head_dim), (1, 8192, 1, 128)
