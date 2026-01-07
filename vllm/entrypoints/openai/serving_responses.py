@@ -230,6 +230,11 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
+        # Set up tool call ID format for Kimi K2 models
+        if self.model_config.hf_config.model_type == "kimi_k2":
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
         self.enable_auto_tools = enable_auto_tools
         # set up tool use
         self.tool_parser = self._get_tool_parser(
@@ -834,6 +839,17 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
+        # Extract tool calls first to prevent reasoning parser from capturing
+        # tool markers
+        tool_calls, text_for_reasoning = self._parse_tool_calls_from_content(
+            request=request,
+            tokenizer=tokenizer,
+            content=final_output.text,
+            enable_auto_tools=self.enable_auto_tools,
+            tool_parser_cls=self.tool_parser,
+        )
+        text_for_reasoning = text_for_reasoning or ""
+
         if self.reasoning_parser:
             try:
                 reasoning_parser = self.reasoning_parser(tokenizer)
@@ -842,11 +858,11 @@ class OpenAIServingResponses(OpenAIServing):
                 raise e
 
             reasoning, content = reasoning_parser.extract_reasoning(
-                final_output.text, request=request
+                text_for_reasoning, request=request
             )
         else:
             reasoning = None
-            content = final_output.text
+            content = text_for_reasoning
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -878,13 +894,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-        tool_calls, content = self._parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            content=content,
-            enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.tool_parser,
-        )
         if content:
             output_text = ResponseOutputText(
                 text=content,

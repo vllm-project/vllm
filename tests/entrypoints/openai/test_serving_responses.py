@@ -350,3 +350,141 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+def test_tool_parser_runs_before_reasoning_parser():
+    """
+    Ensure tool calls are extracted before reasoning parsing, even without <think> tags.
+    """
+    from vllm.entrypoints.openai.protocol import (
+        ExtractedToolCallInformation,
+        FunctionCall,
+        ResponsesRequest,
+        ToolCall,
+    )
+    from vllm.outputs import CompletionOutput
+
+    engine_client = MagicMock()
+    engine_client.model_config.hf_config.model_type = "test"
+    engine_client.model_config.get_diff_sampling_param.return_value = {}
+
+    instance = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    # Simulate reasoning parser fallback: when no </think> tag, treats ALL
+    # input as reasoning and returns None for content
+    def mock_extract_reasoning(text, request=None):
+        if "</think>" not in text:
+            # Fallback: entire text becomes reasoning, content is None
+            return (text, None)
+        # Normal case: would extract between <think>...</think>
+        return (None, text)
+
+    mock_reasoning = MagicMock()
+    mock_reasoning.return_value.extract_reasoning.side_effect = mock_extract_reasoning
+    instance.reasoning_parser = mock_reasoning
+
+    # Simulate tool parser: extracts tool calls if markers present
+    def mock_extract_tool_calls(text, request=None):
+        if "<|tool_calls_section_begin|>" in text:
+            # Extract the tool call, return remaining text
+            remaining = text.split("<|tool_calls_section_begin|>")[0].strip()
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=[
+                    ToolCall(
+                        id="1",
+                        type="function",
+                        function=FunctionCall(name="Bash", arguments="{}"),
+                    )
+                ],
+                content=remaining if remaining else None,
+            )
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=text
+        )
+
+    mock_tool = MagicMock()
+    mock_tool.return_value.extract_tool_calls.side_effect = mock_extract_tool_calls
+    instance.tool_parser = mock_tool
+    instance.enable_auto_tools = True
+
+    # Model output WITHOUT <think> tags - this triggers reasoning parser fallback
+    output = CompletionOutput(
+        index=0,
+        text=(
+            " Let me run it. "
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>functions.Bash:0<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        ),
+        token_ids=[1],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    )
+
+    result = instance._make_response_output_items(
+        request=ResponsesRequest(input="test", model="test"),
+        final_output=output,
+        tokenizer=MagicMock(),
+    )
+
+    # Verify tool call was extracted (not lost to reasoning parser)
+    tool_items = [item for item in result if item.type == "function_call"]
+    assert len(tool_items) == 1, (
+        f"Tool call should be extracted even without <think> tags. "
+        f"Got output types: {[i.type for i in result]}"
+    )
+
+    # Verify we have a completed status
+    completed_items = [
+        item for item in result if getattr(item, "status", None) == "completed"
+    ]
+    assert len(completed_items) >= 1, (
+        f"Expected at least one item with status='completed'. "
+        f"Got: {[(i.type, getattr(i, 'status', None)) for i in result]}"
+    )
+
+    # Edge case: tool call with NO preceding text (text_for_reasoning is None)
+    # This should NOT fall back to original text containing tool markers
+    output_no_text = CompletionOutput(
+        index=0,
+        text=(
+            "<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>functions.Bash:0<|tool_call_end|>"
+            "<|tool_calls_section_end|>"
+        ),
+        token_ids=[1],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    )
+
+    result_no_text = instance._make_response_output_items(
+        request=ResponsesRequest(input="test", model="test"),
+        final_output=output_no_text,
+        tokenizer=MagicMock(),
+    )
+
+    # Should still extract tool call
+    tool_items_no_text = [
+        item for item in result_no_text if item.type == "function_call"
+    ]
+    assert len(tool_items_no_text) == 1, (
+        f"Tool call should be extracted even with no preceding text. "
+        f"Got: {[i.type for i in result_no_text]}"
+    )
+
+    # Reasoning should NOT contain tool markers
+    reasoning_items = [item for item in result_no_text if item.type == "reasoning"]
+    for item in reasoning_items:
+        for content in item.content:
+            assert "<|tool_call" not in content.text, (
+                f"Tool markers should not appear in reasoning. Got: {content.text}"
+            )
