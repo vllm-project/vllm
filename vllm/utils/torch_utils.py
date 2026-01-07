@@ -227,7 +227,7 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
         )
         if isinstance(kv_algo, dict):
             if (
-                not kv_algo.get("dynamic")
+                kv_algo.get("dynamic") is False
                 and kv_algo.get("num_bits") == 8
                 and kv_algo.get("type") == "float"
             ):
