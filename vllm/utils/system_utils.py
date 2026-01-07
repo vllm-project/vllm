@@ -269,7 +269,7 @@ def set_ulimit(target_soft_limit: int = 65535):
             )
 
 
-def find_loaded_library(lib_name) -> str | None:
+def find_loaded_library(lib_name: str) -> str | None:
     """
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
