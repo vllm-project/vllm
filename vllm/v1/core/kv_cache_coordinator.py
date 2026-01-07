@@ -478,9 +478,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # Full attention: reuse cached blocks (downward-closed property)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if is_full_attn and cached_blocks is not None:
-                    # Full attention is downward-closed; if the candidate
-                    # `hit_length` was reduced by other groups, trim cached blocks
-                    # so subsequent reuse reflects the current candidate length.
+                    # For full attention, we only need to compute the cache hit
+                    # length once. Starting from the second iteration, if the
+                    # hit_length is reduced by other groups, we can simply keep
+                    # the first hit_length // block_size blocks from the last iteration.
                     num_blocks = hit_length // spec.block_size
                     for group_id in group_ids:
                         blocks = hit_blocks_by_group[group_id]
@@ -504,7 +505,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if curr_hit_length < hit_length:
                     hit_length = curr_hit_length
                     reduced = True
-                    break
 
             if not reduced:
                 break
