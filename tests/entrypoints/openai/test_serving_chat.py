@@ -1648,7 +1648,7 @@ class TestCreateRemainingArgsDelta:
 
 
 class TestJsonSchemaPromptInjection:
-    """Tests for JSON schema prompt injection (Issue #31804)."""
+    """Tests for JSON schema prompt injection."""
 
     def test_build_json_schema_prompt_basic(self):
         from vllm.entrypoints.openai.serving_chat import _build_json_schema_prompt
@@ -1700,3 +1700,50 @@ class TestJsonSchemaPromptInjection:
         result = _build_json_schema_prompt(schema)
 
         assert "Field requirements" not in result
+
+    def test_build_json_schema_prompt_nested(self):
+        from vllm.entrypoints.openai.serving_chat import _build_json_schema_prompt
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "person": {
+                    "type": "object",
+                    "description": "Details of a person.",
+                    "properties": {
+                        "name": {"type": "string", "description": "Name of the person"},
+                        "details": {
+                            "type": "object",
+                            "properties": {
+                                "age": {
+                                    "type": "integer",
+                                    "description": "Age in years",
+                                }
+                            },
+                        },
+                    },
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item_name": {
+                                "type": "string",
+                                "description": "Name of the item",
+                            }
+                        },
+                    },
+                },
+            },
+        }
+        result = _build_json_schema_prompt(schema)
+
+        assert "Details of a person." in result
+        assert "`person`" in result
+        assert "Name of the person" in result
+        assert "`person.name`" in result
+        assert "Age in years" in result
+        assert "`person.details.age`" in result
+        assert "Name of the item" in result
+        assert "`items[].item_name`" in result

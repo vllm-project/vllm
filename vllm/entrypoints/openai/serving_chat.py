@@ -84,18 +84,33 @@ logger = init_logger(__name__)
 
 def _build_json_schema_prompt(schema: dict[str, Any]) -> str:
     """Build prompt from JSON schema to guide model output format."""
+
+    def _get_descriptions(schema_node: dict[str, Any], path: str) -> list[str]:
+        """Recursively extract descriptions from a JSON schema."""
+        descriptions = []
+        if schema_node.get("type") == "object" and "properties" in schema_node:
+            for key, prop_schema in schema_node["properties"].items():
+                new_path = f"{path}.{key}" if path else key
+                if isinstance(prop_schema, dict):
+                    if "description" in prop_schema:
+                        descriptions.append(
+                            f"- `{new_path}`: {prop_schema['description']}"
+                        )
+                    descriptions.extend(_get_descriptions(prop_schema, new_path))
+        elif (
+            schema_node.get("type") == "array"
+            and "items" in schema_node
+            and isinstance(schema_node.get("items"), dict)
+        ):
+            descriptions.extend(_get_descriptions(schema_node["items"], f"{path}[]"))
+        return descriptions
+
     parts = [
         "## Response Format",
         f"```json\n{json.dumps(schema, indent=2)}\n```",
     ]
 
-    # Extract field descriptions
-    props = schema.get("properties", {})
-    descs = [
-        f"- {k}: {v['description']}"
-        for k, v in props.items()
-        if isinstance(v, dict) and "description" in v
-    ]
+    descs = _get_descriptions(schema, "")
     if descs:
         parts.append("Field requirements:\n" + "\n".join(descs))
 
