@@ -42,6 +42,9 @@ def query_marlin_supported_quant_types(
     include_fp_type: bool = True,
     device_capability: int | None = None,
 ):
+    if current_platform.is_cpu():
+        return _query_cpu_marlin_supported_quant_types(has_zp, include_fp_type)
+
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
         device_capability = (
@@ -71,6 +74,33 @@ def query_marlin_supported_quant_types(
         res = [scalar_types.uint4b8, scalar_types.uint8b128]
         if include_fp_type:
             res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
+        return res
+
+
+def _query_cpu_marlin_supported_quant_types(
+    has_zp: bool | None = None,
+    include_fp_type: bool = True,
+):
+    # - has_zp is True: return quant_types that has zero points
+    # - has_zp is False: return quant_types that has not zero points
+    # - has_zp is None: both
+    if has_zp is None:
+        types0 = _query_cpu_marlin_supported_quant_types(
+            False,
+            include_fp_type,
+        )
+        types1 = _query_cpu_marlin_supported_quant_types(
+            True,
+            include_fp_type,
+        )
+        return types0 + types1
+
+    if has_zp:
+        # AWQ style, unsigned + runtime zero-point
+        return [scalar_types.uint4]
+    else:
+        # GPTQ style, unsigned + symmetric bias, only supports 4-bits for now
+        res = [scalar_types.uint4b8]
         return res
 
 

@@ -1,0 +1,8 @@
+model_name: "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2"
+env:
+  VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  VLLM_FLASHINFER_MOE_BACKEND: "throughput"
