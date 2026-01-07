@@ -250,7 +250,7 @@ def test_update_states_new_request(default_vllm_config, model_runner, dist_init)
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_finished(model_runner, dist_init):
+def test_update_states_request_finished(default_vllm_config, model_runner, dist_init):
     req_id = "req_0"
 
     # new req
