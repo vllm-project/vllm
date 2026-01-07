@@ -92,9 +92,7 @@ class PoolingMetadata:
 
     def get_pooling_cursor(self) -> PoolingCursor:
         pooling_cursor = self.pooling_cursor
-        assert pooling_cursor is not None, (
-            "Failed to call `build_pooling_cursor` before using `pooler`"
-        )
+        assert pooling_cursor is not None, "Should call `build_pooling_cursor` first"
 
         return pooling_cursor
 
