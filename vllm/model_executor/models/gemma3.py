@@ -22,7 +22,6 @@ import torch
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -47,6 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
 from .interfaces import SupportsLoRA, SupportsPP

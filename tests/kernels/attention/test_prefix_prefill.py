@@ -10,10 +10,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
+    chunked_prefill_paged_decode,
+)
+from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
