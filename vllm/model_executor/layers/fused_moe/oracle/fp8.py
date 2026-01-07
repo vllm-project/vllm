@@ -26,6 +26,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_group_gemm_supported,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
@@ -142,7 +145,7 @@ def select_fp8_moe_backend(
         logger.info_once(_make_log_backend("ROCm AITER"), scope="local")
         return Fp8MoeBackend.AITER
 
-    if allow_vllm_cutlass:
+    if allow_vllm_cutlass and cutlass_group_gemm_supported():
         logger.info_once(_make_log_backend("vLLM CUTLASS"), scope="local")
         return Fp8MoeBackend.VLLM_CUTLASS
 
