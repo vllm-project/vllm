@@ -116,10 +116,10 @@ inline void launch_compute_problem_sizes(const torch::Tensor& topk_ids,
                                          const bool swap_ab) {
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
-  const int32_t* topk_ptr = static_cast<const int32_t*>(topk_ids.data_ptr());
-  int32_t* ps1_ptr = static_cast<int32_t*>(problem_sizes1.data_ptr());
-  int32_t* ps2_ptr = static_cast<int32_t*>(problem_sizes2.data_ptr());
-  int32_t* atomic_ptr = static_cast<int32_t*>(atomic_buffer.data_ptr());
+  auto const* topk_ptr = topk_ids.data_ptr<int32_t>();
+  auto* ps1_ptr = problem_sizes1.data_ptr<int32_t>();
+  auto* ps2_ptr = problem_sizes2.data_ptr<int32_t>();
+  auto* atomic_ptr = atomic_buffer.data_ptr<int32_t>();
 
   VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes<SwapAB><<<num_experts, num_threads, 0, stream>>>(
