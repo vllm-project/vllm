@@ -72,7 +72,6 @@ if HAS_TRITON:
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
         CutlassExpertsW4A8Fp8,
-        cutlass_moe_fp4,
         cutlass_moe_fp8,
         cutlass_moe_w4a8_fp8,
     )
@@ -97,7 +96,6 @@ if HAS_TRITON:
         "get_config_file_name",
         "GroupedTopk",
         "cutlass_moe_fp8",
-        "cutlass_moe_fp4",
         "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
