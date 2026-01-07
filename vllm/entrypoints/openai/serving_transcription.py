@@ -38,7 +38,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
@@ -47,7 +46,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
-            log_error_stack=log_error_stack,
             enable_force_include_usage=enable_force_include_usage,
         )
 
@@ -108,7 +106,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
@@ -117,7 +114,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
-            log_error_stack=log_error_stack,
             enable_force_include_usage=enable_force_include_usage,
         )
 
