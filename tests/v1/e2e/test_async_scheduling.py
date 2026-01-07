@@ -4,7 +4,6 @@ from itertools import repeat
 from typing import Any
 
 import pytest
-import torch
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
