@@ -735,6 +735,7 @@ void dispatch_topk_launch(
       const torch::Tensor& bias_tensor = bias.value();
       TORCH_CHECK(bias_tensor.dim() == 1, "bias tensor must be 1D");
       TORCH_CHECK(bias_tensor.size(0) == num_experts, "bias size mismatch, expected: ", num_experts);
+      TORCH_CHECK(bias_tensor.is_contiguous(), "bias tensor must be contiguous");
       TORCH_CHECK(bias_tensor.scalar_type() == at::ScalarType::Float, "bias tensor must be float32");
       bias_ptr = bias_tensor.data_ptr<float>();
     }
