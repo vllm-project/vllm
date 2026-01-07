@@ -108,12 +108,9 @@ message GenerateRequest {
 // =====================
 
 message GenerateResponse {
-  string request_id = 1;
-
   oneof response {
-    GenerateStreamChunk chunk = 2;     // For streaming
-    GenerateComplete complete = 3;      // For final/non-streaming
-    GenerateError error = 4;            // For errors
+    GenerateStreamChunk chunk = 1;     // For streaming
+    GenerateComplete complete = 2;     // For final/non-streaming
   }
 }
 
@@ -140,12 +137,6 @@ message GenerateComplete {
   // InputLogProbs input_logprobs = 7;
 }
 
-message GenerateError {
-  string message = 1;
-  string http_status_code = 2;
-  string details = 3;
-}
-
 // =====================
 // Embedding Request
 // =====================
@@ -156,23 +147,9 @@ message EmbedRequest {
 }
 
 message EmbedResponse {
-  string request_id = 1;
-
-  oneof response {
-    EmbedComplete complete = 2;
-    EmbedError error = 3;
-  }
-}
-
-message EmbedComplete {
   repeated float embedding = 1;
   uint32 prompt_tokens = 2;
   uint32 embedding_dim = 3;
-}
-
-message EmbedError {
-  string message = 1;
-  string code = 2;
 }
 
 // =====================

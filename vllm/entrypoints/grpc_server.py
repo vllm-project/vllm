@@ -108,17 +108,18 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
                 if request.stream:
-                    yield self._chunk_response(request_id, output)
+                    yield self._chunk_response(output)
 
                 # Send complete response when finished
                 if output.finished:
-                    yield self._complete_response(request_id, output)
+                    yield self._complete_response(output)
 
         except ValueError as e:
-            yield self._error_response(request_id, e)
+            # Invalid request error (equiv to 400).
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             logger.exception("Error in Generate for request %s", request_id)
-            yield self._error_response(request_id, e)
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def Embed(
         self,
@@ -138,12 +139,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             EmbedResponse protobuf
         """
         logger.warning("Embed RPC not yet implemented")
-        return vllm_engine_pb2.EmbedResponse(
-            request_id=request.request_id,
-            error=vllm_engine_pb2.EmbedError(
-                message="Embed RPC not yet implemented",
-                code="NOT_IMPLEMENTED",
-            ),
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented"
         )
 
     async def HealthCheck(
@@ -321,15 +318,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     @staticmethod
-    def _chunk_response(
-        request_id: str, output: RequestOutput
-    ) -> vllm_engine_pb2.GenerateResponse:
+    def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
         When output_kind=DELTA, vLLM returns only new tokens automatically.
 
         Args:
-            request_id: The request ID
             output: vLLM RequestOutput (with delta tokens when output_kind=DELTA)
 
         Returns:
@@ -341,7 +335,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         if completion is None:
             # Empty chunk
             return vllm_engine_pb2.GenerateResponse(
-                request_id=request_id,
                 chunk=vllm_engine_pb2.GenerateStreamChunk(
                     token_ids=[],
                     prompt_tokens=0,
@@ -354,7 +347,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # vLLM handles the delta logic internally
         # completion_tokens = delta count (client will accumulate)
         return vllm_engine_pb2.GenerateResponse(
-            request_id=request_id,
             chunk=vllm_engine_pb2.GenerateStreamChunk(
                 token_ids=completion.token_ids,
                 prompt_tokens=len(output.prompt_token_ids)
@@ -366,14 +358,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     @staticmethod
-    def _complete_response(
-        request_id: str, output: RequestOutput
-    ) -> vllm_engine_pb2.GenerateResponse:
+    def _complete_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
 
         Args:
-            request_id: The request ID
             output: vLLM RequestOutput (finished=True)
 
         Returns:
@@ -385,7 +374,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         if completion is None:
             # Empty completion
             return vllm_engine_pb2.GenerateResponse(
-                request_id=request_id,
                 complete=vllm_engine_pb2.GenerateComplete(
                     output_ids=[],
                     finish_reason="error",
@@ -400,7 +388,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # When non-streaming (FINAL_ONLY mode): completion.token_ids has all tokens
         # Client will accumulate token counts for streaming
         return vllm_engine_pb2.GenerateResponse(
-            request_id=request_id,
             complete=vllm_engine_pb2.GenerateComplete(
                 output_ids=completion.token_ids,
                 finish_reason=completion.finish_reason or "stop",
@@ -409,31 +396,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),
                 cached_tokens=output.num_cached_tokens,
-            ),
-        )
-
-    @staticmethod
-    def _error_response(
-        request_id: str, e: Exception
-    ) -> vllm_engine_pb2.GenerateResponse:
-        """
-        Build an error response.
-
-        Args:
-            request_id: The request ID
-            e: The exception from vLLM
-
-        Returns:
-            GenerateResponse with error field set
-        """
-        status_code = "400" if isinstance(e, ValueError) else "500"
-
-        return vllm_engine_pb2.GenerateResponse(
-            request_id=request_id,
-            error=vllm_engine_pb2.GenerateError(
-                message=str(e),
-                http_status_code=status_code,
-                details="",
             ),
         )
 

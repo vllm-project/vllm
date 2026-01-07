@@ -179,7 +179,6 @@ async def test_generate_non_streaming(grpc_client):
 
     # Check the response
     final_response = responses[0]
-    assert final_response.request_id == "test-non-streaming-1"
     assert final_response.HasField("complete")
 
     complete = final_response.complete
@@ -199,9 +198,7 @@ async def test_generate_streaming(grpc_client):
             input_ids=[464, 3139, 286, 4881, 318],  # GPT-2 tokens
         ),
         sampling_params=vllm_engine_pb2.SamplingParams(
-            temperature=0.0,
-            max_tokens=10,
-            n=1,
+            temperature=0.0, max_tokens=10, n=1
         ),
         stream=True,
     )
@@ -211,14 +208,10 @@ async def test_generate_streaming(grpc_client):
     complete_response = None
 
     async for response in grpc_client.Generate(request):
-        assert response.request_id == "test-streaming-1"
-
         if response.HasField("chunk"):
             chunks.append(response.chunk)
         elif response.HasField("complete"):
             complete_response = response.complete
-        elif response.HasField("error"):
-            pytest.fail(f"Unexpected error: {response.error.message}")
 
     # Should have received some chunks
     assert len(chunks) >= 0  # May have 0 chunks if generation is very fast
@@ -245,9 +238,7 @@ async def test_generate_with_different_sampling_params(grpc_client):
             input_ids=[15496],
         ),
         sampling_params=vllm_engine_pb2.SamplingParams(
-            temperature=0.8,
-            top_p=0.95,
-            max_tokens=5,
+            temperature=0.8, top_p=0.95, max_tokens=5
         ),
         stream=False,
     )
@@ -264,9 +255,7 @@ async def test_generate_with_different_sampling_params(grpc_client):
             input_ids=[15496],
         ),
         sampling_params=vllm_engine_pb2.SamplingParams(
-            temperature=1.0,
-            top_k=50,
-            max_tokens=5,
+            temperature=1.0, top_k=50, max_tokens=5
         ),
         stream=False,
     )
@@ -313,8 +302,7 @@ async def test_generate_multiple_requests(grpc_client):
                 input_ids=[15496],
             ),
             sampling_params=vllm_engine_pb2.SamplingParams(
-                temperature=0.0,
-                max_tokens=5,
+                temperature=0.0, max_tokens=5
             ),
             stream=False,
         )
@@ -329,7 +317,6 @@ async def test_generate_multiple_requests(grpc_client):
     # Verify all requests completed successfully
     assert len(responses) == 3
     for i, response in enumerate(responses):
-        assert response.request_id == f"test-concurrent-{i}"
         assert response.HasField("complete")
 
 
@@ -345,9 +332,7 @@ async def test_generate_with_seed(grpc_client):
                 input_ids=[464, 2003, 286, 9552, 318],
             ),
             sampling_params=vllm_engine_pb2.SamplingParams(
-                temperature=1.0,
-                max_tokens=10,
-                seed=seed,
+                temperature=1.0, max_tokens=10, seed=seed
             ),
             stream=False,
         )
@@ -374,23 +359,21 @@ async def test_generate_with_seed(grpc_client):
 @pytest.mark.asyncio
 async def test_generate_error_handling(grpc_client):
     """Test error handling in Generate RPC."""
-    # Request with missing tokenized input
+    # Request with invalid top_p value (-33)
     request = vllm_engine_pb2.GenerateRequest(
-        request_id="test-error-missing-input",
+        request_id="test-error-invalid-topp",
         sampling_params=vllm_engine_pb2.SamplingParams(
-            temperature=0.0,
-            max_tokens=10,
-            top_p=-33,
+            temperature=0.0, max_tokens=10, top_p=-33
         ),
         stream=False,
     )
 
-    responses = [r async for r in grpc_client.Generate(request)]
+    # Should raise an error response
+    with pytest.raises(grpc.RpcError) as exc_info:
+        _ = [r async for r in grpc_client.Generate(request)]
 
-    # Should receive an error response
-    assert len(responses) == 1
-    assert responses[0].HasField("error")
-    assert "top_p must be in (0, 1], got -33.0" in responses[0].error.message
+    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "top_p must be in (0, 1], got -33.0" in exc_info.value.details()
 
 
 @pytest.mark.asyncio
@@ -439,8 +422,8 @@ async def test_abort_request(grpc_client):
     # Run generate and abort concurrently
     await asyncio.gather(run_generate(), abort_after_delay())
 
-    # The request should have been aborted (received error with "aborted" message)
-    # and finished early due to the abort
+    # The request should have been aborted (received final chunk with
+    # "abort" finish reason) and finished early due to the abort.
     assert was_aborted and received_chunks < 500, (
         "Request should have been aborted before generating all 500 tokens"
     )
