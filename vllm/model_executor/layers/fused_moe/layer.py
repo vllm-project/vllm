@@ -66,12 +66,6 @@ else:
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
-
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
-
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
