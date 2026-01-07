@@ -71,7 +71,7 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
 
 
-class GlmAsrRotaryEmbedding(nn.Module):
+class GlmAsrEncoderRotaryEmbedding(nn.Module):
     """
     Rotary Position Embedding for GLM-ASR encoder.
 
@@ -130,9 +130,9 @@ class GlmAsrRotaryEmbedding(nn.Module):
         return freqs * self.attention_scaling
 
 
-class GlmAsrAttention(nn.Module):
+class GlmAsrEncoderAttention(nn.Module):
     """
-    Optimized Multi-headed Grouped Query Attention for GLM-ASR.
+    Optimized Multi-headed Grouped Query Attention for GLM-ASR encoder.
 
     Uses vLLM's QKVParallelLinear for fused projections, ApplyRotaryEmb for
     rotary position embeddings, and MMEncoderAttention for hardware-optimized
@@ -240,7 +240,7 @@ class GlmAsrAttention(nn.Module):
         return output
 
 
-class GlmAsrMLP(nn.Module):
+class GlmAsrEncoderMLP(nn.Module):
     """
     Optimized MLP for GLM-ASR encoder.
     Uses vLLM's parallel linear layers for better performance.
@@ -297,13 +297,13 @@ class GlmAsrEncoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = GlmAsrAttention(
+        self.self_attn = GlmAsrEncoderAttention(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
 
-        self.mlp = GlmAsrMLP(
+        self.mlp = GlmAsrEncoderMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -427,7 +427,7 @@ class GlmAsrEncoder(nn.Module):
         self.norm = nn.LayerNorm(config.hidden_size, eps=layer_norm_eps)
 
         # Rotary position embeddings
-        self.rotary_emb = GlmAsrRotaryEmbedding(config)
+        self.rotary_emb = GlmAsrEncoderRotaryEmbedding(config)
 
     def _get_feat_extract_output_lengths(
         self, input_lengths: torch.Tensor
