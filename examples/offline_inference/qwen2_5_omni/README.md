@@ -10,7 +10,6 @@ python examples/offline_inference/qwen2_5_omni/only_thinker.py \
     -q mixed_modalities
 
 # Read vision and audio inputs from a single video file
-# NOTE: V1 engine does not support interleaved modalities yet.
 python examples/offline_inference/qwen2_5_omni/only_thinker.py \
     -q use_audio_in_video
 

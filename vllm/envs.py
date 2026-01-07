@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
+    VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -74,7 +75,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
-    VLLM_FLOAT32_MATMUL_PRECISION: Literal["ieee", "tf32"] = "ieee"
+    VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -167,6 +168,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -458,13 +460,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAIN_CUDA_VERSION": lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower()
     or "12.9",
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
-    # Accepted values:
-    #   - "ieee" (default): force full IEEE FP32 matmul precision.
-    #   - "tf32": enable TensorFloat32-based fast matmul.
+    # Valid options mirror torch.set_float32_matmul_precision
     "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
         "VLLM_FLOAT32_MATMUL_PRECISION",
-        "ieee",
-        ["ieee", "tf32"],
+        "highest",
+        ["highest", "high", "medium"],
         case_sensitive=False,
     ),
     # Maximum number of compilation jobs to run in parallel.
@@ -603,6 +603,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")
+    ),
+    # Timeout in seconds for waiting for engine cores to become ready
+    # during startup. Default is 600 seconds (10 minutes).
+    "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
+        os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -1202,6 +1207,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
+    # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
+    "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
+        int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "0"))
+    ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
@@ -1263,7 +1273,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
-    # all2all backend for vllm's expert parallel communication
+    # [DEPRECATED - will be removed in v0.15.0] all2all backend for vllm's
+    # expert parallel communication. Use --all2all-backend CLI argument instead.
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
     # - "allgather_reducescatter": all2all implementation based on allgather and
@@ -1274,7 +1285,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND": env_with_choices(
         "VLLM_ALL2ALL_BACKEND",
-        "allgather_reducescatter",
+        None,
         [
             "naive",
             "pplx",
