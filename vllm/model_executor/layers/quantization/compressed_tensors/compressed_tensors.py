@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
@@ -380,6 +381,32 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_mxfp4(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
+        format: str | None = None,
+    ):
+        # TODO: check for activation quantization when supported
+        if weight_quant is None:
+            return False
+
+        is_mxfp4_format = format == CompressionFormat.mxfp4_pack_quantized.value
+        is_group_quant = weight_quant.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = weight_quant.symmetric
+        is_group_size_32 = weight_quant.group_size == 32
+        is_float_type = weight_quant.type == QuantizationType.FLOAT
+        is_4_bits = weight_quant.num_bits == 4
+
+        return (
+            is_mxfp4_format
+            and is_group_quant
+            and is_float_type
+            and is_4_bits
+            and is_group_size_32
+            and is_symmetric
+        )
+
+    @staticmethod
     def _is_static_tensor_w8a8(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
@@ -578,6 +605,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Detect If Mixed Precision
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Fp4()
+
+        if self._is_mxfp4(weight_quant, input_quant, format):
+            return CompressedTensorsW4A16Mxfp4()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
