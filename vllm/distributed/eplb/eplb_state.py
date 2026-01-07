@@ -598,14 +598,16 @@ class EplbState:
 
                 if ep_group.rank() == 0:
                     logger.info(
-                        "EPLB step: %d/%d for model %s: avg_tokens=%.2f, "
-                        "max_tokens=%d, balancedness=%.4f",
+                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                        "max_tokens=%d, balancedness=%.4f, "
+                        "steps until the next rearrangement: %d",
                         self.expert_rearrangement_step,
-                        self.expert_rearrangement_step_interval,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
                         balancedness,
+                        self.expert_rearrangement_step_interval
+                        - self.expert_rearrangement_step,
                     )
 
         # Update the expert load sliding window
