@@ -689,6 +689,31 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Video Frame Recovery
+
+For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
+
+To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Enable frame recovery
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"frame_recovery": true}}'
+```
+
+**Parameters:**
+
+- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+
+**How it works:**
+
+1. The system reads frames sequentially
+2. If a target frame fails to grab, it's marked as "failed"
+3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
+4. This approach handles both mid-video corruption and end-of-video truncation
+
+Works with common video formats like MP4 when using OpenCV backends.
+
 #### Custom RGBA Background Color
 
 To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
