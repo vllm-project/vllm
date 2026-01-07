@@ -18,7 +18,7 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.envs import VLLM_LOG_ITERATION_DETAILS, enable_envs_cache
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -341,7 +341,7 @@ class EngineCore:
 
     @contextmanager
     def log_iteration_details(self, scheduler_output: SchedulerOutput):
-        if not VLLM_LOG_ITERATION_DETAILS:
+        if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
         iteration_details = compute_iteration_details(scheduler_output)

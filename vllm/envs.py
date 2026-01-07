@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
-    VLLM_LOG_ITERATION_DETAILS: bool = False
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
@@ -660,12 +659,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_STATS_INTERVAL": lambda: val
     if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
     else 10.0,
-    # If set, vllm EngineCore will log iteration details
-    # This includes number of context/generation requests and tokens
-    # and the elapsed cpu time for the iteration.
-    "VLLM_LOG_ITERATION_DETAILS": lambda: bool(
-        int(os.getenv("VLLM_LOG_ITERATION_DETAILS", "0"))
-    ),
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -1684,7 +1677,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
-        "VLLM_LOG_ITERATION_DETAILS",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
