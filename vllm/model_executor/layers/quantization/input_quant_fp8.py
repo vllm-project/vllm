@@ -35,6 +35,7 @@ class QuantFP8(CustomOp):
         group_shape: GroupShape,
         num_token_padding: int | None = None,
         column_major_scales: bool = False,
+        tma_aligned_scales: bool = False,
         use_ue8m0: bool | None = None,  # for Torch compile
     ):
         """
@@ -43,6 +44,8 @@ class QuantFP8(CustomOp):
             or arbitrary block size)
         :param num_token_padding: Pad the token dimension of output to this
             size
+        :param tma_aligned_scales: For group quantization, output scales in
+            TMA-aligned layout
         :param column_major_scales: For group quantization, output scales in
             column major format
         """
@@ -52,6 +55,7 @@ class QuantFP8(CustomOp):
         self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
+        self.tma_aligned_scales = tma_aligned_scales
         self.use_ue8m0 = use_ue8m0
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
@@ -81,6 +85,7 @@ class QuantFP8(CustomOp):
                 x,
                 group_size=self.group_size,
                 column_major_scales=self.column_major_scales,
+                tma_aligned_scales=self.tma_aligned_scales,
                 dtype=_FP8_DTYPE,
                 use_ue8m0=self.use_ue8m0,
             )
