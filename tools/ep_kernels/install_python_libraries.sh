@@ -6,11 +6,12 @@ set -ex
 #   --mode <mode>        "install" (default) or "wheel"
 #   --pplx-ref <commit>  pplx-kernels commit hash
 #   --deepep-ref <commit> DeepEP commit hash
+#   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"12cecfd"}
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
-NVSHMEM_VER=3.3.24  # Suppports both CUDA 12 and 13
+NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
 CUDA_VERSION_MAJOR=$(${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2)
@@ -50,12 +51,31 @@ while [[ $# -gt 0 ]]; do
             DEEPEP_COMMIT_HASH="$2"
             shift 2
             ;;
+        --nvshmem-ver)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --nvshmem-ver requires an argument." >&2
+                exit 1
+            fi
+            if [[ "$2" =~ / ]]; then
+                echo "Error: NVSHMEM version should not contain slashes." >&2
+                exit 1
+            fi
+            NVSHMEM_VER="$2"
+            shift 2
+            ;;
         *)
             echo "Error: Unknown argument '$1'" >&2
             exit 1
             ;;
     esac
 done
+
+# Validate NVSHMEM_VER to prevent path traversal attacks
+# Only allow alphanumeric characters, dots, and hyphens (typical version string chars)
+if [[ ! "$NVSHMEM_VER" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    echo "Error: NVSHMEM_VER contains invalid characters. Only alphanumeric, dots, and hyphens are allowed." >&2
+    exit 1
+fi
 
 mkdir -p "$WORKSPACE"
 

@@ -89,7 +89,6 @@ MODELS = [
         "Qwen/Qwen3-Embedding-0.6B",
         mteb_score=0.771163695,
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
@@ -99,7 +98,6 @@ MODELS = [
     EmbedModelInfo(
         "Qwen/Qwen3-Embedding-4B",
         architecture="Qwen3ForCausalLM",
-        dtype="float32",
         enable_test=False,
     ),
 ]
@@ -143,7 +141,5 @@ def test_embed_models_correctness(
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(
-    hf_runner, vllm_runner, model_info: RerankModelInfo
-) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(vllm_runner, model_info)

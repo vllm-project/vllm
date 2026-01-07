@@ -314,6 +314,7 @@ class FusedMoE(CustomOp):
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
+        router_logits_dtype: Data type for router logits buffers.
     """
 
     def __init__(
@@ -348,6 +349,7 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: int | None = None,
+        router_logits_dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
@@ -356,14 +358,14 @@ class FusedMoE(CustomOp):
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
-            logger.info_once("Disabling MoE shared_experts cuda stream")
+            logger.debug_once("Disabling MoE shared_experts cuda stream", scope="local")
             self.shared_experts_stream = None
         else:
             # TODO(rob): enable shared expert overlap with non-cuda-alike.
             # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
-                logger.info_once(
+                logger.debug_once(
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
@@ -559,6 +561,7 @@ class FusedMoE(CustomOp):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
@@ -1509,7 +1512,9 @@ class FusedMoE(CustomOp):
         )
 
         self.batched_router_logits = torch.zeros(
-            logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            logits_shape,
+            dtype=moe.router_logits_dtype,
+            device=torch.cuda.current_device(),
         )
 
     def select_experts(
@@ -1899,11 +1904,11 @@ class FusedMoE(CustomOp):
                 )
 
                 post_quant_allgather = (
-                    has_flashinfer_trtllm_fused_moe()
-                    and self.quant_method is not None
+                    self.quant_method is not None
                     and self.dp_size > 1
                     and self.use_ep
                     and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
+                    and has_flashinfer_trtllm_fused_moe()
                 )
                 if post_quant_allgather:
                     hidden_states_to_dispatch, extra_tensors = (
