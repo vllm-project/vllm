@@ -224,9 +224,9 @@ class InternS1ProMoeAttention(nn.Module):
             rotary_pos_emb_cos,
             rotary_pos_emb_sin,
         )
-        # q: (seq_len, num_heads, head_dim), (8192, 8*128)
+        # q: (seq_len, q_size), (8192, 8*128)
         q = q.squeeze(0).flatten(1, 2)
-        # k, v: (seq_len, num_kv_heads, head_dim), (8192, 1*128)
+        # k, v: (seq_len, kv_size), (8192, 1*128)
         k = k.squeeze(0).flatten(1, 2)
         v = v.squeeze(0).flatten(1, 2)
 
