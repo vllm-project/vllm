@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-K2-VL Model Configuration.
+Kimi-K2.5 Model Configuration.
 
 This configuration supports video-chunk as an internal modality type.
 A video-chunk is the smallest independently processable unit of video.
@@ -11,8 +11,8 @@ from transformers import DeepseekV3Config
 from transformers.configuration_utils import PretrainedConfig
 
 
-class K2VLVisionConfig(PretrainedConfig):
-    """Vision configuration for K2-VL (vision tower + mm projector).
+class KimiK25VisionConfig(PretrainedConfig):
+    """Vision configuration for Kimi-K2.5 (vision tower + mm projector).
 
     Args:
         Vision Tower Parameters:
@@ -36,7 +36,7 @@ class K2VLVisionConfig(PretrainedConfig):
             projector_ln_eps: Layer norm epsilon for projector.
     """
 
-    model_type = "k2_vl_vision"
+    model_type = "kimi_k25_vision"
 
     def __init__(
         self,
@@ -84,10 +84,10 @@ class K2VLVisionConfig(PretrainedConfig):
         self.projector_ln_eps = projector_ln_eps
 
 
-class K2VLConfig(PretrainedConfig):
-    """K2-VL model configuration.
+class KimiK25Config(PretrainedConfig):
+    """Kimi-K2.5 model configuration.
 
-    K2-VL extends Kimi-VL with video support using video-chunks.
+    Kimi-K2.5 extends Kimi-K2 with vision support using video-chunks.
     A video-chunk consists of multiple consecutive frames
     that are processed together with temporal pooling.
 
@@ -99,25 +99,25 @@ class K2VLConfig(PretrainedConfig):
         pad_token_id: The token ID for padding.
     """
 
-    model_type = "k2_vl"
+    model_type = "kimi_k25"
 
     def __init__(
         self,
-        vision_config: dict | K2VLVisionConfig | None = None,
+        vision_config: dict | KimiK25VisionConfig | None = None,
         text_config: dict | DeepseekV3Config | None = None,
         ignore_index: int = -100,
         media_placeholder_token_id: int = 163605,
         pad_token_id: int = 0,
         use_unified_vision_chunk: bool = False,
-        video_placeholder: str = "<|k2vl_video_placeholder|>",
+        video_placeholder: str = "<|kimi_k25_video_placeholder|>",
         **kwargs,
     ):
         # Vision config
         if vision_config is None:
-            vision_config = K2VLVisionConfig()
+            vision_config = KimiK25VisionConfig()
         elif isinstance(vision_config, dict):
-            vision_config = K2VLVisionConfig(**vision_config)
-        self.vision_config: K2VLVisionConfig = vision_config
+            vision_config = KimiK25VisionConfig(**vision_config)
+        self.vision_config: KimiK25VisionConfig = vision_config
 
         # Text config
         if text_config is None:
@@ -125,6 +125,10 @@ class K2VLConfig(PretrainedConfig):
         elif isinstance(text_config, dict):
             text_config = DeepseekV3Config(**text_config)
         self.text_config: DeepseekV3Config = text_config
+
+        # Set mm_hidden_size to text hidden size if not explicitly set
+        if self.vision_config.mm_hidden_size == self.vision_config.hidden_size:
+            self.vision_config.mm_hidden_size = self.text_config.hidden_size
 
         # Other config
         self.ignore_index = ignore_index

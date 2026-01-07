@@ -124,9 +124,9 @@ class IdentityVideoLoader(VideoLoader):
     """IdentityVideoLoader returns raw video bytes without decoding.
 
     This allows the model processor to handle video decoding and
-    is required for models like K2VL that need custom video chunk splitting.
+    is required for models like Kimi-K2.5 that need custom video chunk splitting.
 
-    NOTE: This is temporary for K2VL testing. Remember to change back
+    NOTE: This is temporary for Kimi-K2.5 testing. Remember to change back
     to opencv before release if needed.
     """
 

@@ -716,7 +716,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             )
         },
     ),
-    "K2VLForConditionalGeneration": _HfExamplesInfo(
+    "KimiK25ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5-VL-Preview",
         trust_remote_code=True,
     ),

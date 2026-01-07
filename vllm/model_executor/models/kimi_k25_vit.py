@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Vision tower implementation for K2-VL model.
+Vision tower implementation for Kimi-K2.5 model.
 
-This module provides the vision encoder components for K2-VL,
+This module provides the vision encoder components for Kimi-K2.5,
 including 3D patch embedding, RoPE position embedding, and
 temporal pooling for video chunks.
 """
 
-import math
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
@@ -32,7 +31,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.configs.k2vl import K2VLConfig, K2VLVisionConfig
+from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
 KIMIV_VT_INFER_MAX_PATCH_NUM = 16328
 logger = init_logger(__name__)
@@ -557,11 +556,11 @@ def tpool_patch_merger(
 class MoonViT3dPretrainedModel(PreTrainedModel):
     """Main vision tower model.
 
-    Uses K2VLVisionConfig directly from transformers_utils/configs/k2vl.py.
+    Uses KimiK25VisionConfig directly from transformers_utils/configs/kimi_k25.py.
     """
 
-    config_class = K2VLVisionConfig
-    model_type = "k2_vl_vision"
+    config_class = KimiK25VisionConfig
+    model_type = "kimi_k25_vision"
     _no_split_modules = ["PackingTransformer"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
@@ -695,24 +694,23 @@ def vision_tower_forward(
     return tensors
 
 
-class K2VLMultiModalProjector(nn.Module):
-    """Multi-modal projector with patch merging for K2-VL."""
+class KimiK25MultiModalProjector(nn.Module):
+    """Multi-modal projector with patch merging for Kimi-K2.5."""
 
     def __init__(
         self,
-        config: K2VLConfig,
+        config: KimiK25VisionConfig,
         use_data_parallel: bool = False,
         prefix: str = "",
     ):
         super().__init__()
         self.use_data_parallel = use_data_parallel
-        vc = config.vision_config
 
         # Hidden size after patch merging
-        merge_h, merge_w = vc.merge_kernel_size
-        self.hidden_size = vc.hidden_size * merge_h * merge_w
+        merge_h, merge_w = config.merge_kernel_size
+        self.hidden_size = config.hidden_size * merge_h * merge_w
 
-        self.pre_norm = torch.nn.LayerNorm(vc.hidden_size, eps=1e-5)
+        self.pre_norm = torch.nn.LayerNorm(config.hidden_size, eps=1e-5)
         self.linear_1 = ReplicatedLinear(
             self.hidden_size,
             self.hidden_size,
@@ -721,7 +719,7 @@ class K2VLMultiModalProjector(nn.Module):
         )
         self.linear_2 = ReplicatedLinear(
             self.hidden_size,
-            config.text_config.hidden_size,
+            config.mm_hidden_size,
             bias=True,
             prefix=maybe_prefix(prefix, "linear_2"),
         )

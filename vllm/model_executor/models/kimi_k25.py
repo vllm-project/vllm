@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 """
-K2-VL Model Implementation for vLLM.
+Kimi-K2.5 Model Implementation for vLLM.
 
-K2-VL extends Kimi-VL with video support using video-chunks.
-A video-chunk is the smallest independently processable unit of video,
-typically consisting of 4 consecutive frames (temporal_merge_kernel_size=4).
+Kimi-K2.5 extends Kimi-K2 with vision support
 
 This module defines:
-- K2VLProcessingInfo/K2VLMultiModalProcessor: Processing logic
-- K2VLForConditionalGeneration: Main model class
+- KimiK25ProcessingInfo/KimiK25MultiModalProcessor: Processing logic
+- KimiK25ForConditionalGeneration: Main model class
 """
 
 import copy
@@ -36,8 +34,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
-from vllm.model_executor.models.k2vl_vit import (
-    K2VLMultiModalProjector,
+from vllm.model_executor.models.kimi_k25_vit import (
+    KimiK25MultiModalProjector,
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
@@ -61,7 +59,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseDummyOptions
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import K2VLConfig
+from vllm.transformers_utils.configs import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -77,7 +75,7 @@ class MaxImageTokenMeta:
     height: int = 3000
 
 
-class K2VLMediaPixelInputs(TensorSchema):
+class KimiK25MediaPixelInputs(TensorSchema):
     """
     Media input schema for K2-VL model.
 
@@ -139,8 +137,8 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
         )
 
 
-class K2VLProcessingInfo(BaseProcessingInfo):
-    """Processing information for K2-VL model.
+class KimiK25ProcessingInfo(BaseProcessingInfo):
+    """Processing information for Kimi-K2.5 model.
 
     Provides configuration and utilities for processing both
     images and video-chunks.
@@ -164,17 +162,17 @@ class K2VLProcessingInfo(BaseProcessingInfo):
         return self.hf_processor
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(K2VLConfig)
+        return self.ctx.get_hf_config(KimiK25Config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # None means unlimited
         return {"vision_chunk": None}
 
 
-class K2VLDummyInputsBuilder(BaseDummyInputsBuilder[K2VLProcessingInfo]):
-    """Builds dummy inputs for K2-VL model profiling."""
+class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
+    """Builds dummy inputs for Kimi-K2.5 model profiling."""
 
-    def __init__(self, info: K2VLProcessingInfo) -> None:
+    def __init__(self, info: KimiK25ProcessingInfo) -> None:
         super().__init__(info)
         self.media_token_id = self.info.media_token_id
         self.frame_per_chunk = self.info.media_processor.num_frames_per_chunk
@@ -232,8 +230,8 @@ class K2VLDummyInputsBuilder(BaseDummyInputsBuilder[K2VLProcessingInfo]):
         return {"vision_chunk": dummy_items}
 
 
-class K2VLMultiModalProcessor(BaseMultiModalProcessor[K2VLProcessingInfo]):
-    """Multi-modal processor for K2-VL.
+class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo]):
+    """Multi-modal processor for Kimi-K2.5.
 
     Handles both image and video-chunk modalities.
     """
@@ -290,12 +288,12 @@ class K2VLMultiModalProcessor(BaseMultiModalProcessor[K2VLProcessingInfo]):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    K2VLMultiModalProcessor,
-    info=K2VLProcessingInfo,
-    dummy_inputs=K2VLDummyInputsBuilder,
+    KimiK25MultiModalProcessor,
+    info=KimiK25ProcessingInfo,
+    dummy_inputs=KimiK25DummyInputsBuilder,
 )
-class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    """K2-VL model for conditional generation.
+class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    """Kimi-K2.5 model for conditional generation.
 
     Supports both image and video-chunk modalities.
     Video-chunks are temporal segments (typically 4 frames) that are
@@ -306,12 +304,12 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        # K2-VL uses video_chunk for all media types
+        # Kimi-K2.5 uses video_chunk for all media types
         if modality == "image":
             return "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
         elif modality == "video":
             # return a placeholder, to be replaced in the future.
-            return "<|k2vl_video_placeholder|>"
+            return "<|kimi_k25_video_placeholder|>"
 
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -322,7 +320,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> None:
         super().__init__()
         model_config = vllm_config.model_config
-        config: K2VLConfig = model_config.hf_config
+        config: KimiK25Config = model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -332,7 +330,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = torch.cuda.current_device()
-        # Build vision tower directly with K2VLVisionConfig
+        # Build vision tower directly with KimiK25VisionConfig
         self.vision_tower = MoonViT3dPretrainedModel(
             config.vision_config,
             multimodal_config=model_config.multimodal_config,
@@ -342,8 +340,8 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             device=self.device, dtype=model_config.dtype
         )
 
-        self.mm_projector = K2VLMultiModalProjector(
-            config=config,
+        self.mm_projector = KimiK25MultiModalProjector(
+            config=config.vision_config,
             use_data_parallel=self.use_data_parallel,
             prefix=maybe_prefix(prefix, "mm_projector"),
         )
@@ -377,7 +375,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_media_input(
         self, **kwargs: object
-    ) -> K2VLMediaPixelInputs | None:
+    ) -> KimiK25MediaPixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         grid_thws = kwargs.pop("grid_thws", None)
         if pixel_values is None:
@@ -400,14 +398,14 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
         assert grid_thws.ndim == 2, f"unexpected shape for grid_thws: {grid_thws.shape}"
 
-        return K2VLMediaPixelInputs(
+        return KimiK25MediaPixelInputs(
             type="pixel_values",
             pixel_values=pixel_values,
             grid_thws=grid_thws,
         )
 
     def _process_media_input(
-        self, media_input: K2VLMediaPixelInputs
+        self, media_input: KimiK25MediaPixelInputs
     ) -> list[torch.Tensor]:
         # NOTE(moyan): This forward will automatically batch the forward pass internally
         media_features = vision_tower_forward(
@@ -569,7 +567,7 @@ class K2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: K2VLConfig, weight_name: str
+    config: KimiK25Config, weight_name: str
 ) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
         config.num_nextn_predict_layers > 0
