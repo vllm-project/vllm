@@ -4439,8 +4439,8 @@ class GPUModelRunner(
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            pad_attn = force_attention == (
-                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+            pad_attn = (
+                force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
                 or cudagraph_runtime_mode == CUDAGraphMode.FULL
             )
             attn_metadata, _ = self._build_attention_metadata(
