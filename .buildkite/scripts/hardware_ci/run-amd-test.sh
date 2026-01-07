@@ -192,6 +192,7 @@ if [[ $commands == *"--shard-id="* ]]; then
             --shm-size=16gb \
             --group-add "$render_gid" \
             --rm \
+            -e HIP_VISIBLE_DEVICES \
             -e HF_TOKEN \
             -e AWS_ACCESS_KEY_ID \
             -e AWS_SECRET_ACCESS_KEY \
@@ -248,6 +249,7 @@ else
           --shm-size=16gb \
           --group-add "$render_gid" \
           --rm \
+          -e HIP_VISIBLE_DEVICES \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
           -e AWS_SECRET_ACCESS_KEY \
