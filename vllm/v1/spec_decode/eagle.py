@@ -27,7 +27,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
     TreeAttentionMetadataBuilder,
@@ -167,7 +166,12 @@ class EagleProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
-            rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
+            from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
+
+            rocm_types = [
+                TritonAttentionMetadata,
+                RocmAttentionMetadata,
+            ]
             # ROCM_AITER_FA is an optional backend
             if find_spec(
                 AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
@@ -204,10 +208,7 @@ class EagleProposer:
             )
         # Precompute draft position offsets in flattened tree.
         self.tree_draft_pos_offsets = torch.arange(
-            1,
-            len(self.tree_choices) + 1,
-            device=device,
-            dtype=torch.int32,
+            1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
 
     def _get_positions(self, num_tokens: int):
@@ -287,8 +288,7 @@ class EagleProposer:
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
         num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
-            num_tokens_unpadded=num_tokens,
-            num_tokens_padded=num_tokens,
+            num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
         )
 
         cudagraph_runtime_mode = CUDAGraphMode.NONE
@@ -391,8 +391,7 @@ class EagleProposer:
         draft_token_ids_list = [draft_token_ids]
 
         batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
-            num_tokens_unpadded=batch_size,
-            num_tokens_padded=batch_size,
+            num_tokens_unpadded=batch_size, num_tokens_padded=batch_size
         )
 
         if (
@@ -610,10 +609,8 @@ class EagleProposer:
         assert discard_request_mask.dtype == torch.bool
         assert backup_tokens_gpu.dtype == torch.int32
 
-        next_token_ids = torch.empty((batch_size,), dtype=torch.int32, device=device)
-        valid_sampled_tokens_count = torch.empty(
-            (batch_size,), dtype=torch.int32, device=device
-        )
+        next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
+        valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
         # Kernel grid: one program per request (row)
         grid = (batch_size,)
@@ -782,8 +779,7 @@ class EagleProposer:
                 max_query_len=query_len,
             )
             attn_metadata = tree_attn_metadata_builder.build_for_drafting(
-                common_attn_metadata=common_attn_metadata,
-                draft_index=level + 1,
+                common_attn_metadata=common_attn_metadata, draft_index=level + 1
             )
 
             # Apply new attention metadata to all layers.
@@ -1161,8 +1157,8 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
-        use_cudagraphs=True,
-        is_graph_capturing=False,
+        use_cudagraphs: bool = True,
+        is_graph_capturing: bool = False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
@@ -1174,8 +1170,7 @@ class EagleProposer:
         ):
             if fwd_idx <= 1:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    num_tokens_padded=num_tokens,
+                    num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
                 if (
                     cudagraphs_enabled
@@ -1342,9 +1337,5 @@ def compute_probs_and_sample_next_token(
     next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
+        next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)
     return next_token_ids, probs
