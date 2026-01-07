@@ -615,6 +615,7 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    ready_try_num_prompts: int = 3,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -640,39 +641,45 @@ async def benchmark(
     )
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0].prompt,
-        input_requests[0].prompt_len,
-        input_requests[0].expected_output_len,
-        input_requests[0].multi_modal_data,
-    )
+    test_inputs = []
+    for i in range(ready_try_num_prompts):
+        if i >= len(input_requests):
+            break
 
-    assert (
-        test_mm_content is None
-        or isinstance(test_mm_content, dict)
-        or (
-            isinstance(test_mm_content, list)
-            and all(isinstance(item, dict) for item in test_mm_content)
+        test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+            input_requests[i].prompt,
+            input_requests[i].prompt_len,
+            input_requests[i].expected_output_len,
+            input_requests[i].multi_modal_data,
         )
-    ), "multi_modal_data must be a dict or list[dict]"
-    test_input = RequestFuncInput(
-        model=model_id,
-        model_name=model_name,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-        extra_headers=extra_headers,
-        extra_body=extra_body,
-    )
+
+        assert (
+            test_mm_content is None
+            or isinstance(test_mm_content, dict)
+            or (
+                isinstance(test_mm_content, list)
+                and all(isinstance(item, dict) for item in test_mm_content)
+            )
+        ), "multi_modal_data must be a dict or list[dict]"
+        test_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=api_url,
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+        )
+        test_inputs.append(test_input)
 
     if ready_check_timeout_sec > 0:
         test_output = await wait_for_endpoint(
             request_func,
-            test_input,
+            test_inputs,
             session,
             timeout_seconds=ready_check_timeout_sec,
         )
@@ -700,7 +707,7 @@ async def benchmark(
         async def warmup_limited_request_func():
             async with warmup_semaphore:
                 return await request_func(
-                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                    request_func_input=test_inputs[0], session=session, pbar=warmup_pbar
                 )
 
         for _ in range(num_warmups):
@@ -1493,6 +1500,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
         "the ready check will be skipped.",
     )
+    parser.add_argument(
+        "--ready-try-num-prompts",
+        type=int,
+        default=3,
+        help="Maximum number of prompts to try with when testing or warming up "
+        "the endpoint. Only one has to succeed.",
+    )
 
     parser.add_argument(
         "--extra-body",
@@ -1532,6 +1546,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
         if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+
+    # Validate other arguments
+    if args.ready_try_num_prompts < 1:
+        raise ValueError("--ready-try-num-prompts argument must be at least 1.")
 
     label = args.label
 
@@ -1676,6 +1694,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        ready_try_num_prompts=args.ready_try_num_prompts,
     )
 
     # Save config and results to json

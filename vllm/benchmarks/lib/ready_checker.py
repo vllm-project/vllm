@@ -13,7 +13,7 @@ from .endpoint_request_func import RequestFunc, RequestFuncInput, RequestFuncOut
 
 async def wait_for_endpoint(
     request_func: RequestFunc,
-    test_input: RequestFuncInput,
+    test_inputs: list[RequestFuncInput],
     session: aiohttp.ClientSession,
     timeout_seconds: int = 600,
     retry_interval: int = 5,
@@ -23,7 +23,8 @@ async def wait_for_endpoint(
 
     Args:
         request_func: The async request function to call
-        test_input: The RequestFuncInput to test with
+        test_inputs: The RequestFuncInput list to test with. Only one has to
+        succeed.
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
 
@@ -42,6 +43,7 @@ async def wait_for_endpoint(
         bar_format="{desc} |{bar}| {elapsed} elapsed, {remaining} remaining",
         unit="s",
     ) as pbar:
+        input_i = 0
         while True:
             # update progress bar
             remaining = deadline - time.perf_counter()
@@ -55,6 +57,7 @@ async def wait_for_endpoint(
 
             # ping the endpoint using request_func
             try:
+                test_input = test_inputs[input_i]
                 output = await request_func(
                     request_func_input=test_input, session=session
                 )
@@ -69,4 +72,7 @@ async def wait_for_endpoint(
             if sleep_duration > 0:
                 await asyncio.sleep(sleep_duration)
 
-    return output
+            # test with a new input in the next step
+            input_i = (input_i + 1) % len(test_inputs)
+
+    return output, None
