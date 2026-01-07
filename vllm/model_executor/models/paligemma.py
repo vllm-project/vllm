@@ -35,7 +35,13 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -250,7 +256,9 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
     info=PaliGemmaProcessingInfo,
     dummy_inputs=PaliGemmaDummyInputsBuilder,
 )
-class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class PaliGemmaForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -406,3 +414,16 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        return num_vision_tokens
