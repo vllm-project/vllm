@@ -14,6 +14,10 @@ import torch.types
 from .mem_constants import GiB_bytes
 
 
+def format_gib(b: int) -> float:
+    return round(b / GiB_bytes, 2)
+
+
 @cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
@@ -146,6 +150,18 @@ class MemorySnapshot:
             auto_measure=False,
         )
 
+    def __repr__(self) -> str:
+        return (
+            f"torch_peak={format_gib(self.torch_peak)}GiB, "
+            f"free_memory={format_gib(self.free_memory)}GiB, "
+            f"total_memory={format_gib(self.total_memory)}GiB, "
+            f"cuda_memory={format_gib(self.cuda_memory)}GiB, "
+            f"torch_memory={format_gib(self.torch_memory)}GiB, "
+            f"non_torch_memory={format_gib(self.non_torch_memory)}GiB, "
+            f"timestamp={self.timestamp}, "
+            f"auto_measure={self.auto_measure}"
+        )
+
 
 @dataclass
 class MemoryProfilingResult:
@@ -168,12 +184,12 @@ class MemoryProfilingResult:
         return (
             f"Memory profiling takes {self.profile_time:.2f} seconds. "
             f"Total non KV cache memory: "
-            f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+            f"{format_gib(self.non_kv_cache_memory)}GiB; "
             f"torch peak memory increase: "
-            f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+            f"{format_gib(self.torch_peak_increase)}GiB; "
             f"non-torch forward increase memory: "
-            f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
-            f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB."
+            f"{format_gib(self.non_torch_increase)}GiB; "
+            f"weights memory: {format_gib(self.weights_memory)}GiB."
         )
 
 
