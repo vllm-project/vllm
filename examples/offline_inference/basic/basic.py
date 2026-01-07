@@ -54,14 +54,16 @@ def main():
         max_tokens=args.max_tokens
     )
     
+    import sys
+    
     # Create an LLM.
-    print(f"Loading model: {args.model}")
+    print(f"Loading model: {args.model}", file=sys.stderr)
     llm = LLM(model=args.model)
     
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    print("Generating text...")
+    print("Generating text...", file=sys.stderr)
     outputs = llm.generate(prompts, sampling_params)
     
     # Print the outputs.
