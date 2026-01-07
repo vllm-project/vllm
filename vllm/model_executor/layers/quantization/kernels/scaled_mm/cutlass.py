@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from collections.abc import Callable
-
 import torch
 
 from vllm import _custom_ops as ops
@@ -19,23 +17,6 @@ from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
-
-
-def cutlass_w8a8_scaled_mm_fp8(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list,
-) -> torch.Tensor:
-    # Fused GEMM_DQ
-    output = ops.cutlass_scaled_mm(
-        A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
-    )
-    return output.view(*output_shape)
 
 
 class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -174,8 +155,22 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return cutlass_w8a8_scaled_mm_fp8
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        # Fused GEMM_DQ
+        output = ops.cutlass_scaled_mm(
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+        )
+        return output.view(*output_shape)
 
     def get_ouput_padding(self) -> int | None:
         return None

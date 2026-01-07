@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 from packaging import version
@@ -13,115 +12,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
-
-
-def torch_per_tensor_w8a8_scaled_mm(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list,
-) -> torch.Tensor:
-    output = torch._scaled_mm(
-        A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
-    )
-    # A fix for discrepancy in scaled_mm which returns tuple
-    # for torch < 2.5 and a single value in torch >= 2.5
-    if type(output) is tuple and len(output) == 2:
-        output = output[0]
-
-    return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
-
-
-def torch_row_wise_w8a8_scaled_mm(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list,
-) -> torch.Tensor:
-    #  Note:
-    #  For now it has only been validated on ROCm platform.
-    #  fp8 rowwise scaling in torch._scaled_mm is introduced in
-    #  https://github.com/pytorch/pytorch/pull/144432 using
-    #  hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
-    #
-    #  For CUDA platform please validate if the torch._scaled_mm supports
-    #  rowwise scaled GEMM before using it
-
-    # Fused GEMM_DQ Rowwise GEMM
-    output = torch._scaled_mm(
-        A,
-        B,
-        out_dtype=out_dtype,
-        scale_a=As,
-        scale_b=Bs.t(),
-        bias=bias,
-    )
-
-    output = torch.narrow(output, 0, 0, output_shape[0])
-    output = output.view(*output_shape)
-    return output
-
-
-def torch_channelwise_w8a8_scaled_mm(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list,
-) -> torch.Tensor:
-    # Use unfused DQ due to limitations with scaled_mm
-
-    # Symmetric quantized GEMM by definition computes the following:
-    #   C = (s_x * X) (s_w * W) + bias
-    # This is equivalent to dequantizing the weights and activations
-    # before applying a GEMM.
-    #
-    # In order to compute quantized operands, a quantized kernel
-    # will rewrite the above like so:
-    #   C = s_w * s_x * (X * W) + bias
-    #
-    # For the scaled_mm fallback case, we break this down, since it
-    # does not support s_w being a vector.
-
-    # Input scaling factors are no longer optional in _scaled_mm starting
-    # from pytorch 2.5. Allocating a dummy tensor to pass as scales
-    dummy_tensor = torch.ones(1, dtype=torch.float32, device=A.device)
-
-    # GEMM
-    # This computes C = (X * W).
-    # Output in fp32 to allow subsequent ops to happen in-place
-    output = torch._scaled_mm(
-        A,
-        B,
-        scale_a=dummy_tensor,
-        scale_b=dummy_tensor,
-        out_dtype=torch.float32,
-    )
-    # A fix for discrepancy in scaled_mm which returns tuple
-    # for torch < 2.5 and a single value in torch >= 2.5
-    if type(output) is tuple and len(output) == 2:
-        output = output[0]
-    # Unpad (undo num_token_padding)
-    output = torch.narrow(output, 0, 0, output_shape[0])
-    x_scale = torch.narrow(As, 0, 0, output_shape[0])
-
-    # DQ
-    # C = sw * sx * (X * W) + bias
-    output = output * x_scale * Bs.t()
-    if bias is not None:
-        output = output + bias
-    return output.to(out_dtype).view(*output_shape)
 
 
 class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -167,8 +57,26 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             return False, "requires per tensor activation and weight scales."
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return torch_per_tensor_w8a8_scaled_mm
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        output = torch._scaled_mm(
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+        )
+        # A fix for discrepancy in scaled_mm which returns tuple
+        # for torch < 2.5 and a single value in torch >= 2.5
+        if type(output) is tuple and len(output) == 2:
+            output = output[0]
+
+        return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
 
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
@@ -208,8 +116,39 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return torch_row_wise_w8a8_scaled_mm
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        #  Note:
+        #  For now it has only been validated on ROCm platform.
+        #  fp8 rowwise scaling in torch._scaled_mm is introduced in
+        #  https://github.com/pytorch/pytorch/pull/144432 using
+        #  hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
+        #
+        #  For CUDA platform please validate if the torch._scaled_mm supports
+        #  rowwise scaled GEMM before using it
+
+        # Fused GEMM_DQ Rowwise GEMM
+        output = torch._scaled_mm(
+            A,
+            B,
+            out_dtype=out_dtype,
+            scale_a=As,
+            scale_b=Bs.t(),
+            bias=bias,
+        )
+
+        output = torch.narrow(output, 0, 0, output_shape[0])
+        output = output.view(*output_shape)
+        return output
 
 
 class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
@@ -225,5 +164,56 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return torch_channelwise_w8a8_scaled_mm
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        # Use unfused DQ due to limitations with scaled_mm
+
+        # Symmetric quantized GEMM by definition computes the following:
+        #   C = (s_x * X) (s_w * W) + bias
+        # This is equivalent to dequantizing the weights and activations
+        # before applying a GEMM.
+        #
+        # In order to compute quantized operands, a quantized kernel
+        # will rewrite the above like so:
+        #   C = s_w * s_x * (X * W) + bias
+        #
+        # For the scaled_mm fallback case, we break this down, since it
+        # does not support s_w being a vector.
+
+        # Input scaling factors are no longer optional in _scaled_mm starting
+        # from pytorch 2.5. Allocating a dummy tensor to pass as scales
+        dummy_tensor = torch.ones(1, dtype=torch.float32, device=A.device)
+
+        # GEMM
+        # This computes C = (X * W).
+        # Output in fp32 to allow subsequent ops to happen in-place
+        output = torch._scaled_mm(
+            A,
+            B,
+            scale_a=dummy_tensor,
+            scale_b=dummy_tensor,
+            out_dtype=torch.float32,
+        )
+        # A fix for discrepancy in scaled_mm which returns tuple
+        # for torch < 2.5 and a single value in torch >= 2.5
+        if type(output) is tuple and len(output) == 2:
+            output = output[0]
+        # Unpad (undo num_token_padding)
+        output = torch.narrow(output, 0, 0, output_shape[0])
+        x_scale = torch.narrow(As, 0, 0, output_shape[0])
+
+        # DQ
+        # C = sw * sx * (X * W) + bias
+        output = output * x_scale * Bs.t()
+        if bias is not None:
+            output = output + bias
+        return output.to(out_dtype).view(*output_shape)

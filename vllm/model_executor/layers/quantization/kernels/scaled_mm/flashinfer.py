@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 
@@ -12,21 +11,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
-
-
-def flashinfer_w8a8_scaled_mm(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list,
-) -> torch.Tensor:
-    return flashinfer_scaled_fp8_mm(
-        A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
-    )
 
 
 class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -57,8 +41,20 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return flashinfer_w8a8_scaled_mm
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        return flashinfer_scaled_fp8_mm(
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+        )
 
     def get_ouput_padding(self) -> int | None:
         return None

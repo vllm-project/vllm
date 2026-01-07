@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -124,7 +124,6 @@ class FP8ScaledMMLinearKernel(
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        scaled_mm_func = self.get_scaled_mm_func()
         quant_fp8 = self.quant_fp8
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
@@ -147,7 +146,7 @@ class FP8ScaledMMLinearKernel(
                 x_s,
                 x_s_ub,
             )
-        return scaled_mm_func(
+        return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
             out_dtype=out_dtype,
@@ -158,7 +157,17 @@ class FP8ScaledMMLinearKernel(
         )
 
     @abstractmethod
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     @abstractmethod

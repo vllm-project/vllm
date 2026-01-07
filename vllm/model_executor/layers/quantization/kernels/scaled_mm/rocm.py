@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 
@@ -63,22 +62,6 @@ def rocm_per_tensor_float_w8a8_scaled_mm_fake(
     return A.new_empty((*A.shape[:-1], B.shape[1]), dtype=out_dtype)
 
 
-def rocm_per_tensor_float_w8a8_scaled_mm(
-    *,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    out_dtype: torch.dtype,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor,
-    output_shape: list[int],
-) -> torch.Tensor:
-    output = torch.ops.vllm.rocm_per_tensor_float_w8a8_scaled_mm_impl(
-        A, B, out_dtype, As, Bs, bias
-    )
-    return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
-
-
 if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_per_tensor_float_w8a8_scaled_mm_impl",
@@ -117,8 +100,21 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
-    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
-        return rocm_per_tensor_float_w8a8_scaled_mm
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        output = torch.ops.vllm.rocm_per_tensor_float_w8a8_scaled_mm_impl(
+            A, B, out_dtype, As, Bs, bias
+        )
+        return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
 
     def get_ouput_padding(self) -> int | None:
         return None
