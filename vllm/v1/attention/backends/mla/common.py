@@ -205,11 +205,10 @@ from vllm.attention.backends.abstract import (
     AttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -476,6 +475,27 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
+    )
+
+
+@dataclass
+class MLADims:
+    q_lora_rank: int | None
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
+
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
     )
 
 

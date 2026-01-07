@@ -13,7 +13,6 @@ from vllm.attention.backends.abstract import (
     AttentionMetadata,
     MultipleOf,
 )
-from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.flashmla import (
     flash_mla_sparse_prefill,
     flash_mla_with_kvcache,
@@ -26,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
+from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl, get_mla_dims
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
