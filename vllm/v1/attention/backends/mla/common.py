@@ -1455,19 +1455,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # part and once for the tail part), then concatenate the results and
             # restore the original ordering.
             #
-            # Example pcp_world_size=2 & full sequence: [0,1,2,3]
+            # Considering pcp_world_size=2 and sequence is [0,1,2,3,4,5,6,7]
             #
-            #   pcp_rank0: Q [0,3] KV [0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 0   1 0 0 0
-            #      -----------
-            # tail 3   1 1 1 1
+            #   pcp_rank0: Q [0,1,6,7] KV [0,1,2,3,4,5,6,7]
+            #    Q\KV  0 1 2 3 4 5 6 7
+            # head 0   1 0 0 0 0 0 0 0
+            #      1   1 1 0 0 0 0 0 0
+            #      -------------------
+            # tail 6   1 1 1 1 1 1 1 0
+            #      7   1 1 1 1 1 1 1 1
             #
-            #   pcp_rank1: Q[1,3] KV[0,1,2,3]
-            #    Q\KV  0 1 2 3
-            # head 1   1 1 0 0
-            #      -----------
-            # tail 2   1 1 1 0
+            #   pcp_rank1: Q[2,3,4,5] KV [0,1,2,3,4,5,6,7]
+            #    Q\KV  0 1 2 3 4 5 6 7
+            # head 2   1 1 1 0 0 0 0 0
+            #      3   1 1 1 1 0 0 0 0
+            #      -------------------
+            # tail 4   1 1 1 1 1 0 0 0
+            #      5   1 1 1 1 1 1 0 0
 
             q_head, k_head, v_head, q_tail, k_tail, v_tail = fused_pcp_qkv_select(
                 q=q,
