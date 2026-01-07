@@ -20,12 +20,11 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -85,12 +84,6 @@ class TPUWorker:
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
-
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-
-            init_cached_hf_modules()
 
         # Delay profiler initialization to the start of the profiling.
         # This is because in vLLM V1, MP runtime is initialized before the
@@ -304,6 +297,13 @@ class TPUWorker:
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def check_health(self) -> None:
@@ -335,8 +335,6 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size
         )
-
-        ensure_kv_transfer_initialized(vllm_config)
 
     def shutdown(self) -> None:
         self.model_runner.ensure_kv_transfer_shutdown()

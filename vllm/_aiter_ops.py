@@ -288,7 +288,17 @@ def _check_aiter_mla_fp8_support() -> bool:
             _AITER_MLA_SUPPORTS_FP8 = (
                 "q_scale" in sig.parameters and "kv_scale" in sig.parameters
             )
-        except Exception:
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            AttributeError,
+            ValueError,
+            TypeError,
+        ):
+            # ImportError/ModuleNotFoundError: aiter.mla module not available
+            # AttributeError: mla_decode_fwd doesn't exist
+            # ValueError: mla_decode_fwd has no signature (e.g., built-in)
+            # TypeError: mla_decode_fwd is not a callable
             _AITER_MLA_SUPPORTS_FP8 = False
     return _AITER_MLA_SUPPORTS_FP8
 
@@ -372,6 +382,31 @@ def _rocm_aiter_gemm_a8w8_fake(
     As: torch.Tensor,
     Bs: torch.Tensor,
     bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     m = A.shape[0]
@@ -965,6 +1000,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
+                op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
+                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
@@ -1101,6 +1142,19 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def triton_gemm_a8w8_blockscale(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
+            A, B, As, Bs, output_dtype
+        )
 
     @staticmethod
     def gemm_a8w8_blockscale(
@@ -1330,14 +1384,14 @@ class rocm_aiter_ops:
         key_ = key[..., :rotary_dim]
         positions = positions.view(*query.shape[:1])
         rope_cached_thd_positions_2c_fwd_inplace(
-            positions,
-            sin,
-            cos,
             query_,
             key_,
+            cos,
+            sin,
+            positions,
             rotate_style,
             reuse_freqs_front_part=True,
-            is_nope_first=False,
+            nope_first=False,
         )
         query = query.view(query_shape)
         key = key.view(key_shape)
@@ -1372,19 +1426,6 @@ class rocm_aiter_ops:
             transpose_bm=transpose_bm,
             config=config,
         )
-
-    @staticmethod
-    def triton_gemm_a8w8_blockscale(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        block_size: list[int],
-        output_dtype: torch.dtype = torch.float16,
-    ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
-
-        return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
     @staticmethod
     def group_fp8_quant(

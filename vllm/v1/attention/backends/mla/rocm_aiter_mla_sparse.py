@@ -43,7 +43,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return "ROCM_AITER_MLA_SPARSE"
 
     @staticmethod
-    def get_metadata_cls() -> type[AttentionMetadata]:
+    def get_metadata_cls() -> type["ROCMAiterMLASparseMetadata"]:
         return ROCMAiterMLASparseMetadata
 
     @staticmethod
@@ -74,7 +74,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class ROCMAiterMLASparseMetadata:
+class ROCMAiterMLASparseMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
     max_seq_len: int
@@ -223,7 +223,7 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         )
         self.softmax_scale = scale
         assert indexer is not None
-        self.topk_indices_buffer = indexer.topk_indices_buffer
+        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
         self.is_fp8bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def _forward_bf16_kv(
@@ -294,6 +294,7 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
             # Convert from (N, B, L) to (B, N, L)
             ql_nope = ql_nope.transpose(0, 1)
 
+        assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         topk_indices_global = triton_convert_req_index_to_global_index(
