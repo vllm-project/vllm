@@ -570,6 +570,7 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
+    disable_flashinfer_autotune: bool = VllmConfig.disable_flashinfer_autotune
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend | None = (
@@ -1164,6 +1165,10 @@ class EngineArgs:
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
+        vllm_group.add_argument(
+            "--disable-flashinfer-autotune",
+            **vllm_kwargs["disable_flashinfer_autotune"],
+        )
 
         # Other arguments
         parser.add_argument(
@@ -1756,6 +1761,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            disable_flashinfer_autotune=self.disable_flashinfer_autotune,
         )
 
         return config
