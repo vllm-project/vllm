@@ -69,10 +69,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         assert isinstance(kv_cache_spec, MambaSpec)
         self.compilation_config = vllm_config.compilation_config
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_cudagraph_capture_size,
-        )
+        self.decode_cudagraph_max_bs = self.vllm_config.scheduler_config.max_num_seqs
+        if self.compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                self.compilation_config.max_cudagraph_capture_size,
+            )
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             self.state_indices_tensor = torch.empty(
@@ -150,9 +152,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             cdiv(common_attn_metadata.seq_lens, mamba_block_size) - 1
         )
         # -1 in case it's non-computed and causes later issues with indexing
-        block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
+        block_idx_last_computed_token = torch.clamp(
+            block_idx_last_computed_token, min=0
+        )
         # -1 in the case we have a padded request (0 seq-len)
-        block_idx_last_scheduled_token = block_idx_last_scheduled_token.clamp(min=0)
+        block_idx_last_scheduled_token = torch.clamp(
+            block_idx_last_scheduled_token, min=0
+        )
 
         return (
             block_idx_last_computed_token,
