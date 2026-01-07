@@ -825,7 +825,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
     Similar to Qwen3-Reranker, you need to use the following `-hf_overrides` to load the official original `Qwen3-VL-Reranker`.
 
     ```bash
-    vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
 ## Model Support Policy
