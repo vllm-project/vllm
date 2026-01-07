@@ -316,11 +316,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
-        output: tuple[int, int, int] = (
-            num_experts,
-            max_num_tokens * num_dispatchers,
-            K,
-        )
+        output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
 
     def estimate_expected_m(
