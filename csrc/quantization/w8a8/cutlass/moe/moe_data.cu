@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
+#include "dispatch_utils.h"
+
 #include <iostream>
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
@@ -119,17 +121,12 @@ inline void launch_compute_problem_sizes(const torch::Tensor& topk_ids,
   int32_t* ps2_ptr = static_cast<int32_t*>(problem_sizes2.data_ptr());
   int32_t* atomic_ptr = static_cast<int32_t*>(atomic_buffer.data_ptr());
 
-  if (swap_ab) {
-    compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(
+  VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
+    compute_problem_sizes<SwapAB><<<num_experts, num_threads, 0, stream>>>(
         topk_ptr, ps1_ptr, ps2_ptr, atomic_ptr,
         static_cast<int>(topk_ids.numel()), static_cast<int>(n),
         static_cast<int>(k));
-  } else {
-    compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
-        topk_ptr, ps1_ptr, ps2_ptr, atomic_ptr,
-        static_cast<int>(topk_ids.numel()), static_cast<int>(n),
-        static_cast<int>(k));
-  }
+  });
 }
 }  // namespace
 
@@ -233,17 +230,12 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
   auto* ps1_ptr = static_cast<int32_t*>(problem_sizes1.data_ptr());
   auto* ps2_ptr = static_cast<int32_t*>(problem_sizes2.data_ptr());
 
-  if (swap_ab) {
-    compute_problem_sizes_from_expert_offsets<true>
+  VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
+    compute_problem_sizes_from_expert_offsets<SwapAB>
         <<<blocks, threads, 0, stream>>>(offsets_ptr, ps1_ptr, ps2_ptr,
                                          num_experts, static_cast<int>(n),
                                          static_cast<int>(k));
-  } else {
-    compute_problem_sizes_from_expert_offsets<false>
-        <<<blocks, threads, 0, stream>>>(offsets_ptr, ps1_ptr, ps2_ptr,
-                                         num_experts, static_cast<int>(n),
-                                         static_cast<int>(k));
-  }
+  });
 }
 
 void get_cutlass_moe_mm_data_caller(
