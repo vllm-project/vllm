@@ -759,7 +759,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if layer.quant_method is not None and not isinstance(
+                layer.quant_method, UnquantizedLinearMethod
+            ):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
