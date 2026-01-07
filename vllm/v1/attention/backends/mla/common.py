@@ -1464,6 +1464,12 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
+    # This method is kept here (rather than in layer.py) because both
+    # flashmla_sparse.py and rocm_aiter_mla_sparse.py use _v_up_proj in their
+    # decode path. They inherit this implementation from MLACommonImpl
+    # in common.py, so it's necessary to keep it here for now.
+    # Future refactoring could move this to a common place
+    # (e.g., layer._v_up_proj or a new shared function).
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
