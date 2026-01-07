@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any, Literal, overload
 
 from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from transformers import BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
@@ -70,13 +76,35 @@ def _maybe_load_tokenizer_config(
             revision=revision,
             cache_dir=download_dir,
         )
-    except Exception:
+    except (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError):
+        # If the repo, revision, or file does not exist, fall back silently.
+        return {}
+    except HfHubHTTPError as exc:
+        logger.warning(
+            "Failed to download tokenizer_config.json from %s. "
+            "This may be due to a network or authentication issue. "
+            "The default chat template will be used. Error: %s",
+            repo_id,
+            exc,
+        )
         return {}
 
     try:
         with Path(config_file).open("r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Failed to parse tokenizer_config.json. "
+            "The default chat template will be used. Error: %s",
+            exc,
+        )
+        return {}
+    except OSError as exc:
+        logger.warning(
+            "Failed to open tokenizer_config.json. "
+            "The default chat template will be used. Error: %s",
+            exc,
+        )
         return {}
 
 
@@ -236,11 +264,14 @@ class Grok2Tokenizer(TokenizerLike):
             self._token_to_id[token] = token_id
             self._id_to_token[token_id] = token
 
-        self._bos_token_id = self._special_tokens.get(SEP)
-        if self._bos_token_id is None:
-            self._bos_token_id = self._special_tokens.get(PAD)
-        if self._bos_token_id is None:
-            self._bos_token_id = self._special_tokens.get(EOS, 0)
+        bos_token_id = self._special_tokens.get(SEP)
+        if bos_token_id is None:
+            bos_token_id = self._special_tokens.get(PAD)
+        if bos_token_id is None:
+            bos_token_id = self._special_tokens.get(EOS)
+        if bos_token_id is None:
+            bos_token_id = 0
+        self._bos_token_id = bos_token_id
 
         self._eos_token_id = self._special_tokens.get(EOS, self._bos_token_id)
         self._pad_token_id = self._special_tokens.get(PAD, self._eos_token_id)
@@ -259,15 +290,15 @@ class Grok2Tokenizer(TokenizerLike):
 
     @property
     def bos_token_id(self) -> int:
-        return int(self._bos_token_id)
+        return self._bos_token_id
 
     @property
     def eos_token_id(self) -> int:
-        return int(self._eos_token_id)
+        return self._eos_token_id
 
     @property
     def pad_token_id(self) -> int:
-        return int(self._pad_token_id)
+        return self._pad_token_id
 
     @property
     def is_fast(self) -> bool:
@@ -359,7 +390,7 @@ class Grok2Tokenizer(TokenizerLike):
             raise NotImplementedError("text_pair is not supported for Grok2Tokenizer.")
 
         if isinstance(text, list):
-            input_ids = [
+            input_ids_batch: list[list[int]] = [
                 self.encode(
                     item,
                     truncation=truncation,
@@ -368,16 +399,18 @@ class Grok2Tokenizer(TokenizerLike):
                 )
                 for item in text
             ]
-            attention_mask = [[1] * len(ids) for ids in input_ids]
-        else:
-            input_ids = self.encode(
-                text,
-                truncation=truncation,
-                max_length=max_length,
-                add_special_tokens=add_special_tokens,
+            attention_mask_batch = [[1] * len(ids) for ids in input_ids_batch]
+            return BatchEncoding(
+                {"input_ids": input_ids_batch, "attention_mask": attention_mask_batch}
             )
-            attention_mask = [1] * len(input_ids)
 
+        input_ids = self.encode(
+            text,
+            truncation=truncation,
+            max_length=max_length,
+            add_special_tokens=add_special_tokens,
+        )
+        attention_mask = [1] * len(input_ids)
         return BatchEncoding({"input_ids": input_ids, "attention_mask": attention_mask})
 
     def get_chat_template(
