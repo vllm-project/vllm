@@ -876,7 +876,6 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
-                "cpu_gptq",
                 "cpu_awq",
             ]
             quantization_methods = [
@@ -1097,9 +1096,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
-            # TODO(Isotr0py): Disable paligemma for now before
-            # we supports soft cap attention for FlexAttention
-            # "paligemma",
+            "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -1436,10 +1433,18 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     @property
-    def use_pad_token(self) -> bool:
-        # cross_encoder models defaults to using pad_token.
-        # `llm as reranker` models defaults to not using pad_token.
-        return getattr(self.hf_config, "use_pad_token", True)
+    def use_sep_token(self) -> bool:
+        # cross_encoder models defaults to using separating token.
+        # `llm as reranker` defaults to not using separating token.
+
+        use_pad_token = getattr(self.hf_config, "use_pad_token", None)
+        if use_pad_token is not None:
+            logger.warning_once(
+                "use_pad_token has been deprecated; please use use_sep_token instead."
+            )
+            return use_pad_token
+
+        return getattr(self.hf_config, "use_sep_token", True)
 
     @property
     def head_dtype(self) -> torch.dtype:
