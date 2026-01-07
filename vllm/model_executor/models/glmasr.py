@@ -624,9 +624,7 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(GlmAsrProcessor, **kwargs)
 
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
-        return feature_extractor
+        return self.get_hf_processor(**kwargs).feature_extractor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
@@ -858,16 +856,13 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             )
 
             if chunk_counts is not None:
-                counts_list = _as_list_chunk_counts(chunk_counts)
                 start_idx = 0
-                for count in counts_list:
+                for count in _as_list_chunk_counts(chunk_counts):
                     end_idx = start_idx + count
-                    if isinstance(feature_attention_mask, torch.Tensor):
-                        mask = feature_attention_mask[start_idx:end_idx]
-                    else:
-                        mask = feature_attention_mask[start_idx:end_idx]
-                        if isinstance(mask, list):
-                            mask = torch.stack(mask)
+                    mask = feature_attention_mask[start_idx:end_idx]
+                    if isinstance(mask, list):
+                        mask = torch.stack(mask)
+
                     lengths = _get_audio_output_lengths_from_mask(
                         mask, merge_factor, conv_params
                     )
@@ -876,13 +871,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             else:
                 # Single chunk per audio
                 for idx in range(len(feature_attention_mask)):
-                    if isinstance(feature_attention_mask, torch.Tensor):
-                        mask = feature_attention_mask[idx : idx + 1]
-                    else:
-                        mask = feature_attention_mask[idx]
-                        if not isinstance(mask, torch.Tensor):
-                            mask = torch.tensor(mask)
-                        mask = mask.unsqueeze(0)
+                    mask = feature_attention_mask[idx : idx + 1]
+                    if isinstance(mask, list):
+                        mask = torch.tensor(mask).unsqueeze(0)
                     lengths = _get_audio_output_lengths_from_mask(
                         mask, merge_factor, conv_params
                     )
