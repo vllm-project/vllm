@@ -21,7 +21,7 @@ class TritonScaledMMLinearKernel(ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if current_platform.is_cuda_alike():
             return True, None
-        return False, "Requires ROCm or CUDA."
+        return False, "requires ROCm or CUDA"
 
     @classmethod
     def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:

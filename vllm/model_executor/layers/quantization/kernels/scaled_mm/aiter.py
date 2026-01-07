@@ -20,7 +20,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return (
                 False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not "
+                "requires `aiter` which is not "
                 + "currently supported on non-ROCm platform.",
             )
         if compute_capability is None:
@@ -28,7 +28,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
             if _cc is not None:
                 compute_capability = _cc.major * 10 + _cc.minor
         if compute_capability is not None and compute_capability < 90:
-            return False, f"requires capability 90, got {compute_capability}"
+            return False, f"requires capability >= 90, got {compute_capability}"
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter

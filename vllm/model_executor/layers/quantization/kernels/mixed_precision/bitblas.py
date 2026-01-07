@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
     unpack_gptq_qweight,
     unpack_gptq_qzeros,
 )
+from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -108,13 +109,21 @@ class BitBLASLinearKernel(MPLinearKernel):
         return qweight, scales, zeros
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 70
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
 
-    @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if compute_capability is not None and compute_capability < 70:
+            return (
+                False,
+                f"requires capability >= 70, got {compute_capability}",
+            )
+
         is_bitblas_installed = True
-
         try:
             import bitblas
 
@@ -136,6 +145,10 @@ class BitBLASLinearKernel(MPLinearKernel):
                 f"{MINIMUM_BITBLAS_VERSION}`",
             )
 
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         quant_types = query_bitblas_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
             return False, (

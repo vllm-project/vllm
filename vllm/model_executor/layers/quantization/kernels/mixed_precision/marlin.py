@@ -29,15 +29,28 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 class MarlinLinearKernel(MPLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        # Marlin uses inline PTX, so it can only be compatible with Nvidia
+        if not current_platform.is_cuda():
+            return False, "requires CUDA"
+
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
+
+        if compute_capability is not None and compute_capability < 75:
+            return (
+                False,
+                f"requires capability >= 75, got {compute_capability}",
+            )
+
+        return True, None
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        # Marlin uses inline PTX, so it can only be compatible with Nvidia
-        if not current_platform.is_cuda():
-            return False, "Marlin only supported on CUDA"
-
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
             return (

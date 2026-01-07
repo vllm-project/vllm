@@ -88,24 +88,18 @@ def choose_mp_linear_kernel(
                 f" {kernel.__name__} disabled by environment variable"
             )
             continue
-        if (
-            compute_capability is not None
-            and kernel.get_min_capability() > compute_capability
-        ):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute "
-                f" capability is {compute_capability}"
-            )
+
+        is_supported, reason = kernel.is_supported(compute_capability)
+        if not is_supported:
+            failure_reasons.append(f"{kernel.__name__}: {reason}")
             continue
 
-        can_implement, failure_reason = kernel.can_implement(config)
-        if can_implement:
-            return kernel
-        else:
-            failure_reasons.append(
-                f" {kernel.__name__} cannot implement due to: {failure_reason}"
-            )
+        can_implement, reason = kernel.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel.__name__}: {reason}")
+            continue
+
+        return kernel
 
     raise ValueError(
         "Failed to find a kernel that can implement the "

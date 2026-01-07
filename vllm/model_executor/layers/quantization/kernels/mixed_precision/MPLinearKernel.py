@@ -26,7 +26,9 @@ class MPLinearLayerConfig:
 class MPLinearKernel(ABC):
     @classmethod
     @abstractmethod
-    def get_min_capability(cls) -> int:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         raise NotImplementedError
 
     @classmethod
@@ -43,6 +45,7 @@ class MPLinearKernel(ABC):
         w_gidx_param_name: str | None = None,
     ) -> None:
         assert self.can_implement(c)
+        assert self.is_supported()
         self.config = c
         self.w_q_name = w_q_param_name
         self.w_s_name = w_s_param_name

@@ -23,7 +23,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
-            return False, "Requires CPU."
+            return False, "requires CPU"
         return True, None
 
     @classmethod
