@@ -133,6 +133,39 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
     )
 
 
+def run_qwen3_vl_reranker(query: Query) -> ModelRequestData:
+    if query["modality"] != "text+images":
+        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-VL-Reranker-2B",
+        runner="pooling",
+        enforce_eager=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+        # HuggingFace model configuration overrides required for compatibility
+        hf_overrides={
+            # Manually route to sequence classification architecture
+            # This tells vLLM to use Qwen3VLForSequenceClassification instead of
+            # the default Qwen3VLForConditionalGeneration
+            "architectures": ["Qwen3VLForSequenceClassification"],
+            # Specify which token logits to extract from the language model head
+            # The original reranker uses "no" and "yes" token logits for scoring
+            "classifier_from_token": ["no", "yes"],
+            # Enable special handling for original Qwen3-Reranker models
+            # This flag triggers conversion logic that transforms the two token
+            # vectors into a single classification vector
+            "is_original_qwen3_reranker": True,
+        },
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        query=query["text"],
+        documents=query["image"],
+    )
+
+
 def run_siglip(query: Query) -> ModelRequestData:
     if query["modality"] == "text":
         prompt = query["text"]
@@ -353,6 +386,7 @@ model_example_map = {
     "clip": run_clip,
     "e5_v": run_e5_v,
     "jinavl_reranker": run_jinavl_reranker,
+    "qwen3_vl_reranker": run_qwen3_vl_reranker,
     "siglip": run_siglip,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
