@@ -671,12 +671,11 @@ class GraniteSpeechForConditionalGeneration(
         else:
             # Otherwise we have a list of tensors, which are almost certainly
             # differing in their respective numbers of audio features; when
-            # passed as a batch, we have a list of 2D var len input features
+            # passed as a batch, we expect a list of 2D var len input features
             # so unsqueeze them.
-            if len(input_features) and input_features[0].ndim == 2:
-                input_features = [
-                    inp_features.unsqueeze(dim=0) for inp_features in input_features
-                ]
+            input_features = [
+                feat.unsqueeze(dim=0) for feat in input_features if feat.ndim == 2
+            ]
 
             # stack them into a 3D tensor of size [bsz, most_num_features, 160].
             input_features = self._pad_and_stack_input_features(
