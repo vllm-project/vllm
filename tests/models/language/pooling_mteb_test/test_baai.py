@@ -65,7 +65,6 @@ MODELS = [
         "BAAI/bge-code-v1",
         architecture="Qwen2Model",
         mteb_score=0.75724465,
-        dtype="float32",
         pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
