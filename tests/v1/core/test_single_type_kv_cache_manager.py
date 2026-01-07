@@ -342,11 +342,15 @@ def test_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )
 
@@ -375,6 +379,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
     # should only allocate the truly new block.
@@ -411,10 +416,14 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )
