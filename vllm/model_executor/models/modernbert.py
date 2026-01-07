@@ -25,6 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
@@ -306,9 +307,9 @@ class ModernBertPooler(Pooler):
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
+    ) -> TokenPoolerOutput:
         pooled_output = self.pooling(hidden_states, pooling_metadata)
 
         if isinstance(pooled_output, list):

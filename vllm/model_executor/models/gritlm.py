@@ -149,7 +149,7 @@ class GritLMMeanPool(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         prompt_lens = pooling_metadata.prompt_lens
@@ -189,7 +189,7 @@ class GritLMPooler(Pooler):
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
