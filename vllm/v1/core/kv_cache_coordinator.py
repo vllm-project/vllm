@@ -470,7 +470,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
         while True:
-            reduced = False
+            curr_hit_length = hit_length
 
             for spec, group_ids, manager_cls in self.attention_groups:
                 is_full_attn = isinstance(spec, FullAttentionSpec)
@@ -480,18 +480,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if is_full_attn and cached_blocks is not None:
                     # For full attention, we only need to compute the cache hit
                     # length once. Starting from the second iteration, if the
-                    # hit_length is reduced by other groups, we can simply keep
-                    # the first hit_length // block_size blocks from the last iteration.
-                    num_blocks = hit_length // spec.block_size
+                    # curr_hit_length is reduced by other groups, we can simply
+                    # keep the first (curr_hit_length // block_size) blocks from
+                    # the last iteration.
+                    num_blocks = curr_hit_length // spec.block_size
+                    curr_hit_length = num_blocks * spec.block_size
                     for group_id in group_ids:
                         blocks = hit_blocks_by_group[group_id]
                         assert blocks is not None
                         del blocks[num_blocks:]
-                    curr_hit_length = num_blocks * spec.block_size
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
-                        max_length=hit_length,
+                        max_length=curr_hit_length,
                         kv_cache_group_ids=group_ids,
                         block_pool=self.block_pool,
                         kv_cache_spec=spec,
@@ -502,11 +503,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-                if curr_hit_length < hit_length:
-                    hit_length = curr_hit_length
-                    reduced = True
-
-            if not reduced:
+            if curr_hit_length < hit_length:
+                hit_length = curr_hit_length
+            else:
                 break
 
         return tuple(
