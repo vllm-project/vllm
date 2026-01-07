@@ -463,7 +463,9 @@ if has_flashinfer():
     ) -> torch.Tensor:
         from flashinfer import bmm_fp8 as bmm_fp8_
 
-        return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
+        # Use env var override if set, otherwise use the passed backend
+        effective_backend = envs.VLLM_FLASHINFER_FP8_BACKEND or backend
+        return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, effective_backend)
 
     @torch.library.register_fake(
         "vllm::bmm_fp8",
@@ -532,7 +534,7 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        envs.VLLM_FLASHINFER_FP8_BACKEND or "auto",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
