@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -47,6 +47,7 @@ class InputPreprocessor:
         self,
         model_config: ModelConfig,
         tokenizer: TokenizerLike | None,
+        observability_config: ObservabilityConfig | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -54,6 +55,7 @@ class InputPreprocessor:
 
         self.model_config = model_config
         self.tokenizer = tokenizer
+        self.observability_config = observability_config
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
@@ -232,6 +234,7 @@ class InputPreprocessor:
         if not hasattr(self, "_mm_processor"):
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
+                self.observability_config,
                 tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
