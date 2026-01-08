@@ -720,7 +720,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """
         Full size
         """
-        return self.w2_lora_a_stacked[0].shape[-2]
+        return self.w2_lora_b_stacked[0].shape[-2]
 
     @classmethod
     def can_replace_layer(
