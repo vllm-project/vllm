@@ -761,7 +761,7 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-rocm.txt
 
 - label: OpenAI API correctness # 10min
   timeout_in_minutes: 15
@@ -1003,7 +1003,7 @@ steps:
   commands:
   - export MIOPEN_DEBUG_CONV_DIRECT=0
   - export MIOPEN_DEBUG_CONV_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
@@ -1545,7 +1545,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-rocm.txt
 
 - label: LM Eval Large Models (4 Card)
   mirror_hardwares: [amdexperimental, amdproduction]
