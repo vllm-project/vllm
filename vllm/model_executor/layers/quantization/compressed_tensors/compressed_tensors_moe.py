@@ -40,7 +40,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -483,40 +482,47 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             a2_scale=layer.w2_input_scale,
         )
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and not self.moe.enable_eplb
+        )
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.is_monolithic
         assert layer.activation == "silu", "Only SiLU activation is supported."
-
-        if (
+        assert (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
-        ):
-            return flashinfer_trtllm_fp4_moe(
-                layer=layer,
-                x=x,
-                router_logits=router_logits,
-                top_k=layer.top_k,
-                global_num_experts=layer.global_num_experts,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                custom_routing_function=layer.custom_routing_function,
-                e_score_correction_bias=layer.e_score_correction_bias,
-            )
-
-        # Hidden_states in select_experts is only used to extract metadata
-        if isinstance(x, tuple):
-            x_routing, _ = x
-        else:
-            x_routing = x
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x_routing,
-            router_logits=router_logits,
         )
+
+        return flashinfer_trtllm_fp4_moe(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=layer.top_k,
+            global_num_experts=layer.global_num_experts,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            custom_routing_function=layer.custom_routing_function,
+            e_score_correction_bias=layer.e_score_correction_bias,
+        )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
+        assert layer.activation == "silu", "Only SiLU activation is supported."
 
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -955,17 +961,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         assert self.kernel is not None
-        result = self.kernel(
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -979,8 +980,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             expert_map=None if self.disable_expert_map else layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
-
-        return result
 
     @property
     def supports_eplb(self) -> bool:
@@ -1096,16 +1095,11 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
-
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
 
         return fused_experts(
             hidden_states=x,
@@ -1457,17 +1451,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert layer.activation == "silu", (
             f"{layer.activation} not supported for Marlin MoE."
-        )
-
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
         )
 
         return fused_marlin_moe(
@@ -1478,7 +1467,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             None,
             layer.w13_weight_scale,
             layer.w2_weight_scale,
-            router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),
@@ -1709,16 +1697,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
-
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
 
         return fused_experts(
             x,
@@ -2008,10 +1991,13 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         # fused_experts; quant config is not needed.
         return None
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -2324,19 +2310,15 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ):
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
             )
         assert self.moe_quant_config is not None
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_w4a8_fp8,
