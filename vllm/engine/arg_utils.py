@@ -1668,19 +1668,6 @@ class EngineArgs:
 
         if (
             lora_config is not None
-            and lora_config.enable_tower_connector_lora
-            and self.mm_processor_cache_gb != 0
-        ):
-            raise ValueError(
-                "Currently, enable_tower_connector_lora is "
-                "incompatible with the multi-modal processor cache. "
-                "When enable_tower_connector_lora is set, "
-                "mm_processor_cache_gb must be 0, got %s",
-                self.mm_processor_cache_gb,
-            )
-
-        if (
-            lora_config is not None
             and speculative_config is not None
             and scheduler_config.max_num_batched_tokens
             < (

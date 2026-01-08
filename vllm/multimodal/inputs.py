@@ -330,6 +330,9 @@ class MultiModalFeatureSpec:
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
 
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)
