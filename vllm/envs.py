@@ -671,7 +671,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
-    # - "FLASHINFER_MLA": use FlashInfer for MLA
+    # - "TRTLLM_MLA": use TRTLLM for MLA
     # - "CUTLASS_MLA": use CUTLASS for MLA
     # All possible options loaded dynamically from AttentionBackendEnum
     "VLLM_ATTENTION_BACKEND": env_with_choices(

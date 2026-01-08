@@ -51,7 +51,7 @@ def _get_backend_priorities(
         if device_capability.major == 10:
             return [
                 AttentionBackendEnum.CUTLASS_MLA,
-                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.TRTLLM_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
@@ -61,7 +61,7 @@ def _get_backend_priorities(
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
-                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.TRTLLM_MLA,
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
@@ -178,7 +178,7 @@ class CudaPlatformBase(Platform):
             # required block_size.
             use_flashmla = False
             use_cutlass_mla = False
-            use_flashinfer_mla = False
+            use_trtllm_mla = False
 
             if vllm_config.attention_config.backend is None:
                 # Default case
@@ -198,7 +198,7 @@ class CudaPlatformBase(Platform):
                 backend = vllm_config.attention_config.backend
                 use_flashmla = backend == AttentionBackendEnum.FLASHMLA
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
-                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
+                use_trtllm_mla = backend == AttentionBackendEnum.TRTLLM_MLA
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
@@ -217,14 +217,12 @@ class CudaPlatformBase(Platform):
                 )
 
             if (
-                use_flashinfer_mla
+                use_trtllm_mla
                 and cache_config.block_size != 32
                 and cache_config.block_size % 64 != 0
             ):
                 cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashInferMLA backend."
-                )
+                logger.info("Forcing kv cache block size to 64 for TrtllmMLA backend.")
 
             # TODO(Chen): remove this hacky code
             if use_sparse and cache_config.block_size != 64:

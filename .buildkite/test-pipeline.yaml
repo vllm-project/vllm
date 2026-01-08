@@ -953,7 +953,7 @@ steps:
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
-  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/backends/mla/trtllm_mla.py
   - vllm/platforms/cuda.py
   - vllm/attention/selector.py
   commands:
@@ -965,7 +965,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s tests/kernels/attention/test_trtllm_mla_decode.py
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py

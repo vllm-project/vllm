@@ -181,7 +181,7 @@ The following table lists backends that support full CUDA Graphs at the time of 
 | AITER FlashAttention | `UNIFORM_BATCH`| |
 | FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | Will be set to `UNIFORM_BATCH` when using TRTLLM attention on Blackwell |
 | FlashMLA | `UNIFORM_BATCH` | |
-| FlashInferMLA | `UNIFORM_BATCH` | |
+| TrtllmMLA | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |

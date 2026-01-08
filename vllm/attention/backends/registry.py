@@ -59,9 +59,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     TORCH_SDPA = ""  # this tag is only used for ViT
     FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
-    FLASHINFER_MLA = (
-        "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
-    )
+    TRTLLM_MLA = "vllm.v1.attention.backends.mla.trtllm_mla.TrtllmMLABackend"
     TRITON_MLA = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
     CUTLASS_MLA = "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
     FLASHMLA = "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend"

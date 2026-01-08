@@ -287,10 +287,10 @@ full_cg_backend_configs = {
         },
         specific_gpu_arch=(10, 0),
     ),
-    # FlashInfer MLA on Blackwell
-    "FlashInferMLA": BackendConfig(
-        name="FlashInferMLA",
-        attention_config={"backend": "FLASHINFER_MLA"},
+    # TRTLLM MLA on Blackwell
+    "TrtllmMLA": BackendConfig(
+        name="TrtllmMLA",
+        attention_config={"backend": "TRTLLM_MLA"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
