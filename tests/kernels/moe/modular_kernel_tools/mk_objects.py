@@ -395,9 +395,6 @@ def make_prepare_finalize(
     elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
         return create_flashinfer_prepare_finalize(
             use_dp=moe.moe_parallel_config.dp_size > 1
-            enable_alltoallv=(backend == "flashinfer_all2allv"),
-            enable_moe_a2a=(backend == "flashinfer_moe_a2a"),
-            moe=moe,
         )
     else:
         return MoEPrepareAndFinalizeNoEP()
