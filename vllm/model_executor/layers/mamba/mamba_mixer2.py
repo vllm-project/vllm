@@ -481,6 +481,8 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
+        # TODO smor- this is called before set_vllm config is called, could be a bug
+        # reproduced by set --max-num-batched-tokens, the changes won't appear here
         vllm_config = get_current_vllm_config()
         speculative_config = vllm_config.speculative_config
 

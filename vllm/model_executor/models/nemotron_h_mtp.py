@@ -406,11 +406,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-            if get_tensor_model_parallel_rank() == 0:
-                if "mtp" in name and "mixer.v_proj" in name:
-                    print(f"SMOR name and loaded weight: {name} {loaded_weight}")
-                    
             # Only process MTP weights - skip all non-MTP weights
             if (
                 not name.startswith("mtp.")
@@ -421,22 +416,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
                 continue
-
-            # if "mtp.layers." in name:
-            # TODO SMOR remove once checkpoint is updated
-            # name = name.replace("layers.0.layers.0", "layers.0")
-            # name = name.replace("layers.0.layers.1", "layers.1")
-            # name = name.replace("layers.1.layers.0", "layers.2")
-            # name = name.replace("layers.1.layers.1", "layers.3")
-            # name = name.replace(
-            #     "layers.1.final_layernorm", "layers.3.final_layernorm"
-            # )
-            # name = name.replace(
-            #     "layers.0.final_layernorm", "layers.1.final_layernorm"
-            # )
-            # name = name.replace("layers.1.hnorm", "layers.2.hnorm")
-            # name = name.replace("layers.1.enorm", "layers.2.enorm")
-            # name = name.replace("layers.1.eh_proj", "layers.2.eh_proj")
 
             name = name.replace("mtp.layers.", "model.layers.")
 
