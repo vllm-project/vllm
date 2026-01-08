@@ -67,6 +67,10 @@ fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
 
 
 def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
+    # Checks whether `backend` supports quantizing with scaling factors
+    # of all experts in Expert Parallel Mode when all experts are not
+    # on the same rank.
+
     return backend in [
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
