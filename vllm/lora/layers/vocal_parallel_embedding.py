@@ -70,8 +70,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = 0
-        self.lora_b_stacked[index] = 0
+        self.lora_a_stacked[index].zero_()
+        self.lora_b_stacked[index].zero_()
 
     def set_lora(
         self,
@@ -93,6 +93,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # synchronizing lora load
+        self._sync_lora_loads()
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]

@@ -8,12 +8,13 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.lora.async_loading import AsyncLoadLoRAMixin
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
-class BaseLayerWithLoRA(nn.Module):
+class BaseLayerWithLoRA(nn.Module, AsyncLoadLoRAMixin):
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]
     ) -> torch.Tensor | list[torch.Tensor | None]:

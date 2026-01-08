@@ -53,6 +53,8 @@ importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 # Make torch.nn.Parameter safe to inherit from
 mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
+# LoRA Async Doc Mocking
+mock_if_no_torch("vllm.lora.layers.base", MagicMock(BaseLayerWithLoRA=object))
 
 
 class PydanticMagicMock(MagicMock):
