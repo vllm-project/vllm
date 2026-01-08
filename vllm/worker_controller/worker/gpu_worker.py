@@ -258,8 +258,7 @@ class Worker(WorkerBase):
                     f"utilization or reduce GPU memory used by other processes."
                 )
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
         # Construct the model runner
         self.model_runner = None
@@ -273,7 +272,23 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self, vllm_config: VllmConfig) -> None:
+    def load_model(self, vllm_config: VllmConfig) -> dict:
+        """Load a model into GPU memory.
+
+        Returns:
+            dict with timing information:
+                - config_time: Time to set up configs
+                - dist_init_time: Time to initialize distributed groups
+                - model_runner_init_time: Time to create model runner
+                - weight_load_time: Time to load model weights
+                - total_time: Total load time
+        """
+        import time as time_module
+
+        total_start = time_module.time()
+        timings = {}
+
+        config_start = time_module.time()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -288,35 +303,58 @@ class Worker(WorkerBase):
         self.compilation_config = vllm_config.compilation_config
 
         from vllm.platforms import current_platform
+
         self.current_platform = current_platform
+        timings["config_time"] = time_module.time() - config_start
 
-        # Re-initialize distributed groups for this engine's config
-        # This is needed because the worker may have been initialized with
-        # a different world_size than the engine requires
-        destroy_model_parallel()
+        # Re-initialize distributed groups only if TP/PP config changed
+        # This avoids expensive NCCL group recreation when loading similar models
+        dist_start = time_module.time()
+        new_tp = vllm_config.parallel_config.tensor_parallel_size
+        new_pp = vllm_config.parallel_config.pipeline_parallel_size
 
-        # Re-init model parallel with engine's config
-        ensure_model_parallel_initialized(
-            tensor_model_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
-            pipeline_model_parallel_size=vllm_config.parallel_config.pipeline_parallel_size,
-        )
+        # Check if we need to reinitialize (config changed or first load)
+        old_tp = getattr(self, "_last_tp_size", None)
+        old_pp = getattr(self, "_last_pp_size", None)
+
+        if old_tp != new_tp or old_pp != new_pp:
+            destroy_model_parallel()
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=new_tp,
+                pipeline_model_parallel_size=new_pp,
+            )
+            self._last_tp_size = new_tp
+            self._last_pp_size = new_pp
+            timings["dist_init_time"] = time_module.time() - dist_start
+        else:
+            timings["dist_init_time"] = 0.0  # Skipped
+            logger.debug("Skipping dist init - TP/PP config unchanged")
 
         # Take memory snapshot before loading model (needed for determine_available_memory)
-        gc.collect()
+        # Skip gc.collect if we just unloaded (unload_model already did it)
+        if not getattr(self, "_just_unloaded", False):
+            gc.collect()
+        self._just_unloaded = False
         torch.cuda.empty_cache()
         self.init_snapshot = MemorySnapshot()
         self.requested_memory = (
-            self.init_snapshot.total_memory
-            * self.cache_config.gpu_memory_utilization
+            self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
         )
 
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            vllm_config, self.device
-        )
+        runner_start = time_module.time()
+        self.model_runner: GPUModelRunner = GPUModelRunner(vllm_config, self.device)
+        timings["model_runner_init_time"] = time_module.time() - runner_start
 
+        weight_start = time_module.time()
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        timings["weight_load_time"] = time_module.time() - weight_start
+
+        timings["total_time"] = time_module.time() - total_start
+
+        logger.info(f"Worker {self.rank} load_model timings: {timings}")
+        return timings
 
     def unload_model(self) -> None:
         """Unload the model and free GPU memory.
@@ -328,19 +366,25 @@ class Worker(WorkerBase):
 
         if self.model_runner is not None:
             # Delete the model from model runner
-            if hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
+            if (
+                hasattr(self.model_runner, "model")
+                and self.model_runner.model is not None
+            ):
                 del self.model_runner.model
                 self.model_runner.model = None
 
             # Clear KV cache if initialized
-            if hasattr(self.model_runner, 'kv_caches') and self.model_runner.kv_caches is not None:
+            if (
+                hasattr(self.model_runner, "kv_caches")
+                and self.model_runner.kv_caches is not None
+            ):
                 for kv_cache in self.model_runner.kv_caches:
                     if kv_cache is not None:
                         del kv_cache
                 self.model_runner.kv_caches = None
 
             # Clear kv_cache_config
-            if hasattr(self.model_runner, 'kv_cache_config'):
+            if hasattr(self.model_runner, "kv_cache_config"):
                 self.model_runner.kv_cache_config = None
 
             # Delete the model runner itself
@@ -358,8 +402,13 @@ class Worker(WorkerBase):
         # Reset memory snapshot for next model
         self.init_snapshot = MemorySnapshot()
 
-        logger.info(f"Worker {self.rank} model unloaded. "
-                    f"Free GPU memory: {torch.cuda.mem_get_info()[0] / GiB_bytes:.2f} GiB")
+        # Flag to skip gc.collect in next load_model (we just did it)
+        self._just_unloaded = True
+
+        logger.info(
+            f"Worker {self.rank} model unloaded. "
+            f"Free GPU memory: {torch.cuda.mem_get_info()[0] / GiB_bytes:.2f} GiB"
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -509,8 +558,7 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(
-                size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -598,8 +646,7 @@ class Worker(WorkerBase):
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=last_hidden_states)
+                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -638,12 +685,12 @@ class Worker(WorkerBase):
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
         logger.info(
-            f"Worker execute_model called with {scheduler_output.total_num_scheduled_tokens} tokens")
+            f"Worker execute_model called with {scheduler_output.total_num_scheduled_tokens} tokens"
+        )
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_input_tokens = self.model_runner._get_num_input_tokens(
-            num_scheduled_tokens)
+        num_input_tokens = self.model_runner._get_num_input_tokens(num_scheduled_tokens)
         all_gather_tensors = {
             "residual": not is_residual_scattered_for_sp(
                 self.vllm_config, num_input_tokens
@@ -657,7 +704,8 @@ class Worker(WorkerBase):
         is_last_rank = engine_pp_size == 1 or get_pp_group().is_last_rank
 
         logger.info(
-            f"Worker forward_pass={forward_pass}, is_first_rank={is_first_rank}, engine_pp_size={engine_pp_size}")
+            f"Worker forward_pass={forward_pass}, is_first_rank={is_first_rank}, engine_pp_size={engine_pp_size}"
+        )
         if forward_pass and not is_first_rank:
             logger.info("Worker waiting for recv_tensor_dict...")
             intermediate_tensors = IntermediateTensors(
@@ -673,8 +721,7 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            logger.info(
-                f"Worker model_runner.execute_model returned: {type(output)}")
+            logger.info(f"Worker model_runner.execute_model returned: {type(output)}")
             if isinstance(output, (ModelRunnerOutput, NoneType)):
                 return output
 
@@ -766,10 +813,8 @@ class Worker(WorkerBase):
         from vllm.distributed.parallel_state import get_ep_group
 
         if get_ep_group().rank == 0:
-            logger.info(
-                "[Elastic EP] Starting expert resharding after scaling up...")
-        rank_mapping = {
-            old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
+            logger.info("[Elastic EP] Starting expert resharding after scaling up...")
+        rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
@@ -949,8 +994,7 @@ class Worker(WorkerBase):
 
         if new_ep_size > old_ep_size:
             assert global_expert_loads is not None
-            self._eplb_after_scale_up(
-                old_ep_size, new_ep_size, global_expert_loads)
+            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_loads)
 
     def save_sharded_state(
         self,

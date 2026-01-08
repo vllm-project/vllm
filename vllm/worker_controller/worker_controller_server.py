@@ -7,8 +7,15 @@ import os
 
 # Import WorkerController and config classes
 from vllm.worker_controller.worker_controller import WorkerController
-from vllm.config import (VllmConfig, ModelConfig, CacheConfig, ParallelConfig,
-                         ObservabilityConfig, CompilationConfig, DeviceConfig)
+from vllm.config import (
+    VllmConfig,
+    ModelConfig,
+    CacheConfig,
+    ParallelConfig,
+    ObservabilityConfig,
+    CompilationConfig,
+    DeviceConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +40,9 @@ def _build_vllm_config_from_dict(config_dict: Dict[str, Any]) -> VllmConfig:
 
     # Ensure worker_cls is set for parallel_config
     if "worker_cls" not in parallel_config_dict:
-        parallel_config_dict["worker_cls"] = "vllm.worker_controller.worker.gpu_worker.Worker"
+        parallel_config_dict["worker_cls"] = (
+            "vllm.worker_controller.worker.gpu_worker.Worker"
+        )
 
     # Build ModelConfig
     model_config = ModelConfig(**model_config_dict)
@@ -69,6 +78,7 @@ class EngineCreateRequest(BaseModel):
     1. Simple format: Specify model, dtype, etc. directly
     2. Advanced format: Pass full vllm_config dict
     """
+
     engine_uuid: str
 
     # Simple format fields (optional if vllm_config provided)
@@ -87,22 +97,23 @@ class EngineCreateRequest(BaseModel):
     # Advanced format: full vllm_config dict (optional)
     vllm_config: Optional[Dict[str, Any]] = None
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def validate_config(self):
         """Ensure either model or vllm_config is provided."""
         if self.vllm_config is None and self.model is None:
-            raise ValueError(
-                "Either 'model' or 'vllm_config' must be provided")
+            raise ValueError("Either 'model' or 'vllm_config' must be provided")
         return self
 
 
 class EngineDeleteRequest(BaseModel):
     """Request to delete an existing engine."""
+
     engine_uuid: str
 
 
 class EngineStatusResponse(BaseModel):
     """Response with engine status information."""
+
     engine_uuid: str
     status: str
     api_url: Optional[str] = None
@@ -115,7 +126,7 @@ class EngineStatusResponse(BaseModel):
 app = FastAPI(
     title="Worker Controller API",
     description="API for managing vLLM engines with RemoteExecutor and shared worker pool",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Global WorkerController instance
@@ -129,7 +140,8 @@ async def startup_event():
     logger.info("Initializing WorkerController...")
     worker_controller = WorkerController()
     logger.info(
-        f"WorkerController initialized with {len(worker_controller.executor.workers)} workers")
+        f"WorkerController initialized with {len(worker_controller.executor.workers)} workers"
+    )
 
 
 @app.get("/")
@@ -138,7 +150,9 @@ def read_root():
     return {
         "message": "Worker Controller API",
         "status": "running",
-        "num_workers": len(worker_controller.executor.workers) if worker_controller else 0
+        "num_workers": len(worker_controller.executor.workers)
+        if worker_controller
+        else 0,
     }
 
 
@@ -146,12 +160,11 @@ def read_root():
 def health_check():
     """Health check endpoint."""
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
     return {
         "status": "healthy",
         "num_workers": len(worker_controller.executor.workers),
-        "num_engines": len(worker_controller.executor.engines)
+        "num_engines": len(worker_controller.executor.engines),
     }
 
 
@@ -167,14 +180,14 @@ def create_engine(request: EngineCreateRequest):
     2. Advanced: {"engine_uuid": "test", "vllm_config": {...full config dict...}}
     """
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
 
     try:
         # Check if using advanced format with vllm_config dict
         if request.vllm_config is not None:
             logger.info(
-                f"Creating engine {request.engine_uuid} with advanced vllm_config")
+                f"Creating engine {request.engine_uuid} with advanced vllm_config"
+            )
 
             # Build VllmConfig from nested dict structure
             vllm_config = _build_vllm_config_from_dict(request.vllm_config)
@@ -185,11 +198,12 @@ def create_engine(request: EngineCreateRequest):
             if request.model is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="Either 'model' or 'vllm_config' must be provided"
+                    detail="Either 'model' or 'vllm_config' must be provided",
                 )
 
             logger.info(
-                f"Creating engine {request.engine_uuid} with model {request.model}")
+                f"Creating engine {request.engine_uuid} with model {request.model}"
+            )
 
             model_config = ModelConfig(
                 model=request.model,
@@ -213,7 +227,7 @@ def create_engine(request: EngineCreateRequest):
                 tensor_parallel_size=request.tensor_parallel_size,
                 pipeline_parallel_size=request.pipeline_parallel_size,
                 world_size=world_size,
-                worker_cls='vllm.worker_controller.worker.gpu_worker.Worker'
+                worker_cls="vllm.worker_controller.worker.gpu_worker.Worker",
             )
 
             observability_config = ObservabilityConfig()
@@ -236,12 +250,13 @@ def create_engine(request: EngineCreateRequest):
 
         # Get assigned resources
         assigned_ranks = worker_controller.resource_allocator.get_ranks_by_uuid(
-            request.engine_uuid)
+            request.engine_uuid
+        )
         port = worker_controller.resource_allocator.get_port_by_uuid(
-            request.engine_uuid)
+            request.engine_uuid
+        )
 
-        logger.info(
-            f"Engine {request.engine_uuid} created successfully on port {port}")
+        logger.info(f"Engine {request.engine_uuid} created successfully on port {port}")
 
         return EngineStatusResponse(
             engine_uuid=request.engine_uuid,
@@ -250,12 +265,13 @@ def create_engine(request: EngineCreateRequest):
             port=port,
             assigned_ranks=assigned_ranks,
             model=request.model,
-            pid=proc.pid if proc else None
+            pid=proc.pid if proc else None,
         )
 
     except Exception as e:
         logger.error(f"Failed to create engine {request.engine_uuid}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -271,8 +287,7 @@ def delete_engine(engine_uuid: str):
     3. Release assigned ranks back to the pool
     """
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
 
     logger.info(f"Deleting engine {engine_uuid}")
 
@@ -280,24 +295,26 @@ def delete_engine(engine_uuid: str):
         # Check if engine exists
         if engine_uuid not in worker_controller.executor.engines:
             raise HTTPException(
-                status_code=404, detail=f"Engine {engine_uuid} not found")
+                status_code=404, detail=f"Engine {engine_uuid} not found"
+            )
 
         # Get info before deletion
         assigned_ranks = worker_controller.resource_allocator.get_ranks_by_uuid(
-            engine_uuid)
-        port = worker_controller.resource_allocator.get_port_by_uuid(
-            engine_uuid)
+            engine_uuid
+        )
+        port = worker_controller.resource_allocator.get_port_by_uuid(engine_uuid)
 
         # Delete the engine
         worker_controller.delete(engine_uuid)
 
         logger.info(
-            f"Engine {engine_uuid} deleted, released ranks {assigned_ranks} and port {port}")
+            f"Engine {engine_uuid} deleted, released ranks {assigned_ranks} and port {port}"
+        )
 
         return {
             "message": f"Engine {engine_uuid} deleted successfully",
             "released_ranks": assigned_ranks,
-            "released_port": port
+            "released_port": port,
         }
 
     except HTTPException:
@@ -305,6 +322,7 @@ def delete_engine(engine_uuid: str):
     except Exception as e:
         logger.error(f"Failed to delete engine {engine_uuid}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -313,16 +331,13 @@ def delete_engine(engine_uuid: str):
 def get_engine_status(engine_uuid: str):
     """Get status information for a specific engine."""
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
 
     if engine_uuid not in worker_controller.executor.engines:
-        raise HTTPException(
-            status_code=404, detail=f"Engine {engine_uuid} not found")
+        raise HTTPException(status_code=404, detail=f"Engine {engine_uuid} not found")
 
     engine_info = worker_controller.executor.engines[engine_uuid]
-    assigned_ranks = worker_controller.resource_allocator.get_ranks_by_uuid(
-        engine_uuid)
+    assigned_ranks = worker_controller.resource_allocator.get_ranks_by_uuid(engine_uuid)
     port = worker_controller.resource_allocator.get_port_by_uuid(engine_uuid)
 
     proc = engine_info.get("proc")
@@ -340,9 +355,10 @@ def get_engine_status(engine_uuid: str):
         api_url=f"http://localhost:{port}",
         port=port,
         assigned_ranks=assigned_ranks,
-        model=engine_info.get(
-            "vllm_config").model_config.model if "vllm_config" in engine_info else None,
-        pid=proc.pid if proc else None
+        model=engine_info.get("vllm_config").model_config.model
+        if "vllm_config" in engine_info
+        else None,
+        pid=proc.pid if proc else None,
     )
 
 
@@ -350,8 +366,7 @@ def get_engine_status(engine_uuid: str):
 def list_engines():
     """List all engines and their status."""
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
 
     engines = []
     for engine_uuid in worker_controller.executor.engines:
@@ -361,9 +376,46 @@ def list_engines():
         except Exception as e:
             logger.error(f"Error getting status for {engine_uuid}: {e}")
 
+    return {"num_engines": len(engines), "engines": engines}
+
+
+@app.get("/engines/{engine_uuid}/load_timings")
+def get_engine_load_timings(engine_uuid: str):
+    """Get model loading timing breakdown for an engine."""
+    if worker_controller is None:
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
+
+    if engine_uuid not in worker_controller.executor.engines:
+        raise HTTPException(status_code=404, detail=f"Engine {engine_uuid} not found")
+
+    engine_info = worker_controller.executor.engines[engine_uuid]
+
+    # Get timings from the engine's AsyncLLM if available
+    async_llm = engine_info.get("async_llm")
+    if async_llm and hasattr(async_llm, "engine_core"):
+        timings = async_llm.engine_core.get_model_load_timings()
+        if timings:
+            return {
+                "engine_uuid": engine_uuid,
+                "worker_timings": timings,
+                "summary": {
+                    "avg_total_time": sum(t.get("total_time", 0) for t in timings)
+                    / len(timings),
+                    "avg_weight_load_time": sum(
+                        t.get("weight_load_time", 0) for t in timings
+                    )
+                    / len(timings),
+                    "avg_model_runner_init_time": sum(
+                        t.get("model_runner_init_time", 0) for t in timings
+                    )
+                    / len(timings),
+                },
+            }
+
     return {
-        "num_engines": len(engines),
-        "engines": engines
+        "engine_uuid": engine_uuid,
+        "worker_timings": None,
+        "message": "Timings not available",
     }
 
 
@@ -371,31 +423,29 @@ def list_engines():
 def list_workers():
     """List all workers and their current assignments."""
     if worker_controller is None:
-        raise HTTPException(
-            status_code=503, detail="WorkerController not initialized")
+        raise HTTPException(status_code=503, detail="WorkerController not initialized")
 
     workers = []
     for rank, uuid in worker_controller.resource_allocator.resources.items():
-        workers.append({
-            "rank": rank,
-            "status": "assigned" if uuid != 0 else "free",
-            "assigned_to": uuid if uuid != 0 else None
-        })
+        workers.append(
+            {
+                "rank": rank,
+                "status": "assigned" if uuid != 0 else "free",
+                "assigned_to": uuid if uuid != 0 else None,
+            }
+        )
 
-    return {
-        "num_workers": len(workers),
-        "workers": workers
-    }
+    return {"num_workers": len(workers), "workers": workers}
 
 
 if __name__ == "__main__":
     # Use v0 as requested
-    os.environ['VLLM_USE_V1'] = '0'
+    os.environ["VLLM_USE_V1"] = "0"
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     logger.info("Starting Worker Controller API on port 8000")

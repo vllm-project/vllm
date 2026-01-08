@@ -187,13 +187,13 @@ async def build_async_engine_client(
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Copy WorkerController specific args that might be filtered out
-    if hasattr(args, 'request_queue'):
+    if hasattr(args, "request_queue"):
         engine_args.request_queue = args.request_queue
-    if hasattr(args, 'response_queue'):
+    if hasattr(args, "response_queue"):
         engine_args.response_queue = args.response_queue
-    if hasattr(args, 'engine_uuid'):
+    if hasattr(args, "engine_uuid"):
         engine_args.engine_uuid = args.engine_uuid
-    if hasattr(args, 'vllm_config'):
+    if hasattr(args, "vllm_config"):
         engine_args.vllm_config = args.vllm_config
 
     if client_config:
@@ -201,8 +201,7 @@ async def build_async_engine_client(
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
     if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(
-            args.disable_frontend_multiprocessing)
+        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
@@ -230,15 +229,13 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Use passed vllm_config if available, otherwise create from engine_args
-    if hasattr(engine_args, 'vllm_config') and engine_args.vllm_config is not None:
+    if hasattr(engine_args, "vllm_config") and engine_args.vllm_config is not None:
         vllm_config = engine_args.vllm_config
     else:
-        vllm_config = engine_args.create_engine_config(
-            usage_context=usage_context)
+        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     if disable_frontend_multiprocessing:
-        logger.warning(
-            "V1 is enabled, but got --disable-frontend-multiprocessing.")
+        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     async_llm = None
 
@@ -249,16 +246,21 @@ async def build_async_engine_client_from_engine_args(
 
     try:
         # Check for WorkerController queues in args
-        if hasattr(engine_args, 'request_queue') and hasattr(engine_args, 'response_queue'):
+        if hasattr(engine_args, "request_queue") and hasattr(
+            engine_args, "response_queue"
+        ):
             # Use in-process AsyncLLM to avoid subprocess overhead
-            logger.info(
-                "Using IN-PROCESS EngineCore (avoiding subprocess overhead)")
-            from vllm.worker_controller.engine.async_llm import AsyncLLM as InprocAsyncLLM
+            logger.info("Using IN-PROCESS EngineCore (avoiding subprocess overhead)")
+            from vllm.worker_controller.engine.async_llm import (
+                AsyncLLM as InprocAsyncLLM,
+            )
             from vllm.worker_controller.executor.remote_executor import RemoteExecutor
 
             class RemoteExecutorFactory(RemoteExecutor):
                 def __init__(self, config):
-                    super().__init__(config, engine_args.request_queue, engine_args.response_queue)
+                    super().__init__(
+                        config, engine_args.request_queue, engine_args.response_queue
+                    )
 
             async_llm = InprocAsyncLLM(
                 vllm_config=vllm_config,
@@ -269,6 +271,7 @@ async def build_async_engine_client_from_engine_args(
             )
         else:
             from vllm.v1.engine.async_llm import AsyncLLM
+
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
@@ -408,6 +411,35 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
+
+
+@router.get("/model_load_timings")
+async def get_model_load_timings(raw_request: Request):
+    """Get model loading timing breakdown from workers."""
+    client = engine_client(raw_request)
+    if hasattr(client, "get_model_load_timings"):
+        timings = client.get_model_load_timings()
+        if timings:
+            return JSONResponse(
+                content={
+                    "worker_timings": timings,
+                    "summary": {
+                        "avg_total_time": sum(t.get("total_time", 0) for t in timings)
+                        / len(timings),
+                        "avg_weight_load_time": sum(
+                            t.get("weight_load_time", 0) for t in timings
+                        )
+                        / len(timings),
+                        "avg_model_runner_init_time": sum(
+                            t.get("model_runner_init_time", 0) for t in timings
+                        )
+                        / len(timings),
+                    },
+                }
+            )
+    return JSONResponse(
+        content={"worker_timings": None, "message": "Timings not available"}
+    )
 
 
 @router.get("/load")
@@ -1356,8 +1388,7 @@ class AuthenticationMiddleware:
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
-        self.api_tokens = [hashlib.sha256(
-            t.encode("utf-8")).digest() for t in tokens]
+        self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
 
     def verify_token(self, headers: Headers) -> bool:
         authorization_header_value = headers.get("Authorization")
@@ -1386,8 +1417,7 @@ class AuthenticationMiddleware:
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith("/v1") and not self.verify_token(headers):
-            response = JSONResponse(
-                content={"error": "Unauthorized"}, status_code=401)
+            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
 
@@ -1416,8 +1446,7 @@ class XRequestIdMiddleware:
             """
             if message["type"] == "http.response.start":
                 response_headers = MutableHeaders(raw=message["headers"])
-                request_id = request_headers.get(
-                    "X-Request-Id", uuid.uuid4().hex)
+                request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
                 response_headers.append("X-Request-Id", request_id)
             await send(message)
 
@@ -1469,13 +1498,11 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
 
         # Try using Completion types for type-safe parsing
         if chunk_data.get("object") == "chat.completion.chunk":
-            chat_response = ChatCompletionStreamResponse.model_validate(
-                chunk_data)
+            chat_response = ChatCompletionStreamResponse.model_validate(chunk_data)
             if chat_response.choices and chat_response.choices[0].delta.content:
                 return chat_response.choices[0].delta.content
         elif chunk_data.get("object") == "text_completion":
-            completion_response = CompletionStreamResponse.model_validate(
-                chunk_data)
+            completion_response = CompletionStreamResponse.model_validate(chunk_data)
             if completion_response.choices and completion_response.choices[0].text:
                 return completion_response.choices[0].text
     except pydantic.ValidationError:
@@ -1584,8 +1611,7 @@ def _log_streaming_response(response, response_body: list) -> None:
                     return
 
     response.body_iterator = iterate_in_threadpool(buffered_iterator())
-    logger.info(
-        "response_body={streaming_started: chunks=%d}", len(response_body))
+    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
 
 
 def _log_non_streaming_response(response_body: list) -> None:
@@ -2023,8 +2049,7 @@ def setup_server(args):
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(
-            args.reasoning_parser_plugin)
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -2052,8 +2077,7 @@ def setup_server(args):
     else:
         addr, port = sock_addr
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        host_part = f"[{addr}]" if is_valid_ipv6_address(
-            addr) else addr or "0.0.0.0"
+        host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or "0.0.0.0"
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
@@ -2077,8 +2101,7 @@ async def run_server_worker(
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(
-            args.reasoning_parser_plugin)
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)

@@ -7,12 +7,13 @@ This is a modified version of vllm.v1.engine.async_llm.AsyncLLM that runs the
 EngineCore in-process instead of spawning a subprocess. This significantly reduces
 cold start latency when used with RemoteExecutor since we avoid:
 1. Python subprocess startup (~3-5s)
-2. Import overhead in subprocess (~2-3s) 
+2. Import overhead in subprocess (~2-3s)
 3. ZMQ socket setup overhead
 
 The EngineCore runs in-process and uses RemoteExecutor to communicate with
 pre-initialized workers that already have CUDA context and models loaded.
 """
+
 import asyncio
 import os
 import socket
@@ -49,7 +50,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.worker_controller.engine.core import EngineCore
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -71,6 +72,7 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 @dataclass
 class InprocResources:
     """Resources for in-process engine core, used for clean shutdown."""
+
     engine_dead: bool = False
 
 
@@ -93,8 +95,7 @@ class InprocAsyncEngineCore:
         self.engine_ranks_managed = [0]  # Single engine for now
 
         # Create the EngineCore in-process
-        logger.info(
-            "Creating in-process EngineCore (avoiding subprocess overhead)")
+        logger.info("Creating in-process EngineCore (avoiding subprocess overhead)")
         self.engine_core = EngineCore(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -103,12 +104,15 @@ class InprocAsyncEngineCore:
 
         # Thread pool for running blocking EngineCore operations
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="engine_core")
+            max_workers=1, thread_name_prefix="engine_core"
+        )
 
         # Lock to ensure single-threaded access to engine_core
         self._lock = asyncio.Lock()
 
-    def _run_in_executor(self, fn: Callable[..., _R], *args, **kwargs) -> asyncio.Future[_R]:
+    def _run_in_executor(
+        self, fn: Callable[..., _R], *args, **kwargs
+    ) -> asyncio.Future[_R]:
         """Run a blocking function in the thread pool."""
         loop = asyncio.get_event_loop()
         return loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
@@ -127,8 +131,7 @@ class InprocAsyncEngineCore:
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         async with self._lock:
-            req, request_wave = self.engine_core.preprocess_add_request(
-                request)
+            req, request_wave = self.engine_core.preprocess_add_request(request)
             self.engine_core.add_request(req, request_wave)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -166,6 +169,10 @@ class InprocAsyncEngineCore:
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self._run_in_executor(self.engine_core.pin_lora, lora_id)
 
+    def get_model_load_timings(self) -> list[dict] | None:
+        """Get model loading timing breakdown from workers."""
+        return self.engine_core.get_model_load_timings()
+
     async def collective_rpc_async(
         self,
         method: str | Callable[..., _R],
@@ -183,9 +190,9 @@ class InprocAsyncEngineCore:
     def shutdown(self) -> None:
         """Shutdown the in-process engine core."""
         self.resources.engine_dead = True
-        if hasattr(self, 'engine_core'):
+        if hasattr(self, "engine_core"):
             self.engine_core.shutdown()
-        if hasattr(self, '_executor'):
+        if hasattr(self, "_executor"):
             self._executor.shutdown(wait=False)
 
 
@@ -455,8 +462,7 @@ class AsyncLLM(EngineClient):
         parent_request = ParentRequest(request_id, parent_params)
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - \
-                1 else copy(request)
+            child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
             await self._add_request(
@@ -473,8 +479,7 @@ class AsyncLLM(EngineClient):
         queue: RequestOutputCollector,
     ):
         # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(
-            request, prompt, parent_req, index, queue)
+        self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -648,8 +653,7 @@ class AsyncLLM(EngineClient):
                             processed_outputs.reqs_to_abort
                         )
 
-                    output_processor.update_scheduler_stats(
-                        outputs.scheduler_stats)
+                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
@@ -869,8 +873,7 @@ class AsyncLLM(EngineClient):
                 logger.info("Engines are idle, requests have been drained")
                 return
 
-            logger.info(
-                "Engines are still running, waiting for requests to drain...")
+            logger.info("Engines are still running, waiting for requests to drain...")
             await asyncio.sleep(1)  # Wait 1 second before checking again
 
         raise TimeoutError(

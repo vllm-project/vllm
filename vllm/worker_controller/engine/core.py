@@ -321,6 +321,22 @@ class EngineCore:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
 
+    def get_model_load_timings(self) -> list[dict] | None:
+        """Get model loading timing breakdown from workers.
+
+        Returns:
+            List of timing dicts from each worker, or None if not available.
+            Each dict contains:
+                - config_time: Time to set up configs
+                - dist_init_time: Time to initialize distributed groups
+                - model_runner_init_time: Time to create model runner
+                - weight_load_time: Time to load model weights
+                - total_time: Total load time
+        """
+        if hasattr(self.model_executor, "model_load_timings"):
+            return self.model_executor.model_load_timings
+        return None
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 

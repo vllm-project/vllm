@@ -27,7 +27,9 @@ def run_api_server(request_queue, response_queue, engine_uuid, vllm_config, port
     """
     try:
         multiprocessing.set_start_method("forkserver", force=True)
-        multiprocessing.set_forkserver_preload(["vllm.worker_controller.entrypoint.api_server"])
+        multiprocessing.set_forkserver_preload(
+            ["vllm.worker_controller.entrypoint.api_server"]
+        )
     except RuntimeError:
         # Context already set
         pass
@@ -56,7 +58,6 @@ def run_api_server(request_queue, response_queue, engine_uuid, vllm_config, port
 
 
 class ResourceAllocator:
-
     def __init__(self, number_of_gpus: int, start_port: int = 8001):
         # rank -> uid or 0 (free)
         self.resources = {i: 0 for i in range(number_of_gpus)}
@@ -87,7 +88,8 @@ class ResourceAllocator:
                 self.resources[rank] = 0
                 del self.rank_to_uid[rank]
             raise RuntimeError(
-                f"Only {len(assigned_ranks)} free resources, requested {num}")
+                f"Only {len(assigned_ranks)} free resources, requested {num}"
+            )
 
         return assigned_ranks, port
 
@@ -113,22 +115,25 @@ class ResourceAllocator:
 
 
 class WorkerController:
-
     def __init__(self) -> None:
         # Modified Executor will create the empty worker processes and return the pipes
         model_config = DummyModelConfig("dummy", enforce_eager=True)
         cache_config = CacheConfig(gpu_memory_utilization=0.85)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=2,
-            worker_cls='vllm.worker_controller.worker.gpu_worker.Worker')
+            worker_cls="vllm.worker_controller.worker.gpu_worker.Worker",
+        )
 
-        dummy_vllm_config = DummyVllmConfig(model_config=model_config,
-                                            cache_config=cache_config,
-                                            parallel_config=parallel_config)
-
+        dummy_vllm_config = DummyVllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+        )
+        # type: ignore[call-arg]
         self.executor = ProxyExecutor(vllm_config=dummy_vllm_config)
         self.resource_allocator = ResourceAllocator(
-            number_of_gpus=dummy_vllm_config.parallel_config.world_size)
+            number_of_gpus=dummy_vllm_config.parallel_config.world_size
+        )
         # Set the resource allocator in the executor
         self.executor.resource = self.resource_allocator
         self.rpc_broadcast_mq = self.executor.rpc_broadcast_mq
@@ -147,8 +152,7 @@ class WorkerController:
 
         # 1. Allocate resources
         num_gpus = vllm_config.parallel_config.world_size
-        assigned_ranks, port = self.resource_allocator.assign(
-            num_gpus, engine_uuid)
+        assigned_ranks, port = self.resource_allocator.assign(num_gpus, engine_uuid)
         # Allocate a port for distributed communication (e.g., tcp store)
         # Only needed when world_size > 1 (multi-GPU)
         if num_gpus > 1:
@@ -158,7 +162,8 @@ class WorkerController:
             dist_port = None
 
         logger.info(
-            f"Assigned ranks {assigned_ranks}, port {port} to engine {engine_uuid}")
+            f"Assigned ranks {assigned_ranks}, port {port} to engine {engine_uuid}"
+        )
 
         # 2. Create queues for communication
         ctx = multiprocessing.get_context("forkserver")
@@ -168,15 +173,15 @@ class WorkerController:
         # 3. Register engine with ProxyExecutor
         logger.info(f"Adding engine {engine_uuid} to ProxyExecutor")
         self.executor.add_engine(
-            engine_uuid, assigned_ranks, request_queue, response_queue, dist_port)
+            engine_uuid, assigned_ranks, request_queue, response_queue, dist_port
+        )
 
         # 4. Spawn API Server process
         logger.info(f"Spawning APIServer process for {engine_uuid}")
         proc = ctx.Process(
             target=run_api_server,
-            args=(request_queue, response_queue,
-                  engine_uuid, vllm_config, port),
-            name=f"APIServer-{engine_uuid}"
+            args=(request_queue, response_queue, engine_uuid, vllm_config, port),
+            name=f"APIServer-{engine_uuid}",
         )
         proc.start()
         logger.info(f"APIServer process started with PID {proc.pid}")
@@ -190,7 +195,7 @@ class WorkerController:
         # But we can store it in ProxyExecutor.engines[uuid]['proc'] = proc
 
         if engine_uuid in self.executor.engines:
-            self.executor.engines[engine_uuid]['proc'] = proc
+            self.executor.engines[engine_uuid]["proc"] = proc
 
         return proc
 
@@ -210,8 +215,7 @@ class WorkerController:
                 proc.terminate()
                 proc.join(timeout=5)
                 if proc.is_alive():
-                    logger.warning(
-                        f"Force killing API server process {proc.pid}")
+                    logger.warning(f"Force killing API server process {proc.pid}")
                     proc.kill()
 
         # Delegate to ProxyExecutor which handles worker unloading (if implemented)

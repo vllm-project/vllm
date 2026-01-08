@@ -28,6 +28,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
+
 # from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.worker_controller.executor.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -91,6 +92,7 @@ class FutureWrapper(Future):
 
 class _SkipResponse:
     """Sentinel class indicating that the worker should not send a response."""
+
     pass
 
 
@@ -109,7 +111,9 @@ def check_rank_and_execute(target_ranks, method, worker, *args, **kwargs):
             if method == "initialize_from_config" and args:
                 # args[0] is kv_cache_configs list, index by logical_rank not global_rank
                 kv_cache_configs = args[0]
-                if isinstance(kv_cache_configs, list) and logical_rank < len(kv_cache_configs):
+                if isinstance(kv_cache_configs, list) and logical_rank < len(
+                    kv_cache_configs
+                ):
                     # Pass a single-element list so WorkerBase can index by global_rank=0
                     # We need to make the list such that index [worker.global_rank] works
                     # Easier: override the global_rank temporarily
@@ -135,7 +139,9 @@ class ProxyExecutor(Executor):
         self.running = True
         super().__init__(vllm_config)
 
-    def add_engine(self, engine_uuid, ranks, request_queue, response_queue, dist_port=None):
+    def add_engine(
+        self, engine_uuid, ranks, request_queue, response_queue, dist_port=None
+    ):
         self.engines[engine_uuid] = {
             "ranks": ranks,
             "request_queue": request_queue,
@@ -145,10 +151,10 @@ class ProxyExecutor(Executor):
 
     def delete_engine(self, engine_uuid):
         if engine_uuid in self.engines:
-            ranks = self.engines[engine_uuid]['ranks']
+            ranks = self.engines[engine_uuid]["ranks"]
             # Broadcast unload to these ranks
             self._broadcast_request(ranks, "unload_model", (), {})
-            
+
             # Drain responses to prevent stale messages in the queue
             for rank in ranks:
                 mq = self.response_mqs[rank]
@@ -156,7 +162,9 @@ class ProxyExecutor(Executor):
                     # Wait for response with timeout
                     mq.dequeue(timeout=120)
                 except Exception as e:
-                    logger.error(f"Error draining response from rank {rank} during delete_engine: {e}")
+                    logger.error(
+                        f"Error draining response from rank {rank} during delete_engine: {e}"
+                    )
 
             del self.engines[engine_uuid]
 
@@ -271,8 +279,7 @@ class ProxyExecutor(Executor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                self._ensure_worker_termination(
-                    [uw.proc for uw in unready_workers])
+                self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
@@ -285,7 +292,14 @@ class ProxyExecutor(Executor):
         self.polling_thread.start()
 
     def run_loop(self):
+        """Main polling loop that processes requests from engines.
+
+        Performance notes:
+        - Uses adaptive sleeping: no sleep when processing requests
+        - Falls back to short sleep only when no work is available
+        """
         while self.running:
+            had_work = False
             for engine_uuid, engine in list(self.engines.items()):
                 try:
                     # Non-blocking get
@@ -297,15 +311,21 @@ class ProxyExecutor(Executor):
                     self._broadcast_request(target_ranks, method, args, kwargs)
 
                     self._collect_and_forward_response(
-                        engine["response_queue"], target_ranks)
+                        engine["response_queue"], target_ranks
+                    )
+
+                    had_work = True
 
                 except queue.Empty:
                     pass
                 except Exception as e:
                     logger.error(
-                        f"Error processing request for engine {engine_uuid}: {e}")
+                        f"Error processing request for engine {engine_uuid}: {e}"
+                    )
 
-            time.sleep(0.001)  # Avoid busy loop
+            # Only sleep if no work was done (adaptive polling)
+            if not had_work:
+                time.sleep(0.0001)  # 100us - reduced from 1ms for lower latency
 
     def _broadcast_request(self, target_ranks, method, args, kwargs):
         # Wrap the method
@@ -315,7 +335,8 @@ class ProxyExecutor(Executor):
             send_method = wrapped_method
         else:
             send_method = cloudpickle.dumps(
-                wrapped_method, protocol=pickle.HIGHEST_PROTOCOL)
+                wrapped_method, protocol=pickle.HIGHEST_PROTOCOL
+            )
 
         # We set output_rank=None so everyone receives it (and filters it)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, None))
@@ -328,8 +349,7 @@ class ProxyExecutor(Executor):
             try:
                 status, result = mq.dequeue(timeout=120)  # 2 minute timeout
             except TimeoutError:
-                logger.error(
-                    f"Timeout waiting for response from worker rank {rank}")
+                logger.error(f"Timeout waiting for response from worker rank {rank}")
                 result = Exception(f"Worker {rank} timed out")
                 status = WorkerProc.ResponseStatus.FAILURE
 
@@ -355,8 +375,7 @@ class ProxyExecutor(Executor):
             if not _self or getattr(_self, "shutting_down", False):
                 return
             _self.is_failed = True
-            proc_name = next(
-                h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly, shutting down executor.", proc_name
             )
@@ -405,8 +424,7 @@ class ProxyExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch",
-                            unique_reply_rank=self.output_rank)
+        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
@@ -449,8 +467,7 @@ class ProxyExecutor(Executor):
         if isinstance(method, str):
             send_method = method
         else:
-            send_method = cloudpickle.dumps(
-                method, protocol=pickle.HIGHEST_PROTOCOL)
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
@@ -470,8 +487,7 @@ class ProxyExecutor(Executor):
                         timeout=dequeue_timeout, cancel=shutdown_event
                     )
                 except TimeoutError as e:
-                    raise TimeoutError(
-                        f"RPC call to {method} timed out.") from e
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
@@ -740,8 +756,7 @@ class WorkerProc:
         response_handle = handles["handle"]
         worker_response_mq: MessageQueue | None = None
         if len(response_handle.local_reader_ranks) > 0:
-            worker_response_mq = MessageQueue.create_from_handle(
-                response_handle, 0)
+            worker_response_mq = MessageQueue.create_from_handle(response_handle, 0)
         peer_response_handles = handles["peer_response_handles"]
         peer_worker_response_mqs = [
             MessageQueue.create_from_handle(handle, -1)
