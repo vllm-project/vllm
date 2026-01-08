@@ -574,6 +574,9 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
+            reasoning_effort=None
+            if request.reasoning is None
+            else request.reasoning.effort,
         )
         return messages, engine_prompts
 

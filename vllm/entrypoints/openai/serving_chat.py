@@ -318,6 +318,7 @@ class OpenAIServingChat(OpenAIServing):
                     default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
+                    reasoning_effort=request.reasoning_effort,
                 )
             else:
                 # For GPT-OSS.
