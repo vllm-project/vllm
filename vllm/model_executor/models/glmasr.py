@@ -188,6 +188,7 @@ class GlmAsrEncoderAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads_per_rank,
             head_size=self.head_dim,
+            scale=self.head_dim**-0.5,
             num_kv_heads=self.num_kv_heads_per_rank,
             prefix=f"{prefix}.attn",
         )
