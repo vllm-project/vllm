@@ -418,7 +418,9 @@ pull_request_rules:
   description: Automatically apply bug label
   conditions:
     - label != stale
-    - title~=(?i)bug
+    - or:
+      - title~=(?i)\bbug\b
+      - title~=(?i)\bbugfix\b
   actions:
     label:
       add:
