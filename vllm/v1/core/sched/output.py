@@ -90,10 +90,14 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
+        prefill_token_ids_len = (
+            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
+            f"prefill_token_ids_len={prefill_token_ids_len},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -121,6 +125,27 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+
+    # Version of dataclass repr with token IDs obfuscated.
+    def anon_repr(self) -> str:
+        new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
+        all_token_ids_lens = {
+            req_id: len(toks) for req_id, toks in self.all_token_ids.items()
+        }
+        return (
+            f"CachedRequestData("
+            f"req_ids={self.req_ids},"
+            f"resumed_req_ids={self.resumed_req_ids},"
+            f"new_token_ids_lens={new_token_ids_lens},"
+            f"all_token_ids_lens={all_token_ids_lens},"
+            f"new_block_ids={self.new_block_ids},"
+            f"num_computed_tokens={self.num_computed_tokens},"
+            f"num_output_tokens={self.num_output_tokens}"
+            f")"
+        )
+
+    def __repr__(self) -> str:
+        return self.anon_repr()
 
     @property
     def num_reqs(self) -> int:
