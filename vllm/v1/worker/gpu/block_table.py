@@ -4,9 +4,9 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
 
 
