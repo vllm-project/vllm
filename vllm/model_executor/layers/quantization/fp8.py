@@ -877,11 +877,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-            MoEPrepareAndFinalizeNaiveEP,
-        )
-
-        return MoEPrepareAndFinalizeNaiveEP()
         if self.fp8_backend in [
             Fp8MoeBackend.AITER,
             Fp8MoeBackend.MARLIN,
@@ -889,6 +884,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ]:
             return None
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            # TODO(rob): we can remove this.
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
                 use_deepseek_fp8_block_scale=self.block_quant,

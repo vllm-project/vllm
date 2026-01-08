@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNaiveEP,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 
@@ -170,4 +173,8 @@ def maybe_make_prepare_finalize(
             local_expert_global_ids=local_expert_global_ids,
         )
 
+    elif moe.use_naive_kernels:
+        prepare_finalize = MoEPrepareAndFinalizeNaiveEP()
+
+    print(f"{prepare_finalize=}")
     return prepare_finalize
