@@ -562,15 +562,17 @@ class InputProcessor:
 
             mm_features = []
             for modality, idx in sorted_mm_idxs:
+                base_mm_hash = decoder_mm_hashes[modality][idx]
                 mm_features.append(
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
                         identifier=self._get_mm_identifier(
-                            decoder_mm_hashes[modality][idx],
+                            base_mm_hash,
                             lora_request,
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
+                        mm_hash=base_mm_hash,
                     )
                 )
 
