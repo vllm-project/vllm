@@ -44,3 +44,32 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+
+- label: LM Eval Large Models (H200)
+  timeout_in_minutes: 60
+  device: h200
+  optional: true
+  num_devices: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
+
+- label: MoE Refactor Integration Test (H100 - TEMPORARY)
+  device: h100
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  
+- label: MoE Refactor Integration Test (B200 - TEMPORARY)
+  gpu: b200
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
+
+- label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
+  device: b200
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
