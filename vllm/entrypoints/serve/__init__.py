@@ -52,6 +52,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_cache_router(app)
 
+    from vllm.entrypoints.serve.slowdown.api_router import (
+        attach_router as attach_slowdown_router,
+    )
+
+    attach_slowdown_router(app)
+
     from vllm.entrypoints.serve.tokenize.api_router import (
         attach_router as attach_tokenize_router,
     )

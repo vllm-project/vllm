@@ -127,6 +127,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def set_slowdown_threshold(self, threshold: int) -> None:
+        """Set the slowdown threshold for the scheduler at runtime."""
+        ...
+
+    @abstractmethod
     async def sleep(self, level: int = 1) -> None:
         """Sleep the engine"""
         ...

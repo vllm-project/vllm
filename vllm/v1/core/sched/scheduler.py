@@ -224,6 +224,8 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
+        self.slowdown_threshold = self.scheduler_config.slowdown_threshold
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -760,6 +762,16 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        if len(num_scheduled_tokens) < self.slowdown_threshold:
+            logger.warning(
+                "%d requests are scheduled, which is less than the slowdown "
+                "threshold of %d. Sleeping for 10 seconds...",
+                len(num_scheduled_tokens),
+                self.slowdown_threshold,
+            )
+            time.sleep(10)
+
         return scheduler_output
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:

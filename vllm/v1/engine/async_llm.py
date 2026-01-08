@@ -757,6 +757,9 @@ class AsyncLLM(EngineClient):
             reset_running_requests, reset_connector
         )
 
+    async def set_slowdown_threshold(self, threshold: int) -> None:
+        await self.engine_core.set_slowdown_threshold_async(threshold)
+
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)

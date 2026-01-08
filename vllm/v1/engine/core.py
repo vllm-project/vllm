@@ -530,6 +530,9 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def set_slowdown_threshold(self, threshold: int) -> None:
+        self.scheduler.slowdown_threshold = threshold
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

@@ -144,6 +144,11 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    slowdown_threshold: int = Field(default=0, ge=0)
+    """Scheduler will sleep for 10 seconds if the number of scheduled requests is
+    less than this threshold. Useful for benchmarking decode node under P/D Disagg.
+    """
+
     @staticmethod
     def default_factory(**kwargs):
         """
