@@ -116,7 +116,8 @@ def pooler_for_token_embed(pooler_config: PoolerConfig):
     if pooling_type == "STEP":
         return StepPooler(head=head)
 
-    raise NotImplementedError(f"Unsupported method: {pooling_type!r}")
+    # TODO: Have separate pooling types for batch and request poolers
+    return AllPooler(head=head)
 
 
 def pooler_for_token_classify(
@@ -133,4 +134,5 @@ def pooler_for_token_classify(
     if pooling_type == "STEP":
         return StepPooler(head=head)
 
-    raise NotImplementedError(f"Unsupported method: {pooling_type!r}")
+    # TODO: Have separate pooling types for batch and request poolers
+    return AllPooler(head=head)
