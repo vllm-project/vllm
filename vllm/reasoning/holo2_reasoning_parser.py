@@ -56,7 +56,7 @@ class Holo2ReasoningParser(ReasoningParser):
 
     @property
     def end_token_ids(self) -> list[int] | None:
-        return self._parser.end_token_ids()
+        return self._parser.end_token_ids
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
