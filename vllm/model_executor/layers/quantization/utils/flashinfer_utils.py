@@ -12,6 +12,7 @@ vllm.utils.flashinfer.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -22,9 +23,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
     create_flashinfer_prepare_finalize,
 )
-from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
-from vllm.logger import init_logger
 
 # Re-export unified utilities from vllm.utils.flashinfer for backwards
 # compatibility
@@ -37,6 +35,10 @@ from vllm.utils.flashinfer import (
     rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31,
 )
+from vllm.utils.math_utils import round_up
+
+# Backwards compatibility alias for renamed function
+rotate_weights_for_fi_trtllm_fp8_per_tensor_moe = rotate_flashinfer_fp8_moe_weights
 
 logger = init_logger(__name__)
 
@@ -343,6 +345,7 @@ __all__ = [
     "get_moe_scaling_factors",
     "is_flashinfer_supporting_global_sf",
     "rotate_flashinfer_fp8_moe_weights",
+    "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",  # backwards compat alias
     "swap_w13_to_w31",
     # MoE-specific functions (depend on fused_moe)
     "apply_fi_trtllm_fp8_per_tensor_moe",
@@ -350,7 +353,6 @@ __all__ = [
     "flashinfer_cutlass_moe_fp8",
     "register_moe_scaling_factors",
     "select_cutlass_fp8_gemm_impl",
-    # Added/Kept from HEAD
     "register_scales_for_trtllm_fp8_per_tensor_moe",
     "prepare_fp8_moe_layer_for_fi",
     "align_fp8_moe_weights_for_fi",
