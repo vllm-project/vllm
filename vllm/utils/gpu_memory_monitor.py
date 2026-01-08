@@ -55,7 +55,7 @@ class GPUMemoryMonitor:
         self.warning_cooldown = warning_cooldown
 
         self.last_check_time = 0.0
-        self.last_warning_time = 0.0
+        self.last_warning_time: dict[int, float] = {}
 
     def check_and_warn(self) -> None:
         """Check GPU memory usage and emit warning if threshold exceeded.
@@ -96,9 +96,10 @@ class GPUMemoryMonitor:
             # for predicting OOM
             usage_ratio = memory_reserved / memory_total
 
+            last_warning_time_device = self.last_warning_time.get(device_id, 0.0)
             if (
                 usage_ratio >= self.threshold
-                and current_time - self.last_warning_time > self.warning_cooldown
+                and current_time - last_warning_time_device > self.warning_cooldown
             ):
                 self._emit_warning(
                     device_id,
@@ -107,7 +108,7 @@ class GPUMemoryMonitor:
                     memory_reserved,
                     memory_total,
                 )
-                self.last_warning_time = current_time
+                self.last_warning_time[device_id] = current_time
 
         except Exception as e:
             # Don't let monitoring errors crash the system

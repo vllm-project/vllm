@@ -22,7 +22,7 @@ class TestGPUMemoryMonitor:
         assert monitor.enabled is False
         assert monitor.warning_cooldown == 60.0
         assert monitor.last_check_time == 0.0
-        assert monitor.last_warning_time == 0.0
+        assert monitor.last_warning_time == {}
 
     def test_init_custom_values(self):
         """Test monitor initialization with custom values."""
@@ -109,7 +109,9 @@ class TestGPUMemoryMonitor:
             assert mock_warn.call_count == torch.cuda.device_count()
 
             # After cooldown, should emit warning again
-            monitor.last_warning_time = time.time() - 11.0
+            monitor.last_warning_time = {
+                i: time.time() - 11.0 for i in range(torch.cuda.device_count())
+            }
             monitor.check_and_warn()
             assert mock_warn.call_count == torch.cuda.device_count() * 2
 

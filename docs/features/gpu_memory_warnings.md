@@ -1,8 +1,5 @@
 # GPU Memory Warnings
 
-Author: Arnab Mitra (email: papan.mitra.2121@gmail.com)  
-GitHub: https://github.com/Dedulus/vllm
-
 vLLM includes an optional GPU memory monitoring system that warns users when GPU memory usage exceeds a configurable threshold. This can be helpful for preventing Out-Of-Memory (OOM) crashes by providing early warnings.
 
 ## Enabling Warnings
@@ -28,7 +25,8 @@ vllm serve facebook/opt-125m \
 When enabled, vLLM periodically checks the GPU memory usage (reserved memory vs total memory). If the usage ratio exceeds the threshold, a warning log is emitted.
 
 Example warning:
-```
+
+```text
 WARNING 01-06 21:00:00 gpu_memory_monitor.py:134] GPU 0 memory usage high: 92.5% (reserved: 3.65GB / 3.95GB, allocated: 3.50GB). Consider reducing --max-num-seqs, --max-model-len, or using a smaller model to avoid OOM.
 ```
 
@@ -37,6 +35,7 @@ To prevent log spam, warnings are rate-limited (default: once every 60 seconds).
 ## When to Use
 
 This feature is particularly useful when:
+
 - Running on GPUs with limited VRAM.
 - Experimenting with new models or configurations.
 - Debugging OOM issues.
