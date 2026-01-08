@@ -779,6 +779,14 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
+        # Reset grammar state and spec token IDs. This prevents conflicts
+        # with the old grammar state upon request resumption.
+        if request.use_structured_output:
+            assert request.structured_output_request is not None
+            if request.structured_output_request.grammar is not None:
+                request.structured_output_request.grammar.reset()
+        request.spec_token_ids = []
+
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
