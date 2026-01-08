@@ -191,7 +191,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             if not _is_valid_nvfp4_activations:
                 raise ValueError(
                     "For NVFP4 weights, input quantization must also be NVFP4 format ",
-                    "or None for NVFP4A16",
+                    f"or None for NVFP4A16, found {input_quant}",
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
                 layer.moe_config, layer_name, use_marlin=input_quant is None
