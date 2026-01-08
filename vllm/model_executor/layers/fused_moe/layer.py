@@ -38,9 +38,6 @@ from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimula
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    is_flashinfer_supporting_global_sf,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
@@ -1125,14 +1122,9 @@ class FusedMoE(CustomOp):
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        allow_flashinfer = getattr(self.quant_method, "allow_flashinfer", False)
-        moe_backend = getattr(self.quant_method, "flashinfer_moe_backend", None)
-
         use_global_sf = (
-            allow_flashinfer
-            and is_flashinfer_supporting_global_sf(moe_backend)
+            getattr(self.quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
-            and quant_method_name == "ModelOptNvFp4FusedMoE"
         )
 
         if expert_id == -1 and not use_global_sf:
