@@ -310,15 +310,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
-
-            if self.max_cudagraph_size > 992:
-                # This condition derives from FA3's internal heuristic.
-                # TODO(woosuk): Support larger cudagraph sizes.
-                raise ValueError(
-                    "Capture size larger than 992 is not supported for full cuda graph."
-                )
-
             # Times 4 due to:
             #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
             self.scheduler_metadata = torch.zeros(
