@@ -355,6 +355,15 @@ class LLM:
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
+    def get_world_size(self) -> int:
+        """Get the world size from the parallel config.
+
+        Returns:
+            The world size including data parallelism
+            (tensor_parallel_size * pipeline_parallel_size * data_parallel_size).
+        """
+        return self.llm_engine.vllm_config.parallel_config.world_size_across_dp
+
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()

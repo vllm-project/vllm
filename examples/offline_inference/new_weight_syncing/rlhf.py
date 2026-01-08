@@ -92,12 +92,11 @@ llm = ray.remote(
 )(MyLLM).remote(
     model=MODEL_NAME,
     enforce_eager=True,
-    tensor_parallel_size=1,
-    data_parallel_size=2,
+    tensor_parallel_size=2,
+    data_parallel_size=1,
     distributed_executor_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
     enable_expert_parallel=True,
-    all2all_backend="pplx",
 )
 
 # Generate text from the prompts.
@@ -124,6 +123,7 @@ for output in outputs:
 master_address = get_ip()
 master_port = get_open_port()
 
+world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
 handle = llm.init_weight_transfer.remote(
     WeightTransferInitRequest(
         init_info=asdict(
@@ -131,14 +131,14 @@ handle = llm.init_weight_transfer.remote(
                 master_address=master_address,
                 master_port=master_port,
                 rank_offset=1,
-                world_size=3,
+                world_size=world_size,
             )
         )
     )
 )
 
 model_update_group = stateless_init_process_group(
-    master_address, master_port, 0, 3, torch.device("cuda:0")
+    master_address, master_port, 0, world_size, torch.device("cuda:0")
 )
 ray.get(handle)
 

@@ -31,7 +31,6 @@ from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer import WeightUpdateRequest
 from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -681,6 +680,16 @@ async def update_weights(raw_request: Request):
 async def finalize_weight_update(raw_request: Request):
     await engine_client(raw_request).finalize_weight_update()
     return JSONResponse(content={"message": "Weight update finalized"})
+
+
+@router.get("/get_world_size")
+async def get_world_size(raw_request: Request):
+    """Get the world size from the parallel config (TP * PP * DP)."""
+    world_size = engine_client(
+        raw_request
+    ).vllm_config.parallel_config.world_size_across_dp
+    return JSONResponse(content={"world_size": world_size})
+
 
 def load_log_config(log_config_file: str | None) -> dict | None:
     if not log_config_file:

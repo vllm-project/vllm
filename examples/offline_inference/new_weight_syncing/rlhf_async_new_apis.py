@@ -47,6 +47,9 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
+# MODEL_NAME = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+MODEL_NAME = "facebook/opt-125m"
+
 
 class MyLLM:
     """Simple wrapper over AsyncLLM for supporting async RL."""
@@ -81,18 +84,10 @@ class MyLLM:
 
     async def abort_generation(self) -> None:
         self.generation_paused_event.set()
-        unfinished_request_ids = list(
-            self.engine.output_processor.request_states.keys()
-        )
-        if unfinished_request_ids:
-            await self.engine.abort(unfinished_request_ids)
-        await self.engine.reset_prefix_cache()
-        print(
-            f"abort_generation() finished, aborted"
-            f"{len(unfinished_request_ids)} requests"
-        )
+        return await self.engine.pause_generation(wait_for_inflight_requests=False)
 
     async def resume_generation(self) -> None:
+        await self.engine.resume_generation()
         self.generation_paused_event.clear()
 
     async def collective_rpc(self, method: str, args: tuple = ()):
@@ -116,9 +111,7 @@ class MyLLM:
 
 
 # Load the OPT-125M model onto GPU 0 for the training workload.
-train_model = AutoModelForCausalLM.from_pretrained(
-    "facebook/opt-125m", dtype=torch.bfloat16
-)
+train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
 train_model.to("cuda:0")
 
 # Initialize Ray and set the visible devices. The vLLM engine will
@@ -150,7 +143,7 @@ llm = ray.remote(
     num_gpus=0,
     scheduling_strategy=scheduling_inference,
 )(MyLLM).remote(
-    model="facebook/opt-125m",
+    model=MODEL_NAME,
     enforce_eager=True,
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
@@ -159,13 +152,18 @@ llm = ray.remote(
 
 # Generate text from the prompts.
 prompts = [
-    "Hello, my name is",
+    "My name is",
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
 ]
 
-sampling_params = SamplingParams(temperature=0)
+sampling_params = [
+    SamplingParams(temperature=0, max_tokens=2),
+    SamplingParams(temperature=0, max_tokens=32),
+    SamplingParams(temperature=0, max_tokens=32),
+    SamplingParams(temperature=0, max_tokens=32),
+]
 
 # Set up the communication channel between the training process and the
 # inference engine.
@@ -191,7 +189,8 @@ ray.get(handle)
 
 
 generation_futures = [
-    llm.generate_with_retry.remote(prompt, sampling_params) for prompt in prompts
+    llm.generate_with_retry.remote(prompt, params)
+    for prompt, params in zip(prompts, sampling_params)
 ]
 
 finished, pending = ray.wait(generation_futures, num_returns=1)

@@ -47,12 +47,6 @@ BASE_URL = "http://localhost:8000"
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Thinking-2507"
 
 
-INFERENCE_WORLD_SIZE = 2
-WORLD_SIZE = INFERENCE_WORLD_SIZE + 1
-
-DEVICE = f"cuda:{INFERENCE_WORLD_SIZE}"
-
-
 def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list[str]:
     """Generate completions using the OpenAI-compatible API."""
     results = []
@@ -118,11 +112,24 @@ def finalize_weight_update(base_url: str) -> None:
     response.raise_for_status()
 
 
+def get_world_size(base_url: str) -> int:
+    """Get world size from the vLLM server."""
+    url = f"{base_url}/get_world_size"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    return response.json()["world_size"]
+
+
 def main():
+    # Get the inference world size from the vLLM server
+    inference_world_size = get_world_size(BASE_URL)
+    world_size = inference_world_size + 1  # +1 for the trainer
+    device = f"cuda:{inference_world_size}"
+
     # Load the training model
     print(f"Loading training model: {MODEL_NAME}")
     train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
-    train_model.to(DEVICE)
+    train_model.to(device)
 
     # Create OpenAI client pointing to the vLLM server
     client = OpenAI(
@@ -161,14 +168,13 @@ def main():
 
     init_thread = threading.Thread(
         target=init_weight_transfer,
-        args=(BASE_URL, master_address, master_port, rank_offset, WORLD_SIZE),
+        args=(BASE_URL, master_address, master_port, rank_offset, world_size),
     )
     init_thread.start()
 
     # Initialize NCCL process group on trainer side
-    device = torch.device(DEVICE)
     model_update_group = stateless_init_process_group(
-        master_address, master_port, 0, WORLD_SIZE, device
+        master_address, master_port, 0, world_size, torch.device(device)
     )
 
     # Wait for init_weight_transfer to complete
