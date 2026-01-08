@@ -540,16 +540,29 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        self._grouped_topk_impl: GroupedTopk | None = None
+        if self.use_grouped_topk:
+            assert self.num_expert_group is not None
+            assert self.topk_group is not None
+            self._grouped_topk_impl = GroupedTopk(
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
+
         # ToDo: Better logic to determine the routing method type
         if routing_method_type is not None:
             self.routing_method_type: RoutingMethodType = routing_method_type
         else:
-            if scoring_func == "sigmoid":
-                if self.use_grouped_topk:
-                    self.routing_method_type = RoutingMethodType.DeepSeekV3
-                elif self.top_k == 1:
-                    self.routing_method_type = RoutingMethodType.Llama4
-            elif self.scoring_func == "softmax":
+            if self.use_grouped_topk:
+                self.routing_method_type = RoutingMethodType.DeepSeekV3
+            elif self.top_k == 1:
+                self.routing_method_type = RoutingMethodType.Llama4
+            elif self.scoring_func == "softmax" or self.scoring_func == "sigmoid":
                 self.routing_method_type = (
                     RoutingMethodType.Renormalize
                     if not self.renormalize
