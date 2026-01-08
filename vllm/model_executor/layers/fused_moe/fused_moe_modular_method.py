@@ -95,6 +95,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             hidden_states=x,
             router_logits=router_logits,
         )
+        logger.info(f"after se: {x.dtype=}, {topk_weights.dtype=}, {topk_ids.dtype=}")
 
         result = self.fused_experts(
             hidden_states=x,
