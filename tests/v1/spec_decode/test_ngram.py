@@ -192,12 +192,15 @@ def test_ngram_proposer():
     assert np.array_equal(result[0], [3, 1])
     assert len(result[1]) == 0
     assert np.array_equal(result[2], [9, 7])
-    # Verify internal arrays written to correct indices
-    assert proposer.valid_ngram_num_drafts[0] == 2
-    assert proposer.valid_ngram_num_drafts[1] == 0
-    assert proposer.valid_ngram_num_drafts[2] == 2
-    assert np.array_equal(proposer.valid_ngram_draft[0, :2], [3, 1])
-    assert np.array_equal(proposer.valid_ngram_draft[2, :2], [9, 7])
+    # Verify internal arrays written to correct indices.
+    # Only leader rank does ngram computation whereas
+    # other ranks receive it via broadcast
+    if proposer.tp_group.rank == proposer.leader_rank:
+        assert proposer.valid_ngram_num_drafts[0] == 2
+        assert proposer.valid_ngram_num_drafts[1] == 0
+        assert proposer.valid_ngram_num_drafts[2] == 2
+        assert np.array_equal(proposer.valid_ngram_draft[0, :2], [3, 1])
+        assert np.array_equal(proposer.valid_ngram_draft[2, :2], [9, 7])
 
     # test if 0 threads available: can happen if TP size > CPU count
     ngram_proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
