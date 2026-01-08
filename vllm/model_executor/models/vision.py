@@ -123,9 +123,10 @@ def is_vit_use_data_parallel():
     """
     vllm_config: VllmConfig = get_current_vllm_config()
     multimodal_config: MultiModalConfig | None = vllm_config.multimodal_config
-    return (
+    mm_encoder_tp_mode = (
         multimodal_config.mm_encoder_tp_mode if multimodal_config is not None else None
     )
+    return mm_encoder_tp_mode == "data"
 
 
 def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
