@@ -72,6 +72,7 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.sampling_params import (
@@ -129,36 +130,6 @@ class ErrorInfo(OpenAIBaseModel):
 
 class ErrorResponse(OpenAIBaseModel):
     error: ErrorInfo
-
-
-class VLLMValidationError(ValueError):
-    """vLLM-specific validation error for request validation failures.
-
-    Args:
-        message: The error message describing the validation failure.
-        parameter: Optional parameter name that failed validation.
-        value: Optional value that was rejected during validation.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        parameter: str | None = None,
-        value: Any = None,
-    ) -> None:
-        super().__init__(message)
-        self.parameter = parameter
-        self.value = value
-
-    def __str__(self):
-        base = super().__str__()
-        extras = []
-        if self.parameter is not None:
-            extras.append(f"parameter={self.parameter}")
-        if self.value is not None:
-            extras.append(f"value={self.value}")
-        return f"{base} ({', '.join(extras)})" if extras else base
 
 
 class ModelPermission(OpenAIBaseModel):

@@ -531,11 +531,13 @@ def fused_moe_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
-    if HAS_BIAS:
-        accumulator = accumulator + bias[None, :]
+
+    # Router weight multiplication MUST happen in float32 before precision
+    # conversion for numerical stability (especially critical on ROCm).
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
+
     if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
     elif use_fp8_w8a8 or use_int8_w8a8:
@@ -545,6 +547,11 @@ def fused_moe_kernel(
             accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
+
+    # Bias is added AFTER dequantization since bias is typically stored in
+    # the output dtype and should not be scaled by quantization factors.
+    if HAS_BIAS:
+        accumulator = accumulator + bias[None, :]
 
     # -----------------------------------------------------------
     # Write back the block of the output
@@ -1642,7 +1649,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias.to(gating_output.dtype),
+            e_score_correction_bias,
             1,  # scoring_func=1 for sigmoid
         )
     elif scoring_func == "softmax":
@@ -1656,7 +1663,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias.to(gating_output.dtype),
+            e_score_correction_bias,
             0,  # scoring_func=0 (no activation, scores already computed)
         )
     else:
@@ -2330,7 +2337,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1 = (M, topk, max(N // 2, K))
+        # For fused activations (SwiGLU): N = 2 * intermediate, after act = N/2
+        # For non-fused activations: N = intermediate, after act = N
+        intermediate_size = N // 2 if self.quant_config.is_act_and_mul else N
+        workspace1 = (M, topk, max(intermediate_size, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -2405,8 +2415,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        # For fused activations (SwiGLU): output is N/2, for non-fused: output is N
+        intermediate_size = N // 2 if self.quant_config.is_act_and_mul else N
         intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, N // 2)
+            workspace13, (num_tokens * top_k_num, intermediate_size)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
