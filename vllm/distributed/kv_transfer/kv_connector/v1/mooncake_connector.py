@@ -412,9 +412,15 @@ class MooncakeConnectorWorker:
 
         assert vllm_config.kv_transfer_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.num_workers = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "num_workers", 10
+        self.num_sender_workers = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "num_workers", 10
+            )
         )
+        # Create more tasks than workers to keep the thread pool saturated.
+        # Tasks can await async events, so a surplus (2x is a robust heuristic)
+        # prevents workers from idling.
+        self.num_sender_tasks = self.num_sender_workers * 2
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -424,21 +430,21 @@ class MooncakeConnectorWorker:
         if self.kv_role != "kv_consumer":
             # Background threads for sending kvcaches to D.
             self._sender_executor = ThreadPoolExecutor(
-                max_workers=self.num_workers, thread_name_prefix="vllm-mooncake-sender"
+                max_workers=self.num_sender_workers,
+                thread_name_prefix="vllm-mooncake-sender",
             )
             logger.debug(
-                "Mooncake Prefiller: use %d workers to send kvcaches", self.num_workers
+                "Mooncake Prefiller: use %d workers to send kvcaches",
+                self.num_sender_workers,
             )
             # An asyncio queue to buffer incoming requests for the sender
-            self.sender_worker_queue: asyncio.Queue[tuple[bytes, bytes]] = (
-                asyncio.Queue()
-            )
+            self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
             self.sender_loop = asyncio.new_event_loop()
             # Background thread for processing new sending requests.
-            self._mooncake_sender_t: threading.Thread = threading.Thread(
+            self._sender_listener_t = threading.Thread(
                 target=_async_loop, args=(self.sender_loop,), daemon=True
             )
-            self._mooncake_sender_t.start()
+            self._sender_listener_t.start()
 
         if self.kv_role != "kv_producer":
             self.receiver_loop = asyncio.new_event_loop()
@@ -495,12 +501,12 @@ class MooncakeConnectorWorker:
             self._sender_executor.shutdown(wait=False)
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
-                self._mooncake_sender_t.join()
+                self._sender_listener_t.join()
         if self.kv_role != "kv_producer" and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
 
-    async def _mooncake_sender(
+    async def _mooncake_sender_listener(
         self, ready_event: threading.Event, base_port: int, tp_rank: int
     ):
         """
@@ -513,9 +519,9 @@ class MooncakeConnectorWorker:
         logger.debug("Mooncake sender starting listening on path: %s", path)
 
         # Create async worker tasks that process items from the queue
-        worker_tasks = [
+        sender_tasks = [
             asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_workers * 2)
+            for _ in range(self.num_sender_tasks)
         ]
 
         ready_event.set()
@@ -530,9 +536,9 @@ class MooncakeConnectorWorker:
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
             # Clean up worker tasks
-            for task in worker_tasks:
+            for task in sender_tasks:
                 task.cancel()
-            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            await asyncio.gather(*sender_tasks, return_exceptions=True)
             sock.close()
 
     async def _sender_worker(self, sock: zmq.asyncio.Socket):
@@ -718,7 +724,9 @@ class MooncakeConnectorWorker:
 
         ready_event = threading.Event()
         asyncio.run_coroutine_threadsafe(
-            self._mooncake_sender(ready_event, self.side_channel_port, self.tp_rank),
+            self._mooncake_sender_listener(
+                ready_event, self.side_channel_port, self.tp_rank
+            ),
             self.sender_loop,
         )
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
