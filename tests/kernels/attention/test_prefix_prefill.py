@@ -22,6 +22,7 @@ DTYPES = [torch.float16]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
+BLOCK_SIZES = [8, 16, 32, 64, 128, 544]
 
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
 
@@ -94,6 +95,7 @@ def create_alibi_causal_mask(
     return alibi_bias.unsqueeze(0)
 
 
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -107,6 +109,7 @@ def test_contexted_kv_attention(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
     sliding_window: int,
     dtype: torch.dtype,
     kv_cache_dtype: str,

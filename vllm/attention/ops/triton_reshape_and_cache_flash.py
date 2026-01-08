@@ -28,6 +28,7 @@ def reshape_and_cache_kernel_flash(
     head_size: tl.constexpr,
     block_size: tl.constexpr,
     x: tl.constexpr,
+    USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
     # tune parameters
@@ -48,8 +49,7 @@ def reshape_and_cache_kernel_flash(
     src_key_idx = token_idx * key_stride
     src_value_idx = token_idx * value_stride
 
-    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2:
+    if USE_HEAD_MAJOR_LAYOUT:
         # Decompose the tile index back into head and dim coordinates.
         cur_head = tile_pos // head_size
         cur_dim = tile_pos % head_size
@@ -126,9 +126,8 @@ def triton_reshape_and_cache_flash(
     num_heads = key.shape[1]
     head_size = key.shape[2]
 
-    temp_bs = key_cache.shape[3] if key_cache.ndim == 5 else key_cache.shape[1]
-    is_pow2 = temp_bs > 0 and (temp_bs & (temp_bs - 1) == 0)
-    if not is_pow2:
+    use_head_major_layout = key_cache.ndim == 5
+    if use_head_major_layout:
         block_size = key_cache.shape[3]
         x = key_cache.shape[4]
         head_stride = key_cache.stride(1)
@@ -215,6 +214,7 @@ def triton_reshape_and_cache_flash(
         head_size=head_size,
         block_size=block_size,
         x=x,
+        USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
         # FP8 flags
         FP8_KV_CACHE=FP8_KV_CACHE,
         # autotune parameters
