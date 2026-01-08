@@ -29,6 +29,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -37,16 +38,15 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaMLP
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
 
 from .utils import (
@@ -70,7 +70,7 @@ class LoopCoderAttention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
-        layer_idx: int = 0
+        layer_idx: int = 0,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -129,7 +129,7 @@ class LoopCoderAttention(nn.Module):
         self.attn = nn.ModuleList()
 
         base_cache_config = cache_config
-        
+
         for loop_idx in range(self.loop_num):
             base_layer_idx = extract_layer_index(prefix)
             unique_layer_idx = loop_idx * total_layers + base_layer_idx
@@ -195,9 +195,9 @@ class LoopCoderAttention(nn.Module):
             num_tokens, _ = q.shape
             num_heads = self.num_heads
             head_dim = self.head_dim
-            
+
             q_reshaped = q.view(num_tokens, num_heads, head_dim).transpose(0, 1)
-            
+
             global_attn_output = global_attn(q, None, None)
             local_attn_output = local_attn(q, k, v)
             assert gate_proj is not None, "gate_proj must be provided for loop_idx > 0"
@@ -214,7 +214,7 @@ class LoopCoderDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        layer_idx: int = 0
+        layer_idx: int = 0,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -248,7 +248,9 @@ class LoopCoderDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -276,13 +278,16 @@ class LoopCoderDecoderLayer(nn.Module):
 
 class LoopGateProjection(nn.Module):
     """Gate projection for mixed attention in Loop 2+.
-    
+
     Computes: g = sigmoid(linear(Q)) for each head independently.
-    This gate determines how much to use Loop1's KV (global) vs current loop's KV (local).
-    
+    This gate determines how much to use Loop1's KV (global) vs current
+    loop's KV (local).
+
     Supports tensor parallelism: each GPU handles a subset of heads.
-    The weight matrix has shape [num_heads, head_dim] and is split along the head dimension.
+    The weight matrix has shape [num_heads, head_dim] and is split along
+    the head dimension.
     """
+
     def __init__(
         self,
         total_num_heads: int,
@@ -296,7 +301,7 @@ class LoopGateProjection(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        
+
         self.gate_proj = ColumnParallelLinear(
             head_dim,
             self.total_num_heads,
@@ -305,42 +310,50 @@ class LoopGateProjection(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.gate_proj",
         )
-    
+
     def forward(self, query: torch.Tensor) -> torch.Tensor:
         """Compute gate values from query tensor.
-        
+
         Args:
             query: [num_heads, num_tokens, head_dim] (vLLM flattened format)
                 where num_heads is the number of heads on this TP rank
                 and num_tokens = batch * seq_len
-            
+
         Returns:
             gate: [num_tokens, num_heads * head_dim] (flattened format matching q shape)
         """
         num_heads, num_tokens, head_dim = query.shape
-        
-        assert num_heads == self.num_heads, f"Expected {self.num_heads} heads, got {num_heads}"
-        
+
+        assert num_heads == self.num_heads, (
+            f"Expected {self.num_heads} heads, got {num_heads}"
+        )
+
         query_flat = query.reshape(-1, head_dim)
-        
+
         gate_logits_flat, _ = self.gate_proj(query_flat)
-        
-        gate_logits = gate_logits_flat.reshape(num_heads, num_tokens, self.num_heads) # [num_heads, num_tokens, num_heads]
-        
+
+        gate_logits = gate_logits_flat.reshape(
+            num_heads, num_tokens, self.num_heads
+        )  # [num_heads, num_tokens, num_heads]
+
         # Extract diagonal: each head h's query should use output column h
         # gate_logits[h, :, h] gives the output for head h at each token
-        gate_logits = torch.diagonal(gate_logits, dim1=0, dim2=2)  # [num_tokens, num_heads]
+        gate_logits = torch.diagonal(
+            gate_logits, dim1=0, dim2=2
+        )  # [num_tokens, num_heads]
         gate_logits = gate_logits.transpose(0, 1)  # [num_heads, num_tokens]
         gate_logits = gate_logits.unsqueeze(-1)  # [num_heads, num_tokens, 1]
-        
+
         # Apply sigmoid
         gate = torch.sigmoid(gate_logits)  # [num_heads, num_tokens, 1]
-        
+
         # Expand and reshape to match q shape: [num_tokens, num_heads * head_dim]
         gate = gate.transpose(0, 1)  # [num_tokens, num_heads, 1]
         gate = gate.expand(-1, -1, head_dim)  # [num_tokens, num_heads, head_dim]
-        gate = gate.reshape(num_tokens, num_heads * head_dim)  # [num_tokens, num_heads * head_dim]
-        
+        gate = gate.reshape(
+            num_tokens, num_heads * head_dim
+        )  # [num_tokens, num_heads * head_dim]
+
         return gate
 
 
@@ -394,7 +407,6 @@ class IQuestLoopCoderModel(nn.Module):
         self.loop_num = getattr(self.config, "loop_num", 2)
         self.window_size = getattr(self.config, "loop_window_size", 64)
 
-
         # Gate projections for Loop 2+ (one per layer)
         head_dim = config.hidden_size // config.num_attention_heads
         _, _, self.gate_projections = make_layers(
@@ -437,16 +449,16 @@ class IQuestLoopCoderModel(nn.Module):
             hidden_states = self.embed_input_ids(input_ids)
 
         for loop_idx in range(self.loop_num):
-            for layer_idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer]
+            ):
                 # Get the actual layer index (accounting for pipeline parallelism)
                 actual_layer_idx = self.start_layer + layer_idx
                 # Get gate_proj for this layer (only for loop_idx > 0)
                 gate_proj = (
                     self.gate_projections[actual_layer_idx] if loop_idx > 0 else None
                 )
-                hidden_states = layer(
-                    positions, hidden_states, loop_idx, gate_proj
-                )
+                hidden_states = layer(positions, hidden_states, loop_idx, gate_proj)
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -505,10 +517,12 @@ class IQuestLoopCoderModel(nn.Module):
                         vllm_name = name.replace(".bias", ".gate_proj.bias")
                     else:
                         continue
-                    
+
                     if vllm_name in params_dict:
                         param = params_dict[vllm_name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
                         weight_loader(param, loaded_weight)
                         loaded_params.add(vllm_name)
                         continue
