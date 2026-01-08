@@ -19,10 +19,10 @@ from vllm.model_executor.layers.pool.methods import (
     PoolingMethod,
     TokenPoolingMethodOutput,
 )
+from vllm.model_executor.layers.pool.poolers import TokenPoolerOutput
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces_base import default_pooling_type

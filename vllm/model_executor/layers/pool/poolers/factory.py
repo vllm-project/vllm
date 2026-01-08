@@ -8,7 +8,7 @@ from vllm.model_executor.layers.pool.heads import (
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,
 )
-from vllm.model_executor.layers.pool.methods import get_pooling_method
+from vllm.model_executor.layers.pool.methods import get_token_pooling_method
 
 from .common import SimplePooler
 from .token import ClassifierPooler
@@ -16,7 +16,7 @@ from .tokenwise import AllPooler, StepPooler
 
 
 def pooler_for_embed(pooler_config: PoolerConfig):
-    pooling = get_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_token_pooling_method(pooler_config.get_pooling_type())
     head = EmbeddingPoolerHead()
 
     return SimplePooler(pooling=pooling, head=head)
@@ -27,7 +27,7 @@ def pooler_for_classify(
     classifier: ClassifierFn | None,
     act_fn: PoolerActivation | str | None = None,
 ):
-    pooling = get_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_token_pooling_method(pooler_config.get_pooling_type())
 
     return ClassifierPooler(pooling=pooling, classifier=classifier, act_fn=act_fn)
 

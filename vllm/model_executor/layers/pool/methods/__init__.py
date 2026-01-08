@@ -7,7 +7,7 @@ from .base import (
     TokenwisePoolingMethodOutput,
     TokenwisePoolingMethodOutputItem,
 )
-from .factory import get_pooling_method
+from .factory import get_token_pooling_method
 from .token import CLSPool, LastPool, MeanPool
 from .tokenwise import AllPool
 
@@ -21,5 +21,5 @@ __all__ = [
     "LastPool",
     "MeanPool",
     "AllPool",
-    "get_pooling_method",
+    "get_token_pooling_method",
 ]

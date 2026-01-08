@@ -22,14 +22,14 @@ from vllm.model_executor.layers.pool import (
 from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
 from vllm.model_executor.layers.pool.methods import (
     TokenPoolingMethodOutput,
-    get_pooling_method,
+    get_token_pooling_method,
 )
+from vllm.model_executor.layers.pool.poolers import TokenPoolerOutput
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
@@ -290,7 +290,7 @@ class ModernBertPooler(Pooler):
         super().__init__()
 
         pooling_type = config.classifier_pooling.upper()
-        self.pooling = get_pooling_method(pooling_type)
+        self.pooling = get_token_pooling_method(pooling_type)
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )

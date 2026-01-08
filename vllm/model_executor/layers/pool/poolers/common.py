@@ -90,7 +90,7 @@ class DispatchPooler(Pooler):
         for task, group in groupby(pooling_metadata.tasks):
             if not (pooler := poolers_by_task.get(task)):
                 raise ValueError(
-                    f"Unsupported task: {task} "
+                    f"Unsupported task: {task!r} "
                     f"Supported tasks: {self.get_supported_tasks()}"
                 )
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from .common import PoolingParamsUpdate
-from .methods import AllPool, CLSPool, LastPool, MeanPool, get_pooling_method
+from .methods import AllPool, CLSPool, LastPool, MeanPool, get_token_pooling_method
 from .poolers import (
     AllPooler,
     ClassifierPooler,
@@ -29,7 +29,7 @@ __all__ = [
     "LastPool",
     "MeanPool",
     "AllPool",
-    "get_pooling_method",
+    "get_token_pooling_method",
     "pooler_for_classify",
     "pooler_for_embed",
     "pooler_for_token_classify",
