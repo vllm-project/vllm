@@ -248,9 +248,7 @@ class PCPManager:
         cu_orig_tokens = np.cumsum(num_scheduled_tokens)
         orig_start_offsets = np.concatenate([[0], cu_orig_tokens[:-1]])
 
-        # For each PCP token, find which request it belongs to
         pcp_total_tokens = int(pcp_tokens.sum())
-        _pcp_req_indices = np.repeat(arange_np[:num_reqs], pcp_tokens)
 
         # padding_mask: True if position >= original seq len for that request
         orig_seq_lens_expanded = np.repeat(num_scheduled_tokens, pcp_tokens)
