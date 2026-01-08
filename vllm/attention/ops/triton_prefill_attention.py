@@ -202,9 +202,9 @@ def _fwd_kernel(
 def get_block_size(dtype: torch.dtype) -> int:
     if dtype == torch.float32:
         return 32
-    elif (
-        current_platform.is_cuda_alike()
-    ) and current_platform.get_device_capability().major > 8:
+    elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
+        80
+    ):
         return 128
     else:
         return 64

@@ -100,7 +100,7 @@ direct_register_custom_op(
 )
 
 
-def flashinfer_fused_moe_per_tensor_scale_fp8(
+def fi_trtllm_fp8_per_tensor_moe(
     routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
@@ -158,7 +158,7 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     )
 
 
-def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
+def fi_trtllm_fp8_per_tensor_moe_fake(
     routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
@@ -184,9 +184,9 @@ def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
 
 # TODO(bnell): Does this really need to be a torch.op?
 direct_register_custom_op(
-    op_name="flashinfer_fused_moe_per_tensor_scale_fp8",
-    op_func=flashinfer_fused_moe_per_tensor_scale_fp8,
+    op_name="fi_trtllm_fp8_per_tensor_moe",
+    op_func=fi_trtllm_fp8_per_tensor_moe,
     mutates_args=["hidden_states"],
-    fake_impl=flashinfer_fused_moe_per_tensor_scale_fp8_fake,
+    fake_impl=fi_trtllm_fp8_per_tensor_moe_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )

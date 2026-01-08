@@ -126,12 +126,12 @@ def create_and_prepopulate_kv_cache(
         Tuple of (kv_cache, updated_block_table)
     """
     batch_size = len(k_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
         common_attn_metadata.query_start_loc_cpu[1:]
         - common_attn_metadata.query_start_loc_cpu[:-1]
     )
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
