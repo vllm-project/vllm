@@ -712,7 +712,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
 
-<<<<<<< HEAD
         # # # DEBUG: Log received tensor info
         # # logger.info(f"[SLAB_DEBUG] FusedMoE3D.set_lora called for index {index}:")
         # # logger.info(f"  - num_experts: {num_experts}")
@@ -736,18 +735,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         # # logger.info(f"  - w13_lora_a shape (after reshape): {w13_lora_a.shape}")
         # # logger.info(f"  - w13_lora_b shape (after reshape/permute): {w13_lora_b.shape}")
 
-=======
-        # (num_experts,rank,input_size)
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        # (output_size,num_experts,rank)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
-        # (num_experts,output_size,rank)
-        w13_lora_b = w13_lora_b.permute(1, 0, 2)
-        w2_lora_b = w2_lora_b.permute(1, 0, 2)
-
->>>>>>> 46cc1d7f4 (Adress comments)
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
 
