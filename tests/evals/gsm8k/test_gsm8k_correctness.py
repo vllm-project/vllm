@@ -61,6 +61,7 @@ def test_gsm8k_correctness(config_filename):
     server_args.extend(
         [
             "--trust-remote-code",
+            "--disable-uvicorn-access-log",
         ]
     )
 
