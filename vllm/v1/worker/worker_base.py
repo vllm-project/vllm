@@ -208,8 +208,11 @@ class WorkerWrapperBase:
         It is only used during the initialization of the executor,
         to adjust the rpc_rank of workers after we create all workers.
         """
-        if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
+        old_rank = self.rpc_rank
+        if old_rank in rank_mapping:
+            self.rpc_rank = rank_mapping[old_rank]
+            if self.global_rank == old_rank:
+                self.global_rank = rank_mapping[old_rank]
 
     def update_environment_variables(
         self,
