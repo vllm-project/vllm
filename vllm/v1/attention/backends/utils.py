@@ -136,7 +136,7 @@ class CommonAttentionMetadata:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
         if self._num_computed_tokens_cache is None:
             query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-            self._num_computed_tokens_cache = self.seq_lens - query_lens
+            self._num_computed_tokens_cache = self.seq_lens.cpu() - query_lens.cpu()
         return self._num_computed_tokens_cache
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
