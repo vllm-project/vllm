@@ -9,19 +9,7 @@ from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from ..abstract import Pooler, PoolerOutput
-
-
-class DummyPooler(Pooler):
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"plugin", "score"}
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
-        return hidden_states
+from .abstract import Pooler, PoolerOutput
 
 
 class DispatchPooler(Pooler):
@@ -75,3 +63,18 @@ class DispatchPooler(Pooler):
     def extra_repr(self) -> str:
         s = f"supported_task={self.get_supported_tasks()}"
         return s
+
+
+class IdentityPooler(Pooler):
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"plugin", "score"}
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        return hidden_states
+
+
+__all__ = ["DispatchPooler", "IdentityPooler"]

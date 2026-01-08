@@ -2,6 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from .abstract import *
 from .common import *
+from .special import *
 from .token import *
 from .tokenwise import *
-from .universal import *
