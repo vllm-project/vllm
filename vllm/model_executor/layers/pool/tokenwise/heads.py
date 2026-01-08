@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from abc import abstractmethod
+from abc import ABC, abstractmethod
+from typing import TypeAlias
+
+import torch
+import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.pool.activations import (
@@ -9,14 +13,15 @@ from vllm.model_executor.layers.pool.activations import (
     resolve_classifier_act_fn,
 )
 from vllm.model_executor.layers.pool.common import ClassifierFn
-from vllm.model_executor.layers.pool.methods import TokenwisePoolingMethodOutputItem
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 
-from .base import PoolerHead, TokenwisePoolerHeadOutput
+from .methods import TokenwisePoolingMethodOutputItem
+
+TokenwisePoolerHeadOutput: TypeAlias = torch.Tensor | None
 
 
-class TokenwisePoolerHead(PoolerHead):
+class TokenwisePoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,

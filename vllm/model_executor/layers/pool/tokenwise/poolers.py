@@ -1,19 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import abstractmethod
 from collections.abc import Set
+from typing import TypeAlias
 
 import torch
 
-from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
-from vllm.model_executor.layers.pool.heads.tokenwise import TokenwisePoolerHead
-from vllm.model_executor.layers.pool.methods.tokenwise import AllPool
+from vllm.config import PoolerConfig
+from vllm.model_executor.layers.pool.activations import PoolerActivation
+from vllm.model_executor.layers.pool.common import ClassifierFn, PoolingParamsUpdate
+from vllm.model_executor.layers.pool.tokenwise.heads import TokenwisePoolerHead
+from vllm.model_executor.layers.pool.tokenwise.methods import AllPool
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import Pooler, TokenwisePoolerOutput
+from ..abstract import Pooler
+from .heads import TokenClassifierPoolerHead, TokenEmbeddingPoolerHead
+
+TokenwisePoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
 
 
-class AllPooler(Pooler):
+class TokenwisePooler(Pooler):
+    @abstractmethod
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenwisePoolerOutput:
+        raise NotImplementedError
+
+
+class AllPooler(TokenwisePooler):
     def __init__(self, head: TokenwisePoolerHead) -> None:
         super().__init__()
 
@@ -35,7 +52,7 @@ class AllPooler(Pooler):
         return [self.head(d, p) for d, p in zip(pooled_data, pooling_params)]
 
 
-class StepPooler(Pooler):
+class StepPooler(TokenwisePooler):
     def __init__(self, head: TokenwisePoolerHead) -> None:
         super().__init__()
 
@@ -88,3 +105,31 @@ class StepPooler(Pooler):
         assert len(pooled_data) == len(pooling_params)
 
         return [self.head(d, p) for d, p in zip(pooled_data, pooling_params)]
+
+
+def pooler_for_token_embed(pooler_config: PoolerConfig):
+    pooling_type = pooler_config.get_pooling_type()
+    head = TokenEmbeddingPoolerHead()
+
+    if pooling_type == "ALL":
+        return AllPooler(head=head)
+    if pooling_type == "STEP":
+        return StepPooler(head=head)
+
+    raise NotImplementedError(f"Unsupported method: {pooling_type!r}")
+
+
+def pooler_for_token_classify(
+    pooler_config: PoolerConfig,
+    classifier: ClassifierFn | None = None,
+    act_fn: PoolerActivation | str | None = None,
+):
+    pooling_type = pooler_config.get_pooling_type()
+    head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+
+    if pooling_type == "ALL":
+        return AllPooler(head=head)
+    if pooling_type == "STEP":
+        return StepPooler(head=head)
+
+    raise NotImplementedError(f"Unsupported method: {pooling_type!r}")

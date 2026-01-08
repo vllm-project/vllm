@@ -9,17 +9,17 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pool import (
     DispatchPooler,
-    Pooler,
     PoolingParamsUpdate,
     pooler_for_token_embed,
 )
 from vllm.model_executor.layers.pool.activations import PoolerNormalize
-from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
-from vllm.model_executor.layers.pool.methods import (
-    PoolingMethod,
+from vllm.model_executor.layers.pool.token import (
+    TokenPooler,
+    TokenPoolerHeadOutput,
+    TokenPoolerOutput,
+    TokenPoolingMethod,
     TokenPoolingMethodOutput,
 )
-from vllm.model_executor.layers.pool.poolers import TokenPoolerOutput
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -30,7 +30,7 @@ from .interfaces_base import default_pooling_type
 logger = init_logger(__name__)
 
 
-class GritLMMeanPool(PoolingMethod):
+class GritLMMeanPool(TokenPoolingMethod):
     """As `MeanPool`, but only includes non-instruction tokens."""
 
     def __init__(self, model_config: ModelConfig):
@@ -177,7 +177,7 @@ class GritLMMeanPool(PoolingMethod):
         return pooled_data
 
 
-class GritLMPooler(Pooler):
+class GritLMPooler(TokenPooler):
     def __init__(self, model_config: ModelConfig):
         super().__init__()
 

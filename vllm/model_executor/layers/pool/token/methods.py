@@ -1,16 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from collections.abc import Set
+from typing import TypeAlias
 
 import torch
+import torch.nn as nn
 
+from vllm.config.pooler import PoolingTypeStr
+from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import PoolingMethod, TokenPoolingMethodOutput
+TokenPoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
-class CLSPool(PoolingMethod):
+class TokenPoolingMethod(nn.Module, ABC):
+    @abstractmethod
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        raise NotImplementedError
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate()
+
+    @abstractmethod
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolingMethodOutput:
+        raise NotImplementedError
+
+
+class CLSPool(TokenPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -27,7 +49,7 @@ class CLSPool(PoolingMethod):
         return hidden_states[pooling_cursor.first_token_indices_gpu]
 
 
-class LastPool(PoolingMethod):
+class LastPool(TokenPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -40,7 +62,7 @@ class LastPool(PoolingMethod):
         return hidden_states[pooling_cursor.last_token_indices_gpu]
 
 
-class MeanPool(PoolingMethod):
+class MeanPool(TokenPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -68,3 +90,14 @@ class MeanPool(PoolingMethod):
         return (
             cumsum[end_indices] - cumsum[start_indices] + hidden_states[start_indices]
         ) / prompt_lens.unsqueeze(1)
+
+
+def get_token_pooling_method(pooling_type: PoolingTypeStr | str):
+    if pooling_type == "LAST":
+        return LastPool()
+    if pooling_type == "CLS":
+        return CLSPool()
+    if pooling_type == "MEAN":
+        return MeanPool()
+
+    raise NotImplementedError(f"Unsupported token pooling method: {pooling_type!r}")

@@ -26,12 +26,13 @@ from vllm.model_executor.layers.pool import (
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
-from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
-from vllm.model_executor.layers.pool.methods import (
+from vllm.model_executor.layers.pool.token import (
+    TokenPooler,
+    TokenPoolerHeadOutput,
+    TokenPoolerOutput,
     TokenPoolingMethodOutput,
     get_token_pooling_method,
 )
-from vllm.model_executor.layers.pool.poolers import TokenPoolerOutput
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.sequence import IntermediateTensors
@@ -603,7 +604,7 @@ class BertMLMHead(nn.Module):
         return logits
 
 
-class SPLADESparsePooler(Pooler):
+class SPLADESparsePooler(TokenPooler):
     """
     SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
@@ -642,10 +643,8 @@ class SPLADESparsePooler(Pooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor:
-        assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
-
-        lens_tensor: torch.Tensor = pooling_metadata.prompt_lens
+    ) -> TokenPoolerOutput:
+        lens_tensor = pooling_metadata.prompt_lens
         lens: list[int] = lens_tensor.tolist()
         B: int = len(lens)
 

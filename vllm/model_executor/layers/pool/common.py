@@ -17,3 +17,6 @@ class PoolingParamsUpdate:
 
     def apply(self, params: PoolingParams) -> None:
         params.requires_token_ids = self.requires_token_ids
+
+
+__all__ = ["PoolingParamsUpdate"]

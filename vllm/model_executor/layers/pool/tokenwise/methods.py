@@ -1,17 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from collections.abc import Set
+from typing import TypeAlias
 
 import torch
+import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import PoolingMethod, TokenwisePoolingMethodOutput
+TokenwisePoolingMethodOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+
+TokenwisePoolingMethodOutputItem: TypeAlias = torch.Tensor | None
+"""Represents a single element of `TokenwisePoolingMethodOutput`."""
 
 
-class AllPool(PoolingMethod):
+class TokenwisePoolingMethod(nn.Module, ABC):
+    @abstractmethod
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        raise NotImplementedError
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate()
+
+    @abstractmethod
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenwisePoolingMethodOutput:
+        raise NotImplementedError
+
+
+class AllPool(TokenwisePoolingMethod):
     def __init__(self):
         super().__init__()
 

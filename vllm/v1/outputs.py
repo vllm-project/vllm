@@ -14,11 +14,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-    from vllm.model_executor.layers.pool.poolers import PoolerOutput as _PoolerOutput
 else:
     KVConnectorStats = object
     KVConnectorKVEvents = object
-    _PoolerOutput = object
 
 
 class LogprobsLists(NamedTuple):
@@ -93,7 +91,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput: TypeAlias = "_PoolerOutput"
+PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
 
 @dataclass

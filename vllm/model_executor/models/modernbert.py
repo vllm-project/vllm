@@ -15,16 +15,16 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.pool import (
     ClassifierPooler,
     DispatchPooler,
-    Pooler,
     PoolingParamsUpdate,
     pooler_for_token_classify,
 )
-from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
-from vllm.model_executor.layers.pool.methods import (
+from vllm.model_executor.layers.pool.token import (
+    TokenPooler,
+    TokenPoolerHeadOutput,
+    TokenPoolerOutput,
     TokenPoolingMethodOutput,
     get_token_pooling_method,
 )
-from vllm.model_executor.layers.pool.poolers import TokenPoolerOutput
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -285,7 +285,7 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(Pooler):
+class ModernBertPooler(TokenPooler):
     def __init__(self, config: ModernBertConfig):
         super().__init__()
 

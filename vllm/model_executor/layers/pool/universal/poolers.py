@@ -6,12 +6,10 @@ from itertools import groupby
 import torch
 
 from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
-from vllm.model_executor.layers.pool.heads import PoolerHead
-from vllm.model_executor.layers.pool.methods import PoolingMethod
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import Pooler, PoolerOutput
+from ..abstract import Pooler, PoolerOutput
 
 
 class DummyPooler(Pooler):
@@ -24,37 +22,6 @@ class DummyPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         return hidden_states
-
-
-class SimplePooler(Pooler):
-    """A layer that pools specific information from hidden states.
-
-    This layer does the following:
-    1. Extracts specific tokens or aggregates data based on pooling method.
-    2. Normalizes output if specified.
-    3. Returns structured results as `PoolerOutput`.
-    """
-
-    def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
-        super().__init__()
-
-        self.pooling = pooling
-        self.head = head
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
 
 
 class DispatchPooler(Pooler):
