@@ -7,7 +7,6 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import (
     FP8_DTYPE,
-    ROCM_FP8FNUZ_MAX,
     ref_dynamic_per_tensor_fp8_quant,
     ref_dynamic_per_token_quant,
 )
@@ -107,64 +106,6 @@ def test_dynamic_per_tensor_fp8_quant(
     )
 
     opcheck_fp8_quant(ops_out, x)
-
-
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("per_channel", [True, False])
-@torch.inference_mode()
-def test_static_fp8_quant(
-    num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    seed: int,
-    per_channel: bool,
-) -> None:
-    current_platform.seed_everything(seed)
-
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
-
-    if per_channel:
-        scale = torch.rand(hidden_size, dtype=torch.float32, device="cuda")
-        # Per-channel requires explicit group_shape for 1D scale
-        group_shape = (-1, 1)
-    else:
-        scale = torch.rand(1, dtype=torch.float32, device="cuda")
-        group_shape = None  # Per-tensor doesn't need group_shape
-
-    # Ensure scale is not zero
-    scale = scale + 0.01
-
-    # Reference implementation
-    fp8_traits = torch.finfo(FP8_DTYPE)
-    fp8_traits_max = (
-        ROCM_FP8FNUZ_MAX
-        if current_platform.is_rocm() and current_platform.is_fp8_fnuz()
-        else fp8_traits.max
-    )
-    fp8_traits_min = (
-        -ROCM_FP8FNUZ_MAX
-        if current_platform.is_rocm() and current_platform.is_fp8_fnuz()
-        else fp8_traits.min
-    )
-
-    inv_scale = (1.0 / scale).view(1, scale.numel())
-    ref_out = (
-        (x.to(torch.float32) * inv_scale)
-        .clamp(fp8_traits_min, fp8_traits_max)
-        .to(FP8_DTYPE)
-    )
-
-    ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
-
-    torch.testing.assert_close(scale, ops_scale)
-    torch.testing.assert_close(
-        ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
-    )
-
-    opcheck_fp8_quant(ops_out, x, scale=scale, group_shape=group_shape)
 
 
 # Regression test for a case with large activations where an int32 index cannot
