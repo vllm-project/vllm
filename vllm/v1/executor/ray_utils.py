@@ -103,11 +103,7 @@ try:
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            from tpu_inference.models.jax.jax_intermediate_tensor import (
-                JaxIntermediateTensors,
-            )
-
-            if isinstance(output, IntermediateTensors | JaxIntermediateTensors):
+            if self._is_intermediate_tensors(output):
                 return scheduler_output, grammar_output, output
 
             if isinstance(output, AsyncModelRunnerOutput):
@@ -128,6 +124,9 @@ try:
 
         def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
+
+        def _is_intermediate_tensors(self, output) -> bool:
+            return isinstance(output, IntermediateTensors)
 
     ray_import_err = None
 
