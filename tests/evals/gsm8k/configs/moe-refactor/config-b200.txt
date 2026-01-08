@@ -11,3 +11,4 @@ Qwen3-30B-A3B-NvFp4-ModelOpt-marlin.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass-dp-ep.yaml
+NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-triton.yaml
