@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Set
+from collections.abc import Callable, Set
+from typing import TypeAlias
 
 import torch
 
@@ -9,12 +10,17 @@ from vllm.model_executor.layers.pool.activations import (
     PoolerActivation,
     resolve_classifier_act_fn,
 )
-from vllm.model_executor.layers.pool.common import ClassifierFn, PoolingFn
+from vllm.model_executor.layers.pool.common import ClassifierFn
+from vllm.model_executor.layers.pool.methods import TokenPoolingMethodOutput
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import Pooler
+from .base import Pooler, TokenPoolerOutput
+
+TokenPoolingMethod: TypeAlias = Callable[
+    [torch.Tensor, PoolingMetadata],
+    TokenPoolingMethodOutput,
+]
 
 
 class ClassifierPooler(Pooler):
@@ -28,7 +34,7 @@ class ClassifierPooler(Pooler):
 
     def __init__(
         self,
-        pooling: PoolingFn,
+        pooling: TokenPoolingMethod,
         classifier: ClassifierFn | None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:

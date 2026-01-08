@@ -6,12 +6,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.pooling_params import PoolingParams
-from vllm.v1.pool.metadata import PoolingMetadata
 
-PoolingFn = Callable[
-    [torch.Tensor | list[torch.Tensor], PoolingMetadata],
-    torch.Tensor | list[torch.Tensor],
-]
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 
 

@@ -8,10 +8,9 @@ from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
 from vllm.model_executor.layers.pool.heads.tokenwise import TokenwisePoolerHead
 from vllm.model_executor.layers.pool.methods.tokenwise import AllPool
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import TokenwisePoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import Pooler
+from .base import Pooler, TokenwisePoolerOutput
 
 
 class AllPooler(Pooler):
