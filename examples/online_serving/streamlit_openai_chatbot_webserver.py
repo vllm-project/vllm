@@ -159,8 +159,8 @@ def get_llm_response(messages, model, reason, content_ph=None, reasoning_ph=None
         for chunk in response:
             delta = chunk.choices[0].delta
             # Stream reasoning first
-            if reason and hasattr(delta, "reasoning_content") and live_think:
-                rc = delta.reasoning_content
+            if reason and hasattr(delta, "reasoning") and live_think:
+                rc = delta.reasoning
                 if rc:
                     think_text += rc
                     live_think.markdown(think_text + "▌")
@@ -262,8 +262,8 @@ def server_supports_reasoning():
         messages=[{"role": "user", "content": "Hi"}],
         stream=False,
     )
-    return hasattr(resp.choices[0].message, "reasoning_content") and bool(
-        resp.choices[0].message.reasoning_content
+    return hasattr(resp.choices[0].message, "reasoning") and bool(
+        resp.choices[0].message.reasoning
     )
 
 

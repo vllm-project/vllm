@@ -3,17 +3,17 @@
 
 import random
 import time
-from typing import Optional
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    FlexibleArgumentParser,
     create_kv_caches_with_random,
+    set_random_seed,
 )
 
 logger = init_logger(__name__)
@@ -37,9 +37,9 @@ def main(
     seed: int,
     do_profile: bool,
     device: str = "cuda",
-    kv_cache_dtype: Optional[str] = None,
+    kv_cache_dtype: str | None = None,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(

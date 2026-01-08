@@ -1,60 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
+import mteb
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from tests.conftest import HfRunner
-from tests.models.language.pooling_mteb_test.mteb_utils import (
-    VllmMtebEncoder, mteb_test_rerank_models)
-from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from tests.models.utils import RerankModelInfo
+
+from .mteb_score_utils import (
+    MtebCrossEncoderMixin,
+    mteb_test_rerank_models,
+)
 
 RERANK_MODELS = [
-    LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
-                               architecture="GemmaForSequenceClassification",
-                               mteb_score=0.33757,
-                               hf_overrides={
-                                   "architectures":
-                                   ["GemmaForSequenceClassification"],
-                                   "classifier_from_token": ["Yes"],
-                                   "method":
-                                   "no_post_processing",
-                               }),
+    RerankModelInfo(
+        "BAAI/bge-reranker-v2-gemma",
+        architecture="GemmaForSequenceClassification",
+        hf_overrides={
+            "architectures": ["GemmaForSequenceClassification"],
+            "classifier_from_token": ["Yes"],
+            "method": "no_post_processing",
+        },
+        mteb_score=0.33757,
+        pooling_type="LAST",
+        attn_type="decoder",
+        is_prefix_caching_supported=True,
+        is_chunked_prefill_supported=True,
+        chat_template_name="bge-reranker-v2-gemma.jinja",
+    ),
 ]
 
 PROMPT = "Given a query A and a passage B, determine whether the passage contains an answer to the query by providing a prediction of either 'Yes' or 'No'."  # noqa: E501
 
 
-class GemmaRerankerHfRunner(HfRunner):
-
-    def __init__(self,
-                 model_name: str,
-                 dtype: str = "auto",
-                 *args: Any,
-                 **kwargs: Any) -> None:
+class GemmaRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
+    def __init__(
+        self, model_name: str, dtype: str = "auto", *args: Any, **kwargs: Any
+    ) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        super().__init__(model_name, dtype, auto_cls=AutoModelForCausalLM)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                                       padding_side='left')
+
+        HfRunner.__init__(
+            self,
+            model_name=model_name,
+            auto_cls=AutoModelForCausalLM,
+            dtype=dtype,
+            **kwargs,
+        )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.yes_loc = self.tokenizer.convert_tokens_to_ids("Yes")
 
-    @torch.no_grad()
-    def predict(self, prompts: list[list[str]], *args,
-                **kwargs) -> torch.Tensor:
+    @torch.no_grad
+    def predict(
+        self,
+        inputs1: DataLoader[mteb.types.BatchedInput],
+        inputs2: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        queries = [text for batch in inputs1 for text in batch["text"]]
+        corpus = [text for batch in inputs2 for text in batch["text"]]
 
         def get_inputs(pairs, tokenizer, prompt=None):
             if prompt is None:
                 prompt = PROMPT
 
             sep = "\n"
-            prompt_inputs = tokenizer(prompt,
-                                      return_tensors=None,
-                                      add_special_tokens=False)["input_ids"]
-            sep_inputs = tokenizer(sep,
-                                   return_tensors=None,
-                                   add_special_tokens=False)["input_ids"]
+            prompt_inputs = tokenizer(
+                prompt, return_tensors=None, add_special_tokens=False
+            )["input_ids"]
+            sep_inputs = tokenizer(sep, return_tensors=None, add_special_tokens=False)[
+                "input_ids"
+            ]
             inputs = []
             for query, passage in pairs:
                 query_inputs = tokenizer(
@@ -78,8 +99,7 @@ class GemmaRerankerHfRunner(HfRunner):
                     return_token_type_ids=False,
                     add_special_tokens=False,
                 )
-                item["input_ids"] = item[
-                    "input_ids"] + sep_inputs + prompt_inputs
+                item["input_ids"] = item["input_ids"] + sep_inputs + prompt_inputs
                 item["attention_mask"] = [1] * len(item["input_ids"])
                 inputs.append(item)
             return tokenizer.pad(
@@ -89,46 +109,28 @@ class GemmaRerankerHfRunner(HfRunner):
             )
 
         scores = []
-        for query, doc, *_ in prompts:
-            pairs = [(query, doc)]
+        for query, document in zip(queries, corpus):
+            pairs = [(query, document)]
             inputs = get_inputs(pairs, self.tokenizer)
             inputs = inputs.to(self.model.device)
             _n_tokens = inputs["input_ids"].shape[1]
             logits = self.model(**inputs, return_dict=True).logits
-            _scores = (logits[:, -1,
-                              self.yes_loc].view(-1, ).float().sigmoid())
+            _scores = (
+                logits[:, -1, self.yes_loc]
+                .view(
+                    -1,
+                )
+                .float()
+                .sigmoid()
+            )
             scores.append(_scores[0].item())
         return torch.Tensor(scores)
 
 
-class GemmaMtebEncoder(VllmMtebEncoder):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.query_template = "A: {query}\n"
-        self.document_template = "B: {doc}\n{prompt}"
-
-    def predict(
-        self,
-        sentences: list[tuple[str, str,
-                              Optional[str]]],  # query, corpus, prompt
-        *args,
-        **kwargs,
-    ) -> np.ndarray:
-
-        _sentences = []
-        for query, corpus, prompt in sentences:
-            query = self.query_template.format(query=query)
-            corpus = self.document_template.format(doc=corpus, prompt=PROMPT)
-            _sentences.append((query, corpus, prompt))
-
-        return super().predict(_sentences, *args, **kwargs)
-
-
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
-
-    mteb_test_rerank_models(GemmaRerankerHfRunner,
-                            vllm_runner,
-                            model_info,
-                            vllm_mteb_encoder=GemmaMtebEncoder)
+    mteb_test_rerank_models(
+        vllm_runner,
+        model_info,
+        hf_runner=GemmaRerankerHfRunner,
+    )

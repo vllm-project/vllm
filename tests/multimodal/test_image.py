@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pickle
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image, ImageChops
 
+from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.image import ImageMediaIO, convert_image_mode
+
+pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
@@ -41,8 +45,7 @@ def test_rgba_to_rgb():
 def test_rgba_to_rgb_custom_background(tmp_path):
     """Test RGBA to RGB conversion with custom background colors."""
     # Create a simple RGBA image with transparent and opaque pixels
-    rgba_image = Image.new("RGBA", (10, 10),
-                           (255, 0, 0, 255))  # Red with full opacity
+    rgba_image = Image.new("RGBA", (10, 10), (255, 0, 0, 255))  # Red with full opacity
 
     # Make top-left quadrant transparent
     for i in range(5):
@@ -92,7 +95,7 @@ def test_rgba_to_rgb_custom_background(tmp_path):
     assert blue_numpy[0][0][2] == 255  # B
 
     # Test 4: Test with load_bytes method
-    with open(test_image_path, 'rb') as f:
+    with open(test_image_path, "rb") as f:
         image_data = f.read()
 
     image_io_green = ImageMediaIO(rgba_background_color=(0, 255, 0))
@@ -109,42 +112,81 @@ def test_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
 
     # Test invalid types
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color="255,255,255")
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=255)
 
     # Test wrong number of elements
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, 255))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, 255, 255, 255))
 
     # Test non-integer values
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255.0, 255.0, 255.0))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, "255", 255))
 
     # Test out of range values
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(256, 255, 255))
 
-    with pytest.raises(ValueError,
-                       match="rgba_background_color must be a list or tuple"):
+    with pytest.raises(
+        ValueError, match="rgba_background_color must be a list or tuple"
+    ):
         ImageMediaIO(rgba_background_color=(255, -1, 255))
 
     # Test that valid values work
     ImageMediaIO(rgba_background_color=(0, 0, 0))  # Should not raise
     ImageMediaIO(rgba_background_color=[255, 255, 255])  # Should not raise
     ImageMediaIO(rgba_background_color=(128, 128, 128))  # Should not raise
+
+
+def test_media_with_bytes_pickle_roundtrip():
+    """Regression test for pickle/unpickle of MediaWithBytes.
+
+    Verifies that MediaWithBytes can be pickled and unpickled without
+    RecursionError. See: https://github.com/vllm-project/vllm/issues/30818
+    """
+    original_image = Image.open(ASSETS_DIR / "image1.png").convert("RGB")
+    original_bytes = b"test_bytes_data"
+
+    wrapper = MediaWithBytes(media=original_image, original_bytes=original_bytes)
+
+    # Verify attribute delegation works before pickling
+    assert wrapper.width == original_image.width
+    assert wrapper.height == original_image.height
+    assert wrapper.mode == original_image.mode
+
+    # Pickle and unpickle (this would cause RecursionError before the fix)
+    pickled = pickle.dumps(wrapper)
+    unpickled = pickle.loads(pickled)
+
+    # Verify the unpickled object works correctly
+    assert unpickled.original_bytes == original_bytes
+    assert unpickled.media.width == original_image.width
+    assert unpickled.media.height == original_image.height
+
+    # Verify attribute delegation works after unpickling
+    assert unpickled.width == original_image.width
+    assert unpickled.height == original_image.height
+    assert unpickled.mode == original_image.mode
