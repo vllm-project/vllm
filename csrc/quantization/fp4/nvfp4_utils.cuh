@@ -252,7 +252,6 @@ template <class Type>
 __inline__ __device__ PackedVec<Type> compute_silu_mul(
     const PackedVec<Type>& x_vec, const PackedVec<Type>& y_vec) {
   PackedVec<Type> result;
-  using packed_type = typename TypeConverter<Type>::Type;
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
