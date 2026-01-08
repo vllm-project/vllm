@@ -93,8 +93,7 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
@@ -263,7 +262,6 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
     ):
         self._model_runner_output = model_runner_output
-        self._finished_mask = finished_mask
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -276,11 +274,15 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self._raw_pooler_output_cpu = json_map_leaves(
+            raw_pooler_output_cpu = json_map_leaves(
                 lambda x: None if x is None else x.to("cpu", non_blocking=True),
                 self._raw_pooler_output,
             )
             self.async_copy_ready_event.record()
+            self._model_runner_output.pooler_output = [
+                out if include else None
+                for out, include in zip(raw_pooler_output_cpu, finished_mask)
+            ]
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -290,11 +292,6 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Release the device tensors once the copy has completed.
         del self._raw_pooler_output
-
-        self._model_runner_output.pooler_output = [
-            out if include else None
-            for out, include in zip(self._raw_pooler_output_cpu, self._finished_mask)
-        ]
         return self._model_runner_output
 
 
@@ -556,7 +553,13 @@ class GPUModelRunner(
 
         # Only relevant for multimodal models
         if self.supports_mm_inputs:
-            self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+            # Double buffer to avoid race condition: previous iteration's async
+            # copy may still be reading from CPU while current iteration writes.
+            self.is_mm_embed_buffers = [
+                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
+                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
+            ]
+            self.is_mm_embed_idx = 0
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -628,6 +631,7 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        self._draft_token_req_ids: list[str] | None = None
         self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -640,15 +644,30 @@ class GPUModelRunner(
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
-        if self.use_async_scheduling and self.num_spec_tokens:
-            self.valid_sampled_token_count_event = torch.Event()
-            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
-        self.valid_sampled_token_count_cpu = torch.empty(
-            self.max_num_reqs,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=self.pin_memory,
-        )
+        # We also copy the drafted tokens to the CPU asynchronously,
+        # in case we need them for structured outputs.
+        self.draft_token_ids_event: torch.Event | None = None
+        self.draft_token_ids_copy_stream: torch.cuda.Stream | None = None
+        self.valid_sampled_token_count_cpu: torch.Tensor | None = None
+        self.draft_token_ids_cpu: torch.Tensor | None = None
+        if self.num_spec_tokens:
+            self.draft_token_ids_event = torch.Event()
+            self.draft_token_ids_copy_stream = torch.cuda.Stream()
+            self.draft_token_ids_cpu = torch.empty(
+                (self.max_num_reqs, self.num_spec_tokens),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+            if self.use_async_scheduling:
+                self.valid_sampled_token_count_event = torch.Event()
+                self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+                self.valid_sampled_token_count_cpu = torch.empty(
+                    self.max_num_reqs,
+                    dtype=torch.int64,
+                    device="cpu",
+                    pin_memory=self.pin_memory,
+                )
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
@@ -1038,15 +1057,8 @@ class GPUModelRunner(
             self.input_batch.spec_token_ids[req_index].clear()
             self.input_batch.spec_token_ids[req_index].extend(spec_token_ids)
 
-            # there are no draft tokens with async scheduling,
-            # we clear the spec_decoding info in scheduler_output and
-            # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
                 req_state.prev_num_draft_len = num_spec_tokens
-                if num_spec_tokens and self._draft_token_ids is None:
-                    scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
-                    scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
-                    scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
@@ -1293,7 +1305,6 @@ class GPUModelRunner(
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
-        self._draft_token_ids = None
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -2331,8 +2342,13 @@ class GPUModelRunner(
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        # Swap to the other buffer to avoid race condition with previous
+        # iteration's async copy that may still be reading from CPU.
+        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx
+        is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
+
         mm_embeds = list[torch.Tensor]()
-        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False
 
         req_start_idx = 0
@@ -2410,7 +2426,7 @@ class GPUModelRunner(
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
@@ -2537,8 +2553,7 @@ class GPUModelRunner(
 
         model = cast(VllmModelForPooling, self.model)
         raw_pooler_output: PoolerOutput = model.pooler(
-            hidden_states=hidden_states,
-            pooling_metadata=pooling_metadata,
+            hidden_states=hidden_states, pooling_metadata=pooling_metadata
         )
 
         finished_mask = [
@@ -2568,12 +2583,12 @@ class GPUModelRunner(
             lambda x: None if x is None else x.to("cpu", non_blocking=True),
             raw_pooler_output,
         )
-        self._sync_device()
-
         model_runner_output.pooler_output = [
             out if include else None
             for out, include in zip(raw_pooler_output, finished_mask)
         ]
+        self._sync_device()
+
         return model_runner_output
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3103,20 +3118,6 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        # self._draft_token_ids is None when `input_fits_in_drafter=False`
-        # and there is no draft tokens scheduled. so it need to update the
-        # spec_decoding info in scheduler_output with async_scheduling.
-        # use deepcopy to avoid the modification has influence on the
-        # scheduler_output in engine core process.
-        # TODO(Ronald1995): deepcopy is expensive when there is a large
-        # number of requests, optimize it later.
-        if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self._draft_token_ids is None
-        ):
-            scheduler_output = deepcopy(scheduler_output)
-
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
@@ -3363,6 +3364,8 @@ class GPUModelRunner(
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+        self._draft_token_ids = None
+        self._draft_token_req_ids = None
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
@@ -3417,6 +3420,7 @@ class GPUModelRunner(
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+                self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
         use_padded_batch_for_eagle = (
@@ -3461,6 +3465,12 @@ class GPUModelRunner(
                 self._copy_valid_sampled_token_count(
                     next_token_ids, valid_sampled_tokens_count
                 )
+                # Since we couldn't run the drafter,
+                # just use zeros for the draft tokens.
+                self._draft_token_ids = torch.zeros(
+                    1, device=self.device, dtype=torch.int32
+                ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
@@ -3532,19 +3542,50 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if not self.num_spec_tokens:
+        if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
-
-        req_ids = self.input_batch.req_ids
-        if self._draft_token_ids is None:
-            return DraftTokenIds(req_ids, [[] for _ in req_ids])
-
-        if isinstance(self._draft_token_ids, torch.Tensor):
-            draft_token_ids = self._draft_token_ids.tolist()
-        else:
-            draft_token_ids = self._draft_token_ids
-        self._draft_token_ids = None
+        req_ids = self._draft_token_req_ids
+        draft_token_ids = self._get_draft_token_ids_cpu(len(req_ids))
         return DraftTokenIds(req_ids, draft_token_ids)
+
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        struct_output = scheduler_output.has_structured_output_requests
+        if self.use_async_scheduling and not struct_output:
+            # Draft tokens don't need to be copied to the CPU if async
+            # scheduling is in use and there are no structured output reqs.
+            return
+        # We must also set the corresponding request ids.
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_copy_stream is not None
+        assert self.draft_token_ids_cpu is not None
+        default_stream = torch.cuda.current_stream()
+        num_reqs = draft_token_ids.shape[0]
+        with torch.cuda.stream(self.draft_token_ids_copy_stream):
+            if not zeros_only:
+                # Trigger async copy of draft token ids to cpu.
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                # No copy needed, just zero-out cpu tensor.
+                self.draft_token_ids_cpu[:num_reqs] = 0
+            self.draft_token_ids_event.record()
+
+    def _get_draft_token_ids_cpu(self, num_reqs: int) -> list[list[int]]:
+        if isinstance(self._draft_token_ids, list):
+            return self._draft_token_ids
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_cpu is not None
+        self.draft_token_ids_event.synchronize()
+        return self.draft_token_ids_cpu[:num_reqs].tolist()
 
     def _copy_valid_sampled_token_count(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
@@ -3559,6 +3600,7 @@ class GPUModelRunner(
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
+            assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 
@@ -3567,14 +3609,13 @@ class GPUModelRunner(
     def _get_valid_sampled_token_count(self) -> list[int]:
         # Wait until valid_sampled_tokens_count is copied to cpu,
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        if (
-            self.valid_sampled_token_count_event is None
-            or prev_sampled_token_ids is None
-        ):
+        sampled_count_event = self.valid_sampled_token_count_event
+        if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
 
         counts_cpu = self.valid_sampled_token_count_cpu
-        self.valid_sampled_token_count_event.synchronize()
+        assert counts_cpu is not None
+        sampled_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
@@ -3857,8 +3898,8 @@ class GPUModelRunner(
             logger.error(combined_msg)
             raise e
         logger.info_once(
-            "Model loading took %.4f GiB memory and %.6f seconds",
-            self.model_memory_usage / GiB_bytes,
+            "Model loading took %s GiB memory and %.6f seconds",
+            format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
             scope="local",
         )
@@ -4638,7 +4679,7 @@ class GPUModelRunner(
         for task in supported_pooling_tasks:
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
-            output_size[task] = sum(o.nbytes for o in output)
+            output_size[task] = sum(o.nbytes for o in output if o is not None)
             del output  # Allow GC
 
         max_task = max(output_size.items(), key=lambda x: x[1])[0]

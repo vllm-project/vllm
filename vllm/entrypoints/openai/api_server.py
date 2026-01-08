@@ -911,7 +911,7 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
-        from vllm.entrypoints.openai.protocol import VLLMValidationError
+        from vllm.exceptions import VLLMValidationError
 
         param = None
         for error in exc.errors():
@@ -1091,6 +1091,7 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
+            exclude_log_deltas=args.exclude_log_deltas,
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
