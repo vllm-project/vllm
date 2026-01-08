@@ -23,7 +23,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingMethod,
     PoolingParamsUpdate,
-    PoolingType,
     TokenPoolerHeadOutput,
     TokenPoolingMethodOutput,
 )
@@ -90,7 +89,7 @@ class BertPooler(Pooler):
     def __init__(self, config: BertConfig):
         super().__init__()
 
-        self.pooling = PoolingMethod.from_pooling_type(PoolingType.CLS)
+        self.pooling = PoolingMethod.from_pooling_type("CLS")
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
