@@ -973,11 +973,13 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
 
                 if inner_modality == "image":
                     # Cast data to proper type for image
-                    if hasattr(data, "original_bytes"):
-                        image_bytes = data.original_bytes  # type: ignore[union-attr]
+                    # Use .media (PIL.Image) directly to avoid redundant
+                    # bytes→PIL conversion in media_processor
+                    if hasattr(data, "media"):
+                        image_data = data.media  # type: ignore[union-attr]
                         processed_chunks.append(
                             VisionChunkImage(
-                                type="image", image=image_bytes, uuid=uuid_val
+                                type="image", image=image_data, uuid=uuid_val
                             )
                         )
                     else:
