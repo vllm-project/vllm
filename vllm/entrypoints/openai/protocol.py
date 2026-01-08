@@ -443,6 +443,8 @@ class ResponsesRequest(OpenAIBaseModel):
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
+            reasoning_effort=None if self.reasoning is None else self.reasoning.effort,
+            parallel_tool_calls=self.parallel_tool_calls,
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             skip_clone=True,  # Created fresh per request, safe to skip clone
@@ -558,7 +560,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -843,6 +845,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            reasoning_effort=self.reasoning_effort,
+            parallel_tool_calls=self.parallel_tool_calls,
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
