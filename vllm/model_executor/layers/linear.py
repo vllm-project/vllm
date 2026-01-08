@@ -417,7 +417,7 @@ class ReplicatedLinear(LinearBase):
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={getattr(self, 'bias', None) is not None}"
         return s
 
 
@@ -616,7 +616,7 @@ class ColumnParallelLinear(LinearBase):
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={getattr(self, 'bias', None) is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", gather_output={self.gather_output}"
         return s
@@ -1469,7 +1469,7 @@ class RowParallelLinear(LinearBase):
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={getattr(self, 'bias', None) is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s

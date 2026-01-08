@@ -62,10 +62,19 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
 )
+from vllm.model_executor.parameter import (
+    ModelWeightParameter,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
+
+from compressed_tensors.quantization.utils.helpers import (
+    calculate_qparams,
+    calculate_range,
+)
+from torch import Tensor
 
 logger = init_logger(__name__)
 
@@ -164,7 +173,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             quant_method: LinearMethodBase = UnquantizedLinearMethod()
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
-                quant_method = CompressedTensorsLinearMethod(self)
+                if self.config and self.config.get("is_online_quantization", False):
+                    quant_method = CompressedTensorsOnlineLinearMethod(self)
+                else:
+                    quant_method = CompressedTensorsLinearMethod(self)
 
             # choose transform method
             if any((input_tfms, output_tfms)):
@@ -216,6 +228,17 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config,
             transform_config=transform_config,
         )
+
+    @classmethod
+    def from_config_file(cls, config_file: str) -> "CompressedTensorsConfig":
+        import json
+
+        with open(config_file) as f:
+            f.seek(0)
+            f_read = f.read()
+            config_dict = json.loads(f_read)
+            print("config_dict", config_dict)
+        return cls.from_config(config_dict)
 
     @classmethod
     def _parse_sparsity_config(
@@ -937,6 +960,105 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, x, bias=bias)
+
+
+def fp8_channelwise_quantize(x: Tensor, channel_dim: int = -1) -> tuple[Tensor, Tensor]:
+    """
+    Quantizes a tensor using fp8 channelwise quantization inplace
+    """
+    # TODO(before land): move this somewhere, probably to `CompressedTensorsW8A8Fp8`
+    # TODO(before land): see if there is a compressed-tensor utility we can use
+    #   instead of reimplementing this logic one more time
+    assert x.numel() > 0, "Input tensor must not be empty"
+    assert x.dim() >= 1, "Input tensor must have at least 1 dimension"
+
+    quantization_args = QuantizationArgs(
+        num_bits=8, type=QuantizationType.FLOAT, symmetric=True, strategy="channel"
+    )
+    min_val, max_val = torch.aminmax(x, dim=channel_dim, keepdims=True)
+    scale, zero_point = calculate_qparams(min_val, max_val, quantization_args)
+    bit_min, bit_max = calculate_range(quantization_args, x.device)
+    x.div_(scale)
+    if zero_point is not None:
+        x.add_(zero_point.to(x.dtype))
+    torch.clamp_(x, bit_min, bit_max)
+    quantized = x.to(current_platform.fp8_dtype())
+    return quantized, scale
+
+
+class CompressedTensorsOnlineLinearMethod(CompressedTensorsLinearMethod):
+    """
+    CompressedTensorsLinearMethod for online quantization. In a nutshell:
+    1. create high precision weights in `create_weights`
+    2. weight loading happens in high precision
+    3. `process_weights_after_loading` quantizes the weights, creates new
+       quantized weight parameters, copies the quantized data over, and
+       converts the quantized data to kernel format
+    """
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # create regular high precision weights
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+
+        # create the high precision weight
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # stash the args we need to create the quantized weights in
+        # process_weights_after_loading
+        layer._create_weights_extra_args = [
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+        ]
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # TODO(before land): align on design of where the below code should go
+        # and how to gate it by quantization recipe (dtype, scaling, etc)
+        # Vasiliy's guess: extend `CompressedTensorsScheme` with an additional
+        #   optional method `quantize_weights_online`, then make children such
+        #   as `CompressedTensorsW8A8Fp8` implement it
+        # for now, just inline it here for w8a8 float8 rowwise for quick testing
+
+        # quantize the loaded high precision weights in model format
+        qdata, scale = fp8_channelwise_quantize(layer.weight)
+        # TODO(before land): verify GPU memory from old bf16 weights is cleared
+
+        # create the parameters to hold the new quantized weights
+        with torch.device(qdata.device):
+            super().create_weights(layer, *layer._create_weights_extra_args)
+            # TODO(before land): below is scheme specific, probably
+            # need to move somewhere and branch by scheme
+            layer.weight.copy_(qdata)
+            layer.weight_scale.copy_(scale)
+
+        # convert the weights to kernel format
+        super().process_weights_after_loading(layer)
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
