@@ -24,6 +24,11 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.pool import (
+    ClassifierPooler,
+    DispatchPooler,
+    pooler_for_token_classify,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -37,7 +42,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from ..layers.pooler import ClassifierPooler, DispatchPooler, Pooler
 from .bert import BertPooler
 from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -695,8 +699,9 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.classifier,
                 ),
                 "classify": ClassifierPooler(
                     pooling=self.new.pooler,
@@ -704,7 +709,9 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
                     act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.new.pooler, classifier=self.classifier, act_fn="score"
+                    pooling=self.new.pooler,
+                    classifier=self.classifier,
+                    act_fn="score",
                 ),
             }
         )

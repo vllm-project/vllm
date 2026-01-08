@@ -7,13 +7,16 @@ import torch
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (
+from vllm.model_executor.layers.pool import (
     DispatchPooler,
     Pooler,
-    PoolerNormalize,
-    PoolingMethod,
     PoolingParamsUpdate,
-    TokenPoolerHeadOutput,
+    pooler_for_token_embed,
+)
+from vllm.model_executor.layers.pool.activations import PoolerNormalize
+from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
+from vllm.model_executor.layers.pool.methods import (
+    PoolingMethod,
     TokenPoolingMethodOutput,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -245,7 +248,7 @@ class GritLM(LlamaForCausalLM):
         if pooler_config is not None:
             self.pooler = DispatchPooler(
                 {
-                    "token_embed": Pooler.for_token_embed(pooler_config),
+                    "token_embed": pooler_for_token_embed(pooler_config),
                     "embed": GritLMPooler(vllm_config.model_config),
                 }
             )

@@ -27,7 +27,11 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pool import (
+    DispatchPooler,
+    pooler_for_classify,
+    pooler_for_token_classify,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -598,14 +602,19 @@ class JambaForSequenceClassification(JambaForCausalLM):
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.score
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.score,
                 ),
-                "classify": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="classify"
+                "classify": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="classify",
                 ),
-                "score": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="score"
+                "score": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="score",
                 ),
             }
         )

@@ -10,7 +10,11 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pool import (
+    DispatchPooler,
+    pooler_for_classify,
+    pooler_for_token_classify,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -107,14 +111,19 @@ class JinaVLForSequenceClassification(
         )
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.score
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.score,
                 ),
-                "classify": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="classify"
+                "classify": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="classify",
                 ),
-                "score": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="score"
+                "score": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="score",
                 ),
             }
         )

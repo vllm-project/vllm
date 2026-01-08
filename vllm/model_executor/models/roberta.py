@@ -8,11 +8,11 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.model_executor.layers.pooler import (
+from vllm.model_executor.layers.pool import (
     ClassifierPooler,
     CLSPool,
     DispatchPooler,
-    Pooler,
+    pooler_for_token_classify,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.bert import (
@@ -198,14 +198,19 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config, classifier=self.classifier
+                "token_classify": pooler_for_token_classify(
+                    pooler_config=pooler_config,
+                    classifier=self.classifier,
                 ),
                 "classify": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
+                    pooling=CLSPool(),
+                    classifier=self.classifier,
+                    act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
+                    pooling=CLSPool(),
+                    classifier=self.classifier,
+                    act_fn="score",
                 ),
             }
         )

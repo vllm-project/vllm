@@ -17,14 +17,19 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import (
+from vllm.model_executor.layers.pool import (
     ClassifierPooler,
     DispatchPooler,
     Pooler,
-    PoolingMethod,
     PoolingParamsUpdate,
-    TokenPoolerHeadOutput,
+    pooler_for_embed,
+    pooler_for_token_classify,
+    pooler_for_token_embed,
+)
+from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
+from vllm.model_executor.layers.pool.methods import (
     TokenPoolingMethodOutput,
+    get_pooling_method,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -89,7 +94,7 @@ class BertPooler(Pooler):
     def __init__(self, config: BertConfig):
         super().__init__()
 
-        self.pooling = PoolingMethod.from_pooling_type("CLS")
+        self.pooling = get_pooling_method("CLS")
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
@@ -526,8 +531,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler(
             {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
+                "token_embed": pooler_for_token_embed(pooler_config),
+                "embed": pooler_for_embed(pooler_config),
             }
         )
 
@@ -729,7 +734,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
 
         return DispatchPooler(
             {
-                "token_embed": Pooler.for_token_embed(pooler_config),
+                "token_embed": pooler_for_token_embed(pooler_config),
                 "embed": SPLADESparsePooler(
                     mlm_head=self.mlm_head,
                     cls_token_id=cls_id,
@@ -826,8 +831,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.classifier,
                 ),
                 "classify": ClassifierPooler(
                     pooling=self.bert.pooler,
@@ -835,7 +841,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
                     act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.bert.pooler, classifier=self.classifier, act_fn="score"
+                    pooling=self.bert.pooler,
+                    classifier=self.classifier,
+                    act_fn="score",
                 ),
             }
         )
@@ -892,11 +900,7 @@ class BertForTokenClassification(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config
-                ),
-            }
+            {"token_classify": pooler_for_token_classify(pooler_config)}
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

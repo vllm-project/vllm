@@ -14,7 +14,11 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pool import (
+    DispatchPooler,
+    Pooler,
+    pooler_for_token_classify,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -105,7 +109,7 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"token_classify": Pooler.for_token_classify(pooler_config)}
+            {"token_classify": pooler_for_token_classify(pooler_config)}
         )
 
 
@@ -119,5 +123,5 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {"token_classify": Pooler.for_token_classify(pooler_config)}
+            {"token_classify": pooler_for_token_classify(pooler_config)}
         )

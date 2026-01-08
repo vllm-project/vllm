@@ -41,6 +41,11 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pool import (
+    DispatchPooler,
+    pooler_for_classify,
+    pooler_for_token_classify,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -49,7 +54,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from ..layers.pooler import DispatchPooler, Pooler
 from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
@@ -353,14 +357,19 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.score
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.score,
                 ),
-                "classify": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="classify"
+                "classify": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="classify",
                 ),
-                "score": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="score"
+                "score": pooler_for_classify(
+                    pooler_config,
+                    classifier=self.score,
+                    act_fn="score",
                 ),
             }
         )

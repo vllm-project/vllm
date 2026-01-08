@@ -252,7 +252,11 @@ def as_embedding_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+    from vllm.model_executor.layers.pool import (
+        DispatchPooler,
+        pooler_for_embed,
+        pooler_for_token_embed,
+    )
 
     class ModelForEmbedding(_create_pooling_model_cls(cls)):
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
@@ -261,8 +265,8 @@ def as_embedding_model(cls: _T) -> _T:
 
             self.pooler = DispatchPooler(
                 {
-                    "token_embed": Pooler.for_token_embed(pooler_config),
-                    "embed": Pooler.for_embed(pooler_config),
+                    "token_embed": pooler_for_token_embed(pooler_config),
+                    "embed": pooler_for_embed(pooler_config),
                 },
             )
 
@@ -289,9 +293,10 @@ def as_seq_cls_model(cls: _T) -> _T:
 
     # Lazy import
     from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.pooler import (
+    from vllm.model_executor.layers.pool import (
         DispatchPooler,
-        Pooler,
+        pooler_for_classify,
+        pooler_for_token_classify,
     )
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 
@@ -320,13 +325,13 @@ def as_seq_cls_model(cls: _T) -> _T:
 
             self.pooler = DispatchPooler(
                 {
-                    "token_classify": Pooler.for_token_classify(
+                    "token_classify": pooler_for_token_classify(
                         pooler_config, classifier=self.score
                     ),
-                    "classify": Pooler.for_classify(
+                    "classify": pooler_for_classify(
                         pooler_config, classifier=self.score, act_fn="classify"
                     ),
-                    "score": Pooler.for_classify(
+                    "score": pooler_for_classify(
                         pooler_config, classifier=self.score, act_fn="score"
                     ),
                 }

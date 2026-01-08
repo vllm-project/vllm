@@ -12,14 +12,17 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import (
+from vllm.model_executor.layers.pool import (
     ClassifierPooler,
     DispatchPooler,
     Pooler,
-    PoolingMethod,
     PoolingParamsUpdate,
-    TokenPoolerHeadOutput,
+    pooler_for_token_classify,
+)
+from vllm.model_executor.layers.pool.heads import TokenPoolerHeadOutput
+from vllm.model_executor.layers.pool.methods import (
     TokenPoolingMethodOutput,
+    get_pooling_method,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -287,7 +290,7 @@ class ModernBertPooler(Pooler):
         super().__init__()
 
         pooling_type = config.classifier_pooling.upper()
-        self.pooling = PoolingMethod.from_pooling_type(pooling_type)
+        self.pooling = get_pooling_method(pooling_type)
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )
@@ -346,14 +349,19 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=self.classifier,
                 ),
                 "classify": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="classify"
+                    pooling=self.pooling,
+                    classifier=self.classifier,
+                    act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.pooling, classifier=self.classifier, act_fn="score"
+                    pooling=self.pooling,
+                    classifier=self.classifier,
+                    act_fn="score",
                 ),
             }
         )
@@ -439,11 +447,7 @@ class ModernBertForTokenClassification(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config
-                ),
-            }
+            {"token_classify": pooler_for_token_classify(pooler_config)}
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
