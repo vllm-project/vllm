@@ -59,10 +59,13 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         )
 
         # 2. override if passed by environment or config
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        vllm_config = get_current_vllm_config()
-        if vllm_config.attention_config.flash_attn_version is not None:
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is not None
+            and vllm_config.attention_config.flash_attn_version is not None
+        ):
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
