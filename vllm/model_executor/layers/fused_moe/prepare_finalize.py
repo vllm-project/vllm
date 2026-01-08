@@ -40,13 +40,13 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        a1, topk_weights, topk_ids = get_ep_group().dispatch(
-            a1,
-            topk_weights,
-            topk_ids,
-            # TODO?
-            is_sequence_parallel=False,
-        )
+        if apply_router_weight_on_input:
+            topk = topk_ids.size(1)
+            assert topk == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            # Note: do not use inplace for shared experts overlap
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -57,6 +57,27 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         )
         # TODO - this is just for deepgemm?
         expert_tokens_meta = None
+
+        from vllm.platforms import current_platform
+
+        # The torch ops do not support fp8, so use an int8 view.
+        # Since this does not do a reduce, it is safe to do.
+        use_int8_view = a1q.dtype == current_platform.fp8_dtype()
+        if use_int8_view:
+            a1q = a1q.view(torch.int8)
+
+        extra_tensors = None if a1q_scale is None else [a1q_scale]
+        a1q, topk_weights, topk_ids, et = get_ep_group().dispatch(
+            a1q,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel=False,  # TODO: support SP
+            extra_tensors=extra_tensors,
+        )
+        a1q_scale = et[0] if extra_tensors is not None else None
+
+        if use_int8_view:
+            a1q = a1q.view(current_platform.fp8_dtype())
 
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 
