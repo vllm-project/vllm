@@ -9,7 +9,7 @@ steps:
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+    - pytest -v -s -m kernels kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -19,7 +19,7 @@ steps:
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s -m "kernels and attention" kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Quantization Test %N
@@ -29,7 +29,7 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s -m "kernels and quantization" kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels MoE Test %N
@@ -43,7 +43,7 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Mamba Test
@@ -53,7 +53,7 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/ops
   commands:
-    - pytest -v -s kernels/mamba
+    - pytest -v -s -m kernels kernels/mamba
 
 - label: Kernels DeepGEMM Test (H100)
   timeout_in_minutes: 45
@@ -69,10 +69,10 @@ steps:
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   commands:
-    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
-    - pytest -v -s kernels/moe/test_deepgemm.py
-    - pytest -v -s kernels/moe/test_batched_deepgemm.py
-    - pytest -v -s kernels/attention/test_deepgemm_attention.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" kernels/moe/test_deepgemm.py
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s -m "kernels and attention" kernels/attention/test_deepgemm_attention.py
 
 - label: Kernels (B200)
   timeout_in_minutes: 30
@@ -97,21 +97,21 @@ steps:
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_attention_selector.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s -m "kernels and attention" tests/kernels/attention/test_attention_selector.py
+    - pytest -v -s -m "kernels and attention" tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -v -s -m "kernels and attention" tests/kernels/attention/test_flashinfer_trtllm_attention.py
+    - pytest -v -s -m "kernels and attention" tests/kernels/attention/test_cutlass_mla_decode.py
+    - pytest -v -s -m "kernels and attention" tests/kernels/attention/test_flashinfer_mla_decode.py
     # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s -m "kernels and quantization" tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - pytest -v -s -m "kernels and quantization" tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_silu_mul_nvfp4_quant.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_flashinfer_scaled_mm.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_nvfp4_qutlass.py
+    - pytest -v -s -m "kernels and quantization" kernels/quantization/test_mxfp4_qutlass.py
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" tests/kernels/moe/test_ocp_mx_moe.py
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s -m "kernels and (expert_parallel or models_moe)" tests/kernels/moe/test_cutedsl_moe.py
