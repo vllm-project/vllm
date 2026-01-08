@@ -76,14 +76,16 @@ class XpuCommunicator(DeviceCommunicatorBase):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch(
             hidden_states,
-            router_logits,
+            topk_weights,
+            topk_ids,
             is_sequence_parallel,
             extra_tensors,  # type: ignore[call-arg]
         )

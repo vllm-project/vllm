@@ -1323,10 +1323,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
 
+        logger.info_once(f"{router_logits.shape=}")
         topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
+        logger.info_once(f"{router_logits.shape=}")
+        logger.info_once(f"{topk_weights.shape=}")
+
         result = self.kernel(
             x,
             layer.w13_weight,
