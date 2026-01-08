@@ -86,7 +86,7 @@ def get_encoding():
 
 def get_system_message(
     model_identity: str | None = None,
-    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    reasoning_effort: Literal["minimal", "high", "medium", "low"] | None = None,
     start_date: str | None = None,
     browser_description: str | None = None,
     python_description: str | None = None,
