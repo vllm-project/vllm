@@ -487,6 +487,7 @@ class CLIPEncoderLayer(nn.Module):
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
