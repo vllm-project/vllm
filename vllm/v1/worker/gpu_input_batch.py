@@ -446,6 +446,32 @@ class InputBatch:
 
         return req_index
 
+    def update_req_spec_token_ids(
+        self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
+    ) -> None:
+        req_id = request.req_id
+        req_index = self.req_id_to_index[req_id]
+        cur_spec_token_ids = self.spec_token_ids[req_index]
+        # When speculative decoding is used with structured output,
+        # the scheduler can drop draft tokens that do not
+        # conform to the schema. This can result in
+        # scheduler_output.scheduled_spec_decode_tokens being empty,
+        # even when speculative decoding is enabled.
+        cur_spec_token_ids.clear()
+        spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+        num_spec_tokens = len(spec_token_ids)
+        request.prev_num_draft_len = num_spec_tokens
+        if not spec_token_ids:
+            return
+
+        # For async scheduling, token_ids_cpu assigned from
+        # spec_token_ids are placeholders and will be overwritten in
+        # _prepare_input_ids.
+        start_index = self.num_tokens_no_spec[req_index]
+        end_token_index = start_index + num_spec_tokens
+        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        cur_spec_token_ids.extend(spec_token_ids)
+
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 

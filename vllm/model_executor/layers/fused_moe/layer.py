@@ -38,9 +38,6 @@ from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimula
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    is_flashinfer_supporting_global_sf,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
@@ -66,12 +63,6 @@ else:
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
-
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
-
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -609,9 +600,15 @@ class FusedMoE(CustomOp):
                     "is_act_and_mul=False is supported only for unquantized "
                     ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
-            if not current_platform.is_cuda():
+            # ROCm without AITER MoE uses Triton which supports
+            # is_act_and_mul=False via standard PyTorch ops (F.silu, F.gelu)
+            rocm_without_aiter_moe = (
+                current_platform.is_rocm() and not rocm_aiter_ops.is_fused_moe_enabled()
+            )
+            if not current_platform.is_cuda() and not rocm_without_aiter_moe:
                 raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for CUDA for now"
+                    "is_act_and_mul=False is supported only for CUDA, or ROCm "
+                    "(when AITER MoE is disabled) for now"
                 )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
@@ -1125,14 +1122,9 @@ class FusedMoE(CustomOp):
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        allow_flashinfer = getattr(self.quant_method, "allow_flashinfer", False)
-        moe_backend = getattr(self.quant_method, "flashinfer_moe_backend", None)
-
         use_global_sf = (
-            allow_flashinfer
-            and is_flashinfer_supporting_global_sf(moe_backend)
+            getattr(self.quant_method, "use_global_sf", False)
             and "input_scale" in weight_name
-            and quant_method_name == "ModelOptNvFp4FusedMoE"
         )
 
         if expert_id == -1 and not use_global_sf:
@@ -2007,6 +1999,7 @@ class FusedMoE(CustomOp):
     @classmethod
     def make_expert_params_mapping(
         cls,
+        model: torch.nn.Module,
         ckpt_gate_proj_name: str,
         ckpt_down_proj_name: str,
         ckpt_up_proj_name: str,
@@ -2025,13 +2018,19 @@ class FusedMoE(CustomOp):
             )
         )
 
+        base_layer = (
+            "base_layer."
+            if any(".base_layer." in name for name, _ in model.named_parameters())
+            else ""
+        )
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_"
+                f"experts.{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else "experts.w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.",
+                else f"experts.{base_layer}w2_",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -83,9 +84,11 @@ class InputProcessor:
             if num_logprobs == -1:
                 num_logprobs = self.model_config.get_vocab_size()
             if num_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="logprobs",
+                    value=num_logprobs,
                 )
 
         # Validate prompt logprobs.
@@ -94,9 +97,11 @@ class InputProcessor:
             if num_prompt_logprobs == -1:
                 num_prompt_logprobs = self.model_config.get_vocab_size()
             if num_prompt_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="prompt_logprobs",
+                    value=num_prompt_logprobs,
                 )
 
     def _validate_sampling_params(
@@ -134,9 +139,11 @@ class InputProcessor:
                 invalid_token_ids.append(token_id)
 
         if invalid_token_ids:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}"
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="logit_bias",
+                value=invalid_token_ids,
             )
 
     def _validate_supported_sampling_params(
@@ -539,15 +546,17 @@ class InputProcessor:
 
             mm_features = []
             for modality, idx in sorted_mm_idxs:
+                base_mm_hash = decoder_mm_hashes[modality][idx]
                 mm_features.append(
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
                         identifier=self._get_mm_identifier(
-                            decoder_mm_hashes[modality][idx],
+                            base_mm_hash,
                             lora_request,
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
+                        mm_hash=base_mm_hash,
                     )
                 )
 
