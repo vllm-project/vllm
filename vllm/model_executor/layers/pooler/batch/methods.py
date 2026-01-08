@@ -92,7 +92,7 @@ class MeanPool(BatchPoolingMethod):
         ) / prompt_lens.unsqueeze(1)
 
 
-def get_token_pooling_method(pooling_type: PoolingTypeStr | str):
+def get_batch_pooling_method(pooling_type: PoolingTypeStr | str):
     if pooling_type == "LAST":
         return LastPool()
     if pooling_type == "CLS":
@@ -100,4 +100,4 @@ def get_token_pooling_method(pooling_type: PoolingTypeStr | str):
     if pooling_type == "MEAN":
         return MeanPool()
 
-    raise NotImplementedError(f"Unsupported token pooling method: {pooling_type!r}")
+    raise NotImplementedError(f"Unsupported batch pooling method: {pooling_type!r}")

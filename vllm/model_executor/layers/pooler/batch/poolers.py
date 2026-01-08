@@ -20,7 +20,7 @@ from .heads import BatchPoolerHeadOutput, EmbeddingPoolerHead
 from .methods import (
     BatchPoolingMethod,
     BatchPoolingMethodOutput,
-    get_token_pooling_method,
+    get_batch_pooling_method,
 )
 
 BatchPoolingFn: TypeAlias = Callable[
@@ -146,7 +146,7 @@ class ClassifierPooler(BatchPooler):
 
 
 def pooler_for_embed(pooler_config: PoolerConfig):
-    pooling = get_token_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_batch_pooling_method(pooler_config.get_pooling_type())
     head = EmbeddingPoolerHead()
 
     return SimplePooler(pooling=pooling, head=head)
@@ -160,6 +160,6 @@ def pooler_for_classify(
     act_fn: PoolerActivation | str | None = None,
 ):
     if pooling is None:
-        pooling = get_token_pooling_method(pooler_config.get_pooling_type())
+        pooling = get_batch_pooling_method(pooler_config.get_pooling_type())
 
     return ClassifierPooler(pooling=pooling, classifier=classifier, act_fn=act_fn)

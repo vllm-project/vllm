@@ -13,7 +13,7 @@ from .methods import (
     CLSPool,
     LastPool,
     MeanPool,
-    get_token_pooling_method,
+    get_batch_pooling_method,
 )
 from .poolers import (
     BatchPooler,
@@ -36,7 +36,7 @@ __all__ = [
     "CLSPool",
     "LastPool",
     "MeanPool",
-    "get_token_pooling_method",
+    "get_batch_pooling_method",
     "BatchPooler",
     "BatchPoolingFn",
     "BatchPoolingHeadFn",

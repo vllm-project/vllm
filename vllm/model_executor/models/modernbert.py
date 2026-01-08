@@ -20,7 +20,7 @@ from vllm.model_executor.layers.pooler.batch import (
     BatchPoolerHeadOutput,
     BatchPoolingMethodOutput,
     SimplePooler,
-    get_token_pooling_method,
+    get_batch_pooling_method,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -284,7 +284,7 @@ class ModernBertModel(nn.Module):
 class ModernBertPooler(SimplePooler):
     def __init__(self, config: ModernBertConfig):
         super().__init__(
-            pooling=get_token_pooling_method(config.classifier_pooling.upper()),
+            pooling=get_batch_pooling_method(config.classifier_pooling.upper()),
             head=self.head,
         )
 
