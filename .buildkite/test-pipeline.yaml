@@ -943,7 +943,6 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
@@ -1276,7 +1275,18 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: DP EP NixlConnector PD accuracy tests (Distributed)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
 ##### multi gpus test #####
@@ -1337,6 +1347,14 @@ steps:
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
+- label: LM Eval Large Models (H200) # optional
+  timeout_in_minutes: 60
+  gpu: h200
+  optional: true
+  num_gpus: 8
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
+
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional
   gpu: b200
@@ -1388,3 +1406,19 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
+##### MoE Refactor (Temporary) Tests #####
+
+- label: MoE Refactor Integration Test (H100 - TEMPORARY) # optional
+  gpu: h100
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  
+- label: MoE Refactor Integration Test (B200 - TEMPORARY) # optional
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt

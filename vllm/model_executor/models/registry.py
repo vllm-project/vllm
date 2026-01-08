@@ -164,6 +164,7 @@ _TEXT_GENERATION_MODELS = {
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
+    "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
@@ -303,6 +304,7 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),  # noqa: E501
@@ -333,6 +335,7 @@ _MULTIMODAL_MODELS = {
         "idefics3",
         "Idefics3ForConditionalGeneration",
     ),
+    "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KeyeVL1_5ForConditionalGeneration": (
@@ -425,6 +428,10 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": (
+        "nemotron_parse",
+        "NemotronParseForConditionalGeneration",
+    ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 

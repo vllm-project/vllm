@@ -81,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     hunyuan_vl="HunYuanVLConfig",
+    isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -135,6 +136,7 @@ class HFConfigParser(ConfigParserBase):
             model,
             revision=revision,
             code_revision=code_revision,
+            trust_remote_code=trust_remote_code,
             token=_get_hf_token(),
             **kwargs,
         )
@@ -156,6 +158,7 @@ class HFConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
+                trust_remote_code=trust_remote_code,
                 token=_get_hf_token(),
                 **kwargs,
             )

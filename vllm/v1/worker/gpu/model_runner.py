@@ -14,8 +14,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -98,9 +97,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
-        self.dp_size = self.parallel_config.data_parallel_size
-        self.dp_rank = self.parallel_config.data_parallel_rank
-
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
@@ -168,8 +164,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            "Model loading took %.4f GiB and %.6f seconds",
-            m.consumed_memory / GiB_bytes,
+            "Model loading took %s GiB and %.6f seconds",
+            format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
 
@@ -268,7 +264,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
-        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
+        dp_size = self.parallel_config.data_parallel_size
+        num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(
@@ -312,7 +309,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._dummy_sampler_run(sample_hidden_states)
         if self.do_spec_decode:
             num_tokens_across_dp = make_num_tokens_across_dp(
-                self.dp_size, self.max_num_tokens
+                self.parallel_config.data_parallel_size, self.max_num_tokens
             )
             self.speculator.run_model(
                 self.max_num_tokens,
@@ -807,7 +804,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: SchedulerOutput,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if self.dp_size == 1:
+        dp_size = self.parallel_config.data_parallel_size
+        if dp_size == 1:
             # No DP. Only consider CUDA graphs.
             if total_num_scheduled_tokens == 0:
                 # Special case: no tokens to run.
@@ -835,11 +833,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_size_before_dp = -1
 
         assert cudagraph_size_before_dp is not None
+        dp_rank = self.parallel_config.data_parallel_rank
         num_tokens_across_dp, cudagraph_size_across_dp = get_batch_metadata_across_dp(
             total_num_scheduled_tokens,
             cudagraph_size_before_dp,
-            self.dp_size,
-            self.dp_rank,
+            dp_size,
+            dp_rank,
         )
         if all(cudagraph_size_across_dp >= 0):
             # If all ranks can use CUDA graph, pad to the maximum number of tokens
@@ -850,7 +849,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If any of the ranks cannot use CUDA graph, use eager mode for all ranks.
             # No padding is needed except for ranks that have no tokens to run.
             num_tokens_across_dp = torch.clamp(num_tokens_across_dp, min=1)
-            num_tokens_after_padding = num_tokens_across_dp[self.dp_rank]
+            num_tokens_after_padding = num_tokens_across_dp[dp_rank]
             cudagraph_mode = CUDAGraphMode.NONE
         return cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp
 
@@ -968,11 +967,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Only for compatibility with the existing model runner and scheduler.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
-            logprobs=None,
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore
-            pooler_output=[],
-            kv_connector_output=None,
-            num_nans_in_logits=None,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

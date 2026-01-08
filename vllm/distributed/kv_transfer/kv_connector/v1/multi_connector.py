@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -138,6 +138,12 @@ class MultiConnector(KVConnectorBase_V1):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        if not self._connectors:
+            return False
+        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -163,6 +169,13 @@ class MultiConnector(KVConnectorBase_V1):
                 )
             )
         return ret
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        # Register on all connectors
+        for c in self._connectors:
+            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:

@@ -389,8 +389,6 @@ class Qwen2Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        # Use the provided decoder layer type or default to Qwen2DecoderLayer
-        decoder_layer_type = decoder_layer_type or Qwen2DecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer_type(
