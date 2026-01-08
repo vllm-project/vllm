@@ -948,7 +948,6 @@ class ModelConfig:
                     "The quantization method %s is deprecated "
                     "and will be removed in future versions of vLLM.",
                     self.quantization,
-                    scope="local"
                 )
             else:
                 raise ValueError(
