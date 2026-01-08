@@ -297,7 +297,7 @@ graphql-relay==3.2.0
     # via graphene
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.71.0
+grpcio==1.76.0
     # via ray
 gunicorn==23.0.0
     # via mlflow
@@ -758,7 +758,7 @@ propcache==0.2.0
     #   yarl
 proto-plus==1.26.1
     # via google-api-core
-protobuf==5.28.3
+protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
@@ -1249,6 +1249,7 @@ typing-extensions==4.15.0
     #   chz
     #   fastapi
     #   graphene
+    #   grpcio
     #   huggingface-hub
     #   librosa
     #   lightning
