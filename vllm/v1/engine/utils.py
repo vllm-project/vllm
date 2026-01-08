@@ -1032,10 +1032,6 @@ def wait_for_engine_startup(
                             "_data_parallel_master_port_list",
                             "data_parallel_size",
                         )
-                    },
-                    parallel_config_hash=parallel_hash
-                    if parallel_config.data_parallel_size > 1
-                    else None,
                     }
                     if coordinated_dp
                     else {},
