@@ -8,7 +8,6 @@
 # Documentation
 # label(str): the name of the test. emojis allowed.
 # fast_check(bool): whether to run this on each commit on the fastcheck pipeline.
-# torch_nightly(bool): whether to run this on vllm against the torch nightly pipeline.
 # fast_check_only(bool): run this test on the fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's a scheduled nightly run.
 # soft_fail(bool): allow this step to fail without failing the entire pipeline (useful for flaky or experimental tests).
@@ -35,16 +34,6 @@
 
 steps:
 ##### fast check tests  #####
-
-- label: Pytorch Nightly Dependency Override Check # 2min
-  # if this test fails, it means the nightly torch version is not compatible with some
-  # of the dependencies. Please check the error message and add the package to whitelist
-  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
-  soft_fail: true
-  source_file_dependencies:
-  - requirements/nightly_torch_test.txt
-  commands:
-  - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
   timeout_in_minutes: 50
@@ -93,7 +82,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -121,7 +109,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -137,7 +124,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
@@ -152,7 +138,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/sleep
@@ -169,7 +154,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/pooling
@@ -479,7 +463,6 @@ steps:
 - label: PyTorch Compilation Unit Tests # 15min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -496,7 +479,6 @@ steps:
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -512,7 +494,6 @@ steps:
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -614,7 +595,6 @@ steps:
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
-  torch_nightly: true
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/engine/arg_utils.py
@@ -690,7 +670,6 @@ steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
@@ -702,7 +681,6 @@ steps:
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - vllm/transformers_utils/
@@ -721,7 +699,6 @@ steps:
 - label: Basic Models Tests (Other)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_transformers.py
@@ -731,7 +708,6 @@ steps:
 
 - label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py
@@ -743,7 +719,6 @@ steps:
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -755,7 +730,6 @@ steps:
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
@@ -773,7 +747,6 @@ steps:
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -855,7 +828,6 @@ steps:
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal

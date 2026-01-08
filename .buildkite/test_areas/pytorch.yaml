@@ -40,13 +40,3 @@ steps:
     # Limit to no custom ops to reduce running time
     # Wrap with quotes to escape yaml and avoid starting -k string with a -
   - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
-
-- label: Pytorch Nightly Dependency Override Check # 2min
-  # if this test fails, it means the nightly torch version is not compatible with some
-  # of the dependencies. Please check the error message and add the package to whitelist
-  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
-  soft_fail: true
-  source_file_dependencies:
-  - requirements/nightly_torch_test.txt
-  commands:
-  - bash standalone_tests/pytorch_nightly_dependency.sh

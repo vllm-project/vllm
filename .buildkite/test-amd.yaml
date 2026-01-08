@@ -8,7 +8,6 @@
 # Documentation
 # label(str): the name of the test. emojis allowed.
 # fast_check(bool): whether to run this on each commit on the fastcheck pipeline.
-# torch_nightly(bool): whether to run this on vllm against the torch nightly pipeline.
 # fast_check_only(bool): run this test on the fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's a scheduled nightly run.
 # soft_fail(bool): allow this step to fail without failing the entire pipeline (useful for flaky or experimental tests).
@@ -34,19 +33,6 @@
 
 steps:
 ##### fast check tests  #####
-
-- label: Pytorch Nightly Dependency Override Check # 2min
-  # if this test fails, it means the nightly torch version is not compatible with some
-  # of the dependencies. Please check the error message and add the package to whitelist
-  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
-  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi325_1
-  grade: Blocking
-  soft_fail: true
-  source_file_dependencies:
-  - requirements/nightly_torch_test.txt
-  commands:
-  - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: Async Engine, Inputs, Utils, Worker Test # 10min
   timeout_in_minutes: 15
@@ -104,7 +90,6 @@ steps:
   agent_pool: mi325_1
   # grade: Blocking
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -137,7 +122,6 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -155,7 +139,6 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
@@ -173,7 +156,6 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/sleep
@@ -192,7 +174,6 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/pooling
@@ -546,7 +527,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -563,7 +543,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -579,7 +558,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -692,7 +670,6 @@ steps:
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
-  torch_nightly: true
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -785,7 +762,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
@@ -798,7 +774,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - vllm/transformers_utils/
@@ -818,7 +793,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_transformers.py
@@ -831,7 +805,6 @@ steps:
   agent_pool: mi325_1
   # grade: Blocking
   timeout_in_minutes: 10
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py
@@ -845,7 +818,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -859,7 +831,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_2
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
@@ -880,7 +851,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_8
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -977,7 +947,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal

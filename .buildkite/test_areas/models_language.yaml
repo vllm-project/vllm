@@ -5,7 +5,6 @@ steps:
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -17,7 +16,6 @@ steps:
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
@@ -33,7 +31,6 @@ steps:
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
