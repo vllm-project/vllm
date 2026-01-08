@@ -530,11 +530,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
-            self._decode_cudagraph_max_bs = min(
-                (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_cudagraph_capture_size,
-            )
-
+            self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                self._decode_cudagraph_max_bs = min(
+                    self._decode_cudagraph_max_bs,
+                    self.compilation_config.max_cudagraph_capture_size,
+                )
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -772,44 +773,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         return paged_kv_indices
 
-    def _fix_decode_counts_for_trtllm(
-        self,
-        num_decodes: int,
-        num_prefills: int,
-        num_decode_tokens: int,
-        num_prefill_tokens: int,
-        num_reqs: int,
-        num_actual_tokens: int,
-        query_start_loc_cpu: torch.Tensor,
-    ) -> tuple[int, int, int, int]:
-        """Fix decode counts to exclude zero-length or non-uniform requests."""
-        if num_decodes == 0:
-            return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
-
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        decode_query_lens = query_lens[:num_decodes]
-
-        has_zero_length = torch.any(decode_query_lens == 0)
-        is_non_uniform = num_decode_tokens % num_decodes != 0
-
-        if not (has_zero_length or is_non_uniform):
-            return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
-
-        # Find the first problematic request (zero-length or non-uniform)
-        first_invalid = (
-            (decode_query_lens == 0).int().argmax(dim=-1).item()
-            if has_zero_length
-            else (decode_query_lens != decode_query_lens[0]).int().argmax(dim=-1).item()
-        )
-
-        # Recalculate with corrected num_decodes
-        num_decodes = first_invalid
-        num_decode_tokens = query_start_loc_cpu[num_decodes].item()
-        num_prefills = num_reqs - num_decodes
-        num_prefill_tokens = num_actual_tokens - num_decode_tokens
-
-        return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
-
     def build(
         self,
         common_prefix_len: int,
@@ -823,19 +786,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=True,
-            )
-        )
-
-        # Fix for zero-length padding requests to meet TRTLLM requirements
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            self._fix_decode_counts_for_trtllm(
-                num_decodes,
-                num_prefills,
-                num_decode_tokens,
-                num_prefill_tokens,
-                num_reqs,
-                num_actual_tokens,
-                common_attn_metadata.query_start_loc_cpu,
             )
         )
 
@@ -921,7 +871,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_cpu = (
+            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
+        )
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
             (seq_lens_np + (page_size - 1)) // page_size
@@ -1109,8 +1061,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 assert num_decode_tokens % num_decodes == 0, (
                     "TRTLLM decode requires uniform query lengths per request."
                 )
-
-            if decode_use_trtllm:
                 attn_metadata.decode = TRTLLMDecode(
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],

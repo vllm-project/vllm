@@ -939,23 +939,28 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
+    # Early return if we don't need uniformity check
     if max_query_len <= decode_threshold and (
-        not require_uniform or decode_threshold <= 1
+        not require_uniform or decode_threshold > 1
     ):
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     if query_lens[0].item() > decode_threshold:
-        # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
     if require_uniform:
-        # check if we are in a padded uniform batch; this is used for full-CGs, some
-        # requests may have a query length of 0 but since they are padding its fine
-        # to treat them as decodes (ensures num_decodes matches the captured size)
+        # Check for padded uniform batch (used for full-CGs)
+        # Requests with query_len=0 are padding and can be treated as decodes
         if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
-            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
-            return num_reqs, 0, num_tokens, 0  # all decodes
+            # If tokens match uniform padding, return all as decodes
+            if num_reqs * query_lens[0] == num_tokens:
+                return num_reqs, 0, num_tokens, 0
+            # Non-uniform padding: count only real decode requests
+            num_actual_decodes = int((query_lens > 0).sum().item())
+            if num_actual_decodes * query_lens[0].item() == num_tokens:
+                return num_actual_decodes, 0, num_tokens, 0
+        # Non-uniform case: treat non-matching requests as prefills
         is_prefill = query_lens != query_lens[0]
     else:
         is_prefill = query_lens > decode_threshold
