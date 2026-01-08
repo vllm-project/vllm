@@ -93,7 +93,11 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
     enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
     enable_moe_a2a = moe.moe_parallel_config.all2all_backend == "flashinfer_moe_a2a"
     return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv, enable_moe_a2a=enable_moe_a2a, moe=moe
+        use_dp=use_dp,
+        use_nvfp4=True,
+        enable_alltoallv=enable_alltoallv,
+        enable_moe_a2a=enable_moe_a2a,
+        moe=moe,
     )
 
 
@@ -139,11 +143,12 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     intermediate_size,
     num_experts,
 ):
-    from flashinfer import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
         get_w2_permute_indices_with_cache,
     )
+
+    from flashinfer import nvfp4_block_scale_interleave
 
     _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
     """Prepare quantized weights for kernel (done offline with weights)."""
@@ -280,7 +285,6 @@ def flashinfer_trtllm_fp4_moe(
         Output tensor from the MoE layer
     """
     import flashinfer
-
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # Quantize input to FP4

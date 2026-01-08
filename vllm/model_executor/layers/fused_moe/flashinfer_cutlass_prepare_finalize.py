@@ -9,7 +9,10 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
 )
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -349,7 +352,7 @@ def flashinfer_alltoall_combine(
 
 
 class FlashInferMoeA2APrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
-    """FlashInfer implementation using the Moe AlltoAll kernel. """
+    """FlashInfer implementation using the Moe AlltoAll kernel."""
 
     def __init__(
         self,
@@ -365,7 +368,6 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize)
         self.hidden_size = hidden_size
 
         self.all2all_manager = get_ep_group().device_communicator.all2all_manager
-
 
     def prepare(
         self,
@@ -490,4 +492,3 @@ def create_flashinfer_prepare_finalize(
         # in a single call with the MoE experts kernel.
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
         return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
-

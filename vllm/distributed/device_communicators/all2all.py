@@ -28,7 +28,7 @@ if has_flashinfer_moe_a2a():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_moe_alltoall import (
-        MoeAlltoAll,   # type: ignore[import-not-found]
+        MoeAlltoAll,  # type: ignore[import-not-found]
     )
 
 logger = init_logger(__name__)
