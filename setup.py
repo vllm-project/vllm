@@ -90,7 +90,7 @@ def compile_grpc_protos():
     try:
         from grpc_tools import protoc
     except ImportError:
-        logger.error(
+        logger.warning(
             "grpcio-tools not installed, skipping gRPC proto compilation. "
             "gRPC server functionality will not be available."
         )
