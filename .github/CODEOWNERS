@@ -3,7 +3,6 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/attention @LucasWilkinson
-/vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @njhill @22quinn
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
@@ -27,6 +26,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson
+/vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
@@ -117,15 +117,15 @@ mkdocs.yaml @hmellor
 /vllm/transformers_utils/tokenizers/mistral.py @patrickvonplaten
 
 # Kernels
-/vllm/attention/ops/chunked_prefill_paged_decode.py @tdoublep
-/vllm/attention/ops/triton_unified_attention.py @tdoublep
+/vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
+/vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa
 /docker/Dockerfile.rocm* @gshtras @tjtanaa
 /vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
 /vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/attention/ops/rocm*.py @gshtras @tjtanaa
+/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
 /vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
 /csrc/rocm @gshtras @tjtanaa
 /requirements/*rocm* @tjtanaa
