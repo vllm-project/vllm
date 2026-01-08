@@ -91,9 +91,17 @@ class BlockTables:
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             block_ids = new_block_ids[i]
+            num_new_blocks = len(block_ids)
+            if num_new_blocks == 0:
+                continue
+
+            # TODO(woosuk): Too many Numpy invocations. Optimize this.
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            end = start + len(block_ids)
-            self.block_tables[i].np[req_index, start:end] = block_ids
+            end = start + num_new_blocks
+            if num_new_blocks == 1:
+                self.block_tables[i].np[req_index, start] = block_ids[0]
+            else:
+                self.block_tables[i].np[req_index, start:end] = block_ids
             self.num_blocks.np[i, req_index] = end
 
     def gather_block_tables(
