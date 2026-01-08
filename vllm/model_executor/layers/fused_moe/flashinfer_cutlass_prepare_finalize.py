@@ -11,6 +11,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNaiveEP,
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -363,13 +364,11 @@ def create_flashinfer_prepare_finalize(
         else:
             return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
 
-    # FP8 DP path currently supported via AllGather.
+    # NOTE(rob): CUTLASS FP8 block quant executes the input
+    # quantzation and grouped gemm in a single kernel.
     if use_dp:
-        return FlashInferAllGatherMoEPrepareAndFinalize(
-            use_dp=True,
-            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+        return MoEPrepareAndFinalizeNaiveEP(
+            defer_input_quant=use_deepseek_fp8_block_scale
         )
     else:
-        # NOTE(rob): CUTLASS FP8 block quant executes the input
-        # quantzation and grouped gemm in a single kernel.
         return MoEPrepareAndFinalizeNoEP(defer_input_quant=use_deepseek_fp8_block_scale)
