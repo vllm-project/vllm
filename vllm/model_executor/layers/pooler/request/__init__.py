@@ -8,12 +8,7 @@ from .heads import (
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,
 )
-from .methods import (
-    AllPool,
-    RequestPoolingMethod,
-    RequestPoolingMethodOutput,
-    RequestPoolingMethodOutputItem,
-)
+from .methods import AllPool, RequestPoolingMethod, RequestPoolingMethodOutputItem
 from .poolers import (
     AllPooler,
     RequestPooler,
@@ -29,7 +24,6 @@ __all__ = [
     "TokenClassifierPoolerHead",
     "TokenEmbeddingPoolerHead",
     "RequestPoolingMethod",
-    "RequestPoolingMethodOutput",
     "RequestPoolingMethodOutputItem",
     "AllPool",
     "RequestPooler",
