@@ -2,14 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Set
+from typing import TypeAlias
 
 import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
+
+TokenPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+"""Applicable to pooling strategies that output one token."""
+
+TokenwisePoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+"""Applicable to pooling strategies that output multiple tokens."""
+
+PoolerOutput: TypeAlias = TokenPoolerOutput | TokenwisePoolerOutput
 
 
 class Pooler(nn.Module, ABC):

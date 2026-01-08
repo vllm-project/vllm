@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .base import Pooler
+from .base import Pooler, PoolerOutput, TokenPoolerOutput, TokenwisePoolerOutput
 from .common import DispatchPooler, DummyPooler, SimplePooler
 from .factory import (
     pooler_for_classify,
@@ -13,6 +13,9 @@ from .tokenwise import AllPooler, StepPooler
 
 __all__ = [
     "Pooler",
+    "TokenPoolerOutput",
+    "TokenwisePoolerOutput",
+    "PoolerOutput",
     "DispatchPooler",
     "SimplePooler",
     "DummyPooler",
