@@ -21,8 +21,7 @@ class PoolerConfig:
 
     pooling_type: PoolingTypeStr | None = None
     """
-    The pooling method of the pooling model. This should be a key in
-    [`vllm.model_executor.layers.pooler.PoolingType`][].
+    The pooling method of the pooling model.
     """
 
     ## for embeddings models
@@ -111,13 +110,15 @@ class PoolerConfig:
 def get_use_activation(o: object):
     if softmax := getattr(o, "softmax", None) is not None:
         logger.warning_once(
-            "softmax will be deprecated, please use use_activation instead."
+            "softmax will be deprecated and will be removed in v0.15. "
+            "Please use use_activation instead."
         )
         return softmax
 
     if activation := getattr(o, "activation", None) is not None:
         logger.warning_once(
-            "activation will be deprecated, please use use_activation instead."
+            "activation will be deprecated and will be removed in v0.15. "
+            "Please use use_activation instead."
         )
         return activation
 

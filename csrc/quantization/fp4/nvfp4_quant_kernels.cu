@@ -35,7 +35,13 @@ template <typename Int>
 __host__ __device__ inline Int round_up(Int x, Int y) {
   static_assert(std::is_integral_v<Int>,
                 "round_up argument must be integral type");
-  return (x + y - 1) / y * y;
+  return ((x + y - 1) / y) * y;
+}
+
+// Compute effective rows for grid configuration with swizzled SF layouts.
+inline int computeEffectiveRows(int m) {
+  constexpr int ROW_TILE = 128;
+  return round_up(m, ROW_TILE);
 }
 
 // Use UE4M3 by default.
@@ -49,80 +55,56 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+  // Precompute SF layout parameter (constant for entire kernel).
+  int32_t const numKTiles = (numCols + 63) / 64;
+
   int sf_m = round_up<int>(numRows, 128);
   int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
   int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
-  for (int row = numRows + blockIdx.x; row < sf_m; row += gridDim.x) {
-    // Each thread writes 4 uint32_t elements.
-    for (int col = sf_n_unpadded + threadIdx.x * 4; col < sf_n_int;
-         col += blockDim.x * 4) {
-      SFout[row * sf_n_int + col] = 0x00;
-    }
-  }
+  int num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE;
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
   // (448.f / (Alpha_A / 6.f)).
   float const global_scale = SFScale == nullptr ? 1.0f : SFScale[0];
 
-  // Input tensor row/col loops.
-  for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
-    for (int colIdx = threadIdx.x; colIdx < numCols / CVT_FP4_ELTS_PER_THREAD;
+  // Iterate over all rows and cols including padded ones -
+  //  ensures we visit every single scale factor address to initialize it.
+  for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
+    for (int colIdx = threadIdx.x;
+         colIdx < num_padded_cols / CVT_FP4_ELTS_PER_THREAD;
          colIdx += blockDim.x) {
+      int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
+
+      PackedVec in_vec;
       int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-      PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
-      // Get the output tensor offset.
-      // Same as inOffset because 8 elements are packed into one uint32_t.
-      int64_t outOffset = inOffset;
-      auto& out_pos = out[outOffset];
+
+      // If we are outside valid rows OR outside valid columns -> Use Zeros
+      if (rowIdx >= numRows || elem_idx >= numCols) {
+        memset(&in_vec, 0, sizeof(PackedVec));
+
+      } else {
+        // Valid Region: Load actual data
+        in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
+      }
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
-              rowIdx, colIdx, numCols, SFout);
+              rowIdx, colIdx, numKTiles, SFout);
 
-      out_pos =
+      auto out_val =
           cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, global_scale, sf_out);
+
+      // We do NOT write output for padding because the 'out' tensor is not
+      // padded.
+      if (rowIdx < numRows && elem_idx < numCols) {
+        // Same as inOffset because 8 elements are packed into one uint32_t.
+        out[inOffset] = out_val;
+      }
     }
   }
 }
-
-template <typename T>
-void invokeFP4Quantization(int m, int n, T const* input, float const* SFScale,
-                           int64_t* output, int32_t* SFOuput, bool useUE8M0,
-                           int multiProcessorCount, cudaStream_t stream) {
-  // Grid, Block size.
-  // Each thread converts 8 values.
-  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
-  // Get number of blocks per SM
-  int const numBlocksPerSM =
-      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
-  dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
-
-  // Launch the cvt kernel.
-  if (useUE8M0) {
-    cvt_fp16_to_fp4<T, true><<<grid, block, 0, stream>>>(
-        m, n, input, SFScale, reinterpret_cast<uint32_t*>(output),
-        reinterpret_cast<uint32_t*>(SFOuput));
-  } else {
-    cvt_fp16_to_fp4<T, false><<<grid, block, 0, stream>>>(
-        m, n, input, SFScale, reinterpret_cast<uint32_t*>(output),
-        reinterpret_cast<uint32_t*>(SFOuput));
-  }
-}
-
-// Instantiate the function.
-template void invokeFP4Quantization(int m, int n, half const* input,
-                                    float const* SFScale, int64_t* output,
-                                    int32_t* SFOuput, bool useUE8M0,
-                                    int multiProcessorCount,
-                                    cudaStream_t stream);
-
-template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
-                                    float const* SFScale, int64_t* output,
-                                    int32_t* SFOuput, bool useUE8M0,
-                                    int multiProcessorCount,
-                                    cudaStream_t stream);
 
 }  // namespace vllm
 
@@ -147,13 +129,19 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 
-  // We don't support e8m0 scales at this moment.
-  bool useUE8M0 = false;
+  // Grid, Block size. Each thread converts 8 values.
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
+  int effectiveRows = vllm::computeEffectiveRows(m);
+  dim3 grid(std::min(effectiveRows, multiProcessorCount * numBlocksPerSM));
 
   VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
     using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
     auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-    vllm::invokeFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
-                                sf_out, useUE8M0, multiProcessorCount, stream);
+    // NOTE: We don't support e8m0 scales at this moment.
+    vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
+        m, n, input_ptr, input_sf_ptr, reinterpret_cast<uint32_t*>(output_ptr),
+        reinterpret_cast<uint32_t*>(sf_out));
   });
 }

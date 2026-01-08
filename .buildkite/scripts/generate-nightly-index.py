@@ -331,6 +331,7 @@ if __name__ == "__main__":
     """
     Arguments:
         --version <version> : version string for the current build (e.g., commit hash)
+        --wheel-dir <wheel_directory> : directory containing wheel files (default to be same as `version`)
         --current-objects <path_to_json> : path to JSON file containing current S3 objects listing in this version directory
         --output-dir <output_directory> : directory to store generated index files
         --alias-to-default <alias_variant_name> : (optional) alias variant name for the default variant
@@ -357,6 +358,12 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Directory to store generated index files",
+    )
+    parser.add_argument(
+        "--wheel-dir",
+        type=str,
+        default=None,
+        help="Directory containing wheel files (default to be same as `version`)",
     )
     parser.add_argument(
         "--alias-to-default",
@@ -417,8 +424,19 @@ if __name__ == "__main__":
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
+    # keep only "official" files for a non-nightly version (specified by cli args)
+    PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
+    if PY_VERSION_RE.match(version):
+        # upload-wheels.sh ensures no "dev" is in args.version
+        wheel_files = list(
+            filter(lambda x: version in x and "dev" not in x, wheel_files)
+        )
+        print(f"Non-nightly version detected, wheel files used: {wheel_files}")
+    else:
+        print("Nightly version detected, keeping all wheel files.")
+
     # Generate index and metadata, assuming wheels and indices are stored as:
-    # s3://vllm-wheels/{version}/<wheel files>
+    # s3://vllm-wheels/{wheel_dir}/<wheel files>
     # s3://vllm-wheels/<anything>/<index files>
     #
     # For ROCm builds, version is "rocm/{commit}" and indices are uploaded to:
@@ -427,14 +445,16 @@ if __name__ == "__main__":
     #   - rocm/{version}/
     # All these are under the "rocm/" prefix, so relative paths should be
     # relative to "rocm/", not the bucket root.
-    #
-    # Extract the commit/version part after "rocm/" for path calculation
-    if version.startswith("rocm/"):
+    if args.wheel_dir:
+        # Explicit wheel-dir provided (e.g., for version-specific indices pointing to commit dir)
+        wheel_dir = args.wheel_dir.strip().rstrip("/")
+    elif version.startswith("rocm/"):
         # For rocm/commit, wheel_base_dir should be just the commit part
         # so relative path from rocm/0.12.0/rocm710/vllm/ -> ../../../{commit}/
-        wheel_base_dir = Path(output_dir).parent / version.split("/", 1)[1]
+        wheel_dir = version.split("/", 1)[1]
     else:
-        wheel_base_dir = Path(output_dir).parent / version
+        wheel_dir = version
+    wheel_base_dir = Path(output_dir).parent / wheel_dir
     index_base_dir = Path(output_dir)
 
     generate_index_and_metadata(

@@ -106,6 +106,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -119,7 +120,7 @@ class RemoteOpenAIServer:
         vllm_serve_args: list[str],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
@@ -283,7 +284,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
     ) -> None:

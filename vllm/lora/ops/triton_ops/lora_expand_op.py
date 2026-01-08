@@ -14,8 +14,6 @@ from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl
-
 
 @triton.jit
 def _lora_expand_kernel(
@@ -241,7 +239,9 @@ def _lora_expand(
         # thread blocks simply exit.
         MAX_LORAS,
     )
-    use_gdc = supports_pdl(inputs.device)
+    # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
+    # making PDL invalid and affecting the kernel performance.
+    use_gdc = False  # supports_pdl(inputs.device)
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,

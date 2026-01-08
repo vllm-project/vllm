@@ -229,6 +229,11 @@ def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
 # guaranteed by the Python GIL.
 _configure_vllm_root_logger()
 
+# Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
+# so we set its logging level to WARNING when vLLM's logging level is INFO.
+if envs.VLLM_LOGGING_LEVEL == "INFO":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = init_logger(__name__)
 
 

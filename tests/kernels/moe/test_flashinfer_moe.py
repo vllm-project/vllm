@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.torch_utils import set_random_seed
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     100
@@ -51,9 +52,16 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("activation", ["silu_and_mul", "relu2"])
 @torch.inference_mode()
 def test_flashinfer_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, activation: str
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    activation: str,
+    workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
