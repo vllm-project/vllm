@@ -16,7 +16,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 
-def get_classification_activation_function(
+def get_classification_act_fn(
     config: PretrainedConfig,
 ) -> "PoolerActivation":
     # Implement alignment with transformers ForSequenceClassificationLoss
@@ -32,7 +32,7 @@ def get_classification_activation_function(
     return PoolerClassify()
 
 
-def get_cross_encoder_activation_function(
+def get_cross_encoder_act_fn(
     config: PretrainedConfig,
 ) -> "PoolerActivation":
     function_name: str | None = None
@@ -65,9 +65,9 @@ def resolve_classifier_act_fn(
 ):
     if isinstance(act_fn, str):
         if act_fn == "classify":
-            return get_classification_activation_function(model_config.hf_config)
+            return get_classification_act_fn(model_config.hf_config)
         if act_fn == "score":
-            return get_cross_encoder_activation_function(model_config.hf_config)
+            return get_cross_encoder_act_fn(model_config.hf_config)
 
         raise ValueError(f"act_fn [{act_fn=}] not supported.")
     if act_fn is None:

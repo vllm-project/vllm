@@ -12,20 +12,20 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput
 from .activations import PoolerActivation
-from .common import ClassifierFn
-from .token import (
+from .batched import (
+    BatchedPoolingFn,
     ClassifierPooler,
-    TokenPoolingFn,
     pooler_for_classify,
     pooler_for_embed,
 )
-from .tokenwise import pooler_for_token_classify, pooler_for_token_embed
+from .common import ClassifierFn
+from .request import pooler_for_token_classify, pooler_for_token_embed
 
 
 def _get_seq_cls_pooler(
     pooler_config: PoolerConfig,
     *,
-    pooling: TokenPoolingFn | None = None,
+    pooling: BatchedPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
@@ -60,7 +60,7 @@ class DispatchPooler(Pooler):
         cls,
         pooler_config: PoolerConfig,
         *,
-        pooling: TokenPoolingFn | None = None,
+        pooling: BatchedPoolingFn | None = None,
         classifier: ClassifierFn | None = None,
     ):
         return cls(

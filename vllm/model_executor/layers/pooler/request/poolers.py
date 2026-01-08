@@ -9,29 +9,29 @@ import torch
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
 from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
-from vllm.model_executor.layers.pooler.tokenwise.heads import TokenwisePoolerHead
-from vllm.model_executor.layers.pooler.tokenwise.methods import AllPool
+from vllm.model_executor.layers.pooler.request.heads import RequestPoolerHead
+from vllm.model_executor.layers.pooler.request.methods import AllPool
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
 from .heads import TokenClassifierPoolerHead, TokenEmbeddingPoolerHead
 
-TokenwisePoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+RequestPoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
 
 
-class TokenwisePooler(Pooler):
+class RequestPooler(Pooler):
     @abstractmethod
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenwisePoolerOutput:
+    ) -> RequestPoolerOutput:
         raise NotImplementedError
 
 
-class AllPooler(TokenwisePooler):
-    def __init__(self, head: TokenwisePoolerHead) -> None:
+class AllPooler(RequestPooler):
+    def __init__(self, head: RequestPoolerHead) -> None:
         super().__init__()
 
         self.pooling = AllPool()
@@ -44,7 +44,7 @@ class AllPooler(TokenwisePooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenwisePoolerOutput:
+    ) -> RequestPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooling_params = pooling_metadata.pooling_params
         assert len(pooled_data) == len(pooling_params)
@@ -52,8 +52,8 @@ class AllPooler(TokenwisePooler):
         return [self.head(d, p) for d, p in zip(pooled_data, pooling_params)]
 
 
-class StepPooler(TokenwisePooler):
-    def __init__(self, head: TokenwisePoolerHead) -> None:
+class StepPooler(RequestPooler):
+    def __init__(self, head: RequestPoolerHead) -> None:
         super().__init__()
 
         self.pooling = AllPool()
@@ -99,7 +99,7 @@ class StepPooler(TokenwisePooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenwisePoolerOutput:
+    ) -> RequestPoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooling_params = pooling_metadata.pooling_params
         assert len(pooled_data) == len(pooling_params)

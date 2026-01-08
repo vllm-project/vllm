@@ -1,39 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Poolers that apply the head tokenwise to all tokens in the hidden states."""
+"""Poolers that apply the head to the hidden states one request at a time."""
 
 from .heads import (
+    RequestPoolerHead,
+    RequestPoolerHeadOutput,
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,
-    TokenwisePoolerHead,
-    TokenwisePoolerHeadOutput,
 )
 from .methods import (
     AllPool,
-    TokenwisePoolingMethod,
-    TokenwisePoolingMethodOutput,
-    TokenwisePoolingMethodOutputItem,
+    RequestPoolingMethod,
+    RequestPoolingMethodOutput,
+    RequestPoolingMethodOutputItem,
 )
 from .poolers import (
     AllPooler,
+    RequestPooler,
+    RequestPoolerOutput,
     StepPooler,
-    TokenwisePooler,
-    TokenwisePoolerOutput,
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
 
 __all__ = [
-    "TokenwisePoolerHead",
-    "TokenwisePoolerHeadOutput",
+    "RequestPoolerHead",
+    "RequestPoolerHeadOutput",
     "TokenClassifierPoolerHead",
     "TokenEmbeddingPoolerHead",
-    "TokenwisePoolingMethod",
-    "TokenwisePoolingMethodOutput",
-    "TokenwisePoolingMethodOutputItem",
+    "RequestPoolingMethod",
+    "RequestPoolingMethodOutput",
+    "RequestPoolingMethodOutputItem",
     "AllPool",
-    "TokenwisePooler",
-    "TokenwisePoolerOutput",
+    "RequestPooler",
+    "RequestPoolerOutput",
     "AllPooler",
     "StepPooler",
     "pooler_for_token_classify",

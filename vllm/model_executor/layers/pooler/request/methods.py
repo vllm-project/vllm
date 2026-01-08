@@ -12,13 +12,13 @@ from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-TokenwisePoolingMethodOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+RequestPoolingMethodOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
 
-TokenwisePoolingMethodOutputItem: TypeAlias = torch.Tensor | None
-"""Represents a single element of `TokenwisePoolingMethodOutput`."""
+RequestPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
+"""Represents a single element of `RequestPoolingMethodOutput`."""
 
 
-class TokenwisePoolingMethod(nn.Module, ABC):
+class RequestPoolingMethod(nn.Module, ABC):
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
         raise NotImplementedError
@@ -31,11 +31,11 @@ class TokenwisePoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenwisePoolingMethodOutput:
+    ) -> RequestPoolingMethodOutput:
         raise NotImplementedError
 
 
-class AllPool(TokenwisePoolingMethod):
+class AllPool(RequestPoolingMethod):
     def __init__(self):
         super().__init__()
 
@@ -51,7 +51,7 @@ class AllPool(TokenwisePoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenwisePoolingMethodOutput:
+    ) -> RequestPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         hidden_states_all = hidden_states.split(
             pooling_cursor.num_scheduled_tokens_cpu.tolist()

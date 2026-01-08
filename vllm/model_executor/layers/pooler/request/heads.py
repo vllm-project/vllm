@@ -16,22 +16,22 @@ from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 
-from .methods import TokenwisePoolingMethodOutputItem
+from .methods import RequestPoolingMethodOutputItem
 
-TokenwisePoolerHeadOutput: TypeAlias = torch.Tensor | None
+RequestPoolerHeadOutput: TypeAlias = torch.Tensor | None
 
 
-class TokenwisePoolerHead(nn.Module, ABC):
+class RequestPoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,
-        pooled_data: TokenwisePoolingMethodOutputItem,
+        pooled_data: RequestPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenwisePoolerHeadOutput:
+    ) -> RequestPoolerHeadOutput:
         raise NotImplementedError
 
 
-class TokenEmbeddingPoolerHead(TokenwisePoolerHead):
+class TokenEmbeddingPoolerHead(RequestPoolerHead):
     def __init__(self) -> None:
         super().__init__()
 
@@ -46,9 +46,9 @@ class TokenEmbeddingPoolerHead(TokenwisePoolerHead):
 
     def forward(
         self,
-        pooled_data: TokenwisePoolingMethodOutputItem,
+        pooled_data: RequestPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenwisePoolerHeadOutput:
+    ) -> RequestPoolerHeadOutput:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
@@ -72,7 +72,7 @@ class TokenEmbeddingPoolerHead(TokenwisePoolerHead):
         return pooled_data
 
 
-class TokenClassifierPoolerHead(TokenwisePoolerHead):
+class TokenClassifierPoolerHead(RequestPoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
@@ -93,9 +93,9 @@ class TokenClassifierPoolerHead(TokenwisePoolerHead):
 
     def forward(
         self,
-        pooled_data: TokenwisePoolingMethodOutputItem,
+        pooled_data: RequestPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenwisePoolerHeadOutput:
+    ) -> RequestPoolerHeadOutput:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None

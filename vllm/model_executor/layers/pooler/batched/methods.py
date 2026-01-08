@@ -12,10 +12,10 @@ from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-TokenPoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+BatchedPoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
-class TokenPoolingMethod(nn.Module, ABC):
+class BatchedPoolingMethod(nn.Module, ABC):
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
         raise NotImplementedError
@@ -28,11 +28,11 @@ class TokenPoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolingMethodOutput:
+    ) -> BatchedPoolingMethodOutput:
         raise NotImplementedError
 
 
-class CLSPool(TokenPoolingMethod):
+class CLSPool(BatchedPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -40,7 +40,7 @@ class CLSPool(TokenPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolingMethodOutput:
+    ) -> BatchedPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with CLS pooling"
@@ -49,7 +49,7 @@ class CLSPool(TokenPoolingMethod):
         return hidden_states[pooling_cursor.first_token_indices_gpu]
 
 
-class LastPool(TokenPoolingMethod):
+class LastPool(BatchedPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -57,12 +57,12 @@ class LastPool(TokenPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolingMethodOutput:
+    ) -> BatchedPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         return hidden_states[pooling_cursor.last_token_indices_gpu]
 
 
-class MeanPool(TokenPoolingMethod):
+class MeanPool(BatchedPoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify", "embed", "classify", "score"}
 
@@ -70,7 +70,7 @@ class MeanPool(TokenPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolingMethodOutput:
+    ) -> BatchedPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with MEAN pooling"

@@ -24,13 +24,13 @@ from vllm.model_executor.layers.pooler import (
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
-from vllm.model_executor.layers.pooler.token import (
+from vllm.model_executor.layers.pooler.batched import (
+    BatchedPooler,
+    BatchedPoolerHeadOutput,
+    BatchedPoolerOutput,
+    BatchedPoolingMethodOutput,
     CLSPool,
     SimplePooler,
-    TokenPooler,
-    TokenPoolerHeadOutput,
-    TokenPoolerOutput,
-    TokenPoolingMethodOutput,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -102,9 +102,9 @@ class BertPooler(SimplePooler):
 
     def head(
         self,
-        pooled_data: TokenPoolingMethodOutput,
+        pooled_data: BatchedPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerHeadOutput:
+    ) -> BatchedPoolerHeadOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
 
@@ -585,7 +585,7 @@ class BertMLMHead(nn.Module):
         return logits
 
 
-class SPLADESparsePooler(TokenPooler):
+class SPLADESparsePooler(BatchedPooler):
     """
     SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
@@ -624,7 +624,7 @@ class SPLADESparsePooler(TokenPooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
+    ) -> BatchedPoolerOutput:
         lens_tensor = pooling_metadata.prompt_lens
         lens: list[int] = lens_tensor.tolist()
         B: int = len(lens)
