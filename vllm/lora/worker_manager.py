@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 
@@ -189,16 +189,30 @@ class WorkerLoRAManager:
         requested_ids = set(models_map)
         for adapter_id in existing_adapters - requested_ids:
             self.remove_adapter(adapter_id)
-        for adapter_id in requested_ids - existing_adapters:
-            self.add_adapter(models_map[adapter_id])
 
-    def add_adapter(self, adapter_request: Any) -> bool:
-        if adapter_request.adapter_id in self.list_adapters():
-            return False
-        loaded_adapter = self._load_adapter(adapter_request)
-        loaded = self._adapter_manager.add_adapter(loaded_adapter)
-        self._adapter_manager.activate_adapter(loaded_adapter.id)
-        return loaded
+        # Batch add new adapters
+        new_requests = [models_map[aid] for aid in requested_ids - existing_adapters]
+        if new_requests:
+            self.add_adapters(new_requests)
+
+    def add_adapter(self, lora_request: LoRARequest) -> bool:
+        """Add a single adapter. Wrapper for add_adapters."""
+        self.add_adapters([lora_request])
+        return lora_request.lora_int_id in self.list_adapters()
+
+    def add_adapters(self, adapter_requests: list[Any]) -> None:
+        """Load, register, and batch activate multiple adapters."""
+        ids_to_activate: list[int] = []
+
+        for adapter_request in adapter_requests:
+            if adapter_request.adapter_id in self.list_adapters():
+                continue
+            loaded_adapter = self._load_adapter(adapter_request)
+            self._adapter_manager.add_adapter(loaded_adapter)
+            ids_to_activate.append(loaded_adapter.id)
+
+        if ids_to_activate:
+            self._adapter_manager.activate_adapters(ids_to_activate)
 
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
@@ -218,6 +232,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     be unloaded if the cache is above capacity."""
 
     _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _adapter_manager: LRUCacheLoRAModelManager
 
     def create_lora_manager(
         self,
@@ -234,7 +249,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             max_num_batched_tokens=self.max_num_batched_tokens,
             vllm_config=vllm_config,
         )
-        self._adapter_manager = lora_manager
+        self._adapter_manager = cast(LRUCacheLoRAModelManager, lora_manager)
         return lora_manager.model
 
     def _apply_adapters(self, lora_requests: set[LoRARequest]) -> None:
@@ -249,41 +264,45 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 "than the number of GPU LoRA slots "
                 f"({self._adapter_manager.lora_slots})."
             )
-        for lora in loras_map.values():
-            self.add_adapter(lora)
+        self.add_adapters(list(loras_map.values()))
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapters(self, lora_requests: list[LoRARequest]) -> None:
+        """Load, register, and batch activate multiple adapters."""
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if (
-            lora_request.lora_int_id not in self.list_adapters()
-            or lora_request.load_inplace
-        ):
-            # Load the new adapter first to ensure it is actually valid, before
-            # evicting any existing adapters.
-            # This may cause the # of loaded lora adapters to very temporarily
-            # exceed `--max-cpu-loras`.
+        requested_ids = {r.lora_int_id for r in lora_requests}
+        existing_ids = self.list_adapters()
+        new_requests = [
+            r
+            for r in lora_requests
+            if (r.lora_int_id not in existing_ids) or r.load_inplace
+        ]
+
+        # Touch existing requested adapters to protect them from eviction
+        for lora_id in requested_ids & existing_ids:
+            self._adapter_manager._registered_adapters.touch(lora_id)
+
+        # Evict oldest (non-touched) adapters if needed
+        num_to_evict = max(
+            0,
+            len(self._adapter_manager)
+            + len(new_requests)
+            - self._adapter_manager.capacity,
+        )
+        for _ in range(num_to_evict):
+            self._adapter_manager.remove_oldest_adapter()
+
+        # Load and register new adapters
+        for lora_request in new_requests:
             lora = self._load_adapter(lora_request)
+            if lora_request.load_inplace:
+                self._adapter_manager.remove_adapter(lora.id)
+            self._adapter_manager.add_adapter(lora)
 
-            # Remove the existing adapter if it exists
-            # Use case for LoRA inplace
-            self._adapter_manager.remove_adapter(lora.id)
-
-            # Loading succeeded, now check if we will exceed cache capacity and
-            # evict if the oldest adapter if so
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                self._adapter_manager.remove_oldest_adapter()
-            # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
-        else:
-            # If the lora is already loaded, just touch it to
-            # update its position in the caches
-            loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
-            )
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
-        return loaded
+        # Activate all
+        ids_to_activate = [r.lora_int_id for r in lora_requests]
+        if ids_to_activate:
+            self._adapter_manager.activate_adapters(ids_to_activate)

@@ -237,6 +237,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
+    VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA: bool = False
 
 
 def get_default_cache_root():
@@ -1578,6 +1579,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # enable LORA per Request Async Loading for GPU Accelerators
+    "VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": lambda: bool(
+        int(os.getenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "0"))
+    ),
 }
 
 
