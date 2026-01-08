@@ -1330,6 +1330,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
+        # TODO: move this type of check into the oracle.
         if (
             not self.moe.is_act_and_mul
             and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
