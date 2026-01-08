@@ -32,6 +32,9 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
+from vllm.distributed.weight_transfer import (
+    init_transfer_engine,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
@@ -94,6 +97,18 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
+        # Weight transfer engine (initialized on-demand)
+        # check if class is in the map
+        self.weight_transfer_engine = init_transfer_engine(
+            self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
+        )
+
+        # Weight transfer engine (initialized on-demand)
+        # check if class is in the map
+        self.weight_transfer_engine = init_transfer_engine(
+            self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
+        )
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         self.profiler: Any | None = None
@@ -922,11 +937,59 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config,
         )
 
+    def init_weight_transfer(self, init_info: dict) -> None:
+        """
+        Initialize weight transfer mechanism.
+        For NCCL backend, this creates a process group with the trainer.
+
+        Args:
+            init_info: Dictionary containing backend-specific initialization info
+        """
+        # Parse dict into backend-specific typed dataclass
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        self.weight_transfer_engine.init_transfer(typed_init_info)
+
+    def update_weights(self, update_info: dict) -> None:
+        """
+        Batched weight update from the trainer.
+
+        Args:
+            update_info: Dictionary containing backend-specific update info
+        """
+        if self.weight_transfer_engine is None:
+            raise RuntimeError("Weight transfer not initialized.")
+
+        # Parse dict into backend-specific typed dataclass
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+
+        # Receive and load weights incrementally to avoid OOM
+        self.weight_transfer_engine.receive_weights(
+            typed_update_info,
+            load_weights=self.model_runner.model.load_weights,
+        )
+
+    def finalize_weight_update(self) -> None:
+        """
+        Finalize the weight update by processing weights for quantization/kernel format.
+        This should be called after all weight updates are complete.
+        """
+        from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+        process_weights_after_loading(
+            self.model_runner.model, self.model_config, self.device
+        )
+
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
+
+        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
+            weight_transfer_engine.shutdown()
+
+        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
+            weight_transfer_engine.shutdown()
 
 
 def init_worker_distributed_environment(

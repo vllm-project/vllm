@@ -14,6 +14,10 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightUpdateRequest,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
@@ -869,3 +873,46 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
+
+    async def init_weight_transfer(self, request: WeightTransferInitRequest) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+        from vllm.distributed.weight_transfer.base import (
+            WeightTransferInitRequest,
+        )
+
+        if isinstance(request, WeightTransferInitRequest):
+            init_info_dict = request.init_info
+        else:
+            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+
+        await self.collective_rpc(
+            "init_weight_transfer", kwargs={"init_info": init_info_dict}
+        )
+
+    async def update_weights(self, request: WeightUpdateRequest) -> None:
+        """
+        Batched weight update for RL training.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+
+        if hasattr(request, "update_info"):
+            update_info_dict = request.update_info
+        else:
+            raise TypeError(f"Invalid WeightUpdateRequest format: {type(request)}")
+
+        await self.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )
+
+    async def finalize_weight_update(self) -> None:
+        """
+        Finalize the current weight update during RL training.
+        """
+        await self.collective_rpc("finalize_weight_update")

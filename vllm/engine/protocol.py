@@ -6,6 +6,10 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightUpdateRequest,
+)
 from vllm.inputs.data import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -191,4 +195,18 @@ class EngineClient(ABC):
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
+        raise NotImplementedError
+
+    async def init_weight_transfer(
+        self, init_request: WeightTransferInitRequest
+    ) -> None:
+        """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def update_weights(self, request: WeightUpdateRequest) -> None:
+        """Batched weight update for RL training."""
+        raise NotImplementedError
+
+    async def finalize_weight_update(self) -> None:
+        """Finalize the current weight update during RL training."""
         raise NotImplementedError
