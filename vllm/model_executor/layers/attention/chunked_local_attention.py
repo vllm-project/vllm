@@ -74,7 +74,7 @@ attention chunk. Batch idx 0 becomes:
 
 
 @torch.compile(dynamic=True)
-def _compute_cu_num_vb(
+def _compute_virtual_query_start_locs(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     chunk: int,
@@ -87,11 +87,11 @@ def _compute_cu_num_vb(
     q_in_remaining_chunks = q_seqlens - q_in_first_chunk
     num_vb_per_req = 1 + (q_in_remaining_chunks + chunk - 1) // chunk
     # Prepend 0 and compute cumsum for output offsets
-    cu_num_vb = torch.zeros(
+    virtual_query_start_locs = torch.zeros(
         seq_lens.shape[0] + 1, dtype=torch.int32, device=seq_lens.device
     )
-    cu_num_vb[1:] = torch.cumsum(num_vb_per_req, dim=0)
-    return cu_num_vb
+    virtual_query_start_locs[1:] = torch.cumsum(num_vb_per_req, dim=0)
+    return virtual_query_start_locs
 
 
 @triton.jit
@@ -99,11 +99,11 @@ def _compute_virtual_batches_attn_metadata_kernel(
     # Inputs
     query_start_loc_ptr,  # [batch_size + 1]
     seq_lens_ptr,  # [batch_size]
-    cu_num_vb_ptr,  # [batch_size + 1] - cumsum of virtual batches per request
+    virtual_query_start_locs_ptr,  # [batch_size + 1] - cumsum of vb per request
     block_table_ptr,  # [batch_size, max_blocks_per_seq]
     # Outputs
     seqlens_k_ptr,  # [num_vb_ub] - virtual batch kv seqlens
-    cu_seqlens_q_ptr,  # [num_vb_ub + 1] - cumulative query seqlens
+    virtual_query_start_locs_out_ptr,  # [num_vb_ub + 1] - cumulative query seqlens
     virtual_batches_block_table_ptr,  # [num_vb_ub * pages_per_virtual_batch]
     batch_mapping_ptr,  # [num_vb_ub] - maps vb -> original batch
     block_indices_ptr,  # [num_vb_ub * pages_per_virtual_batch] - block indices
@@ -121,8 +121,8 @@ def _compute_virtual_batches_attn_metadata_kernel(
         return
 
     # Load batch boundaries and sequence data
-    output_start = tl.load(cu_num_vb_ptr + batch_idx)
-    output_end = tl.load(cu_num_vb_ptr + batch_idx + 1)
+    output_start = tl.load(virtual_query_start_locs_ptr + batch_idx)
+    output_end = tl.load(virtual_query_start_locs_ptr + batch_idx + 1)
     num_vb = output_end - output_start
 
     q_start = tl.load(query_start_loc_ptr + batch_idx)
@@ -136,13 +136,13 @@ def _compute_virtual_batches_attn_metadata_kernel(
     space_in_first = tl.where(
         remainder == 0, ATTN_CHUNK_SIZE, ATTN_CHUNK_SIZE - remainder
     )
-    q_first = tl.minimum(space_in_first, q_seqlen)
+    tokens_first = tl.minimum(space_in_first, q_seqlen)
 
     # Compute tokens_in_last_block
     last_remainder = kv_seqlen % ATTN_CHUNK_SIZE
     tokens_last = tl.where(last_remainder == 0, ATTN_CHUNK_SIZE, last_remainder)
 
-    # Running sum for cu_seqlens_q (base offset is q_start from query_start_loc)
+    # Running sum for virtual_query_start_locs
     cu_q_running = q_start
 
     # Loop over virtual batches for this request (use mask instead of break)
@@ -153,9 +153,11 @@ def _compute_virtual_batches_attn_metadata_kernel(
         # Compute seqlen_q
         is_first = vb_local_idx == 0
         consumed = tl.where(vb_local_idx > 0, (vb_local_idx - 1) * ATTN_CHUNK_SIZE, 0)
-        remaining = q_seqlen - q_first - consumed
+        remaining = q_seqlen - tokens_first - consumed
         seqlen_q = tl.where(
-            is_first, q_first, tl.minimum(tl.maximum(remaining, 0), ATTN_CHUNK_SIZE)
+            is_first,
+            tokens_first,
+            tl.minimum(tl.maximum(remaining, 0), ATTN_CHUNK_SIZE),
         )
 
         # Compute seqlen_k (0 for padding entries where kv_seqlen=0)
@@ -174,9 +176,11 @@ def _compute_virtual_batches_attn_metadata_kernel(
         tl.store(seqlens_k_ptr + vb_idx, seqlen_k, mask=valid)
         tl.store(batch_mapping_ptr + vb_idx, batch_idx, mask=valid)
 
-        # Update and store cu_seqlens_q
+        # Update and store virtual_query_start_locs
         cu_q_running = tl.where(valid, cu_q_running + seqlen_q, cu_q_running)
-        tl.store(cu_seqlens_q_ptr + vb_idx + 1, cu_q_running, mask=valid)
+        tl.store(
+            virtual_query_start_locs_out_ptr + vb_idx + 1, cu_q_running, mask=valid
+        )
 
         # Store block table entries and indices (masked)
         for page_idx in range(PAGES_PER_VIRTUAL_BATCH):
@@ -303,7 +307,9 @@ def create_chunked_local_attention_backend(
             max_vb_per_req = max(1, int(num_vb_per_req_ub.max()))
 
             # Compute cumulative virtual batches per request on GPU
-            cu_num_vb = _compute_cu_num_vb(query_start_loc, seq_lens, chunk)
+            virtual_query_start_locs = _compute_virtual_query_start_locs(
+                query_start_loc, seq_lens, chunk
+            )
 
             # Get max_blocks_per_seq from actual block_table shape
             max_blocks_per_seq = block_table.shape[1]
@@ -317,7 +323,7 @@ def create_chunked_local_attention_backend(
             _compute_virtual_batches_attn_metadata_kernel[(batch_size,)](
                 query_start_loc,
                 seq_lens,
-                cu_num_vb,
+                virtual_query_start_locs,
                 block_table,
                 self._virtual_seqlens,
                 self._virtual_query_start_loc,
@@ -384,12 +390,8 @@ def create_chunked_local_attention_backend(
 
             metadata = super().build(common_prefix_len, cm, fast_build)
 
-            # Create closure to build virtual batches block table on demand
-            # Clone indices so they're stable (different layers have different builders)
-            batch_mapping = self._virtual_batch_to_batch_mapping[:num_vb_ub].clone()
-            block_indices = self._virtual_batch_block_indices[
-                :num_vb_ub, :pages_per_vb
-            ].clone()
+            batch_mapping = self._virtual_batch_to_batch_mapping[:num_vb_ub]
+            block_indices = self._virtual_batch_block_indices[:num_vb_ub, :pages_per_vb]
 
             def make_virtual_batches_block_table(blk_table: torch.Tensor):
                 return blk_table[batch_mapping.unsqueeze(1), block_indices]
