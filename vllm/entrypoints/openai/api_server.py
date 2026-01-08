@@ -494,12 +494,12 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API"
         )
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+    # try:
+    generator = await handler.create_chat_completion(request, raw_request)
+    # except Exception as e:
+        # raise HTTPException(
+            # status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        # ) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
@@ -1089,6 +1089,7 @@ async def init_app_state(
             tool_parser=args.tool_call_parser,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_completion_tokens_details=args.enable_completion_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             exclude_log_deltas=args.exclude_log_deltas,

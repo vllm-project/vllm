@@ -18,6 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    count_reasoning_tokens,
     get_history_tool_calls_cnt,
     make_tool_call_id,
 )
@@ -42,6 +43,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
+    CompletionTokensDetails,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -99,6 +101,7 @@ class OpenAIServingChat(OpenAIServing):
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
+        enable_completion_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         exclude_log_deltas: bool = False,
@@ -136,6 +139,7 @@ class OpenAIServingChat(OpenAIServing):
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_completion_tokens_details = enable_completion_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         if self.default_sampling_params:
@@ -613,6 +617,7 @@ class OpenAIServingChat(OpenAIServing):
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
+        num_reasoning_tokens = [0] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
         if self.use_harmony:
@@ -655,6 +660,7 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = None
 
         try:
+            reasoning_parser = None
             if self.reasoning_parser:
                 if tokenizer is None:
                     raise ValueError(
@@ -1082,6 +1088,12 @@ class OpenAIServingChat(OpenAIServing):
 
                     # when only reasoning
                     elif self.reasoning_parser:
+                        reasoning_end_arr[i] = (
+                            reasoning_parser.is_reasoning_end_streaming(
+                                previous_token_ids,
+                                current_token_ids,
+                            )
+                        )
                         delta_message = reasoning_parser.extract_reasoning_streaming(
                             previous_text,
                             current_text,
@@ -1110,6 +1122,15 @@ class OpenAIServingChat(OpenAIServing):
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
 
+                    # Count reasoning tokens when reasoning ends
+                    if (
+                        self.reasoning_parser
+                        and reasoning_end_arr[i]
+                        and (not num_reasoning_tokens[i])
+                    ):
+                        num_reasoning_tokens[i] = count_reasoning_tokens(
+                            all_previous_token_ids[i], reasoning_parser.end_token_ids
+                        )
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
@@ -1286,6 +1307,12 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens
+                    )
+
+                if self.enable_completion_tokens_details and self.reasoning_parser:
+                    reasoning_tokens = sum(num_reasoning_tokens)
+                    final_usage.completion_tokens_details = CompletionTokensDetails(
+                        reasoning_tokens=reasoning_tokens - num_prompt_tokens
                     )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
@@ -1620,9 +1647,14 @@ class OpenAIServingChat(OpenAIServing):
         num_prompt_tokens = len(final_res.prompt_token_ids)
         if final_res.encoder_prompt_token_ids is not None:
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
-        num_generated_tokens = sum(
-            len(output.token_ids) for output in final_res.outputs
-        )
+        num_generated_tokens = 0
+        total_reasoning_tokens = 0
+        for output in final_res.outputs:
+            num_generated_tokens += len(output.token_ids)
+            if self.reasoning_parser:
+                total_reasoning_tokens += count_reasoning_tokens(
+                    output.token_ids, reasoning_parser.end_token_ids
+                )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
@@ -1632,7 +1664,10 @@ class OpenAIServingChat(OpenAIServing):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
             )
-
+        if self.enable_completion_tokens_details and total_reasoning_tokens:
+            usage.completion_tokens_details = CompletionTokensDetails(
+                reasoning_tokens=total_reasoning_tokens - num_prompt_tokens
+            )
         request_metadata.final_usage_info = usage
 
         response = ChatCompletionResponse(

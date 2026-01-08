@@ -177,6 +177,8 @@ class FrontendArgs:
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
+    enable_completion_tokens_details: bool = False
+    """If set to True, enable completion_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
