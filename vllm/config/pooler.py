@@ -21,8 +21,7 @@ class PoolerConfig:
 
     pooling_type: PoolingTypeStr | None = None
     """
-    The pooling method of the pooling model. This should be a key in
-    [`vllm.model_executor.layers.pooler.PoolingType`][].
+    The pooling method of the pooling model.
     """
 
     ## for embeddings models
