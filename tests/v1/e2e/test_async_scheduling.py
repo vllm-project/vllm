@@ -54,6 +54,14 @@ def test_without_spec_decoding(
         dict(
             structured_outputs=struct_outputs,
             logprobs=2,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            presence_penalty=-1.0,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
             presence_penalty=-1.0,
         ),
     ]

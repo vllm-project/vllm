@@ -2720,16 +2720,9 @@ class GPUModelRunner(
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
-        if (
-            self._draft_token_req_ids is not None
-            and self.input_batch.sampling_metadata.output_token_ids
-        ):
-            num_reqs = len(self._draft_token_req_ids)
-            draft_token_ids_cpu = self._get_draft_token_ids_cpu(num_reqs)
-            self.input_batch.update_async_spec_token_ids(
-                draft_token_ids_cpu,
-                num_draft_tokens=spec_decode_metadata.num_draft_tokens,
-            )
+        if self.use_async_scheduling and self._draft_token_req_ids is not None:
+            draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
+            self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
@@ -3533,8 +3526,7 @@ class GPUModelRunner(
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
-        req_ids = self._draft_token_req_ids
-        draft_token_ids = self._get_draft_token_ids_cpu(len(req_ids))
+        draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_draft_token_ids_to_cpu(
@@ -3542,13 +3534,11 @@ class GPUModelRunner(
     ) -> None:
         # Check if we need to copy draft tokens to CPU. In async scheduling,
         # we only copy when needed for structured output, penalties or bad_words.
-        if self.use_async_scheduling:
-            needs_copy_draft_token_ids = (
-                scheduler_output.has_structured_output_requests
-                or self.input_batch.sampling_metadata.output_token_ids
-            )
-            if not needs_copy_draft_token_ids:
-                return
+        if self.use_async_scheduling and not (
+            scheduler_output.has_structured_output_requests
+            or self.input_batch.sampling_metadata.output_token_ids
+        ):
+            return
         # We must also set the corresponding request ids.
         self._draft_token_req_ids = self.input_batch.req_ids.copy()
 
@@ -3572,13 +3562,16 @@ class GPUModelRunner(
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
-    def _get_draft_token_ids_cpu(self, num_reqs: int) -> list[list[int]]:
+    def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
         if isinstance(self._draft_token_ids, list):
-            return self._draft_token_ids
+            return self._draft_token_ids, self.input_batch.req_ids
+        req_ids = self._draft_token_req_ids
+        if req_ids is None:
+            return [], []
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_cpu is not None
         self.draft_token_ids_event.synchronize()
-        return self.draft_token_ids_cpu[:num_reqs].tolist()
+        return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
 
     def _copy_valid_sampled_token_count(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
