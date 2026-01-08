@@ -507,7 +507,7 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     request.lora_request = LoRARequest(
-        lora_name="test_lora_adapter", lora_int_id=1, lora_path="/path/to/lora"
+        lora_name="test_lora_adapter", lora_path="/path/to/lora"
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)

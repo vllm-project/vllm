@@ -29,7 +29,6 @@ class FilesystemResolver(LoRAResolver):
                 ):
                     lora_request = LoRARequest(
                         lora_name=lora_name,
-                        lora_int_id=abs(hash(lora_name)),
                         lora_path=lora_path,
                     )
                     return lora_request

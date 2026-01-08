@@ -47,9 +47,7 @@ async def _async_serving_models_init() -> OpenAIServingModels:
 async def test_serving_model_name():
     serving_models = await _async_serving_models_init()
     assert serving_models.model_name(None) == MODEL_NAME
-    request = LoRARequest(
-        lora_name="adapter", lora_path="/path/to/adapter2", lora_int_id=1
-    )
+    request = LoRARequest(lora_name="adapter", lora_path="/path/to/adapter2")
     assert serving_models.model_name(request) == request.lora_name
 
 
