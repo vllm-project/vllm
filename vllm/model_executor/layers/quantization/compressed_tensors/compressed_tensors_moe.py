@@ -78,10 +78,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
-    prepare_moe_fp4_layer_for_marlin,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
@@ -228,7 +224,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None, use_marlin: bool = False):
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+        use_marlin: bool = False,
+    ):
         if not moe.is_act_and_mul:
             raise ValueError(
                 "CompressedTensorsW4A4Nvfp4MoEMethod does not yet "
