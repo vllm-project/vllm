@@ -432,6 +432,12 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
+        extra_args = dict(
+            parallel_tool_calls=self.parallel_tool_calls,
+        )
+        if self.reasoning is not None and self.reasoning.effort is not None:
+            extra_args.update(reasoning_effort=self.reasoning.effort)
+
         # TODO: add more parameters
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -443,11 +449,10 @@ class ResponsesRequest(OpenAIBaseModel):
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
-            reasoning_effort=None if self.reasoning is None else self.reasoning.effort,
-            parallel_tool_calls=self.parallel_tool_calls,
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            extra_args=extra_args,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -818,6 +823,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.reasoning_effort is not None:
+            extra_args["reasoning_effort"] = self.reasoning_effort
+        extra_args["parallel_tool_calls"] = self.parallel_tool_calls
+
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -845,8 +854,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            reasoning_effort=self.reasoning_effort,
-            parallel_tool_calls=self.parallel_tool_calls,
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
