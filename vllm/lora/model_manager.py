@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import nvtx
 import regex as re
 import torch
 from torch import nn
@@ -255,19 +254,16 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            module.lora_ready.fill_(0)
+            if module.lora_ready:
+                module.lora_ready.fill_(0)
             if not module_lora:
                 module.reset_lora(index)
                 continue
-        i = 0
+
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 continue
-            range_id_18 = nvtx.start_range(
-                message=f"gpu_module_layer : {i}", color="red"
-            )
-            i += 1
             with torch.cuda.stream(self.lora_loading_stream):
                 module.set_lora(
                     index,
@@ -275,8 +271,8 @@ class LoRAModelManager:
                     module_lora.lora_b,
                 )
                 # will need to update for multi-lora request loading
-                module.lora_ready.fill_(1)
-            nvtx.end_range(range_id_18)
+                if module.lora_ready:
+                    module.lora_ready.fill_(1)
         return True
 
     def _deactivate_adapter(self, lora_id: int):

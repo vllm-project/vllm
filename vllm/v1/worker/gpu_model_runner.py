@@ -191,7 +191,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
-import nvtx
 
 logger = init_logger(__name__)
 
@@ -1659,14 +1658,9 @@ class GPUModelRunner(
                 np.sum(num_sampled_tokens)
                 <= self.vllm_config.scheduler_config.max_num_batched_tokens
             )
-            range_id_6 = nvtx.start_range(
-                message="lora_hot_swap_load_time", color="red"
-            )
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
-            nvtx.end_range(range_id_6)
-
         return (
             logits_indices,
             spec_decode_metadata,
@@ -3522,7 +3516,6 @@ class GPUModelRunner(
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
-            torch.cuda.nvtx.range("model_single_forward_pass"),
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,
