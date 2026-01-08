@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooling strategies that output one token."""
+"""Poolers that apply the head to only a single token in the hidden states."""
 
 from .heads import (
     EmbeddingPoolerHead,

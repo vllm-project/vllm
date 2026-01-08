@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooling strategies that output multiple tokens."""
+"""Poolers that apply the head tokenwise to all tokens in the hidden states."""
 
 from .heads import (
     TokenClassifierPoolerHead,
