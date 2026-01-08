@@ -233,6 +233,7 @@ class Siglip2Attention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads_per_partition,
             head_size=self.head_dim,
+            scale=self.scale,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
         )
