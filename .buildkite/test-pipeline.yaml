@@ -1104,6 +1104,7 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
+  - .buildkite/scripts/run-multi-node-test.sh
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'

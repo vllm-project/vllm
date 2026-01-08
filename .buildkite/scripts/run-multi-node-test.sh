@@ -7,7 +7,7 @@ set -euox pipefail
 if [ -e /dev/kfd ] || \
     [ -d /opt/rocm ] || \
     command -v rocm-smi &> /dev/null || \
-    [ -n "$ROCM_HOME" ]; then
+    [ -n "${ROCM_HOME:-}" ]; then
     IS_ROCM=1
 else
     IS_ROCM=0
