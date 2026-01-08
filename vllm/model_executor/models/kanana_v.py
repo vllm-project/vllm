@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .llama import LlamaForCausalLM
@@ -267,18 +268,13 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
     reuses vLLM's optimized `Qwen2VisionTransformer` building blocks.
     """
 
-    config_class = Qwen2VLVisionConfig
-
     def __init__(self, config: Qwen2VLVisionConfig) -> None:
         super().__init__(
             vision_config=config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=None,
             prefix="",
-            use_data_parallel=False,
-            attn_backend_override=None,
         )
-        self.gradient_checkpointing = False
 
         # Kanana-V uses its own projector/abstractor instead of the Qwen2
         # built-in patch merger, so we drop the merger module to keep the
@@ -344,24 +340,13 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
                 # Store patch-level states (S, D).
                 encoder_states = encoder_states + (x.squeeze(1),)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    blk.__call__,
-                    x,
-                    cu_seqlens,
-                    rotary_pos_emb_cos,
-                    rotary_pos_emb_sin,
-                    max_seqlen,
-                )
-            else:
-                layer_outputs = blk(
-                    x,
-                    cu_seqlens=cu_seqlens,
-                    rotary_pos_emb_cos=rotary_pos_emb_cos,
-                    rotary_pos_emb_sin=rotary_pos_emb_sin,
-                    max_seqlen=max_seqlen,
-                )
-            x = layer_outputs
+            x = blk(
+                x,
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                max_seqlen=max_seqlen,
+            )
 
         # Final hidden state at patch level (S, D).
         hidden_states = x.squeeze(1)
@@ -406,11 +391,8 @@ class KananaVProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
     ) -> tuple[ImageSize, int]:
         image_processor = self.ctx.get_hf_processor().image_processor
-
-        import sys
-
-        module = sys.modules[type(image_processor).__module__]
-        smart_resize = module.smart_resize
+        smart_resize = resolve_obj_by_qualname(
+            f"{type(image_processor).__module__}.smart_resize")
 
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -612,15 +594,10 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         quant_config = vllm_config.quant_config
 
-        logger.info("Build vision model ...")
         self.vision_model = CustomQwen2VLVE._from_config(config.vision_config)
-
-        logger.info("Build projector ...")
         self.abstractor = DynamicCAbstractor(
             config.projector_config, num_input_tokens=self.vision_model.get_num_tokens()
         )
-
-        logger.info("Build LM ...")
         self.text_config = config.text_config
         language_model_config = vllm_config.with_hf_config(hf_config=self.text_config)
         language_model_config.quant_config = quant_config
@@ -725,13 +702,14 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
         if isinstance(pixel_values, torch.Tensor):
             if pixel_values.ndim == 2:
                 kwargs["pixel_values"] = pixel_values
-            if pixel_values.ndim != 3:
+            elif pixel_values.ndim == 3:
+                kwargs["pixel_values"] = pixel_values.flatten(0, 1)
+            else:
                 raise ValueError(
                     f"pixel_values should be 2D or batched 3D tensor. "
                     f"Got ndim: {pixel_values.ndim} "
                     f"(shape={pixel_values.shape})"
                 )
-            kwargs["pixel_values"] = pixel_values.flatten(0, 1)
         else:
             kwargs["pixel_values"] = torch.concat(pixel_values)
         if kwargs["vision_grid_thw"].ndim == 3:
