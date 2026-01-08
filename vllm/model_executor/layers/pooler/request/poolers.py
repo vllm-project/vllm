@@ -74,17 +74,17 @@ class StepPooler(RequestPooler):
         ):
             # for unfinished chunked prefill
             if data is None:
-                pooled_data.append(data)
-                continue
+                pass
+            else:
+                step_tag_id = pooling_param.step_tag_id
+                returned_token_ids = pooling_param.returned_token_ids
 
-            step_tag_id = pooling_param.step_tag_id
-            returned_token_ids = pooling_param.returned_token_ids
+                if returned_token_ids is not None and len(returned_token_ids) > 0:
+                    data = data[:, returned_token_ids]
 
-            if returned_token_ids is not None and len(returned_token_ids) > 0:
-                data = data[:, returned_token_ids]
+                if step_tag_id is not None:
+                    data = data[token_id == step_tag_id]
 
-            if step_tag_id is not None:
-                data = data[token_id == step_tag_id]
             pooled_data.append(data)
 
         return pooled_data
