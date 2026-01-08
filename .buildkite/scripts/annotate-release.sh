@@ -51,4 +51,42 @@ docker manifest create vllm/vllm-openai:v${RELEASE_VERSION} vllm/vllm-openai:v${
 docker manifest push vllm/vllm-openai:latest
 docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}
 \`\`\`
-EOF 
+
+## CPU Images (Docker Hub)
+
+CPU images are automatically published to Docker Hub when you unblock "Build and publish CPU release images to Docker Hub" in the release pipeline.
+
+**Published tags:**
+- \`vllm/vllm-openai:v${RELEASE_VERSION}-cpu\` (multi-arch manifest)
+- \`vllm/vllm-openai:v${RELEASE_VERSION}-cpu-x86_64\`
+- \`vllm/vllm-openai:v${RELEASE_VERSION}-cpu-aarch64\`
+- \`vllm/vllm-openai:latest-cpu\` (multi-arch manifest)
+- \`vllm/vllm-openai:latest-cpu-x86_64\`
+- \`vllm/vllm-openai:latest-cpu-aarch64\`
+
+**To manually publish CPU images (if pipeline step was not triggered):**
+\`\`\`
+# Pull from ECR
+docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:${RELEASE_VERSION}
+docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${RELEASE_VERSION}
+
+# Tag for Docker Hub
+docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:${RELEASE_VERSION} vllm/vllm-openai:v${RELEASE_VERSION}-cpu-x86_64
+docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:${RELEASE_VERSION} vllm/vllm-openai:latest-cpu-x86_64
+docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${RELEASE_VERSION} vllm/vllm-openai:v${RELEASE_VERSION}-cpu-aarch64
+docker tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${RELEASE_VERSION} vllm/vllm-openai:latest-cpu-aarch64
+
+# Push to Docker Hub
+docker push vllm/vllm-openai:v${RELEASE_VERSION}-cpu-x86_64
+docker push vllm/vllm-openai:latest-cpu-x86_64
+docker push vllm/vllm-openai:v${RELEASE_VERSION}-cpu-aarch64
+docker push vllm/vllm-openai:latest-cpu-aarch64
+
+# Create and push multi-arch manifests
+docker manifest rm vllm/vllm-openai:latest-cpu || true
+docker manifest create vllm/vllm-openai:v${RELEASE_VERSION}-cpu vllm/vllm-openai:v${RELEASE_VERSION}-cpu-x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-cpu-aarch64
+docker manifest create vllm/vllm-openai:latest-cpu vllm/vllm-openai:latest-cpu-x86_64 vllm/vllm-openai:latest-cpu-aarch64
+docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}-cpu
+docker manifest push vllm/vllm-openai:latest-cpu
+\`\`\`
+EOF
