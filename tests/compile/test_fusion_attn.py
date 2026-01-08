@@ -14,6 +14,7 @@ from tests.compile.fusion_test_utils import (
     MODELS_FP4,
     MODELS_FP8,
     Matches,
+    has_cuda_graph_wrapper_metadata,
     is_blackwell,
     run_model,
 )
@@ -542,8 +543,6 @@ def test_attn_quant(
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition requires torch>=2.9")
-    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
-        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
