@@ -224,13 +224,6 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
-    reasoning_effort: str | None = None
-    """Controls the amount of reasoning the model performs. Supported values
-    are "minimal", "low", "medium", and "high". Higher values enable extended
-    thinking for more complex tasks."""
-    parallel_tool_calls: bool = True
-    """Whether to allow parallel tool calls."""
-
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
     """Parameters for configuring structured outputs."""
@@ -280,8 +273,6 @@ class SamplingParams(
         logits_processors: list[LogitsProcessor] | None = None,
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        reasoning_effort: str | None = None,
-        parallel_tool_calls: bool | None = True,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
@@ -323,8 +314,6 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
-            reasoning_effort=reasoning_effort,
-            parallel_tool_calls=True if parallel_tool_calls is None else parallel_tool_calls,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
@@ -482,18 +471,6 @@ class SamplingParams(
                 "Set detokenize=True to use stop."
             )
 
-        if self.reasoning_effort is not None and self.reasoning_effort not in (
-            "minimal",
-            "low",
-            "medium",
-            "high",
-        ):
-            raise ValueError(
-                f"reasoning_effort must be one of 'minimal', 'low', 'medium', 'high', "
-                f"got {self.reasoning_effort!r}."
-            )
-
-
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
             raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
@@ -631,8 +608,6 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"reasoning_effort={self.reasoning_effort})"
-            f"parallel_tool_calls={self.parallel_tool_calls})"
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
         )
