@@ -25,6 +25,9 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_roundup_layer_hidden_size,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -40,7 +43,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
@@ -229,61 +232,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     )
 
 
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    quant_config: QuantizationConfig | None,
-    moe_parallel_config: FusedMoEParallelConfig,
-    is_lora_enabled: bool,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        quant_config: Fused MoE quantization configuration.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            hidden_size = round_up(hidden_size, 256)
-
-    return hidden_size
-
-
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -400,12 +348,10 @@ class FusedMoE(CustomOp):
         self.expert_mapping = expert_mapping
 
         # Round up hidden size if needed.
-        hidden_size = maybe_roundup_hidden_size(
+        hidden_size = maybe_roundup_layer_hidden_size(
             hidden_size,
             moe_in_dtype,
-            quant_config,
             self.moe_parallel_config,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -635,6 +581,12 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        self.support_padded_mxfp8_quant = (
+            hasattr(self.quant_method, "mxfp8_quant_alignment")
+            and self.quant_method.mxfp8_quant_alignment is not None
+        )
+        # create_weights may pad hidden_size
+        self.moe_config.hidden_dim = self.hidden_size
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
@@ -1660,7 +1612,9 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         og_hidden_states = hidden_states.shape[-1]
-        if self.hidden_size != og_hidden_states:
+        # No need to explicitly pad the hidden size for mxfp8 quantization
+        # It will be padded in mxfp8_quantize() before MoE
+        if not self.support_padded_mxfp8_quant and self.hidden_size != og_hidden_states:
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.hidden_size - og_hidden_states),
