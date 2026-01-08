@@ -289,6 +289,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Grok1ModelForCausalLM": _HfExamplesInfo(
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
+    "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
