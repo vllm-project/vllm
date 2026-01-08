@@ -460,6 +460,7 @@ class TestNixlHandshake:
     )
     def test_multi_xfer_one_engine(
         self,
+        default_vllm_config,
         # dist_init is a fixture that initializes the distributed environment.
         dist_init,
     ):
@@ -549,6 +550,7 @@ class TestNixlHandshake:
     )
     def test_async_load_kv(
         self,
+        default_vllm_config,
         # Fixture that initializes the distributed environment.
         dist_init,
         # Simulate consumer-producer TP sizes.
@@ -607,7 +609,7 @@ class TestNixlHandshake:
     )
     @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size(
-        self, local_tp_size: int, dist_init
+        self, local_tp_size: int, default_vllm_config, dist_init
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
@@ -672,7 +674,7 @@ class TestNixlHandshake:
     )
     @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size_mla(
-        self, local_tp_size: int, dist_init
+        self, local_tp_size: int, default_vllm_config, dist_init
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
@@ -772,6 +774,7 @@ class TestNixlHandshake:
     )
     def test_concurrent_load_kv(
         self,
+        default_vllm_config,
         # dist_init is a fixture that initializes the distributed environment.
         dist_init,
     ):
@@ -832,7 +835,9 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
+    def test_handshake_fails_on_kv_cache_layout_mismatch(
+        self, default_vllm_config, dist_init
+    ):
         """
         Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
@@ -881,7 +886,7 @@ class TestNixlHandshake:
         FakeNixlWrapper,
     )
     def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
-        self, dist_init
+        self, default_vllm_config, dist_init
     ):
         """
         Verify that adding a remote agent fails if kv_cache_layout differs.
@@ -936,7 +941,7 @@ class TestNixlHandshake:
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_kv_connector_stats(dist_init):
+def test_kv_connector_stats(default_vllm_config, dist_init):
     """Test that KV transfer stats are properly recorded and retrieved."""
     vllm_config = create_vllm_config()
 
@@ -1359,7 +1364,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         "TRITON_ATTN",
     ],
 )
-def test_register_kv_caches(dist_init, attn_backend):
+def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
@@ -1520,7 +1525,9 @@ class FakePlatform(Platform):
         ("oot", "VRAM"),
     ],
 )
-def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device, nixl_memory_type):
+def test_kv_buffer_to_nixl_memory_types(
+    default_vllm_config, dist_init, kv_buffer_device, nixl_memory_type
+):
     """
     Test that register_kv_caches() passes the correct memory types from the
     config to the nixl_wrapper.
@@ -1565,7 +1572,7 @@ def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device, nixl_memory
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_shutdown_cleans_up_resources(dist_init):
+def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     """Test that shutdown() properly cleans up all resources."""
     vllm_config = create_vllm_config()
 
@@ -1624,7 +1631,7 @@ def test_shutdown_cleans_up_resources(dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_aborted_request_removed_from_worker_in_batch(dist_init):
+def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_init):
     """
     Create and schedule a request so that P adds it to in-batch tracking via
     the real scheduler, then simulate an abort (request not in next scheduler
@@ -1733,7 +1740,7 @@ class FailingNixlWrapper(FakeNixlWrapper):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_handshake_failure_returns_finished(dist_init):
+def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     """Test that handshake failures mark blocks invalid and return via get_finished."""
     vllm_config = create_vllm_config()
 
@@ -1782,7 +1789,7 @@ def test_handshake_failure_returns_finished(dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_transfer_setup_failure_returns_finished(dist_init):
+def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init):
     """Test that transfer setup failures mark blocks invalid
     and return via get_finished."""
     vllm_config = create_vllm_config()
@@ -1857,6 +1864,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
     FakeNixlWrapper,
 )
 def test_compatibility_hash_validation(
+    default_vllm_config,
     dist_init,
     mismatch_type,
     config_overrides,
@@ -1969,7 +1977,7 @@ def test_compatibility_hash_validation(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_handshake_decode_errors(dist_init, error_scenario):
+def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario):
     """
     Test that msgspec decode errors are properly handled during handshake.
 
