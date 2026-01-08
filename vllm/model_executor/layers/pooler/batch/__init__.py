@@ -3,23 +3,23 @@
 """Poolers that apply the head to the hidden states in one step."""
 
 from .heads import (
-    BatchedPoolerHead,
-    BatchedPoolerHeadOutput,
+    BatchPoolerHead,
+    BatchPoolerHeadOutput,
     EmbeddingPoolerHead,
 )
 from .methods import (
-    BatchedPoolingMethod,
-    BatchedPoolingMethodOutput,
+    BatchPoolingMethod,
+    BatchPoolingMethodOutput,
     CLSPool,
     LastPool,
     MeanPool,
     get_token_pooling_method,
 )
 from .poolers import (
-    BatchedPooler,
-    BatchedPoolerOutput,
-    BatchedPoolingFn,
-    BatchedPoolingHeadFn,
+    BatchPooler,
+    BatchPoolerOutput,
+    BatchPoolingFn,
+    BatchPoolingHeadFn,
     ClassifierPooler,
     SimplePooler,
     pooler_for_classify,
@@ -27,20 +27,20 @@ from .poolers import (
 )
 
 __all__ = [
-    "BatchedPoolerHead",
-    "BatchedPoolerHeadOutput",
+    "BatchPoolerHead",
+    "BatchPoolerHeadOutput",
     "EmbeddingPoolerHead",
-    "BatchedPoolerHead",
-    "BatchedPoolingMethod",
-    "BatchedPoolingMethodOutput",
+    "BatchPoolerHead",
+    "BatchPoolingMethod",
+    "BatchPoolingMethodOutput",
     "CLSPool",
     "LastPool",
     "MeanPool",
     "get_token_pooling_method",
-    "BatchedPooler",
-    "BatchedPoolingFn",
-    "BatchedPoolingHeadFn",
-    "BatchedPoolerOutput",
+    "BatchPooler",
+    "BatchPoolingFn",
+    "BatchPoolingHeadFn",
+    "BatchPoolerOutput",
     "ClassifierPooler",
     "SimplePooler",
     "pooler_for_classify",

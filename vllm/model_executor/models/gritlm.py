@@ -13,10 +13,10 @@ from vllm.model_executor.layers.pooler import (
     pooler_for_token_embed,
 )
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
-from vllm.model_executor.layers.pooler.batched import (
-    BatchedPoolerHeadOutput,
-    BatchedPoolingMethod,
-    BatchedPoolingMethodOutput,
+from vllm.model_executor.layers.pooler.batch import (
+    BatchPoolerHeadOutput,
+    BatchPoolingMethod,
+    BatchPoolingMethodOutput,
     SimplePooler,
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -29,7 +29,7 @@ from .interfaces_base import default_pooling_type
 logger = init_logger(__name__)
 
 
-class GritLMMeanPool(BatchedPoolingMethod):
+class GritLMMeanPool(BatchPoolingMethod):
     """As `MeanPool`, but only includes non-instruction tokens."""
 
     def __init__(self, model_config: ModelConfig):
@@ -153,7 +153,7 @@ class GritLMMeanPool(BatchedPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolingMethodOutput:
+    ) -> BatchPoolingMethodOutput:
         prompt_lens = pooling_metadata.prompt_lens
         instr_lens = torch.tensor(
             [
@@ -187,9 +187,9 @@ class GritLMPooler(SimplePooler):
 
     def head(
         self,
-        pooled_data: BatchedPoolingMethodOutput,
+        pooled_data: BatchPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolerHeadOutput:
+    ) -> BatchPoolerHeadOutput:
         return self.activation(pooled_data)
 
 

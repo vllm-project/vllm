@@ -11,7 +11,7 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput
-from .batched import BatchedPoolingFn, pooler_for_classify, pooler_for_embed
+from .batch import BatchPoolingFn, pooler_for_classify, pooler_for_embed
 from .common import ClassifierFn
 from .request import pooler_for_token_classify, pooler_for_token_embed
 
@@ -33,7 +33,7 @@ class DispatchPooler(Pooler):
         cls,
         pooler_config: PoolerConfig,
         *,
-        pooling: BatchedPoolingFn | None = None,
+        pooling: BatchPoolingFn | None = None,
         classifier: ClassifierFn | None = None,
     ):
         return cls(

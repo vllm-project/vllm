@@ -16,9 +16,9 @@ from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     pooler_for_token_classify,
 )
-from vllm.model_executor.layers.pooler.batched import (
-    BatchedPoolerHeadOutput,
-    BatchedPoolingMethodOutput,
+from vllm.model_executor.layers.pooler.batch import (
+    BatchPoolerHeadOutput,
+    BatchPoolingMethodOutput,
     SimplePooler,
     get_token_pooling_method,
 )
@@ -298,9 +298,9 @@ class ModernBertPooler(SimplePooler):
 
     def head(
         self,
-        pooled_data: BatchedPoolingMethodOutput,
+        pooled_data: BatchPoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolerHeadOutput:
+    ) -> BatchPoolerHeadOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
 

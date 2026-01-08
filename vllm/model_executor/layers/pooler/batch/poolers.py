@@ -16,36 +16,36 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import BatchedPoolerHeadOutput, EmbeddingPoolerHead
+from .heads import BatchPoolerHeadOutput, EmbeddingPoolerHead
 from .methods import (
-    BatchedPoolingMethod,
-    BatchedPoolingMethodOutput,
+    BatchPoolingMethod,
+    BatchPoolingMethodOutput,
     get_token_pooling_method,
 )
 
-BatchedPoolingFn: TypeAlias = Callable[
+BatchPoolingFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
-    BatchedPoolerHeadOutput,
+    BatchPoolerHeadOutput,
 ]
-BatchedPoolingHeadFn: TypeAlias = Callable[
-    [BatchedPoolingMethodOutput, PoolingMetadata],
-    BatchedPoolerHeadOutput,
+BatchPoolingHeadFn: TypeAlias = Callable[
+    [BatchPoolingMethodOutput, PoolingMetadata],
+    BatchPoolerHeadOutput,
 ]
 
-BatchedPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+BatchPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
-class BatchedPooler(Pooler):
+class BatchPooler(Pooler):
     @abstractmethod
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolerOutput:
+    ) -> BatchPoolerOutput:
         raise NotImplementedError
 
 
-class SimplePooler(BatchedPooler):
+class SimplePooler(BatchPooler):
     """A layer that pools specific information from hidden states.
 
     This layer does the following:
@@ -56,8 +56,8 @@ class SimplePooler(BatchedPooler):
 
     def __init__(
         self,
-        pooling: BatchedPoolingMethod,
-        head: BatchedPoolingHeadFn,
+        pooling: BatchPoolingMethod,
+        head: BatchPoolingHeadFn,
     ) -> None:
         super().__init__()
 
@@ -70,18 +70,18 @@ class SimplePooler(BatchedPooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    # Returns subset of BatchedPoolerOutput to satisfy BatchedPoolingFn
+    # Returns subset of BatchPoolerOutput to satisfy BatchPoolingFn
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolerHeadOutput:
+    ) -> BatchPoolerHeadOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
 
-class ClassifierPooler(BatchedPooler):
+class ClassifierPooler(BatchPooler):
     """A pooling layer for classification tasks.
 
     This layer does the following:
@@ -92,7 +92,7 @@ class ClassifierPooler(BatchedPooler):
 
     def __init__(
         self,
-        pooling: BatchedPoolingFn,
+        pooling: BatchPoolingFn,
         classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:
@@ -116,7 +116,7 @@ class ClassifierPooler(BatchedPooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchedPoolerOutput:
+    ) -> BatchPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
@@ -155,7 +155,7 @@ def pooler_for_embed(pooler_config: PoolerConfig):
 def pooler_for_classify(
     pooler_config: PoolerConfig,
     *,
-    pooling: BatchedPoolingFn | None = None,
+    pooling: BatchPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
