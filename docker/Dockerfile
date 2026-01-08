@@ -593,8 +593,5 @@ ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
-COPY docker/entrypoint.sh .
-RUN chmod +x entrypoint.sh
-
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER ####################
