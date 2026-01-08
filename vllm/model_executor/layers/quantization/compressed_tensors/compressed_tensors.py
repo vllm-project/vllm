@@ -331,48 +331,19 @@ class CompressedTensorsConfig(QuantizationConfig):
             return False
 
     @staticmethod
-    def _is_fp4a4_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
-        if weight_quant is None or input_quant is None:
+    def _is_nvfp4_format(quant_args: QuantizationArgs):
+        if quant_args is None:
             return False
-
         is_tensor_group_quant = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
-            and input_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
+            quant_args.strategy == QuantizationStrategy.TENSOR_GROUP.value
         )
-        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_symmetric = quant_args.symmetric
 
-        is_group_size_16 = (
-            weight_quant.group_size == 16 and input_quant.group_size == 16
-        )
-        is_float_type = (
-            weight_quant.type == QuantizationType.FLOAT
-            and input_quant.type == QuantizationType.FLOAT
-        )
-        is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
-
+        is_group_size_16 = quant_args.group_size == 16
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_4_bits = quant_args.num_bits == 4
         return (
             is_tensor_group_quant
-            and is_float_type
-            and is_4_bits
-            and is_group_size_16
-            and is_symmetric
-        )
-
-    @staticmethod
-    def _is_fp4a16_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
-        is_weight_only = weight_quant is not None and input_quant is None
-        is_tensor_group_quant = (
-            weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
-        )
-        is_symmetric = weight_quant.symmetric
-
-        is_group_size_16 = weight_quant.group_size == 16
-        is_float_type = weight_quant.type == QuantizationType.FLOAT
-        is_4_bits = weight_quant.num_bits == 4
-
-        return (
-            is_weight_only
-            and is_tensor_group_quant
             and is_float_type
             and is_4_bits
             and is_group_size_16
@@ -576,7 +547,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         format = format if format is not None else self.quant_format
 
         # Detect If Mixed Precision
-        if self._is_fp4a16_nvfp4(weight_quant, input_quant):
+        if self._is_nvfp4_format(weight_quant) and input_quant is None:
             return CompressedTensorsW4A16Fp4()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
@@ -614,7 +585,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
-            if self._is_fp4a4_nvfp4(weight_quant, input_quant):
+            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
+                input_quant
+            ):
                 if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
                     return CompressedTensorsW4A4Fp4()
                 else:
