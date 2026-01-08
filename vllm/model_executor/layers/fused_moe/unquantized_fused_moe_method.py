@@ -299,7 +299,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             return biased_moe_quant_config(
                 layer.w13_bias,
                 layer.w2_bias,
+                is_act_and_mul=self.moe.is_act_and_mul,
             )
+        elif not self.moe.is_act_and_mul:
+            # Create a config with is_act_and_mul=False since
+            # FUSED_MOE_UNQUANTIZED_CONFIG has is_act_and_mul=True
+            return FusedMoEQuantConfig.make(is_act_and_mul=False)
         else:
             return FUSED_MOE_UNQUANTIZED_CONFIG
 
