@@ -252,7 +252,9 @@ def check_punica_wrapper(punica_wrapper) -> bool:
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
-def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
+def test_embeddings(
+    default_vllm_config, dist_init, num_loras, device, vocab_size, stage
+) -> None:
     # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
     # device, see: https://github.com/triton-lang/triton/issues/2925
     # Same below.
@@ -353,7 +355,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
 @pytest.mark.parametrize("stage", STAGES)
 def test_lm_head_logits_processor(
-    dist_init, num_loras, device, vocab_size, stage
+    default_vllm_config, dist_init, num_loras, device, vocab_size, stage
 ) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -470,6 +472,7 @@ def test_lm_head_logits_processor(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_linear_replicated(
+    default_vllm_config,
     dist_init,
     num_loras,
     device,
@@ -580,7 +583,7 @@ def test_linear_replicated(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_linear_parallel(
-    dist_init, num_loras, orientation, fully_shard, device, stage
+    default_vllm_config, dist_init, num_loras, orientation, fully_shard, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -705,7 +708,7 @@ def test_linear_parallel(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_column_parallel_packed(
-    dist_init, num_loras, repeats, fully_shard, device, stage
+    default_vllm_config, dist_init, num_loras, repeats, fully_shard, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -851,7 +854,7 @@ def test_column_parallel_packed(
 @pytest.mark.parametrize(
     "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS))
 )
-def test_vocab_parallel_embedding_indices(tp_size, seed):
+def test_vocab_parallel_embedding_indices(tp_size, seed, default_vllm_config):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
     added_vocab_size = random.randint(0, 1024)

@@ -57,6 +57,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
+    default_vllm_config,
     device: str,
     dtype: torch.dtype,
     is_neox: bool,

@@ -21,7 +21,11 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("eps", [1e-6, 1e-5])
 def test_rms_norm_batch_invariant_vs_standard(
-    batch_size: int, hidden_size: int, dtype: torch.dtype, eps: float
+    default_vllm_config,
+    batch_size: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    eps: float,
 ):
     """
     Compare batch-invariant Triton RMS norm against standard CUDA implementation.
@@ -68,7 +72,9 @@ def test_rms_norm_batch_invariant_vs_standard(
 @pytest.mark.parametrize("batch_size", [1, 16, 128])
 @pytest.mark.parametrize("seq_len", [1, 32, 512])
 @pytest.mark.parametrize("hidden_size", [2048, 4096])
-def test_rms_norm_3d_input(batch_size: int, seq_len: int, hidden_size: int):
+def test_rms_norm_3d_input(
+    default_vllm_config, batch_size: int, seq_len: int, hidden_size: int
+):
     """
     Test RMS norm with 3D input tensors (batch, seq_len, hidden_size).
 
@@ -107,7 +113,7 @@ def test_rms_norm_3d_input(batch_size: int, seq_len: int, hidden_size: int):
 
 
 @skip_unsupported
-def test_rms_norm_numerical_stability():
+def test_rms_norm_numerical_stability(default_vllm_config):
     """
     Test RMS norm numerical stability with extreme values.
 
@@ -167,7 +173,7 @@ def test_rms_norm_numerical_stability():
 
 
 @skip_unsupported
-def test_rms_norm_formula():
+def test_rms_norm_formula(default_vllm_config):
     """
     Test that RMS norm follows the correct mathematical formula.
 
@@ -201,7 +207,7 @@ def test_rms_norm_formula():
 
 @skip_unsupported
 @pytest.mark.parametrize("hidden_size", [128, 1024, 4096, 16384])
-def test_rms_norm_different_hidden_sizes(hidden_size: int):
+def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
     """
     Test RMS norm with various hidden sizes to ensure block size handling.
 
@@ -238,7 +244,7 @@ def test_rms_norm_different_hidden_sizes(hidden_size: int):
 
 
 @skip_unsupported
-def test_rms_norm_determinism():
+def test_rms_norm_determinism(default_vllm_config):
     """
     Test that batch-invariant RMS norm produces deterministic results.
 

@@ -458,7 +458,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     )
 
 
-def test_trtllm_attention_rejects_num_kv_heads_1() -> None:
+def test_trtllm_attention_rejects_num_kv_heads_1(default_vllm_config) -> None:
     """Test that TRTLLM attention correctly rejects num_kv_heads=1.
 
     When num_kv_heads=1 (MQA), the KV cache strides become degenerate

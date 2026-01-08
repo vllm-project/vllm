@@ -1417,13 +1417,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        # Use stack level 2 so the log contains the line of the caller,
-        # so it's easier to track down the source of the warning.
-        logger.warning("Current vLLM config is not set.", stacklevel=2)
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 
