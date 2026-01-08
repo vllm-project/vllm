@@ -367,8 +367,8 @@ class MultiModalRegistry:
             # than whisper.
             return 0
         assert len(max_tokens) == 1, (
-            "Encoder-decoder models are expected \
-            to implement the multimodal interface with at most one modality."
+            "Encoder-decoder models are expected "
+            "to implement the multimodal interface with at most one modality."
         )
 
         first_modality = next(iter(max_tokens))
