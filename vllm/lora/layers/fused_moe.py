@@ -40,7 +40,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 
 from .utils import _get_lora_device
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: FusedMoE) -> None:
@@ -508,14 +510,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
         )
-        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        # (output_size,num_experts,rank)
-        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
-        # (num_experts,output_size,rank)
-        w13_lora_b = w13_lora_b.permute(1, 0, 2)
-        w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
@@ -711,29 +705,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
-
-        # # # DEBUG: Log received tensor info
-        # # logger.info(f"[SLAB_DEBUG] FusedMoE3D.set_lora called for index {index}:")
-        # # logger.info(f"  - num_experts: {num_experts}")
-        # # logger.info(f"  - w13_lora_a shape (input): {w13_lora_a.shape}, device: {w13_lora_a.device}")
-        # # logger.info(f"  - w13_lora_a norm (input): {w13_lora_a.norm().item():.6f}")
-        # # logger.info(f"  - w13_lora_a[:10] (input): {w13_lora_a[:10].tolist()}")
-        # # logger.info(f"  - w13_lora_b shape (input): {w13_lora_b.shape}, device: {w13_lora_b.device}")
-        # # logger.info(f"  - w13_lora_b norm (input): {w13_lora_b.norm().item():.6f}")
-        # # logger.info(f"  - w13_lora_b[:10] (input): {w13_lora_b[:10].tolist()}")
-
-        # # (num_experts,rank,input_size)
-        # w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
-        # w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        # # (output_size,num_experts,rank)
-        # w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        # w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
-        # # (num_experts,output_size,rank)
-        # w13_lora_b = w13_lora_b.permute(1, 0, 2)
-        # w2_lora_b = w2_lora_b.permute(1, 0, 2)
-
-        # # logger.info(f"  - w13_lora_a shape (after reshape): {w13_lora_a.shape}")
-        # # logger.info(f"  - w13_lora_b shape (after reshape/permute): {w13_lora_b.shape}")
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)

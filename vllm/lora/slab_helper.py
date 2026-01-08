@@ -570,26 +570,26 @@ def create_slab_optimized_lora_model(
             return lora_model.loras.get(module_name, None)
 
         # Pack modules similar to _create_merged_loras_inplace
-        for module_name, new_module_names in packed_modules.items(): #1
-            replacement_loras: list[LoRALayerWeights | None] = [] #1
-            replaced_module: set[str] = set()#1
-            has_replacement = False#1
+        for module_name, new_module_names in packed_modules.items():
+            replacement_loras: list[LoRALayerWeights | None] = []
+            replaced_module: set[str] = set()
+            has_replacement = False
 
             # Collect individual projections
-            for r in new_module_names:#1
-                lora = get_lora_weights(lora_model_instance, r)#1
-                replacement_loras.append(lora)#1
-                if lora:#1
-                    has_replacement = True#1
-                    replaced_module.add(r)#1
+            for r in new_module_names:
+                lora = get_lora_weights(lora_model_instance, r)
+                replacement_loras.append(lora)
+                if lora:
+                    has_replacement = True
+                    replaced_module.add(r)
 
-            if not has_replacement:#1
-                continue#1
+            if not has_replacement:
+                continue
 
             # Ensure None values are explicit
-            for i in range(len(replacement_loras)):#1
-                if not replacement_loras[i]:#1
-                    replacement_loras[i] = None#1
+            for i in range(len(replacement_loras)):
+                if not replacement_loras[i]:
+                    replacement_loras[i] = None
 
             # Pack based on module type
             if module_name.endswith(".experts"):
@@ -653,6 +653,55 @@ def create_slab_optimized_lora_model(
                     # Single tensor: shard once
                     shards = module_lora.lora_b.chunk(tp_size, dim=0)
                     module_lora.lora_b = shards[tp_rank]
+
+    # MOE WEIGHT STACKING: Process MOE modules to reshape from 2D to 3D
+    # This must happen AFTER TP sharding so reshaping uses sharded weights
+    if target_modules_dict:
+        for module_name, module in target_modules_dict.items():
+            if isinstance(module, FusedMoE3DWithLoRA):
+                module_lora = lora_model_instance.loras.get(module_name)
+                
+                # Only process if lora_a is still a tensor (not already processed)
+                if module_lora and torch.is_tensor(module_lora.lora_a):
+                    gate_up_proj_lora = lora_model_instance.loras.get(module_name + ".base_layer")
+                    down_proj_lora = module_lora
+                    
+                    if gate_up_proj_lora and down_proj_lora:
+                        num_experts = module.w13_lora_a_stacked[0].shape[1]
+
+                        # Reshape lora_a to (num_experts, rank, input_size)
+                        gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
+                            num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                        )
+                        down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
+                            num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                        )
+                        
+                        # Reshape lora_b to (output_size, num_experts, rank)
+                        gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
+                            gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
+                            down_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        
+                        # Permute lora_b to (num_experts, output_size, rank)
+                        gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
+                            2, 0, 1
+                        ).contiguous()
+                        down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
+                            2, 0, 1
+                        ).contiguous()
+                        
+                        # Convert to list format for MOE
+                        module_lora.lora_a = [
+                            gate_up_proj_lora.lora_a,
+                            down_proj_lora.lora_a,
+                        ]
+                        module_lora.lora_b = [
+                            gate_up_proj_lora.lora_b,
+                            down_proj_lora.lora_b,
+                        ]
 
     slab, metadata = build_target_matched_slab(
         lora_model_instance, target_modules_dict, 1, target_lora_config, slab_path
