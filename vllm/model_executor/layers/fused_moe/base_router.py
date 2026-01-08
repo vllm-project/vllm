@@ -38,8 +38,16 @@ class BaseRouter(FusedMoERouter):
         global_num_experts: int,
         eplb_state: EplbLayerState,
         enable_eplb: bool = False,
+        # TODO(bnell): Once the MK is constructed at layer init time, we
+        # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
+        """
+        Note: the indices dtype might not be available at router construction
+        time, so we need to supply a callback to get it at runtime.  This is
+        because the indices type is supplied by modular kernels which are
+        created after MoE layer/router construction.
+        """
         super().__init__()
         self.top_k = top_k
         self.global_num_experts = global_num_experts
@@ -142,7 +150,7 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Get indices type
+        # Step 2: Get indices type.
         indices_type = self._get_indices_type()
 
         # Step 3: Compute routing (delegated to subclass)

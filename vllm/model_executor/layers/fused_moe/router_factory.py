@@ -36,8 +36,6 @@ def create_fused_moe_router(
     num_fused_shared_experts: int = 0,
     enable_eplb: bool = False,
     indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-    zero_expert_num: int | None = 0,
-    zero_expert_type: str | None = None,
     routing_method_type: RoutingMethodType | None = None,
 ) -> FusedMoERouter:
     """
@@ -66,8 +64,6 @@ def create_fused_moe_router(
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
         enable_eplb: Whether EPLB is enabled
         indices_type_getter: Function to get the desired indices dtype
-        zero_expert_num: Number of zero experts
-        zero_expert_type: Type of zero experts
         routing_method_type: Optional explicit routing method type
 
     Returns:
@@ -83,8 +79,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
         )
 
     # Priority 2: Check if grouped top-k routing is requested
@@ -107,8 +101,6 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
             routing_method_type=routing_method_type,
         )
 
@@ -123,8 +115,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
         )
 
     # Priority 4: Check if custom routing function is provided
@@ -137,8 +127,6 @@ def create_fused_moe_router(
             renormalize=renormalize,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
         )
 
     # Priority 5: Default to standard fused top-k routing
@@ -149,6 +137,4 @@ def create_fused_moe_router(
         renormalize=renormalize,
         enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
-        zero_expert_num=zero_expert_num,
-        zero_expert_type=zero_expert_type,
     )
