@@ -19,12 +19,15 @@ from vllm.model_executor.layers.pooler import (
     PoolingMethod,
     PoolingParamsUpdate,
     PoolingType,
+    TokenPoolerHeadOutput,
+    TokenPoolingMethodOutput,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
@@ -63,7 +66,9 @@ class ModernBertEmbeddings(nn.Module):
 
 
 class ModernBertAttention(nn.Module):
-    def __init__(self, config: ModernBertConfig, layer_id: int | None = None):
+    def __init__(
+        self, config: ModernBertConfig, layer_id: int | None = None, prefix: str = ""
+    ):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -80,6 +85,7 @@ class ModernBertAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             bias=config.attention_bias,
+            prefix=f"{prefix}.Wqkv",
         )
 
         if layer_types := getattr(config, "layer_types", None):
@@ -117,7 +123,10 @@ class ModernBertAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
         )
         self.Wo = RowParallelLinear(
-            config.hidden_size, config.hidden_size, bias=config.attention_bias
+            config.hidden_size,
+            config.hidden_size,
+            bias=config.attention_bias,
+            prefix=f"{prefix}.Wo",
         )
 
     def forward(
@@ -135,7 +144,7 @@ class ModernBertAttention(nn.Module):
 
 
 class ModernBertMLP(nn.Module):
-    def __init__(self, config: ModernBertConfig):
+    def __init__(self, config: ModernBertConfig, prefix: str = ""):
         super().__init__()
         self.config = config
         self.Wi = nn.Linear(
@@ -143,7 +152,10 @@ class ModernBertMLP(nn.Module):
         )
         self.act = nn.GELU()
         self.Wo = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, bias=config.mlp_bias
+            config.intermediate_size,
+            config.hidden_size,
+            bias=config.mlp_bias,
+            prefix=f"{prefix}.Wo",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -163,11 +175,13 @@ class ModernBertLayer(nn.Module):
             self.attn_norm = nn.LayerNorm(
                 config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
             )
-        self.attn = ModernBertAttention(config=config, layer_id=layer_id)
+        self.attn = ModernBertAttention(
+            config=config, layer_id=layer_id, prefix=f"{prefix}.attn"
+        )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
-        self.mlp = ModernBertMLP(config)
+        self.mlp = ModernBertMLP(config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -189,7 +203,11 @@ class ModernBertEncoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         self.layers = nn.ModuleList(
             [
-                ModernBertLayer(config=config, layer_id=layer_id)
+                ModernBertLayer(
+                    config=config,
+                    layer_id=layer_id,
+                    prefix=f"{prefix}.layers.{layer_id}",
+                )
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
@@ -220,7 +238,9 @@ class ModernBertModel(nn.Module):
         config = vllm_config.model_config.hf_config
         self.config = config
         self.embeddings = ModernBertEmbeddings(config)
-        self.encoder_layer = ModernBertEncoderLayer(vllm_config)
+        self.encoder_layer = ModernBertEncoderLayer(
+            vllm_config, prefix=f"{prefix}.encoder_layer"
+        )
         self.final_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
@@ -283,23 +303,25 @@ class ModernBertPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = pooled_output.to(self.dense.weight.dtype)
-        return self.norm(self.act(self.dense(pooled_output)))
+    def head(
+        self,
+        pooled_data: TokenPoolingMethodOutput,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolerHeadOutput:
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+
+        pooled_data = pooled_data.to(self.dense.weight.dtype)
+        return self.norm(self.act(self.dense(pooled_data)))
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+    ) -> TokenPoolerOutput:
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 @default_pooling_type("CLS")

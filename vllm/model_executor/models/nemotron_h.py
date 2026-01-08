@@ -210,16 +210,12 @@ class NemotronHMoE(nn.Module):
         )
 
         if self.use_latent_moe:
-            # TODO: check if using ReplicatedLinear is better than
-            # ColumnParallelLinear + all_gather
-            self.fc1_latent_proj = ColumnParallelLinear(
+            self.fc1_latent_proj = ReplicatedLinear(
                 input_size=config.hidden_size,
                 output_size=self.moe_hidden_size,
                 bias=config.mlp_bias,
                 quant_config=quant_config,
                 disable_tp=self.is_sequence_parallel,
-                # We need to gather the output to prepare input for moe
-                gather_output=True,
                 prefix=f"{prefix}.fc1_latent_proj",
             )
             self.fc2_latent_proj = ReplicatedLinear(
@@ -487,6 +483,7 @@ class NemotronHAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -640,6 +637,7 @@ class NemotronHModel(nn.Module):
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
                 #   using non-gated MoE
+                self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="",
