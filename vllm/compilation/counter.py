@@ -3,7 +3,9 @@
 
 import copy
 import dataclasses
+from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Any
 
 
 @dataclasses.dataclass
@@ -34,7 +36,7 @@ class CompilationCounter:
         return copy.deepcopy(self)
 
     @contextmanager
-    def expect(self, **kwargs):
+    def expect(self, **kwargs: Any) -> Generator[None, None, None]:
         old = self.clone()
         yield
         for k, v in kwargs.items():

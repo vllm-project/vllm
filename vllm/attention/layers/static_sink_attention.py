@@ -140,7 +140,7 @@ class StaticSinkAttention(Attention, CustomOp):
                 head_size, dtype, kv_cache_dtype, block_size
             )
         attn_backend = create_static_sink_attention_backend(
-            underlying_attn_backend,
+            underlying_attn_backend,  # type: ignore[arg-type]
             sink_len=sink_len,
         )
         Attention.__init__(

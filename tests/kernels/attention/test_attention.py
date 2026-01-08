@@ -13,6 +13,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import set_random_seed
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -150,7 +151,7 @@ def test_paged_attention(
 
     global PARTITION_SIZE
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads

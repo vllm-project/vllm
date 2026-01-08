@@ -10,6 +10,7 @@ from transformers import (
 )
 
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tokenizers.grok2 import Grok2Tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
@@ -35,6 +36,10 @@ def test_tokenizer_like_protocol():
         "mistralai/Mistral-7B-Instruct-v0.3", tokenizer_mode="mistral"
     )
     assert isinstance(tokenizer, MistralTokenizer)
+    _assert_tokenizer_like(tokenizer)
+
+    tokenizer = get_tokenizer("xai-org/grok-2", tokenizer_mode="grok2")
+    assert isinstance(tokenizer, Grok2Tokenizer)
     _assert_tokenizer_like(tokenizer)
 
 

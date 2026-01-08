@@ -7,7 +7,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.mark.parametrize(
@@ -30,7 +30,7 @@ def test_quantfp8_group_functionality(
     Tests both CUDA and native implementations, column-major scales,
     and verifies consistency between implementations.
     """
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     x = torch.randn((batch_size, hidden_dim), dtype=torch.bfloat16, device="cuda") * 8
     expected_num_groups = (hidden_dim + group_size - 1) // group_size
@@ -83,7 +83,7 @@ def test_quantfp8_group_functionality(
 @pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
 def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     group_size = 64
 
@@ -136,7 +136,7 @@ def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
 @pytest.mark.parametrize("seed", [42])
 @torch.inference_mode()
 def test_quantfp8_group_edge_cases(seed: int) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     batch_size = 16
     group_size = 64
