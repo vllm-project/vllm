@@ -41,7 +41,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -146,6 +145,7 @@ class MultiprocExecutor(Executor):
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -154,6 +154,7 @@ class MultiprocExecutor(Executor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
                     )
                 )
 
@@ -223,6 +224,9 @@ class MultiprocExecutor(Executor):
 
     def _post_init_executor(self) -> None:
         pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -528,6 +532,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
@@ -535,12 +540,6 @@ class WorkerProc:
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        if USE_TPU_INFERENCE:
-            is_driver_worker = True
-        else:
-            is_driver_worker = (
-                rank % vllm_config.parallel_config.tensor_parallel_size == 0
-            )
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -587,6 +586,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -604,6 +604,7 @@ class WorkerProc:
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
