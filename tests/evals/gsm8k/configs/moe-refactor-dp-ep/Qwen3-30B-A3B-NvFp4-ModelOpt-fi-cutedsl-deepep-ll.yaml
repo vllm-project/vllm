@@ -6,4 +6,3 @@ server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enab
 env:
   VLLM_USE_FLASHINFER_MOE_FP4: "1"
   VLLM_FLASHINFER_MOE_BACKEND: "masked_gemm"
-  VLLM_DEEPEPLL_NVFP4_DISPATCH: "1"
