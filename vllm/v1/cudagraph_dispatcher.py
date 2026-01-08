@@ -174,9 +174,9 @@ class CudagraphDispatcher:
             uniform_decode: Whether the batch is uniform decode (i.e. uniform and query
                 length is uniform_decode_query_len).
             has_lora: Whether LoRA is active.
-            piecewise_or_eager_only: If True, skip FULL cudagraph checks and
-                return PIECEWISE or NONE only. (can be used for features cascade
-                attention that are not supported by full cudagraphs)
+            disable_full: If True, skip FULL cudagraph checks and
+                return PIECEWISE or NONE only. (can be used for features like
+                cascade attention that are not supported by full cudagraphs)
         """
         if (
             not self.keys_initialized
