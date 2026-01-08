@@ -106,14 +106,14 @@ def _quant_flags_to_group_shape(
 class RoutingMethodType(IntEnum):
     # Default: Softmax -> TopK
     Default = (0,)
-    # Renormalize: TopK -> Softmax
+    # Renormalize: TopK -> Softmax/Sigmoid
     Renormalize = (1,)
     # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
     # -> Top8 experts from the Top4 groups
     DeepSeekV3 = (2,)
     # Llama4: Top1 -> Sigmoid
     Llama4 = (3,)
-    # RenormalizeNaive: Softmax -> TopK -> Renormalize
+    # RenormalizeNaive: Softmax/Sigmoid -> TopK -> Renormalize
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
