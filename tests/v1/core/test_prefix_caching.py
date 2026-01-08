@@ -111,10 +111,18 @@ def make_kv_cache_config_hybrid_model(
 ) -> KVCacheConfig:
     if second_spec_type == "sliding_window":
         second_spec = SlidingWindowSpec(
-            block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=2 * block_size,
         )
     elif second_spec_type == "mamba":
-        second_spec = MambaSpec(block_size, 1, 1, torch.float32)
+        second_spec = MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -122,7 +130,12 @@ def make_kv_cache_config_hybrid_model(
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
@@ -140,10 +153,18 @@ def make_kv_cache_config_three_types(
     block_size: int, num_blocks: int, third_spec_type: str = "mamba"
 ) -> KVCacheConfig:
     if third_spec_type == "mamba":
-        third_spec = MambaSpec(block_size, 1, 1, torch.float32)
+        third_spec = MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        )
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
-            block_size, 1, 1, torch.float32, sliding_window=4 * block_size
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=4 * block_size,
         )
 
     return KVCacheConfig(
@@ -472,14 +493,31 @@ def _make_hybrid_kv_cache_config(
             - "mamba": MambaSpec
     """
     spec_map = {
-        "full": lambda: FullAttentionSpec(block_size, 1, 1, torch.float32),
+        "full": lambda: FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
         "sliding_window": lambda: SlidingWindowSpec(
-            block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=2 * block_size,
         ),
         "sliding_window_large": lambda: SlidingWindowSpec(
-            block_size, 1, 1, torch.float32, sliding_window=4 * block_size
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=4 * block_size,
         ),
-        "mamba": lambda: MambaSpec(block_size, 1, 1, torch.float32),
+        "mamba": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        ),
     }
 
     kv_cache_groups = [
