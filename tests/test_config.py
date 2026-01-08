@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
@@ -24,7 +25,6 @@ from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
-from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
 
@@ -161,7 +161,7 @@ def test_get_pooling_config():
 
     assert model_config.pooler_config is not None
     assert model_config.pooler_config.normalize
-    assert model_config.pooler_config.pooling_type == PoolingType.MEAN.name
+    assert model_config.pooler_config.pooling_type == "MEAN"
 
 
 @pytest.mark.skipif(
