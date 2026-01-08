@@ -779,14 +779,6 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
-        # Reset grammar state and spec token IDs. This prevents conflicts
-        # with the old grammar state upon request resumption.
-        if request.use_structured_output:
-            assert request.structured_output_request is not None
-            if request.structured_output_request.grammar is not None:
-                request.structured_output_request.grammar.reset()
-        request.spec_token_ids = []
-
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
@@ -1219,6 +1211,15 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+
+        # Clear spec_token_ids for preempted requests. These tokens may be
+        # invalid after the request is resumed.
+        if scheduler_output.preempted_req_ids:
+            for req_id in scheduler_output.preempted_req_ids:
+                request = self.requests.get(req_id)
+                if request is None:
+                    continue
+                request.spec_token_ids = []
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
