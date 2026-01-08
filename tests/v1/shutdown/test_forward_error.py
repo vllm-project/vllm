@@ -3,6 +3,8 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
+import inspect
+import os
 
 import pytest
 
@@ -14,6 +16,7 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -42,7 +45,7 @@ def evil_forward(self, *args, **kwargs):
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(
-    monkeypatch, tensor_parallel_size: int, model: str
+    monkeypatch, tmp_path, tensor_parallel_size: int, model: str
 ) -> None:
     """Test that AsyncLLM propagates a forward pass error and frees memory.
 
@@ -50,6 +53,17 @@ async def test_async_llm_model_error(
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
+
+    if current_platform.is_rocm():
+        # ROCm uses spawn instead of fork.
+        sc = tmp_path / "sitecustomize.py"
+        sc.write_text(f"""
+from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.model_executor.models.llama import LlamaForCausalLM
+{inspect.getsource(evil_forward)}
+LlamaForCausalLM.forward = evil_forward
+""")
+        monkeypatch.setenv("PYTHONPATH", f"{tmp_path}:{os.getenv('PYTHONPATH', '')}")
 
     # Monkeypatch an error in the model.
     monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
