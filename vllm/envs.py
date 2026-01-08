@@ -189,6 +189,7 @@ if TYPE_CHECKING:
         "deepep_low_latency",
         "allgather_reducescatter",
         "flashinfer_all2allv",
+        "flashinfer_moe_a2a",
     ] = "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -1283,6 +1284,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
+    # - "flashinfer_moe_a2a", use flashinfer moe alltoall kernels
     "VLLM_ALL2ALL_BACKEND": env_with_choices(
         "VLLM_ALL2ALL_BACKEND",
         None,
@@ -1293,6 +1295,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "deepep_low_latency",
             "allgather_reducescatter",
             "flashinfer_all2allv",
+            "flashinfer_moe_a2a",
         ],
     ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.

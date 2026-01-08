@@ -168,6 +168,14 @@ def has_flashinfer_all2all() -> bool:
 
 
 @functools.cache
+def has_flashinfer_moe_a2a() -> bool:
+    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    if not has_flashinfer_comm():
+        return False
+    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+
+
+@functools.cache
 def has_flashinfer_moe() -> bool:
     """Return `True` if FlashInfer MoE module is available."""
     return (
@@ -607,6 +615,7 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_comm",
     "has_flashinfer_all2all",
+    "has_flashinfer_moe_a2a",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_fp8_blockscale_gemm",

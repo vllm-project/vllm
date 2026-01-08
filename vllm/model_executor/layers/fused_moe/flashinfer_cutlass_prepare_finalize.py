@@ -9,7 +9,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
 )
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -348,11 +348,123 @@ def flashinfer_alltoall_combine(
     )
 
 
+class FlashInferMoeA2APrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
+    """FlashInfer implementation using the Moe AlltoAll kernel. """
+
+    def __init__(
+        self,
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+    ):
+        super().__init__(use_dp=False)
+        self.max_num_tokens = max_num_tokens
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.hidden_size = hidden_size
+
+        self.all2all_manager = get_ep_group().device_communicator.all2all_manager
+
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> mk.PrepareResultType:
+        self._apply_router_weight_on_input(
+            a1, topk_weights, topk_ids, apply_router_weight_on_input
+        )
+
+        assert self.all2all_manager.ensure_moe_a2a_workspace_initialized(
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+        )
+
+        global_num_tokens_cpu = get_local_sizes()
+        self.runtime_max_tokens_per_rank = (
+            max(global_num_tokens_cpu)
+            if global_num_tokens_cpu is not None
+            else a1.shape[0]
+        )
+
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            quant_config.a1_gscale,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+        )
+
+        payloads = []
+        payloads.append(a1q)
+        if a1q_scale is not None:
+            payloads.append(a1q_scale)
+        payloads.append(topk_ids)
+        payloads.append(topk_weights)
+
+        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(
+            token_selected_experts=topk_ids,
+            input_payloads=payloads,
+            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+        )
+
+        if a1q_scale is not None:
+            a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
+            if quant_config.quant_dtype == "nvfp4":
+                a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
+        else:
+            a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
+            a1q_scale_recv = None
+
+        a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
+        topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
+        topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
+        if a1q_scale_recv is not None:
+            a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
+
+        return a1q_recv, a1q_scale_recv, None, topk_ids_recv, topk_weights_recv
+
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
+        assert self.all2all_manager.moe_alltoall is not None
+
+        ep_size = self.all2all_manager.world_size
+        hidden_size = fused_expert_output.shape[-1]
+        fused_expert_output = fused_expert_output.view(
+            ep_size, self.runtime_max_tokens_per_rank, hidden_size
+        )
+
+        combined_output = self.all2all_manager.moe_alltoall.combine(
+            payload=fused_expert_output,
+            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+        )
+
+        output.copy_(combined_output)
+
+
 def create_flashinfer_prepare_finalize(
     use_dp: bool,
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
+    enable_moe_a2a: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
+    moe: FusedMoEConfig | None = None,
 ) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
     """Factory function to create the appropriate FlashInfer implementation."""
 
@@ -360,6 +472,15 @@ def create_flashinfer_prepare_finalize(
         if enable_alltoallv:
             assert use_nvfp4
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
+        elif enable_moe_a2a:
+            assert use_nvfp4
+            assert moe is not None
+            return FlashInferMoeA2APrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                top_k=moe.experts_per_token,
+                num_experts=moe.num_experts,
+                hidden_size=moe.hidden_dim,
+            )
         return FlashInferAllGatherMoEPrepareAndFinalize(
             use_dp=True,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
@@ -369,3 +490,4 @@ def create_flashinfer_prepare_finalize(
         # in a single call with the MoE experts kernel.
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
         return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
+
