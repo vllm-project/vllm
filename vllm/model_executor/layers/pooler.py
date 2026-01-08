@@ -111,6 +111,11 @@ class PoolingMethod(nn.Module, ABC):
             return CLSPool()
         if pooling_type == "MEAN":
             return MeanPool()
+        if pooling_type == "STEP":
+            raise ValueError(
+                "'STEP' pooling is handled by StepPooler "
+                "and is not a standalone PoolingMethod."
+            )
 
         raise NotImplementedError(f"Unsupported method: {pooling_type}")
 
