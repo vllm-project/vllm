@@ -70,6 +70,7 @@ def resolve_classifier_act_fn(
             return get_cross_encoder_act_fn(model_config.hf_config)
 
         raise ValueError(f"act_fn [{act_fn=}] not supported.")
+
     if act_fn is None:
         return PoolerClassify(static_num_labels=static_num_labels)
 
