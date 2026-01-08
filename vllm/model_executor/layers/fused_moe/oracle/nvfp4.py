@@ -48,7 +48,7 @@ logger = init_logger(__name__)
 class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
-    FLASHINFER_CUTEDSL = "FLashInfer CUTEDSL"
+    FLASHINFER_CUTEDSL = "FlashInfer CUTEDSL"
     VLLM_CUTLASS = "vLLM CUTASS"
     MARLIN = "vLLM MARLIN"
 
