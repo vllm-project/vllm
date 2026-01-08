@@ -41,7 +41,6 @@ FILES = [
     "vllm/usage",
     "vllm/utils",
     "vllm/worker",
-    "vllm/v1/attention",
     "vllm/v1/core",
     "vllm/v1/engine",
     "vllm/v1/executor",
