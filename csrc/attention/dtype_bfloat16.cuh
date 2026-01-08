@@ -450,6 +450,15 @@ inline __device__ float to_float(__nv_bfloat16 u) {
   return __bfloat162float(u);
 }
 
+inline __device__ Float8_ to_float(bf16_8_t u) {
+  Float8_ tmp;
+  tmp.x = bf1622float2(u.x);
+  tmp.y = bf1622float2(u.y);
+  tmp.z = bf1622float2(u.z);
+  tmp.w = bf1622float2(u.w);
+  return tmp;
+}
+
 // Zero-out a variable.
 inline __device__ void zero(__nv_bfloat16& dst) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
