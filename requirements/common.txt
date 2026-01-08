@@ -54,4 +54,3 @@ model-hosting-container-standards >= 0.1.10, < 1.0.0
 mcp
 grpcio>=1.76.0
 grpcio-reflection>=1.76.0
-grpcio-tools>=1.76.0
