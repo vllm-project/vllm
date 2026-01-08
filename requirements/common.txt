@@ -52,3 +52,4 @@ openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic == 0.71.0
 model-hosting-container-standards >= 0.1.10, < 1.0.0
 mcp
+triton @ git+https://github.com/triton-lang/triton.git@bc05216d7f08de3d75b10b9aa84221227698f93d  # SM 12.0/12.1 support
