@@ -582,11 +582,8 @@ class VllmConfig:
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
-                        "async scheduling for EAGLE/MTP kind of speculative "
-                        "decoding is enabled, but disable_padded_drafter_batch=True "
-                        "disable_padded_drafter_batch=True is not supported for "
-                        "this situation now. please set "
-                        "disable_padded_drafter_batch=Fasle"
+                        "Async scheduling is not compatible with "
+                        "disable_padded_drafter_batch=True."
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -602,20 +599,24 @@ class VllmConfig:
                     "pipeline_parallel_size > 1 and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
-            elif self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
-                    logger.warning(
-                        "Async scheduling not supported with %s-based "
-                        "speculative decoding and will be disabled.",
-                        self.speculative_config.method,
-                    )
-                else:
-                    logger.warning(
-                        "Async scheduling will be disabled because some features do "
-                        "not currently work in conjunction with speculative decoding. "
-                        "To use async scheduling with spec decoding anyway, "
-                        "enable it explicitly via async_scheduling=True."
-                    )
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.method not in get_args(EagleModelTypes)
+            ):
+                logger.warning(
+                    "Async scheduling not supported with %s-based "
+                    "speculative decoding and will be disabled.",
+                    self.speculative_config.method,
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.disable_padded_drafter_batch
+            ):
+                logger.warning(
+                    "Async scheduling is not compatible with "
+                    "disable_padded_drafter_batch=True and will be disabled."
+                )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
                 logger.warning(
