@@ -253,7 +253,7 @@ class SpecDecodeBaseProposer:
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         num_tokens, last_token_indices, common_attn_metadata = (
-            self.set_input_ids_first_pass(
+            self.set_inputs_first_pass(
                 target_token_ids=target_token_ids,
                 next_token_ids=next_token_ids,
                 target_positions=target_positions,
@@ -262,10 +262,6 @@ class SpecDecodeBaseProposer:
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         )
-
-        if self.runner.log_toks:
-            print("num_tokens:", num_tokens)
-            print("last_token_indices:", last_token_indices.tolist())
 
         assert self.runner is not None
 
@@ -342,16 +338,6 @@ class SpecDecodeBaseProposer:
         }
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
-
-        self.runner.log_tokens("draft input_ids:", model_kwargs["input_ids"])
-        if self.runner.log_toks:
-            print("draft positions:", model_kwargs["positions"].tolist())
-            print("cad.seq_lens:", common_attn_metadata.seq_lens.tolist())
-            print(
-                "cad.query_start_loc:",
-                common_attn_metadata.query_start_loc.tolist(),
-            )
-            print("cad.slot_mapping:", common_attn_metadata.slot_mapping.tolist())
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -452,8 +438,6 @@ class SpecDecodeBaseProposer:
             common_attn_metadata._num_computed_tokens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
-            if self.runner.log_toks:
-                print("-------------------")
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -550,16 +534,6 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
 
-            self.runner.log_tokens("draft input_ids:", model_kwargs["input_ids"])
-            if self.runner.log_toks:
-                print("draft positions:", model_kwargs["positions"].tolist())
-                print("cad.seq_lens:", common_attn_metadata.seq_lens.tolist())
-                print(
-                    "cad.query_start_loc:",
-                    common_attn_metadata.query_start_loc.tolist(),
-                )
-                print("cad.slot_mapping:", common_attn_metadata.slot_mapping.tolist())
-
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -581,11 +555,9 @@ class SpecDecodeBaseProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        for idx, row in enumerate(draft_token_ids):
-            self.runner.log_tokens(f"draft suggestions [{idx}]:", row)
         return draft_token_ids
 
-    def set_input_ids_first_pass(
+    def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
         next_token_ids: torch.Tensor,

@@ -79,7 +79,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "Please pass 'draft_tensor_parallel_size' in the speculative_config."
             )
 
-    def set_input_ids_first_pass(
+    def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
         next_token_ids: torch.Tensor,
@@ -122,8 +122,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             target_toks_size=target_positions.shape[0],
             rejected_tok_fill=-1,
         )
-        if self.runner.log_toks:
-            print("invalid_positions", is_rejected_tok.int().tolist())
 
         # recompute slot mapping
         new_slot_mapping = compute_new_slot_mapping(
