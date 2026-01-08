@@ -442,12 +442,6 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_ocp_mx(weight_config, input_config):
-            if QuarkOCP_MX is None:
-                raise NotImplementedError(
-                    "OCP MX quantization requires AITER, which is not available "
-                    "on this GPU architecture. Supported architectures include "
-                    "gfx90a, gfx942, gfx950."
-                )
             return QuarkOCP_MX(weight_config, input_config)
 
         raise NotImplementedError(
