@@ -254,7 +254,7 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if module.lora_ready:
+            if module.lora_ready is not None:
                 module.lora_ready.fill_(0)
             if not module_lora:
                 module.reset_lora(index)
@@ -271,7 +271,7 @@ class LoRAModelManager:
                     module_lora.lora_b,
                 )
                 # will need to update for multi-lora request loading
-                if module.lora_ready:
+                if module.lora_ready is not None:
                     module.lora_ready.fill_(1)
         return True
 
