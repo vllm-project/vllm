@@ -765,6 +765,14 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        merge_size = self.vision_tower.spatial_merge_size
+        return num_image_tokens * (merge_size**2)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        merge_size = self.vision_tower.spatial_merge_size
+        return num_vision_tokens // (merge_size**2)
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
