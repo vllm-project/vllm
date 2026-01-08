@@ -92,8 +92,8 @@ class LogprobsTensors(NamedTuple):
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 TokenPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
-TokensPoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
-PoolerOutput: TypeAlias = TokenPoolerOutput | TokensPoolerOutput
+TokenwisePoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+PoolerOutput: TypeAlias = TokenPoolerOutput | TokenwisePoolerOutput
 
 
 @dataclass
