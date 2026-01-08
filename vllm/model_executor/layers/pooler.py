@@ -183,10 +183,10 @@ class AllPool(PoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> TokenwisePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        hidden_states_lst = hidden_states.split(
+        hidden_states_all = hidden_states.split(
             pooling_cursor.num_scheduled_tokens_cpu.tolist()
         )
-        hidden_states_lst = [hidden_states_lst[i] for i in pooling_cursor.index]
+        hidden_states_lst = [hidden_states_all[i] for i in pooling_cursor.index]
 
         if not self.enable_chunked_prefill:
             return hidden_states_lst
