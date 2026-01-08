@@ -55,6 +55,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
+        self._one = torch.tensor([1], dtype=torch.int, device=self.device)
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}
@@ -149,6 +150,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
+                self._sync_lora_loads()
                 result = func(*args, **kwargs)
                 return result
 
@@ -382,6 +384,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
+        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
+        # Warmup: trigger Triton JIT compilation for CUDA graph capture
+        self.lora_ready.fill_(1)
+        self._sync_lora_loads()
+        self.lora_ready.fill_(0)
+
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
@@ -491,57 +499,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
-        # Make mypy happy
         assert isinstance(lora_a, list)
         assert isinstance(lora_b, list)
 
-        self.reset_lora(index)
-        self.adapter_enabled[index] = 1
-
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
+        self.adapter_enabled[index : index + 1].copy_(self._one, non_blocking=True)
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
-        assert (
-            num_experts
-            == w1_lora_a.shape[0]
-            == w2_lora_a.shape[0]
-            == w3_lora_a.shape[0]
-        )
 
-        slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
-        slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
-        slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
-        slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
-
-        sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
-        sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
-
-        self.w13_lora_a_stacked[0][
-            index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
-        ].copy_(slliced_w1_lora_a, non_blocking=True)
-
-        self.w13_lora_a_stacked[1][
-            index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
-        ].copy_(slliced_w3_lora_a, non_blocking=True)
-
-        self.w13_lora_b_stacked[0][
-            index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
-        ].copy_(slliced_w1_lora_b, non_blocking=True)
-
-        self.w13_lora_b_stacked[1][
-            index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
-        ].copy_(slliced_w3_lora_b, non_blocking=True)
-
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
-
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+        # Weights are already sliced and padded - just copy
+        self.w13_lora_a_stacked[0][index].copy_(w1_lora_a, non_blocking=True)
+        self.w13_lora_a_stacked[1][index].copy_(w3_lora_a, non_blocking=True)
+        self.w13_lora_b_stacked[0][index].copy_(w1_lora_b, non_blocking=True)
+        self.w13_lora_b_stacked[1][index].copy_(w3_lora_b, non_blocking=True)
+        self.w2_lora_a_stacked[0][index].copy_(w2_lora_a, non_blocking=True)
+        self.w2_lora_b_stacked[0][index].copy_(w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
+        # self._sync_lora_loads()
         return self.base_layer.forward(*args, **kwargs)
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
@@ -620,6 +595,12 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
+        # Warmup: trigger Triton JIT compilation for CUDA graph capture
+        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
+        self.lora_ready.fill_(1)
+        self._sync_lora_loads()
+        self.lora_ready.fill_(0)
+
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
@@ -668,31 +649,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert isinstance(lora_b, list)
         assert len(lora_a) == len(lora_b) == 2
 
-        self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index : index + 1].copy_(self._one, non_blocking=True)
 
-        w13_lora_a, w2_lora_a = lora_a
-        w13_lora_b, w2_lora_b = lora_b
-
-        sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
-        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
-
-        sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
-        sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
-
-        self.w13_lora_a_stacked[0][
-            index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
-        ].copy_(sliced_w13_lora_a, non_blocking=True)
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
-
-        self.w13_lora_b_stacked[0][
-            index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
-        ].copy_(sliced_w13_lora_b, non_blocking=True)
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+        # Now copy full buffers - this is contiguous!
+        self.w13_lora_a_stacked[0][index].copy_(lora_a[0], non_blocking=True)
+        self.w13_lora_b_stacked[0][index].copy_(lora_b[0], non_blocking=True)
+        self.w2_lora_a_stacked[0][index].copy_(lora_a[1], non_blocking=True)
+        self.w2_lora_b_stacked[0][index].copy_(lora_b[1], non_blocking=True)
 
     @property
     def w13_input_size(self):

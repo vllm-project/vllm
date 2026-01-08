@@ -178,6 +178,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
+import nvtx
+
 logger = init_logger(__name__)
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -1560,9 +1562,13 @@ class GPUModelRunner(
                 np.sum(num_sampled_tokens)
                 <= self.vllm_config.scheduler_config.max_num_batched_tokens
             )
+            range_id_6 = nvtx.start_range(
+                message="lora_hot_swap_load_time", color="red"
+            )
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
+            nvtx.end_range(range_id_6)
 
         return (
             logits_indices,
@@ -3253,7 +3259,6 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
-
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -3265,6 +3270,7 @@ class GPUModelRunner(
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
+            torch.cuda.nvtx.range("model_single_forward_pass"),
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,

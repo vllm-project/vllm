@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from typing import Any, Literal
 
+import nvtx
 import torch
 
 from vllm.config import VllmConfig
@@ -160,8 +161,12 @@ class WorkerLoRAManager:
 
     def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
         self._apply_adapters(requests)
+        range_id_108 = nvtx.start_range(
+            message="after activating adpater", color="orange"
+        )
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
+        nvtx.end_range(range_id_108)
 
     def supports_tower_connector_lora(self) -> bool:
         return (
@@ -191,13 +196,18 @@ class WorkerLoRAManager:
     def add_adapter(self, adapter_request: Any) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
+        range_id_8 = nvtx.start_range(message="lora_add", color="yellow")
         loaded_adapter = self._load_adapter(adapter_request)
         loaded = self._adapter_manager.add_adapter(loaded_adapter)
         self._adapter_manager.activate_adapter(loaded_adapter.id)
+        nvtx.end_range(range_id_8)
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        return self._adapter_manager.remove_adapter(adapter_id)
+        range_id_7 = nvtx.start_range(message="lora_remove", color="orange")
+        bool_val = self._adapter_manager.remove_adapter(adapter_id)
+        nvtx.end_range(range_id_7)
+        return bool_val
 
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
@@ -245,8 +255,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 "than the number of GPU LoRA slots "
                 f"({self._adapter_manager.lora_slots})."
             )
+        range_id_9 = nvtx.start_range(message="lora_add_evict", color="yellow")
         for lora in loras_map.values():
             self.add_adapter(lora)
+        nvtx.end_range(range_id_9)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
@@ -259,6 +271,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
+            range_id_10 = nvtx.start_range(message="disk_load_cpu", color="green")
             lora = self._load_adapter(lora_request)
 
             # Loading succeeded, now check if we will exceed cache capacity and
@@ -268,11 +281,14 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 self._adapter_manager.remove_oldest_adapter()
             # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)
+            nvtx.end_range(range_id_10)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches
             loaded = (
                 self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
             )
+        range_id_11 = nvtx.start_range(message="gpu_load", color="orange")
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        nvtx.end_range(range_id_11)
         return loaded

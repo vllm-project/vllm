@@ -5,6 +5,7 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
+import nvtx
 import regex as re
 import torch
 from torch import nn
@@ -15,8 +16,10 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    VocabParallelEmbeddingWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
@@ -107,6 +110,7 @@ class LoRAModelManager:
         self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
+        self.lora_loading_stream = torch.cuda.Stream()
 
         self.model.lora_manager = self
 
@@ -253,16 +257,28 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            module.lora_ready.fill_(0)
             if not module_lora:
                 module.reset_lora(index)
                 continue
-
-            module.set_lora(
-                index,
-                module_lora.lora_a,
-                module_lora.lora_b,
+        i = 0
+        for module_name, module in self.modules.items():
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            if not module_lora:
+                continue
+            range_id_18 = nvtx.start_range(
+                message=f"gpu_module_layer : {i}", color="red"
             )
-
+            i += 1
+            with torch.cuda.stream(self.lora_loading_stream):
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                )
+                # will need to update for multi-lora request loading
+                module.lora_ready.fill_(1)
+            nvtx.end_range(range_id_18)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -571,11 +587,14 @@ class LoRAModelManager:
                 lora_model.loras.pop(module, None)
 
         for lora in lora_model.loras.values():
-            lora.optimize()
+            if not isinstance(lora.lora_a, list):
+                lora.optimize()
 
         for module_name, module in self.modules.items():
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
+            # LoRA Padding
+            self._pad_lora_weights_to_buffer(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -687,6 +706,148 @@ class LoRAModelManager:
 
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
+
+    def _pad_lora_weights_to_buffer(
+        self, lora_model: LoRAModel, module: BaseLayerWithLoRA, module_name: str
+    ) -> None:
+        """Pad LoRA weights to match buffer dimensions for contiguous copy."""
+        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if not module_lora:
+            return
+
+        def pad_to_buffer(data, buffer_shape, is_moe=False, slice_fn=None):
+            """
+            Pad data to match buffer shape after indexing in set_lora.
+
+            Buffer indexing patterns:
+            - Standard: (max_loras, 1, ...) -> [index, 0] -> skip 2 dims
+            - MoE: (max_loras, num_experts, ...) -> [index] -> skip 1 dim
+            - Embedding still to be implemented
+            """
+            target_shape = buffer_shape[1:] if is_moe else buffer_shape[2:]
+
+            if slice_fn is not None:
+                data = slice_fn(data)
+                if not data.is_contiguous():
+                    data = data.contiguous()
+
+            if data.shape == target_shape:
+                return data
+
+            padded = torch.zeros(target_shape, dtype=data.dtype, pin_memory=True)
+
+            if len(data.shape) == 2:
+                padded[: data.shape[0], : data.shape[1]] = data.cpu()
+            elif len(data.shape) == 3:
+                padded[: data.shape[0], : data.shape[1], : data.shape[2]] = data.cpu()
+
+            return padded
+
+        # VocabParallelEmbeddingWithLoRA: Skip - will implement
+        if isinstance(module, VocabParallelEmbeddingWithLoRA):
+            return
+
+        # FusedMoE3DWithLoRA: MoE with full copy support
+        if isinstance(module, FusedMoE3DWithLoRA):
+            if isinstance(module_lora.lora_a, list) and len(module_lora.lora_a) == 2:
+                module_lora.lora_a[0] = pad_to_buffer(
+                    module_lora.lora_a[0],
+                    module.w13_lora_a_stacked[0].shape,
+                    is_moe=True,
+                    slice_fn=module._slice_w13_a,
+                )
+                module_lora.lora_a[1] = pad_to_buffer(
+                    module_lora.lora_a[1],
+                    module.w2_lora_a_stacked[0].shape,
+                    is_moe=True,
+                    slice_fn=module._slice_w2_a,
+                )
+                module_lora.lora_b[0] = pad_to_buffer(
+                    module_lora.lora_b[0],
+                    module.w13_lora_b_stacked[0].shape,
+                    is_moe=True,
+                    slice_fn=module._slice_w13_b,
+                )
+                module_lora.lora_b[1] = pad_to_buffer(
+                    module_lora.lora_b[1],
+                    module.w2_lora_b_stacked[0].shape,
+                    is_moe=True,
+                    slice_fn=module._slice_w2_b,
+                )
+            return
+
+        # FusedMoEWithLoRA
+        if isinstance(module, FusedMoEWithLoRA):
+            if isinstance(module_lora.lora_a, list):
+                # lora_a order: [w1, w2, w3] per expert
+                # w1/w3 (gate/up) use _slice_w13, w2 (down) uses _slice_w2
+                for i in range(len(module_lora.lora_a)):
+                    if module_lora.lora_a[i] is not None:
+                        slice_fn = (
+                            module._slice_w2_a if (i % 3 == 1) else module._slice_w13_a
+                        )
+                        module_lora.lora_a[i] = pad_to_buffer(
+                            module_lora.lora_a[i],
+                            module.w13_lora_a_stacked[0].shape,
+                            is_moe=True,
+                            slice_fn=slice_fn,
+                        )
+                for i in range(len(module_lora.lora_b)):
+                    if module_lora.lora_b[i] is not None:
+                        slice_fn = (
+                            module._slice_w2_b if (i % 3 == 1) else module._slice_w13_b
+                        )
+                        buffer_shape = (
+                            module.w2_lora_b_stacked[0].shape
+                            if (i % 3 == 1)
+                            else module.w13_lora_b_stacked[0].shape
+                        )
+                        module_lora.lora_b[i] = pad_to_buffer(
+                            module_lora.lora_b[i],
+                            buffer_shape,
+                            is_moe=True,
+                            slice_fn=slice_fn,
+                        )
+            return
+
+        # BaseLinear, Column/Row Parallel, Merged,
+        # QKV, Replicated Linear, LogitsProcessor
+        if isinstance(module_lora.lora_a, list):
+            # Slice entire lists at once
+            module_lora.lora_a = module.slice_lora_a(module_lora.lora_a)
+            module_lora.lora_b = module.slice_lora_b(module_lora.lora_b)
+            # Then pad each element
+            for i in range(len(module_lora.lora_a)):
+                if module_lora.lora_a[i] is not None:
+                    module_lora.lora_a[i] = pad_to_buffer(
+                        module_lora.lora_a[i],
+                        module.lora_a_stacked[i].shape,
+                        is_moe=False,
+                    )
+                if module_lora.lora_b[i] is not None:
+                    module_lora.lora_b[i] = pad_to_buffer(
+                        module_lora.lora_b[i],
+                        module.lora_b_stacked[i].shape,
+                        is_moe=False,
+                    )
+        else:
+            # Single tensors: ReplicatedLinear, LogitsProcessor, etc.
+            slice_fn_a = getattr(module, "slice_lora_a", None)
+            slice_fn_b = getattr(module, "slice_lora_b", None)
+            if module_lora.lora_a is not None:
+                module_lora.lora_a = pad_to_buffer(
+                    module_lora.lora_a,
+                    module.lora_a_stacked[0].shape,
+                    is_moe=False,
+                    slice_fn=slice_fn_a,
+                )
+            if module_lora.lora_b is not None:
+                module_lora.lora_b = pad_to_buffer(
+                    module_lora.lora_b,
+                    module.lora_b_stacked[0].shape,
+                    is_moe=False,
+                    slice_fn=slice_fn_b,
+                )
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
