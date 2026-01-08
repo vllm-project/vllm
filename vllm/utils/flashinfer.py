@@ -586,7 +586,7 @@ def flashinfer_quant_nvfp4_8x4_sf_layout(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return flashinfer_nvfp4_quantize(a, a_global_sf)
 
-  
+
 flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
     "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
 )
