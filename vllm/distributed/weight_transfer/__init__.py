@@ -44,7 +44,7 @@ __all__ = [
     "WeightTransferEngine",
     "NCCLWeightTransferEngine",
     "register_weight_transfer_engine",
-    "WEIGHT_TRANSFER_ENGINE_MAP",
+    "WEIGHT_TRANSFER_ENGINE_REGISTRY",
     "IPCWeightTransferEngine",
     "WeightUpdateRequest",
 ]

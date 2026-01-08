@@ -104,12 +104,6 @@ class Worker(WorkerBase):
             self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
         )
 
-        # Weight transfer engine (initialized on-demand)
-        # check if class is in the map
-        self.weight_transfer_engine = init_transfer_engine(
-            self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
-        )
-
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         self.profiler: Any | None = None
         profiler_config = vllm_config.profiler_config
@@ -984,9 +978,6 @@ class Worker(WorkerBase):
             runner.ensure_kv_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
-
-        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
-            weight_transfer_engine.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
