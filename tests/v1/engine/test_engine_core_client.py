@@ -37,8 +37,11 @@ from vllm.v1.executor.abstract import Executor
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA-alike platforms.",
+        allow_module_level=True,
+    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -133,6 +136,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     parallel_config = SimpleNamespace(
         data_parallel_size=1,
         data_parallel_rank=0,
+        data_parallel_index=0,
         data_parallel_size_local=1,
         data_parallel_rank_local=None,
         data_parallel_hybrid_lb=False,

@@ -612,6 +612,15 @@ _AUTOMATIC_CONVERTED_MODELS = {
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     ),
     "Qwen3ForTokenClassification": _HfExamplesInfo("bd2lcco/Qwen3-0.6B-finetuned"),
+    "Qwen3VLForSequenceClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-VL-Reranker-2B",
+        is_available_online=False,
+        hf_overrides={
+            "architectures": ["Qwen3VLForSequenceClassification"],
+            "classifier_from_token": ["no", "yes"],
+            "is_original_qwen3_reranker": True,
+        },
+    ),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -907,6 +916,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},
