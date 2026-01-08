@@ -91,7 +91,7 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(Pooler):
+class BertPooler(TokenPooler):
     def __init__(self, config: BertConfig):
         super().__init__()
 
