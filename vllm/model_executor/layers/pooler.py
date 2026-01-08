@@ -117,7 +117,7 @@ class PoolingMethod(nn.Module, ABC):
                 "and is not a standalone PoolingMethod."
             )
 
-        raise NotImplementedError(f"Unsupported method: {pooling_type}")
+        raise NotImplementedError(f"Unsupported method: {pooling_type!r}")
 
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
