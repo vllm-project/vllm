@@ -782,8 +782,7 @@ def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
-        [{"role": "user", "content": f"<image>\n{question}"}]
-        for question in questions
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
     ]
     prompts = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True

@@ -392,7 +392,8 @@ class KananaVProcessingInfo(BaseProcessingInfo):
     ) -> tuple[ImageSize, int]:
         image_processor = self.ctx.get_hf_processor().image_processor
         smart_resize = resolve_obj_by_qualname(
-            f"{type(image_processor).__module__}.smart_resize")
+            f"{type(image_processor).__module__}.smart_resize"
+        )
 
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
