@@ -11,10 +11,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
+
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
     def __init__(self) -> None:
         super().__init__()
-        self.dummy_tensor = torch.empty(1, device='cuda')
+        self.dummy_tensor = torch.empty(1, device="cuda")
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -31,7 +32,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
     def output_is_reduced(self) -> bool:
         return False
-    
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -44,17 +45,20 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         from vllm.distributed import get_ep_group
 
-        if not hasattr(self, "dummy_tensor"):
-            self.dummy_tensor = torch.zeros(1, device='cuda')
+        print(f"before: {a1.shape=}")
+        print(f"before: {topk_weights.shape=}")
+        print(f"before: {topk_ids.shape=}")
 
-        extra_tensors = [topk_weights,topk_ids]
-        a1, _, extra_tensors = get_ep_group().dispatch(
+        a1, topk_weights, topk_ids = get_ep_group().dispatch(
             a1,
-            self.dummy_tensor, # router logits
-            is_sequence_parallel=False, # TODO?
-            extra_tensors=extra_tensors,
+            topk_weights,
+            topk_ids,
+            # TODO?
+            is_sequence_parallel=False,
         )
-        topk_weights, topk_ids = extra_tensors
+        print(f"after: {a1.shape=}")
+        print(f"after: {topk_weights.shape=}")
+        print(f"after: {topk_ids.shape=}")
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -63,7 +67,11 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.per_act_token_quant,
             quant_config.block_shape,
         )
-        expert_tokens_meta = None # TODO?
+        # TODO?
+        expert_tokens_meta = None
+        print(
+            f"{a1q.dtype=}, {a1q_scale.dtype=} {topk_weights.dtype=}, {topk_ids.dtype=}"
+        )
 
         return a1q, a1q_scale, None, topk_weights, topk_ids
 
@@ -87,19 +95,16 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         )
 
         from vllm.distributed import get_ep_group
-        combined_output = get_ep_group().combine(
-            output,
-            is_sequence_parallel=False
-        )
-        combined_output.copy_(output)
 
+        combined_output = get_ep_group().combine(output, is_sequence_parallel=False)
+        combined_output.copy_(output)
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def __init__(self, defer_input_quant: bool = False) -> None:
         super().__init__()
         self.defer_input_quant = defer_input_quant
-    
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

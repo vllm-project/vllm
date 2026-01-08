@@ -1005,22 +1005,24 @@ class GroupCoordinator:
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> (
-        tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(  # type: ignore[call-arg]
                 hidden_states,
-                router_logits,
+                topk_weights,
+                topk_ids,
                 is_sequence_parallel,
                 extra_tensors,
             )
         else:
-            return hidden_states, router_logits
+            return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states, is_sequence_parallel: bool = False

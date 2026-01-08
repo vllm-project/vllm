@@ -1123,6 +1123,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
+        # return MoEPrepareAndFinalizeNaiveEP()
         if (
             self.fp8_backend == Fp8MoeBackend.AITER
             or self.fp8_backend == Fp8MoeBackend.MARLIN
@@ -1323,13 +1324,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 )
 
-        logger.info_once(f"{router_logits.shape=}")
         topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
-        logger.info_once(f"{router_logits.shape=}")
-        logger.info_once(f"{topk_weights.shape=}")
+        print(f"{x.dtype=}, {topk_weights.dtype=}, {topk_ids.dtype=}")
 
         result = self.kernel(
             x,
