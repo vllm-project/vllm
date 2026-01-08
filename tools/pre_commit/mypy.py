@@ -41,6 +41,7 @@ FILES = [
     "vllm/usage",
     "vllm/utils",
     "vllm/worker",
+    "vllm/v1/attention",
     "vllm/v1/core",
     "vllm/v1/engine",
     "vllm/v1/executor",
@@ -60,7 +61,6 @@ SEPARATE_GROUPS = [
     "vllm/lora",
     "vllm/model_executor",
     # v1 related
-    "vllm/v1/attention",
     "vllm/v1/kv_offload",
     "vllm/v1/spec_decode",
     "vllm/v1/structured_output",
@@ -74,6 +74,8 @@ EXCLUDE = [
     "vllm/model_executor/layers/fla/ops",
     # Ignore triton kernels in ops.
     "vllm/v1/attention/ops",
+    # TODO(matt): remove.
+    "vllm/v1/attention/backends/fa_utils.py",
 ]
 
 
