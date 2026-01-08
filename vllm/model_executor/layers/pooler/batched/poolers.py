@@ -70,6 +70,7 @@ class SimplePooler(BatchedPooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
+    # Returns subset of BatchedPoolerOutput to satisfy BatchedPoolingFn
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -91,7 +92,7 @@ class ClassifierPooler(BatchedPooler):
 
     def __init__(
         self,
-        pooling: BatchedPoolingFn | SimplePooler,
+        pooling: BatchedPoolingFn,
         classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:
