@@ -19,7 +19,7 @@ def clear_cache():
 @pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):
     # Set the current platform to ROCm using monkeypatch
-    monkeypatch.setattr("vllm.attention.selector.current_platform", RocmPlatform())
+    monkeypatch.setattr("vllm.v1.attention.selector.current_platform", RocmPlatform())
 
     # Test standard ROCm attention
     attention_config = AttentionConfig(backend=AttentionBackendEnum.ROCM_ATTN)

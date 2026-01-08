@@ -30,7 +30,7 @@ NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
-# vllm.attention.ops.paged_attn.PagedAttention
+# vllm.v1.attention.ops.paged_attn.PagedAttention
 HEAD_SIZES = [32, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]
