@@ -303,30 +303,23 @@ void static_scaled_fp8_quant(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 // Dispatch to template-specialized kernel based on stride pattern
-#define LAUNCH_KERNEL(S0_ZERO, S1_ZERO)                                        \
-  vllm::scaled_fp8_quant_kernel_strided_group_shape<scalar_t, fp8_t, S0_ZERO,  \
-                                                    S1_ZERO>                   \
-      <<<grid, block, 0, stream>>>(                                            \
-          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),                   \
-          scale.data_ptr<float>(), hidden_size, in_row_stride, out_row_stride, \
-          group_m, group_n, scale_stride_i, scale_stride_j)
-
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
-              if (scale_stride_i == 0 && scale_stride_j == 0)
-                LAUNCH_KERNEL(true, true);
-              else if (scale_stride_i == 0)
-                LAUNCH_KERNEL(true, false);
-              else if (scale_stride_j == 0)
-                LAUNCH_KERNEL(false, true);
-              else
-                LAUNCH_KERNEL(false, false);
+              VLLM_DISPATCH_BOOL(scale_stride_i == 0, S0_ZERO, [&] {
+                VLLM_DISPATCH_BOOL(scale_stride_j == 0, S1_ZERO, [&] {
+                  vllm::scaled_fp8_quant_kernel_strided_group_shape<
+                      scalar_t, fp8_t, S0_ZERO, S1_ZERO>
+                      <<<grid, block, 0, stream>>>(
+                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                          scale.data_ptr<float>(), hidden_size, in_row_stride,
+                          out_row_stride, group_m, group_n, scale_stride_i,
+                          scale_stride_j);
+                });
+              });
             });
       });
-
-#undef LAUNCH_KERNEL
 }
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
