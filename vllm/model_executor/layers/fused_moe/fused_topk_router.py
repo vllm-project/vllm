@@ -21,8 +21,6 @@ class FusedTopKRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        zero_expert_num: int | None = 0,
-        zero_expert_type: str | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -30,8 +28,6 @@ class FusedTopKRouter(BaseRouter):
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
         )
         self.renormalize = renormalize
 
