@@ -1226,8 +1226,8 @@ class IsaacVisionEmbedding(nn.Module):
         self.transformer = Siglip2VisionTransformer(
             vision_cfg,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "0"),
             multimodal_config=multimodal_config,
+            prefix=maybe_prefix(prefix, "0"),
         )
         self.linear_fc1 = ColumnParallelLinear(
             hidden_dim,
