@@ -209,8 +209,6 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
-        # Index of the current iteration for recording iteration details.
-        self.iteration_index = 0
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -344,6 +342,8 @@ class EngineCore:
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
+        if not hasattr(self, "_iteration_index"):
+            self._iteration_index = 0
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
         yield
@@ -351,7 +351,7 @@ class EngineCore:
             "".join(
                 [
                     "Iteration(",
-                    str(self.iteration_index),
+                    str(self._iteration_index),
                     "): ",
                     str(iteration_details.num_ctx_requests),
                     " context requests, ",
@@ -366,7 +366,7 @@ class EngineCore:
                 ]
             )
         )
-        self.iteration_index += 1
+        self._iteration_index += 1
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
