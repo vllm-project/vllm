@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
@@ -101,7 +101,9 @@ class OpenAIServingChat(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        exclude_log_deltas: bool = False,
         log_error_stack: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -115,7 +117,9 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
+        self.exclude_log_deltas = exclude_log_deltas
 
         # set up logits processors
         self.logits_processors = self.model_config.logits_processors
@@ -203,6 +207,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts=None,
                 documents=None,
                 chat_template_kwargs=None,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 tool_parser=None,
                 add_special_tokens=False,
             )
@@ -310,6 +315,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts=tool_dicts,
                     documents=request.documents,
                     chat_template_kwargs=request.chat_template_kwargs,
+                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
                 )
@@ -655,9 +661,14 @@ class OpenAIServingChat(OpenAIServing):
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
 
+                # Pass the same chat template kwargs as used in tokenization
+                chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                    request.chat_template_kwargs,
+                    self.default_chat_template_kwargs,
+                )
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
-                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -1126,7 +1137,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if tc.function and tc.function.arguments
                             )
 
-                        if delta_content:
+                        if delta_content and not self.exclude_log_deltas:
                             self.request_logger.log_outputs(
                                 request_id=request_id,
                                 outputs=delta_content,
@@ -1433,9 +1444,14 @@ class OpenAIServingChat(OpenAIServing):
                             "Tokenizer not available when `skip_tokenizer_init=True`"
                         )
 
+                    # Pass the same chat template kwargs as used in tokenization
+                    chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                        request.chat_template_kwargs,
+                        self.default_chat_template_kwargs,
+                    )
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
-                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                        chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
                     )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")

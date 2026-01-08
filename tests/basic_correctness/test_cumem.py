@@ -247,7 +247,6 @@ def test_deep_sleep_async():
 
 @requires_fp8
 def test_deep_sleep_fp8_kvcache():
-    GiB_bytes = 1 << 30
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
