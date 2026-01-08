@@ -660,7 +660,6 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = None
 
         try:
-            reasoning_parser = None
             if self.reasoning_parser:
                 if tokenizer is None:
                     raise ValueError(
