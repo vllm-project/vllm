@@ -256,6 +256,10 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         model_config.hf_config.method = "from_2_way_softmax"
 
 
+class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
+    pass
+
+
 class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -551,6 +555,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,

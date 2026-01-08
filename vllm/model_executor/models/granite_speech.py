@@ -348,7 +348,9 @@ class GraniteSpeechConformerAttention(nn.Module):
 
         if self.context_size <= 0 or self.context_size > self.max_pos_emb:
             raise ValueError(
-                "Context size is either less than 0 or exceeds the max_pos_emb"
+                f"Context size should be > 0 and "
+                f"<= max_pos_emb ({self.max_pos_emb}), "
+                f"got {self.context_size}."
             )
 
     def forward(

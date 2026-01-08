@@ -355,6 +355,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
@@ -1211,6 +1212,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
@@ -1355,6 +1357,7 @@ class EngineArgs:
 
         model_config = self.create_model_config()
         self.model = model_config.model
+        self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
@@ -1654,19 +1657,6 @@ class EngineArgs:
             if self.enable_lora
             else None
         )
-
-        if (
-            lora_config is not None
-            and lora_config.enable_tower_connector_lora
-            and self.mm_processor_cache_gb != 0
-        ):
-            raise ValueError(
-                "Currently, enable_tower_connector_lora is "
-                "incompatible with the multi-modal processor cache. "
-                "When enable_tower_connector_lora is set, "
-                "mm_processor_cache_gb must be 0, got %s",
-                self.mm_processor_cache_gb,
-            )
 
         if (
             lora_config is not None

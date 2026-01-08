@@ -519,9 +519,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(
-            vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
-        )
+        wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)

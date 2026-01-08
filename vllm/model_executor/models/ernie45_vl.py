@@ -152,6 +152,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
@@ -599,7 +600,11 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
 
     if min_pixels > h_bar * w_bar or h_bar * w_bar > max_pixels:
-        raise ValueError(f"encounter invalid h_bar: {h_bar}, w_bar: {w_bar}")
+        raise ValueError(
+            f"Invalid h_bar={h_bar}, w_bar={w_bar}: "
+            f"h_bar * w_bar must be >= min_pixels ({min_pixels}) "
+            f"and <= max_pixels ({max_pixels})."
+        )
 
     return h_bar, w_bar
 

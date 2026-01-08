@@ -251,6 +251,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
+        assert attn_metadata.decode.max_qo_len is not None
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
