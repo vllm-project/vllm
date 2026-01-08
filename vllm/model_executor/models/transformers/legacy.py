@@ -19,8 +19,9 @@
 from typing import TYPE_CHECKING
 
 import torch
+import transformers
+from packaging.version import Version
 
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -28,22 +29,16 @@ if TYPE_CHECKING:
 
 
 class LegacyMixin:
-    hf_to_vllm_mapper = WeightsMapper(
-        # These are applied in order, so the order matters!
-        orig_to_new_prefix={
-            # Handle BERT-like models
-            "roberta": "model",
-            "bert": "model",
-        },
-        orig_to_new_suffix={
-            # Replace legacy suffixes used for norms
-            ".gamma": ".weight",
-            ".beta": ".bias",
-        },
-    )
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # In Transformers v5 this is handled by the conversion mapping
+        if Version(transformers.__version__) < Version("5"):
+            # Replace legacy suffixes used for norms
+            self.hf_to_vllm_mapper.orig_to_new_suffix = {
+                ".gamma": ".weight",
+                ".beta": ".bias",
+            } | self.hf_to_vllm_mapper.orig_to_new_suffix
 
         # Skip unsupported/unwanted output embeddings layers
         self.skip_prefixes.extend(

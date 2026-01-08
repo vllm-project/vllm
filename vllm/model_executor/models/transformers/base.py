@@ -105,27 +105,6 @@ class Base(
     SupportsEagle3,
 ):
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # Add `model.` prefix for base model checkpoints,
-            # handling the case where it is already present
-            "": "model.",
-            "model.model.": "model.",
-            # Heads will be adjacent to `model` (pooling included because of adapters)
-            "model.lm_head.": "lm_head.",
-            "model.score.": "classifier.",
-            "model.classifier.": "classifier.",
-        }
-    )
-
-    def __init_subclass__(cls, *args, **kwargs):
-        """Merge hf_to_vllm_mapper in MRO from most specific to least specific."""
-        super().__init_subclass__(*args, **kwargs)
-        hf_to_vllm_mapper = WeightsMapper()
-        for base in cls.__mro__:
-            if base_hf_to_vllm_mapper := getattr(base, "hf_to_vllm_mapper", None):
-                hf_to_vllm_mapper |= base_hf_to_vllm_mapper
-        cls.hf_to_vllm_mapper = hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__()
@@ -181,7 +160,37 @@ class Base(
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
-        # Remove layers not on this pipeline parallel rank
+        # Create weight mapper
+        self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+
+        if Version(transformers.__version__) >= Version("5.0.0.dev0"):
+            from transformers.conversion_mapping import (
+                WeightRenaming,
+                get_model_conversion_mapping,
+            )
+
+            for mapping in get_model_conversion_mapping(self.model):
+                # Handle weights which have been renamed in Transformers
+                if isinstance(mapping, WeightRenaming):
+                    compiled_sources = mapping.compiled_sources
+                    target_pattern = mapping.target_patterns[0]
+                    orig_to_new_regex[compiled_sources] = target_pattern
+                # TODO: Handle WeightConverter to enable layer merging
+
+        # Standardise base model prefix
+        bmp = self.model.base_model_prefix
+        expected_bmp = r"model\.\1"
+        # Handle checkpoints saved with different base model prefix
+        if bmp and bmp != "model":
+            different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
+            orig_to_new_regex[different_bmp_pattern] = expected_bmp
+        # Handle checkpoints saved without base model prefix
+        model_children = "|".join(name for name, _ in self.model.named_children())
+        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).+)")
+        orig_to_new_regex[missing_bmp_pattern] = expected_bmp
+
+        # Remove\ layers not on this pipeline parallel rank
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
