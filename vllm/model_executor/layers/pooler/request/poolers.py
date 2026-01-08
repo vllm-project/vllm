@@ -17,7 +17,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from ..abstract import Pooler
 from .heads import TokenClassifierPoolerHead, TokenEmbeddingPoolerHead
 
-RequestPoolerOutput: TypeAlias = list[torch.Tensor] | list[torch.Tensor | None]
+RequestPoolerOutput: TypeAlias = list[torch.Tensor | None]
 
 
 class RequestPooler(Pooler):
