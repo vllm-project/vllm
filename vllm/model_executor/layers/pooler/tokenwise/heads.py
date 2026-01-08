@@ -87,7 +87,7 @@ class TokenClassifierPoolerHead(TokenwisePoolerHead):
         self.logit_bias: float | None = model_config.pooler_config.logit_bias
         self.head_dtype = model_config.head_dtype
 
-        self.activation = resolve_classifier_act_fn(
+        self.act_fn = resolve_classifier_act_fn(
             model_config, static_num_labels=False, act_fn=act_fn
         )
 
@@ -113,7 +113,7 @@ class TokenClassifierPoolerHead(TokenwisePoolerHead):
             scores -= self.logit_bias
 
         if pooling_param.use_activation:
-            scores = self.activation(scores)
+            scores = self.act_fn(scores)
 
         # scores shape: [n_token, num_labels]
         return scores
