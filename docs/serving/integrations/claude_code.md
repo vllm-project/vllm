@@ -1,6 +1,6 @@
 # Claude Code
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) is Anthropic's official agentic coding tool that lives in your terminal. It can understand your codebase, edit files, run commands, and help you write code more efficiently.
+[Claude Code](https://code.claude.com/docs/en/quickstart) is Anthropic's official agentic coding tool that lives in your terminal. It can understand your codebase, edit files, run commands, and help you write code more efficiently.
 
 By pointing Claude Code at a vLLM server, you can use your own models as the backend instead of the Anthropic API. This is useful for:
 
