@@ -268,11 +268,22 @@ class ExecuteModelState(NamedTuple):
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
+    def log_tokens(self, msg: str, toks: torch.Tensor):
+        if self.log_toks:
+            print(msg, [self.tokenizer.decode(tok) for tok in toks.tolist()])
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        self.log_toks = False
+        if self.log_toks:
+            from transformers import AutoTokenizer
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                vllm_config.model_config.model
+            )
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2612,6 +2623,12 @@ class GPUModelRunner(
             sampling_metadata,
         )
         self._update_states_after_model_execute(sampler_output.sampled_token_ids)
+        for idx, row in enumerate(sampler_output.sampled_token_ids):
+            _accepted_tokens = row[row != -1]
+            self.log_tokens(
+                f"accepted tokens [{idx}]: len={len(_accepted_tokens)}",
+                _accepted_tokens,
+            )
         return sampler_output
 
     def _bookkeeping_sync(
@@ -2975,6 +2992,8 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.log_toks:
+            print("================STEP================")
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3163,6 +3182,9 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+        self.log_tokens("tgt input_ids:", input_ids)
+        if self.log_toks:
+            print("tgt positions:", positions.tolist())
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:

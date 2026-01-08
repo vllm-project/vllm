@@ -243,11 +243,7 @@ class SpecDecodeBaseProposer:
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_tokens = target_token_ids.shape[0]
         batch_size = common_attn_metadata.batch_size()
-
-        if last_token_indices is None:
-            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -256,9 +252,20 @@ class SpecDecodeBaseProposer:
             )
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        self.set_input_ids_first_pass(
-            target_token_ids, next_token_ids, num_tokens, last_token_indices
+        num_tokens, last_token_indices, common_attn_metadata = (
+            self.set_input_ids_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                last_token_indices=last_token_indices,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
         )
+
+        if self.runner.log_toks:
+            print("num_tokens:", num_tokens)
+            print("last_token_indices:", last_token_indices.tolist())
 
         assert self.runner is not None
 
@@ -308,8 +315,6 @@ class SpecDecodeBaseProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        # copy inputs to buffer for cudagraph
-        self._set_positions(num_tokens, target_positions)
         if self.pass_hidden_states_to_model:
             # target_hidden_states and self.hidden_states can have different
             # hidden dims. E.g. large target model and small draft model.
@@ -338,6 +343,16 @@ class SpecDecodeBaseProposer:
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
+        self.runner.log_tokens("draft input_ids:", model_kwargs["input_ids"])
+        if self.runner.log_toks:
+            print("draft positions:", model_kwargs["positions"].tolist())
+            print("cad.seq_lens:", common_attn_metadata.seq_lens.tolist())
+            print(
+                "cad.query_start_loc:",
+                common_attn_metadata.query_start_loc.tolist(),
+            )
+            print("cad.slot_mapping:", common_attn_metadata.slot_mapping.tolist())
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -351,6 +366,7 @@ class SpecDecodeBaseProposer:
                 hidden_states = last_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
+
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
@@ -360,9 +376,9 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
-            positions = target_positions[:, last_token_indices]
+            positions = self.positions[:, last_token_indices]
         else:
-            positions = target_positions[last_token_indices]
+            positions = self.positions[last_token_indices]
         if self.method in (
             "deepseek_mtp",
             "ernie_mtp",
@@ -436,6 +452,8 @@ class SpecDecodeBaseProposer:
             common_attn_metadata._num_computed_tokens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
+            if self.runner.log_toks:
+                print("-------------------")
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -532,6 +550,16 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
 
+            self.runner.log_tokens("draft input_ids:", model_kwargs["input_ids"])
+            if self.runner.log_toks:
+                print("draft positions:", model_kwargs["positions"].tolist())
+                print("cad.seq_lens:", common_attn_metadata.seq_lens.tolist())
+                print(
+                    "cad.query_start_loc:",
+                    common_attn_metadata.query_start_loc.tolist(),
+                )
+                print("cad.slot_mapping:", common_attn_metadata.slot_mapping.tolist())
+
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -553,21 +581,34 @@ class SpecDecodeBaseProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        for idx, row in enumerate(draft_token_ids):
+            self.runner.log_tokens(f"draft suggestions [{idx}]:", row)
         return draft_token_ids
 
     def set_input_ids_first_pass(
         self,
         target_token_ids: torch.Tensor,
         next_token_ids: torch.Tensor,
-        num_tokens: int,
-        last_token_indices: torch.Tensor,
-    ) -> None:
+        target_positions: torch.Tensor,
+        last_token_indices: torch.Tensor | None,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        if last_token_indices is None:
+            last_token_indices = cad.query_start_loc[1:] - 1
+
+        num_tokens = target_token_ids.shape[0]
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[: num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
+
+        # copy inputs to buffer for cudagraph
+        self._set_positions(num_tokens, target_positions)
+
+        return num_tokens, last_token_indices, cad
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")

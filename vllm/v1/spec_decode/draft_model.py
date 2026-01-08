@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -10,12 +9,11 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     extend_all_queries_by_1,
-    extend_flat_seqs,
 )
-from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
@@ -36,57 +34,9 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self._raise_if_multimodal()
         self._raise_if_mrope()
-        self._raise_if_padded_drafter_batch()
+        self._raise_if_padded_drafter_batch_disabled()
         self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
-
-    def propose(
-        self,
-        # [num_tokens]
-        target_token_ids: torch.Tensor,
-        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
-        target_positions: torch.Tensor,
-        # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
-        # [batch_size]
-        next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        num_rejected_tokens_gpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        This function processes the inputs first before calling the .propose()
-        method of the parent class.
-        """
-        inputs = DraftModelInputs(
-            cad=common_attn_metadata,
-            token_ids=target_token_ids,
-            positions=target_positions,
-        )
-        inputs = merge_next_token_ids_into_token_ids(
-            inputs=inputs,
-            next_token_ids=next_token_ids,
-            block_size=self.block_size,
-            max_model_len=self.max_model_len,
-            arange=self.arange,
-        )
-
-        draft_token_ids = super().propose(
-            target_token_ids=inputs.token_ids,
-            target_positions=inputs.positions,
-            common_attn_metadata=inputs.cad,
-            sampling_metadata=sampling_metadata,
-            # below are are not used by draft model
-            target_hidden_states=None,
-            next_token_ids=None,
-            last_token_indices=None,
-            mm_embed_inputs=None,
-            # used with padded drafter batch
-            num_rejected_tokens_gpu=None,
-        )
-        return draft_token_ids
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -101,12 +51,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "Speculative Decoding with draft models does not support M-RoPE yet"
             )
 
-    def _raise_if_padded_drafter_batch(self):
-        if not self.vllm_config.speculative_config.disable_padded_drafter_batch:
+    def _raise_if_padded_drafter_batch_disabled(self):
+        if self.vllm_config.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
-                "Speculative Decoding with draft models does not support "
-                "padded drafter batch yet. Please pass --disable-padded-drafter-batch "
-                "in the speculative_config."
+                "Speculative Decoding with draft models only supports "
+                "padded drafter batch. Please don't pass --disable-padded-drafter-batch"
+                " in the speculative_config."
             )
 
     def _raise_if_vocab_size_mismatch(self):
@@ -133,10 +83,68 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self,
         target_token_ids: torch.Tensor,
         next_token_ids: torch.Tensor,
-        num_tokens: int,
+        target_positions: torch.Tensor,
         last_token_indices: torch.Tensor,
-    ) -> None:
-        self.input_ids[:num_tokens] = target_token_ids
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        batch_size = cad.batch_size()
+        grid = (batch_size,)
+        start_locs = cad.query_start_loc[:-1]
+        end_locs = cad.query_start_loc[1:] - 1
+        if num_rejected_tokens_gpu is not None:
+            end_locs -= num_rejected_tokens_gpu
+
+        num_tokens = target_token_ids.shape[0] + batch_size
+        is_rejected_tok = torch.empty(
+            (num_tokens,), device=self.input_ids.device, dtype=torch.bool
+        )
+        merge_toks_kernel[grid](
+            target_toks_ptr=target_token_ids,
+            next_toks_ptr=next_token_ids,
+            query_start_locs_ptr=start_locs,
+            query_end_locs_ptr=end_locs,
+            out_ptr_merged_toks=self.input_ids,
+            out_ptr_is_rejected_tok=is_rejected_tok,
+            target_toks_size=target_token_ids.shape[0],
+            # passing a negative rejected_tok_fill value will raise an error
+            # when the value is used to index into embeddings.
+            # Therefore, we pass a valid integer, e.g. 0.
+            rejected_tok_fill=0,
+        )
+        merge_toks_kernel[grid](
+            target_toks_ptr=target_positions,
+            next_toks_ptr=target_positions[end_locs] + 1,
+            query_start_locs_ptr=start_locs,
+            query_end_locs_ptr=end_locs,
+            out_ptr_merged_toks=self.positions,
+            out_ptr_is_rejected_tok=is_rejected_tok,
+            target_toks_size=target_positions.shape[0],
+            rejected_tok_fill=-1,
+        )
+        if self.runner.log_toks:
+            print("invalid_positions", is_rejected_tok.int().tolist())
+
+        # recompute slot mapping
+        new_slot_mapping = compute_new_slot_mapping(
+            cad=cad,
+            new_positions=self.positions[:num_tokens],
+            is_rejected_token_mask=is_rejected_tok,
+            block_size=self.block_size,
+            max_model_len=self.max_model_len,
+        )
+        # update common_attn_metadata
+        new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
+            cad,
+            arange=self.arange,
+            new_slot_mapping=new_slot_mapping,
+        )
+
+        new_last_token_indices = new_cad.query_start_loc[1:] - 1
+        if num_rejected_tokens_gpu is not None:
+            new_last_token_indices -= num_rejected_tokens_gpu
+
+        return num_tokens, new_last_token_indices, new_cad
 
     def load_model(self, target_model: Any) -> None:
         """Takes target_model to satisfy the type checker."""
@@ -191,39 +199,13 @@ def create_vllm_config_for_draft_model(
     return new
 
 
-@dataclass
-class DraftModelInputs:
-    token_ids: torch.Tensor
-    positions: torch.Tensor
-    cad: CommonAttentionMetadata
-
-
-def merge_next_token_ids_into_token_ids(
-    inputs: DraftModelInputs,
-    next_token_ids: torch.Tensor,
+def compute_new_slot_mapping(
+    cad: CommonAttentionMetadata,
+    new_positions: torch.Tensor,
+    is_rejected_token_mask: torch.Tensor,
     block_size: int,
     max_model_len: int,
-    arange: torch.Tensor,
-) -> DraftModelInputs:
-    """
-    Merges the next token ids with the existing token ids into a flat sequence.
-    Does the same for the positions, computes new slot mapping,
-    and updates the common_attn_metadata. The inputs are not modified in-place.
-    """
-    cad: CommonAttentionMetadata = inputs.cad
-
-    # merge token_ids and next_token_ids
-    query_end_locs = cad.query_start_loc[1:] - 1
-    new_token_ids = extend_flat_seqs(
-        seqs=inputs.token_ids, end_locs=query_end_locs, new_vals=next_token_ids
-    )
-    # append new positions
-    positions_to_append = inputs.positions[query_end_locs] + 1
-    new_positions = extend_flat_seqs(
-        seqs=inputs.positions, end_locs=query_end_locs, new_vals=positions_to_append
-    )
-
-    # recompute slot mapping
+):
     batch_size, n_blocks_per_req = cad.block_table_tensor.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
     req_indices = torch.repeat_interleave(req_indices, cad.query_lens() + 1)
@@ -234,11 +216,40 @@ def merge_next_token_ids_into_token_ids(
     # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+    # Mask out the positions ids that are invalid
+    new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
+    return new_slot_mapping
 
-    # update common_attn_metadata
-    new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
-        cad, arange=arange, new_slot_mapping=new_slot_mapping
-    )
-    return DraftModelInputs(
-        token_ids=new_token_ids, positions=new_positions, cad=new_cad
-    )
+
+@triton.jit
+def merge_toks_kernel(
+    target_toks_ptr,
+    next_toks_ptr,
+    query_start_locs_ptr,
+    query_end_locs_ptr,
+    out_ptr_merged_toks,
+    out_ptr_is_rejected_tok,
+    target_toks_size,
+    rejected_tok_fill,
+):
+    pid = tl.program_id(0)
+    start_loc = tl.load(query_start_locs_ptr + pid)
+    is_last_program = pid == tl.num_programs(0) - 1
+    if is_last_program:
+        next_start_loc = target_toks_size.to(tl.int32)
+    else:
+        next_start_loc = tl.load(query_start_locs_ptr + pid + 1).to(tl.int32)
+
+    end_loc = tl.load(query_end_locs_ptr + pid)
+    new_val = tl.load(next_toks_ptr + pid)
+    for i in range(start_loc, next_start_loc + 1):
+        if i <= end_loc:  # copy existing tokens
+            old_val = tl.load(target_toks_ptr + i)
+            tl.store(out_ptr_merged_toks + pid + i, old_val)
+            tl.store(out_ptr_is_rejected_tok + pid + i, False)
+        elif i == end_loc + 1:  # copy bonus token
+            tl.store(out_ptr_merged_toks + pid + i, new_val)
+            tl.store(out_ptr_is_rejected_tok + pid + i, False)
+        else:  # fill rejected tokens
+            tl.store(out_ptr_merged_toks + pid + i, rejected_tok_fill)
+            tl.store(out_ptr_is_rejected_tok + pid + i, True)

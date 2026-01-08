@@ -15,7 +15,10 @@ from vllm.config.vllm import VllmConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.v1.spec_decode.draft_model import create_vllm_config_for_draft_model
+from vllm.v1.spec_decode.draft_model import (
+    create_vllm_config_for_draft_model,
+    merge_toks_kernel,
+)
 from vllm.v1.spec_decode.metrics import compute_acceptance_len, compute_acceptance_rate
 
 MTP_SIMILARITY_RATE = 0.8
@@ -731,7 +734,6 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "disable_padded_drafter_batch": True,
             "max_num_seqs": 100,  # limit cudagraph capture runtime
         },
         max_model_len=args.max_model_len,
@@ -768,3 +770,54 @@ def some_high_acceptance_metrics() -> dict:
         "expected_acceptance_len": 2.95 + 1,
         "expected_acceptance_rate": 0.95,
     }
+
+
+def test_merge_toks_kernel():
+    device = "cuda"
+    merged_len = 5 + 2  # len(target_toks) = 5, batch_size = 2
+    merged = torch.full((merged_len,), -100, device=device)  # -100 is arbitrary
+    is_rejected_tok = torch.full((merged_len,), True, device=device)
+    grid = (2,)
+    merge_toks_kernel[grid](
+        target_toks_ptr=torch.tensor([0, 1, 2, 0, 1], device=device),
+        next_toks_ptr=torch.tensor([3, 2], device=device),
+        query_start_locs_ptr=torch.tensor([0, 3], device=device),
+        query_end_locs_ptr=torch.tensor([2, 4], device=device),
+        out_ptr_merged_toks=merged,
+        out_ptr_is_rejected_tok=is_rejected_tok,
+        target_toks_size=5,
+        rejected_tok_fill=-1,
+    )
+    expected_merged = torch.tensor([0, 1, 2, 3, 0, 1, 2], device=device)
+    assert torch.allclose(merged, expected_merged)
+
+    expected_rejected_toks = torch.tensor([False] * merged_len, device=device)
+    assert torch.allclose(is_rejected_tok, expected_rejected_toks)
+
+
+def test_merge_toks_kernel_with_rejected_tokens():
+    device = "cuda"
+    merged_size = 9 + 2  # len(target_toks) = 9, batch_size = 2
+    merged = torch.full((merged_size,), -100, device=device)
+    is_rejected_tok = torch.full((merged_size,), True, device=device)
+    grid = (2,)
+    merge_toks_kernel[grid](
+        #                                       rejected tokens
+        #                                       ↓   ↓   ↓         ↓
+        target_toks_ptr=torch.tensor([0, 1, 2, 13, 14, 15, 0, 1, 22], device=device),
+        next_toks_ptr=torch.tensor([3, 2], device=device),
+        query_start_locs_ptr=torch.tensor([0, 6], device=device),
+        query_end_locs_ptr=torch.tensor([2, 7], device=device),
+        out_ptr_merged_toks=merged,
+        out_ptr_is_rejected_tok=is_rejected_tok,
+        target_toks_size=9,
+        rejected_tok_fill=-1,
+    )
+    expected_merged = torch.tensor([0, 1, 2, 3, -1, -1, -1, 0, 1, 2, -1], device=device)
+    assert torch.allclose(merged, expected_merged)
+
+    expected_rejected_toks = torch.tensor(
+        [False, False, False, False, True, True, True, False, False, False, True],
+        device=device,
+    )
+    assert torch.allclose(is_rejected_tok, expected_rejected_toks)
