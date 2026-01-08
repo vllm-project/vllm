@@ -125,7 +125,7 @@ class Worker(WorkerBase):
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode freed %f GiB memory, %f GiB memory is still in use.",
+            "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
             format_gib(freed_bytes),
             format_gib(used_bytes),
         )
@@ -342,19 +342,19 @@ class Worker(WorkerBase):
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
-            "Initial free memory: %f GiB; Requested memory: %f (util), %f GiB",
+            "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
             format_gib(self.init_snapshot.free_memory),
             self.cache_config.gpu_memory_utilization,
             format_gib(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %f GiB (total), %f GiB (within requested)",
+            "Free memory after profiling: %s GiB (total), %s GiB (within requested)",
             format_gib(free_gpu_memory),
             format_gib(free_gpu_memory - unrequested_memory),
         )
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %f GiB",
+            "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
             scope="local",
         )
