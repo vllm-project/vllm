@@ -50,7 +50,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         extra_tensors = [topk_weights,topk_ids]
         a1, _, extra_tensors = get_ep_group().dispatch(
             a1,
-            self.dummy_tensor,
+            self.dummy_tensor, # router logits
             is_sequence_parallel=False, # TODO?
             extra_tensors=extra_tensors,
         )
@@ -91,7 +91,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             output,
             is_sequence_parallel=False
         )
-
         combined_output.copy_(output)
 
 
