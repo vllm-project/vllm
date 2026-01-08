@@ -373,7 +373,7 @@ class OpenAIServingResponses(OpenAIServing):
             NotImplementedError,
         ) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -2005,7 +2005,6 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            processer = None
             if self.use_harmony:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697

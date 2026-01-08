@@ -199,7 +199,6 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {
-                    "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeMTPModel"],
                 }
@@ -401,6 +400,9 @@ class SpeculativeConfig:
                             model_type="eagle",
                         )
                         self.draft_model_config.hf_config = eagle_config
+                        self.draft_model_config.model_arch_config = (
+                            self.draft_model_config.get_model_arch_config()
+                        )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
