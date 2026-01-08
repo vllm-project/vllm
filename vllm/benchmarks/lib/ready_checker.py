@@ -24,7 +24,7 @@ async def wait_for_endpoint(
     Args:
         request_func: The async request function to call
         test_inputs: The RequestFuncInput list to test with. Only one has to
-        succeed.
+            succeed.
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
 
