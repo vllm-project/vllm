@@ -1161,6 +1161,7 @@ class OpenPanguModel(nn.Module):
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
             expert_merge_mapping = SharedFusedMoE.make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",

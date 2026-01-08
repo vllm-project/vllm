@@ -993,7 +993,6 @@ class NixlConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
         )
-        self._use_pallas = self.kv_topo._use_pallas
         self._physical_blocks_per_logical_kv_block = 1
 
     def _nixl_handshake(
@@ -1651,9 +1650,6 @@ class NixlConnectorWorker:
         # Num kv_heads > tp_size and P TP > D TP case, not supported
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
 
-        assert not self._use_pallas or tp_ratio == 1, (
-            "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
-        )
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -1801,7 +1797,7 @@ class NixlConnectorWorker:
                 block_size_ratio,
             )
 
-        split_k_and_v = self.kv_topo.split_k_and_v
+        split_k_and_v = not (self.use_mla or self.kv_topo.is_kv_layout_blocks_first)
 
         for block_ids in block_ids_list:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)

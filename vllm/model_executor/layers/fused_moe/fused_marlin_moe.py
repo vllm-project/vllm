@@ -540,9 +540,10 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (varun) : Enable activation quantization
         assert (
             quant_config.use_mxfp4_w4a16
+            or quant_config.use_nvfp4_w4a16
             or quant_config.use_int4_w4a16
             or quant_config.use_fp8_w8a16
-        ), "Supports only mxfp4_w4a16, int4_w4a16 or fp8_w8a16"
+        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -555,7 +556,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
         if self.quant_config.use_int4_w4a16:
             return scalar_types.uint4b8.id
-        elif self.quant_config.use_mxfp4_w4a16:
+        elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
         elif (
             self.quant_config.use_fp8_w8a16
@@ -692,6 +693,8 @@ class MarlinExperts(MarlinExpertsBase):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            global_scale1=self.g1_alphas,
+            global_scale2=self.g2_alphas,
             quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
