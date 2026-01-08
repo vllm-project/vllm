@@ -236,7 +236,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             k=k,
             v=v,
             softmax_scale=softmax_scale,
-            return_softmax_lse=return_softmax_lse,
+            return_lse=return_softmax_lse,
             **kwargs,
         )
 

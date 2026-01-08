@@ -136,7 +136,7 @@ def create_and_prepopulate_kv_cache(
     slot_mapping = common_attn_metadata.slot_mapping
 
     # Create KV cache
-    kv_cache = torch.empty(
+    kv_cache = torch.zeros(
         2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
     kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
