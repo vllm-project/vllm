@@ -342,8 +342,7 @@ class EngineCore:
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
-        if not hasattr(self, "_iteration_index"):
-            self._iteration_index = 0
+        self._iteration_index = getattr(self, "_iteration_index", 0)
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
         yield
