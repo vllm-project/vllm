@@ -273,6 +273,7 @@ class LoopCoderDecoderLayer(nn.Module):
 
         return hidden_states
 
+
 class LoopGateProjection(nn.Module):
     """Gate projection for mixed attention in Loop 2+.
     
@@ -302,7 +303,7 @@ class LoopGateProjection(nn.Module):
             bias=True,
             gather_output=False,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.gate_proj",
         )
     
     def forward(self, query: torch.Tensor) -> torch.Tensor:
