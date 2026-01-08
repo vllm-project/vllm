@@ -133,8 +133,6 @@ For example:
 ```python
 --8<-- "vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
 
---8<-- "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
-
 --8<-- "vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:unquantized_fused_moe"
 
 --8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
