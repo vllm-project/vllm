@@ -1,0 +1,8 @@
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ht.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ll.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-deepgemm-deepep-ht.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-deepgemm-deepep-ll.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-deepgemm.yaml
+Qwen3-30B-A3B-NvFp4-CT-fi-cutlass.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass-fi-a2av.yaml

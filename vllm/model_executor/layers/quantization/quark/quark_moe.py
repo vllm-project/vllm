@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    prepare_moe_fp8_layer_for_marlin,
+    prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -315,8 +315,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            (workspace, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale) = (
-                prepare_moe_fp8_layer_for_marlin(
+            w13_weight, w2_weight, w13_weight_scale, w2_weight_scale = (
+                prepare_fp8_moe_layer_for_marlin(
                     layer,
                     layer.w13_weight,
                     layer.w2_weight,
@@ -324,7 +324,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                     layer.w2_weight_scale,
                 )
             )
-            layer.workspace = workspace
             # TODO(rob): once we apply refactor to Quark, switch to using
             # replace_parameter for compatibility with reloading in RL.
             layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
