@@ -408,10 +408,10 @@ class ReplicatedLinear(LinearBase):
         assert self.quant_method is not None
 
         output = self.quant_method.apply(self, x, bias)
-        output_bias = self.bias if self.skip_bias_add else None
 
         if not self.return_bias:
             return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -1455,10 +1455,9 @@ class RowParallelLinear(LinearBase):
         else:
             output = output_parallel
 
-        output_bias = self.bias if self.skip_bias_add else None
-
         if not self.return_bias:
             return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
     def extra_repr(self) -> str:
