@@ -62,6 +62,7 @@ from .utils import (
 class Lfm2VLImagePixelInputs(TensorSchema):
     """
     Dimensions:
+        - b: Number of images in the prompt
         - bn: Batch size * number of images
         - d: Number of dimensions
         - fd: Number of features per dimension
@@ -70,7 +71,7 @@ class Lfm2VLImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[torch.Tensor, TensorShape("bn", "d", "fd")]
     spatial_shapes: Annotated[torch.Tensor, TensorShape("bn", 2)]
-    num_patches: torch.Tensor
+    num_patches: Annotated[torch.Tensor, TensorShape("b")]
 
 
 LFM2VLImageInputs = Lfm2VLImagePixelInputs
