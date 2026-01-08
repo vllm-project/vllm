@@ -354,6 +354,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
@@ -523,6 +524,7 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -838,7 +840,9 @@ class EngineArgs:
             **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
-            "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
+            "--enable-expert-parallel",
+            "-ep",
+            **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -1203,6 +1207,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
@@ -1346,6 +1351,7 @@ class EngineArgs:
 
         model_config = self.create_model_config()
         self.model = model_config.model
+        self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
@@ -1574,6 +1580,7 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
@@ -1647,19 +1654,6 @@ class EngineArgs:
 
         if (
             lora_config is not None
-            and lora_config.enable_tower_connector_lora
-            and self.mm_processor_cache_gb != 0
-        ):
-            raise ValueError(
-                "Currently, enable_tower_connector_lora is "
-                "incompatible with the multi-modal processor cache. "
-                "When enable_tower_connector_lora is set, "
-                "mm_processor_cache_gb must be 0, got %s",
-                self.mm_processor_cache_gb,
-            )
-
-        if (
-            lora_config is not None
             and speculative_config is not None
             and scheduler_config.max_num_batched_tokens
             < (
@@ -1712,6 +1706,7 @@ class EngineArgs:
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
         )
 
         # Compilation config overrides

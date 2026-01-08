@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
 
 # Added by the IBM Team, 2024
@@ -82,7 +82,7 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
 
 
 def generate_random_inputs(batch_size, seqlen, n_heads, d_head, itype, device="cuda"):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     A = -torch.exp(torch.rand(n_heads, dtype=itype, device=device))
     dt = F.softplus(
         torch.randn(batch_size, seqlen, n_heads, dtype=itype, device=device) - 4

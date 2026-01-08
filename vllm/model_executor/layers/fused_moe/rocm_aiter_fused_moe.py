@@ -231,8 +231,7 @@ def rocm_aiter_fused_experts(
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
-                "apply_router_weight_on_input is\
-                not supported for block scaled moe"
+                "apply_router_weight_on_input is not supported for block scaled moe"
             )
             assert quant_config.w1_scale is not None
             assert quant_config.w2_scale is not None
