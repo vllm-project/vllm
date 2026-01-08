@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -43,12 +44,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        from vllm.distributed import get_ep_group
-
-        print(f"before: {a1.shape=}")
-        print(f"before: {topk_weights.shape=}")
-        print(f"before: {topk_ids.shape=}")
-
         a1, topk_weights, topk_ids = get_ep_group().dispatch(
             a1,
             topk_weights,
@@ -56,9 +51,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             # TODO?
             is_sequence_parallel=False,
         )
-        print(f"after: {a1.shape=}")
-        print(f"after: {topk_weights.shape=}")
-        print(f"after: {topk_ids.shape=}")
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -67,13 +59,10 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.per_act_token_quant,
             quant_config.block_shape,
         )
-        # TODO?
+        # TODO - this is just for deepgemm
         expert_tokens_meta = None
-        print(
-            f"{a1q.dtype=}, {a1q_scale.dtype=} {topk_weights.dtype=}, {topk_ids.dtype=}"
-        )
 
-        return a1q, a1q_scale, None, topk_weights, topk_ids
+        return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(
         self,
@@ -86,18 +75,17 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
     ) -> None:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-        weight_and_reduce_impl.apply(
-            output=output,
+
+        out = weight_and_reduce_impl.apply(
+            output=None,
             fused_expert_output=fused_expert_output,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        from vllm.distributed import get_ep_group
-
-        combined_output = get_ep_group().combine(output, is_sequence_parallel=False)
-        combined_output.copy_(output)
+        # ... copy the
+        output.copy_(get_ep_group().combine(out, is_sequence_parallel=False))
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
