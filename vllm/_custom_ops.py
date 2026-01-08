@@ -2162,7 +2162,6 @@ def moe_wna16_marlin_gemm(
     moe_block_size: int,
     top_k: int,
     mul_topk_weights: bool,
-    is_ep: bool,
     b_q_type: ScalarType,
     size_m: int,
     size_n: int,
@@ -2194,7 +2193,6 @@ def moe_wna16_marlin_gemm(
         moe_block_size,
         top_k,
         mul_topk_weights,
-        is_ep,
         b_q_type.id,
         size_m,
         size_n,
@@ -2256,7 +2254,6 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "marlin_gemm_moe")
         moe_block_size: int,
         top_k: int,
         mul_topk_weights: bool,
-        is_ep: bool,
         b_q_type: ScalarType,
         size_m: int,
         size_n: int,
@@ -2326,18 +2323,6 @@ def concat_and_cache_mla(
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
-
-
-def copy_blocks(
-    key_caches: list[torch.Tensor],
-    value_caches: list[torch.Tensor],
-    block_mapping: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
-
-
-def copy_blocks_mla(kv_caches: list[torch.Tensor], block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
 
 
 def swap_blocks(

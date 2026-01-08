@@ -41,9 +41,8 @@ from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -259,8 +258,8 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
+        tokenizer: TokenizerLike,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,

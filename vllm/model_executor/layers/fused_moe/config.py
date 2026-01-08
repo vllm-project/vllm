@@ -201,6 +201,11 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
 
+    # Whether activation is fused with gate multiplication (SwiGLU-style).
+    # When True: intermediate_size = N // 2 (gate and up are combined)
+    # When False: intermediate_size = N (no gate multiplication)
+    is_act_and_mul: bool = True
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -332,6 +337,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
     @property
+    def use_nvfp4_w4a16(self) -> bool:
+        return self._a1.dtype is None and self._w1.dtype == "nvfp4"
+
+    @property
     def ocp_mx_scheme(self) -> str | None:
         if not hasattr(self, "_ocp_mx_scheme"):
             if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
@@ -435,6 +444,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        is_act_and_mul: bool = True,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -452,11 +462,14 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
-            per-channel scales for w1 (for W4A8 FP8).
+                     Optional per-channel scales for w1 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
-            per-channel scales for w2 (for W4A8 FP8).
-        - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
-        - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
+                     Optional per-channel scales for w2 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
+        - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
+        - a2_gscale: Optional global quantization scales for a2 (1.0 /a2_scale).
+
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
@@ -491,6 +504,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
+            is_act_and_mul=is_act_and_mul,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -680,6 +694,25 @@ def nvfp4_moe_quant_config(
     )
 
 
+def nvfp4_w4a16_moe_quant_config(
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for 16-but activations and nvp4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        quant_dtype=None,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        weight_dtype="nvfp4",
+    )
+
+
 def int4_w4a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
@@ -803,6 +836,7 @@ def awq_marlin_moe_quant_config(
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
+    is_act_and_mul: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations with biases.
@@ -812,6 +846,7 @@ def biased_moe_quant_config(
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
+        is_act_and_mul=is_act_and_mul,
     )
 
 
@@ -1003,6 +1038,9 @@ class FusedMoEConfig:
     # The activation type.
     in_dtype: torch.dtype
 
+    # Defaults to in_dtype if not specified.
+    router_logits_dtype: torch.dtype | None = None
+
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
@@ -1019,6 +1057,9 @@ class FusedMoEConfig:
 
         assert self.max_num_tokens > 0
 
+        if self.router_logits_dtype is None:
+            self.router_logits_dtype = self.in_dtype
+
     @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
@@ -1026,6 +1067,10 @@ class FusedMoEConfig:
     @property
     def dp_size(self):
         return self.moe_parallel_config.dp_size
+
+    @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
 
     @property
     def ep_size(self):
@@ -1038,6 +1083,10 @@ class FusedMoEConfig:
     @property
     def dp_rank(self):
         return self.moe_parallel_config.dp_rank
+
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
 
     @property
     def ep_rank(self):

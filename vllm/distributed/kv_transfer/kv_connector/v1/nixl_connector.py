@@ -84,8 +84,12 @@ logger = init_logger(__name__)
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
-    from nixl._api import nixl_agent as NixlWrapper
-    from nixl._bindings import nixlXferTelemetry
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent as NixlWrapper
+        from nixl._bindings import nixlXferTelemetry
+    else:
+        from rixl._api import nixl_agent as NixlWrapper
+        from rixl._bindings import nixlXferTelemetry
 
     logger.info("NIXL is available")
 except ImportError:
@@ -95,7 +99,10 @@ except ImportError:
 
 
 try:
-    from nixl._api import nixl_agent_config
+    if not current_platform.is_rocm():
+        from nixl._api import nixl_agent_config
+    else:
+        from rixl._api import nixl_agent_config
 except ImportError:
     nixl_agent_config = None
     logger.warning("NIXL agent config is not available")
@@ -464,7 +471,7 @@ class NixlConnectorScheduler:
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
         )
         assert vllm_config.kv_transfer_config is not None
         if current_platform.device_type == "cpu":
@@ -983,7 +990,6 @@ class NixlConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
         )
-        self._use_pallas = self.kv_topo._use_pallas
         self._physical_blocks_per_logical_kv_block = 1
 
     def _nixl_handshake(
@@ -1641,9 +1647,6 @@ class NixlConnectorWorker:
         # Num kv_heads > tp_size and P TP > D TP case, not supported
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
 
-        assert not self._use_pallas or tp_ratio == 1, (
-            "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
-        )
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -1814,9 +1817,7 @@ class NixlConnectorWorker:
 
         if len(self.device_kv_caches) == 0:
             return
-        split_k_and_v = not (
-            self.use_mla or self._use_pallas or self.kv_topo.is_kv_layout_blocks_first
-        )
+        split_k_and_v = not (self.use_mla or self.kv_topo.is_kv_layout_blocks_first)
         sample_cache = list(self.device_kv_caches.values())[0][0]
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             assert block_size_ratio > 1, "Only nP < nD supported currently."

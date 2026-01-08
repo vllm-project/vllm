@@ -240,7 +240,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
         self.marlin_input_dtype = None
-        self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
@@ -784,7 +783,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_weight = w13_weight
             layer.w2_weight = w2_weight
         else:
-            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+            raise ValueError(
+                f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
+                f"should be one of: {list(Mxfp4Backend)}."
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
