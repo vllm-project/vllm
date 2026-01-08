@@ -35,6 +35,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    resolve_layers_from_vllm_config,
     update_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -4911,9 +4912,44 @@ class GPUModelRunner(
             kv_cache_group_spec: KVCacheGroupSpec,
         ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
             layer_type = cast(type[Any], AttentionLayerBase)
-            layers = get_layers_from_vllm_config(
+            layers, missing_layer_names = resolve_layers_from_vllm_config(
                 self.vllm_config, layer_type, kv_cache_group_spec.layer_names
             )
+            if missing_layer_names:
+                logger.debug(
+                    "Skipping %d remote layer(s) for KV cache group on this rank: %s",
+                    len(missing_layer_names),
+                    ", ".join(missing_layer_names[:3])
+                    + ("..." if len(missing_layer_names) > 3 else ""),
+                )
+                # Also log what local layers we found for debugging PP issues
+                logger.debug(
+                    "Local layers found: %d (sample: %s)",
+                    len(layers),
+                    ", ".join(list(layers.keys())[:3])
+                    + ("..." if len(layers) > 3 else ""),
+                )
+
+            local_layer_names = [
+                layer_name
+                for layer_name in kv_cache_group_spec.layer_names
+                if layer_name in layers
+            ]
+            if local_layer_names != kv_cache_group_spec.layer_names:
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    pruned_specs = {
+                        name: layer_kv_cache_spec.kv_cache_specs[name]
+                        for name in local_layer_names
+                    }
+                    kv_cache_group_spec.kv_cache_spec = UniformTypeKVCacheSpecs(
+                        block_size=layer_kv_cache_spec.block_size,
+                        kv_cache_specs=pruned_specs,
+                    )
+                kv_cache_group_spec.layer_names = local_layer_names
+
+            if not local_layer_names:
+                return ({}, set())
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than
@@ -4921,7 +4957,7 @@ class GPUModelRunner(
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name in kv_cache_group_spec.layer_names:
+            for layer_name in local_layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
@@ -5303,22 +5339,35 @@ class GPUModelRunner(
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
-            for layer_name in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name] = tensor
-
+        # First, compute the set of valid layer names from kv_cache_groups.
+        # This set may have been pruned to only include local layers (e.g.,
+        # in pipeline parallelism scenarios).
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
+
+        # Now allocate KV cache tensors, but only for layers that are
+        # in the valid layer_names set.
+        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor = torch.zeros(
+                kv_cache_tensor.size, dtype=torch.int8, device=self.device
+            )
+            for layer_name in kv_cache_tensor.shared_by:
+                if layer_name in self.runner_only_attn_layers:
+                    # These layers reuse another layer's KV cache tensor.
+                    continue
+                if layer_name not in layer_names:
+                    # This layer was pruned (e.g., not on this rank in PP).
+                    continue
+                kv_cache_raw_tensors[layer_name] = tensor
+
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
-            "Some layers are not correctly initialized"
+            f"Some layers are not correctly initialized. "
+            f"Expected: {layer_names}, got: {set(kv_cache_raw_tensors.keys())}"
         )
         return kv_cache_raw_tensors
 
@@ -5596,6 +5645,42 @@ class GPUModelRunner(
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
+
+        # Validate that the kv_cache_config layers match layers on this rank.
+        # This helps catch mismatches in pipeline parallelism setups.
+        layer_type = cast(type[Any], AttentionLayerBase)
+        local_attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
+        config_layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            config_layer_names.update(group.layer_names)
+        local_layer_names = set(local_attn_layers.keys())
+
+        # Log info about layer configuration for debugging PP issues
+        if config_layer_names and local_layer_names:
+            config_sample = sorted(config_layer_names)[:3]
+            local_sample = sorted(local_layer_names)[:3]
+            logger.debug(
+                "KV cache config has %d layers (sample: %s), "
+                "local rank has %d layers (sample: %s)",
+                len(config_layer_names),
+                config_sample,
+                len(local_layer_names),
+                local_sample,
+            )
+
+            # Check for complete mismatch which indicates config was sent to
+            # wrong worker (likely PP rank ordering issue)
+            overlap = config_layer_names & local_layer_names
+            if len(overlap) == 0 and len(config_layer_names) > 0:
+                raise RuntimeError(
+                    f"KV cache config layers do not match local layers. "
+                    f"Config layers (sample): {config_sample}, "
+                    f"Local layers (sample): {local_sample}. "
+                    f"This usually indicates a pipeline parallelism "
+                    f"configuration issue where kv_cache_configs ordering "
+                    f"doesn't match worker global_rank ordering."
+                )
+
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
