@@ -501,6 +501,8 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
         qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
         v_head_dim=hf_text_config.v_head_dim,
     )
+
+
 @functools.cache
 def backend_supports_prefill_query_quantization() -> bool:
     """Check if the selected MLA backend supports prefill query quantization.
@@ -513,7 +515,10 @@ def backend_supports_prefill_query_quantization() -> bool:
     - cuDNN Prefill
     - FlashAttention
     """
-    return use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
+    use_fp8_prefill = use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
+    if use_fp8_prefill:
+        logger.info("Backend supports prefill query quantization")
+    return use_fp8_prefill
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -595,7 +600,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.q_data_type = (
             current_platform.fp8_dtype()
             if (
-                kv_cache_spec.cache_dtype_str.startswith("fp8")
+                self.kv_cache_dtype.startswith("fp8")
                 and vllm_config.attention_config.use_prefill_query_quantization
                 and backend_supports_prefill_query_quantization()
             )
