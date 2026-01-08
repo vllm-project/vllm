@@ -1096,6 +1096,303 @@ define_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+#
+# _offload_C extension
+#
+
+# Find OpenMP (required by offload module)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  find_package(OpenMP)
+  if(OpenMP_CXX_FOUND)
+    message(STATUS "Found OpenMP: ${OpenMP_CXX_FLAGS}")
+  else()
+    message(WARNING "OpenMP not found, but may be required by offload module")
+  endif()
+endif()
+
+set(VLLM_OFFLOAD_EXT_SRC
+  "csrc/offload/forward_context.cpp"
+  "csrc/offload/moe.cpp"
+  "csrc/offload/primitives.cpp"
+  "csrc/offload/py_bindding.cpp")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_OFFLOAD_EXT_SRC
+    "csrc/offload/moe_kernel.cu")
+endif()
+
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_OFFLOAD_EXT_SRC}"
+  CUDA_ARCHS "${CUDA_ARCHS}")
+
+# Prepare include directories and libraries for _offload_C extension
+set(_OFFLOAD_C_INCLUDE_DIRS
+  "${CMAKE_CURRENT_SOURCE_DIR}/csrc/offload"
+)
+
+set(_OFFLOAD_C_LIBRARIES)
+# Add OpenMP if found (required by offload module)
+if(OpenMP_CXX_FOUND)
+  list(APPEND _OFFLOAD_C_LIBRARIES OpenMP::OpenMP_CXX)
+endif()
+
+# Add C++ specific compile flags for offload module (AVX512 and AMX optimizations)
+# Note: AVX512 and AMX are CPU optimizations, not GPU-specific, so always apply them
+set(_OFFLOAD_CXX_FLAGS)
+# Add AVX512 and AMX optimizations for CPU code in offload module
+# These flags match the standalone setup.py configuration
+list(APPEND _OFFLOAD_CXX_FLAGS
+  "-mavx512f"
+  "-mavx512bf16"
+  "-mamx-tile"
+  "-mamx-bf16"
+  "-fvisibility=hidden"
+)
+
+message(STATUS "Enabling offload extension.")
+message(STATUS "_offload_C extension sources: ${VLLM_OFFLOAD_EXT_SRC}")
+message(STATUS "_offload_C extension include directories: ${_OFFLOAD_C_INCLUDE_DIRS}")
+message(STATUS "_offload_C extension libraries: ${_OFFLOAD_C_LIBRARIES}")
+message(STATUS "_offload_C C++ compile flags: ${_OFFLOAD_CXX_FLAGS}")
+
+define_extension_target(
+  _offload_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_OFFLOAD_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${_OFFLOAD_C_INCLUDE_DIRS}
+  LIBRARIES ${_OFFLOAD_C_LIBRARIES}
+  # Note: Not using USE_SABI 3 because pybind11 type casters need access to
+  # PyTorch's internal symbols which are restricted by Stable ABI.
+  # This extension uses pybind11 for class registration, which requires
+  # full symbol visibility.
+  WITH_SOABI)
+
+# Keep Stable ABI for the module, but *not* for CUDA/C++ files.
+# This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
+# PyBind11 and PyTorch require full Python API access, not limited API.
+target_compile_options(_offload_C PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
+  $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
+
+# Explicitly link torch_python library for pybind11 type casters
+# The pybind11 type caster symbols (e.g., type_caster<at::Tensor>) are in libtorch_python.so
+# Without this explicit link, the dynamic linker won't know to look for symbols in torch_python
+# Priority: 1) Use CMake target torch::torch_python (handles dependencies automatically)
+#           2) Find library file and link directly
+if(TARGET torch::torch_python)
+  get_target_property(_torch_python_lib torch::torch_python IMPORTED_LOCATION)
+  if(NOT _torch_python_lib)
+    get_target_property(_torch_python_lib torch::torch_python LOCATION)
+  endif()
+  
+  if(_torch_python_lib AND EXISTS "${_torch_python_lib}")
+    message(STATUS "Linking _offload_C with torch::torch_python target (preferred): ${_torch_python_lib}")
+    
+    # Use --whole-archive to force complete linking (fixes RTLD_LOCAL symbol isolation)
+    if(NOT WIN32)
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # GNU linker: use --whole-archive to force complete linking
+        target_link_libraries(_offload_C PRIVATE
+          "-Wl,--no-as-needed"
+          "-Wl,--whole-archive"
+          "${_torch_python_lib}"
+          "-Wl,--no-whole-archive"
+          "-Wl,--as-needed"
+        )
+        message(STATUS "Applied --whole-archive to torch_python for GNU linker")
+      elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # Clang linker: use -force_load (macOS) or --whole-archive (Linux)
+        if(APPLE)
+          target_link_libraries(_offload_C PRIVATE
+            "-Wl,-force_load,${_torch_python_lib}"
+          )
+          message(STATUS "Applied -force_load to torch_python for Clang on macOS")
+        else()
+          target_link_libraries(_offload_C PRIVATE
+            "-Wl,--no-as-needed"
+            "-Wl,--whole-archive"
+            "${_torch_python_lib}"
+            "-Wl,--no-whole-archive"
+            "-Wl,--as-needed"
+          )
+          message(STATUS "Applied --whole-archive to torch_python for Clang on Linux")
+        endif()
+      else()
+        # Fallback: normal linking
+        target_link_libraries(_offload_C PRIVATE "${_torch_python_lib}")
+      endif()
+    else()
+      # Windows: normal linking
+      target_link_libraries(_offload_C PRIVATE "${_torch_python_lib}")
+    endif()
+    
+    # Store the library directory for RPATH
+    get_filename_component(TORCH_PYTHON_LIB_DIR ${_torch_python_lib} DIRECTORY)
+    if(TORCH_PYTHON_LIB_DIR)
+      set(_TORCH_PYTHON_RPATH_DIR "${TORCH_PYTHON_LIB_DIR}")
+      message(STATUS "Will add torch_python directory to RPATH: ${TORCH_PYTHON_LIB_DIR}")
+    endif()
+  else()
+    # Fallback to normal target linking if library path not found
+    target_link_libraries(_offload_C PRIVATE torch::torch_python)
+    message(STATUS "Linking _offload_C with torch::torch_python target (fallback)")
+  endif()
+else()
+  # Fallback: find library file
+  find_library(TORCH_PYTHON_LIB
+    NAMES torch_python
+    PATHS
+      ${CMAKE_PREFIX_PATH}
+      ${Python_SITELIB}
+    PATH_SUFFIXES
+      lib
+      lib64
+      torch/lib
+  )
+
+  # Also try to find it from Python's torch package
+  # Use platform-agnostic detection for library extension
+  if(NOT TORCH_PYTHON_LIB)
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} -c "import torch, os, sys; ext='dll' if sys.platform=='win32' else ('dylib' if sys.platform=='darwin' else 'so'); lib_path = os.path.join(os.path.dirname(torch.__file__), 'lib', f'libtorch_python.{ext}'); print(lib_path if os.path.exists(lib_path) else '')"
+      OUTPUT_VARIABLE TORCH_PYTHON_LIB_PATH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(TORCH_PYTHON_LIB_PATH AND EXISTS "${TORCH_PYTHON_LIB_PATH}")
+      set(TORCH_PYTHON_LIB "${TORCH_PYTHON_LIB_PATH}")
+      message(STATUS "Found torch_python from Python package: ${TORCH_PYTHON_LIB}")
+    else()
+      # Try torch.utils.cmake_prefix_path as fallback
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path)"
+        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      if(TORCH_CMAKE_PREFIX_PATH)
+        find_library(TORCH_PYTHON_LIB_FALLBACK
+          NAMES torch_python
+          PATHS ${TORCH_CMAKE_PREFIX_PATH}
+          PATH_SUFFIXES lib lib64 torch/lib
+          NO_DEFAULT_PATH
+        )
+        if(TORCH_PYTHON_LIB_FALLBACK)
+          set(TORCH_PYTHON_LIB "${TORCH_PYTHON_LIB_FALLBACK}")
+          message(STATUS "Found torch_python via torch.utils.cmake_prefix_path: ${TORCH_PYTHON_LIB}")
+        else()
+          set(TORCH_PYTHON_LIB "")
+        endif()
+      else()
+        set(TORCH_PYTHON_LIB "")
+      endif()
+    endif()
+  endif()
+
+  if(TORCH_PYTHON_LIB AND EXISTS "${TORCH_PYTHON_LIB}")
+    # Link the library file directly
+    # Important: Use --whole-archive to force complete linking (fixes RTLD_LOCAL symbol isolation)
+    message(STATUS "Linking _offload_C with torch_python: ${TORCH_PYTHON_LIB}")
+    
+    # Use --whole-archive to force complete linking (fixes RTLD_LOCAL symbol isolation)
+    if(NOT WIN32)
+      if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # GNU linker: use --whole-archive to force complete linking
+        target_link_libraries(_offload_C PRIVATE
+          "-Wl,--no-as-needed"
+          "-Wl,--whole-archive"
+          "${TORCH_PYTHON_LIB}"
+          "-Wl,--no-whole-archive"
+          "-Wl,--as-needed"
+        )
+        message(STATUS "Applied --whole-archive to torch_python for GNU linker")
+      elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # Clang linker: use -force_load (macOS) or --whole-archive (Linux)
+        if(APPLE)
+          target_link_libraries(_offload_C PRIVATE
+            "-Wl,-force_load,${TORCH_PYTHON_LIB}"
+          )
+          message(STATUS "Applied -force_load to torch_python for Clang on macOS")
+        else()
+          target_link_libraries(_offload_C PRIVATE
+            "-Wl,--no-as-needed"
+            "-Wl,--whole-archive"
+            "${TORCH_PYTHON_LIB}"
+            "-Wl,--no-whole-archive"
+            "-Wl,--as-needed"
+          )
+          message(STATUS "Applied --whole-archive to torch_python for Clang on Linux")
+        endif()
+      else()
+        # Fallback: normal linking
+        target_link_libraries(_offload_C PRIVATE ${TORCH_PYTHON_LIB})
+      endif()
+    else()
+      # Windows: normal linking
+      target_link_libraries(_offload_C PRIVATE ${TORCH_PYTHON_LIB})
+    endif()
+    
+    # Store the library directory for RPATH (will be merged later)
+    get_filename_component(TORCH_PYTHON_LIB_DIR ${TORCH_PYTHON_LIB} DIRECTORY)
+    if(TORCH_PYTHON_LIB_DIR)
+      set(_TORCH_PYTHON_RPATH_DIR "${TORCH_PYTHON_LIB_DIR}")
+      message(STATUS "Will add torch_python directory to RPATH: ${TORCH_PYTHON_LIB_DIR}")
+    endif()
+  else()
+    message(WARNING "torch_python library not found. Pybind11 type casters may not work correctly.")
+    message(WARNING "Trying to use --allow-shlib-undefined as fallback...")
+    # Set linker flags to allow undefined symbols (they will be resolved at runtime from torch)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      target_link_options(_offload_C PRIVATE
+        "-Wl,--allow-shlib-undefined"
+      )
+    endif()
+  endif()
+endif()
+
+# Add C++ specific compile options for offload module
+if(_OFFLOAD_CXX_FLAGS)
+  target_compile_options(_offload_C PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${_OFFLOAD_CXX_FLAGS}>)
+endif()
+
+# Set RPATH to ensure all required libraries can be found at runtime
+# Collect all RPATH directories and merge them (don't overwrite!)
+set(_OFFLOAD_RPATH_DIRS)
+
+# Add torch_python RPATH if it was set
+if(DEFINED _TORCH_PYTHON_RPATH_DIR AND _TORCH_PYTHON_RPATH_DIR)
+  list(APPEND _OFFLOAD_RPATH_DIRS "${_TORCH_PYTHON_RPATH_DIR}")
+endif()
+
+# Set all RPATH directories at once (merge, don't overwrite)
+if(_OFFLOAD_RPATH_DIRS)
+  # Remove duplicates
+  list(REMOVE_DUPLICATES _OFFLOAD_RPATH_DIRS)
+  # Convert list to platform-specific separator
+  if(UNIX AND NOT APPLE)
+    # Linux: colon-separated
+    string(REPLACE ";" ":" _OFFLOAD_RPATH_STRING "${_OFFLOAD_RPATH_DIRS}")
+  elseif(APPLE)
+    # macOS: colon-separated
+    string(REPLACE ";" ":" _OFFLOAD_RPATH_STRING "${_OFFLOAD_RPATH_DIRS}")
+  else()
+    # Windows: semicolon-separated
+    string(REPLACE ";" ";" _OFFLOAD_RPATH_STRING "${_OFFLOAD_RPATH_DIRS}")
+  endif()
+  
+  # Set all properties in one call to avoid redundancy
+  set_target_properties(_offload_C PROPERTIES
+    INSTALL_RPATH "${_OFFLOAD_RPATH_STRING}"
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+  )
+  message(STATUS "Setting RPATH for _offload_C to include: ${_OFFLOAD_RPATH_STRING}")
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension

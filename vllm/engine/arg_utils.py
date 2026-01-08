@@ -22,6 +22,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    Optional,
 )
 
 import huggingface_hub
@@ -373,6 +374,11 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int | None = ModelConfig.max_model_len
+    moe_offload: Optional[bool] = ModelConfig.moe_offload
+    moe_offload_cache_expert_num: Optional[int] = ModelConfig.moe_offload_cache_expert_num
+    moe_offload_cache_topk: Optional[int] = ModelConfig.moe_offload_cache_topk
+    moe_offload_update_expert_num: Optional[int] = ModelConfig.moe_offload_update_expert_num
+    moe_offload_context_num_threads: Optional[int] = ModelConfig.moe_offload_context_num_threads
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -646,6 +652,11 @@ class EngineArgs:
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
+        model_group.add_argument("--moe-offload", **model_kwargs["moe_offload"])
+        model_group.add_argument("--moe-offload-cache-expert-num", **model_kwargs["moe_offload_cache_expert_num"])
+        model_group.add_argument("--moe-offload-cache-topk", **model_kwargs["moe_offload_cache_topk"])
+        model_group.add_argument("--moe-offload-update-expert-num", **model_kwargs["moe_offload_update_expert_num"])
+        model_group.add_argument("--moe-offload-context-num-threads", **model_kwargs["moe_offload_context_num_threads"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
@@ -1222,6 +1233,11 @@ class EngineArgs:
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
+            moe_offload=self.moe_offload,
+            moe_offload_cache_expert_num=self.moe_offload_cache_expert_num,
+            moe_offload_cache_topk=self.moe_offload_cache_topk,
+            moe_offload_update_expert_num=self.moe_offload_update_expert_num,
+            moe_offload_context_num_threads=self.moe_offload_context_num_threads,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,

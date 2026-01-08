@@ -599,6 +599,35 @@ class WorkerProc:
 
         proc.start()
         writer.close()
+        
+        # CPU binding for moe_offload
+        if vllm_config.model_config.moe_offload:
+            from numa import schedule, memory
+            import torch.distributed as dist
+            import psutil
+            import os
+            rank_local = rank
+            
+            parallel_config = vllm_config.parallel_config
+            dp_rank = parallel_config.data_parallel_rank
+            tp_size = parallel_config.tensor_parallel_size
+            rank_local += dp_rank * tp_size
+            proc_handle = psutil.Process(proc.pid)
+            
+            # the following cpu setting only for DCG's shenzhen AI servers
+            core_per_worker = 64 // tp_size
+            node_split = tp_size // 2
+            if rank_local < node_split:
+                cpu_node = 0
+            else:
+                cpu_node = 1
+            
+            cpu_cores = list(range(rank_local * core_per_worker, rank_local * core_per_worker + core_per_worker))
+            
+            schedule.run_on_nodes(cpu_node)
+            memory.set_membind_nodes(cpu_node)
+            proc_handle.cpu_affinity(cpu_cores)
+        
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)

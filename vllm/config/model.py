@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args,Optional
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -303,6 +303,12 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+
+    moe_offload: Optional[bool] = False
+    moe_offload_cache_expert_num: Optional[int] = 32
+    moe_offload_cache_topk: Optional[int] = 2
+    moe_offload_update_expert_num: Optional[int] = 2
+    moe_offload_context_num_threads: Optional[int] = 14
 
     def compute_hash(self) -> str:
         """

@@ -52,3 +52,4 @@ openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic == 0.71.0
 model-hosting-container-standards >= 0.1.10, < 1.0.0
 mcp
+py-libnuma # Required for NUMA support

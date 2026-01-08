@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig,VllmConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
@@ -179,6 +179,7 @@ def coordinate_batch_across_dp(
     uniform_decode: bool | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
     cudagraph_mode: int = 0,
+    moe_offload : bool = False,
 ) -> tuple[bool, torch.Tensor | None, int]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
@@ -208,7 +209,7 @@ def coordinate_batch_across_dp(
     ]
 
     """
-    if parallel_config.data_parallel_size == 1:
+    if parallel_config.data_parallel_size == 1  and not moe_offload:
         # Early exit.
         return False, None, cudagraph_mode
 
