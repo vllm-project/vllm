@@ -73,17 +73,14 @@ def build_chunked_local_attention(
     arange_block_indices: bool = True,
 ) -> CommonAttentionMetadata:
     """Build chunked local attention metadata using the real builder."""
-    # Create the backend
     mock_backend = create_mock_underlying_backend(device)
     chunked_backend = create_chunked_local_attention_backend(
         mock_backend, attn_chunk_size, block_size
     )
 
-    # Create mock kv_cache_spec
     mock_kv_cache_spec = MagicMock()
     mock_kv_cache_spec.block_size = block_size
 
-    # Create vllm_config with enough capacity
     vllm_config = create_vllm_config(
         max_num_seqs=len(batch_spec.query_lens),
         max_num_batched_tokens=max(
@@ -92,7 +89,6 @@ def build_chunked_local_attention(
         block_size=block_size,
     )
 
-    # Create the builder
     builder_cls = chunked_backend.get_builder_cls()
     builder = builder_cls(
         kv_cache_spec=mock_kv_cache_spec,
@@ -101,7 +97,6 @@ def build_chunked_local_attention(
         device=device,
     )
 
-    # Create common attention metadata
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
         block_size,
@@ -109,10 +104,10 @@ def build_chunked_local_attention(
         arange_block_indices=arange_block_indices,
     )
 
-    # Build and return the result
     builder.build(0, common_attn_metadata)
 
-    # The underlying builder's last_common_attn_metadata has the virtual batches
+    # Get the common attention metadata the underlying builder saw which should
+    # have the virtual batches
     return builder.last_common_attn_metadata
 
 
@@ -265,19 +260,21 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     expected_k_seqlens = test_data.expected_k_seqlens
     expected_local_block_table = test_data.expected_local_block_table
 
-    # Call the builder
     result = build_chunked_local_attention(
         batch_spec,
         attn_chunk_size,
         block_size,
         device,
+        # Use torch.arange instead of torch.randint so we can assert on
+        # block table tensor values. The block table will have shape
+        # (num_batches, cdiv(max_seq_len, block_size)) and the values will be
+        # arranged from 0 to cdiv(max_seq_len, block_size)-1
         arange_block_indices=True,
     )
 
     # Get actual count (trim padding - find first zero in k_seqlens)
     actual_count = len(expected_k_seqlens)
 
-    # Convert to numpy for comparison (use GPU tensors, then transfer to CPU)
     actual_q_seqlens = np.diff(result.query_start_loc.cpu().numpy())[:actual_count]
     actual_k_seqlens = result.seq_lens.cpu().numpy()[:actual_count]
 
