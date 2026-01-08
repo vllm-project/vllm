@@ -176,5 +176,4 @@ def maybe_make_prepare_finalize(
     elif moe.use_naive_kernels:
         prepare_finalize = MoEPrepareAndFinalizeNaiveEP()
 
-    print(f"{prepare_finalize=}")
     return prepare_finalize
