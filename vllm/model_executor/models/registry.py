@@ -128,6 +128,8 @@ _TEXT_GENERATION_MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
