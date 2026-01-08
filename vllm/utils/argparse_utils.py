@@ -244,9 +244,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
+            elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
                 # also handle -O=<optimization_level> here
                 optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
                 processed_args += ["--optimization-level", optimization_level]
@@ -257,17 +256,6 @@ class FlexibleArgumentParser(ArgumentParser):
             ):
                 # Convert -O <n> to --optimization-level <n>
                 processed_args.append("--optimization-level")
-            elif arg.startswith("-O."):
-                # Handle -O.* dotted syntax - ALL dotted syntax is deprecated
-                logger.warning_once(
-                    "The -O.* dotted syntax for --compilation-config is "
-                    "deprecated and will be removed in v0.13.0 or v1.0.0"
-                    ", whichever is earlier.  Please use -cc.* instead. "
-                    "Example: -cc.backend=eager instead of "
-                    "-O.backend=eager."
-                )
-                converted_arg = arg.replace("-O", "-cc", 1)
-                processed_args.append(converted_arg)
             else:
                 processed_args.append(arg)
 
@@ -411,8 +399,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]

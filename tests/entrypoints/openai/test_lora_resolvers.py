@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -61,13 +61,13 @@ class MockLoRAResolver(LoRAResolver):
             return LoRARequest(
                 lora_name="test-lora",
                 lora_int_id=1,
-                lora_local_path="/fake/path/test-lora",
+                lora_path="/fake/path/test-lora",
             )
         elif lora_name == "invalid-lora":
             return LoRARequest(
                 lora_name="invalid-lora",
                 lora_int_id=2,
-                lora_local_path="/fake/path/invalid-lora",
+                lora_path="/fake/path/invalid-lora",
             )
         return None
 

@@ -34,6 +34,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -49,6 +50,7 @@ from vllm.config import (
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
+    ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -69,7 +71,6 @@ from vllm.config.model import (
     LogprobsMode,
     ModelDType,
     RunnerOption,
-    TaskOption,
     TokenizerMode,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
@@ -86,11 +87,13 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
-from vllm.transformers_utils.utils import is_cloud_storage, is_gguf
+from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
+from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -103,6 +106,7 @@ else:
     QuantizationMethods = Any
     LoadFormats = Any
     UsageContext = Any
+
 
 logger = init_logger(__name__)
 
@@ -293,16 +297,14 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
-            kwargs[name]["type"] = int
-            # Special case for large integers
-            human_readable_ints = {
-                "max_model_len",
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-            }
-            if name in human_readable_ints:
+            if name == "max_model_len":
+                kwargs[name]["type"] = human_readable_int_or_auto
+                kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
+            elif name in ("max_num_batched_tokens", "kv_cache_memory_bytes"):
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
+            else:
+                kwargs[name]["type"] = int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
         elif contains_type(type_hints, dict) and (
@@ -352,12 +354,12 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
-    task: TaskOption | None = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode | str = ModelConfig.tokenizer_mode
@@ -370,9 +372,8 @@ class EngineArgs:
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: int | None = 0
+    seed: int = ModelConfig.seed
     max_model_len: int | None = ModelConfig.max_model_len
-    cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -406,8 +407,9 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    all2all_backend: str | None = ParallelConfig.all2all_backend
+    all2all_backend: str = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
+    ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
     disable_nccl_for_dp_synchronization: bool = (
@@ -420,10 +422,6 @@ class EngineArgs:
     )
     _api_process_count: int = ParallelConfig._api_process_count
     _api_process_rank: int = ParallelConfig._api_process_rank
-    num_redundant_experts: int = EPLBConfig.num_redundant_experts
-    eplb_window_size: int = EPLBConfig.window_size
-    eplb_step_interval: int = EPLBConfig.step_interval
-    eplb_log_balancedness: bool = EPLBConfig.log_balancedness
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
@@ -464,7 +462,6 @@ class EngineArgs:
         MultiModalConfig, "media_io_kwargs"
     )
     mm_processor_kwargs: dict[str, Any] | None = MultiModalConfig.mm_processor_kwargs
-    disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
@@ -487,6 +484,7 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
+    enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -496,7 +494,7 @@ class EngineArgs:
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    disable_hybrid_kv_cache_manager: bool = (
+    disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
 
@@ -521,13 +519,22 @@ class EngineArgs:
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
+    cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
+    enable_layerwise_nvtx_tracing: bool = (
+        ObservabilityConfig.enable_layerwise_nvtx_tracing
+    )
+    enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
+    attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
+
+    profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -541,6 +548,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
+    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -551,9 +559,6 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
-
-    # DEPRECATED
-    enable_multimodal_encoder_data_parallel: bool = False
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -579,6 +584,8 @@ class EngineArgs:
         # CompilationConfig object
         if isinstance(self.compilation_config, dict):
             self.compilation_config = CompilationConfig(**self.compilation_config)
+        if isinstance(self.attention_config, dict):
+            self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
@@ -620,7 +627,6 @@ class EngineArgs:
             model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--runner", **model_kwargs["runner"])
         model_group.add_argument("--convert", **model_kwargs["convert"])
-        model_group.add_argument("--task", **model_kwargs["task"], deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode", **model_kwargs["tokenizer_mode"])
         model_group.add_argument(
@@ -714,6 +720,16 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+
+        # Attention arguments
+        attention_kwargs = get_kwargs(AttentionConfig)
+        attention_group = parser.add_argument_group(
+            title="AttentionConfig",
+            description=AttentionConfig.__doc__,
+        )
+        attention_group.add_argument(
+            "--attention-backend", **attention_kwargs["backend"]
         )
 
         # Structured outputs arguments
@@ -824,12 +840,18 @@ class EngineArgs:
             **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
-            "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
+            "--enable-expert-parallel",
+            "-ep",
+            **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--ubatch-size",
+            **parallel_kwargs["ubatch_size"],
+        )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
@@ -863,11 +885,6 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
-        )
-        parallel_group.add_argument(
-            "--enable-multimodal-encoder-data-parallel",
-            action="store_true",
-            deprecated=True,
         )
 
         # KV cache arguments
@@ -943,9 +960,6 @@ class EngineArgs:
             "--mm-processor-cache-gb", **multimodal_kwargs["mm_processor_cache_gb"]
         )
         multimodal_group.add_argument(
-            "--disable-mm-preprocessor-cache", action="store_true", deprecated=True
-        )
-        multimodal_group.add_argument(
             "--mm-processor-cache-type", **multimodal_kwargs["mm_processor_cache_type"]
         )
         multimodal_group.add_argument(
@@ -987,6 +1001,10 @@ class EngineArgs:
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
+        lora_group.add_argument(
+            "--enable-tower-connector-lora",
+            **lora_kwargs["enable_tower_connector_lora"],
+        )
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument(
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
@@ -1023,6 +1041,18 @@ class EngineArgs:
         observability_group.add_argument(
             "--kv-cache-metrics-sample",
             **observability_kwargs["kv_cache_metrics_sample"],
+        )
+        observability_group.add_argument(
+            "--cudagraph-metrics",
+            **observability_kwargs["cudagraph_metrics"],
+        )
+        observability_group.add_argument(
+            "--enable-layerwise-nvtx-tracing",
+            **observability_kwargs["enable_layerwise_nvtx_tracing"],
+        )
+        observability_group.add_argument(
+            "--enable-mfu-metrics",
+            **observability_kwargs["enable_mfu_metrics"],
         )
 
         # Scheduler arguments
@@ -1094,15 +1124,6 @@ class EngineArgs:
         compilation_group.add_argument(
             "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
         )
-        compilation_kwargs["cudagraph_capture_sizes"]["help"] = (
-            "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or v1.0.0,"
-            " whichever is soonest. Please use --cudagraph-capture-sizes instead."
-        )
-        compilation_group.add_argument(
-            "--cuda-graph-sizes",
-            **compilation_kwargs["cudagraph_capture_sizes"],
-            deprecated=True,
-        )
         compilation_group.add_argument(
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
@@ -1132,12 +1153,15 @@ class EngineArgs:
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
+            "--attention-config", "-ac", **vllm_kwargs["attention_config"]
+        )
+        vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
-
+        vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1172,62 +1196,21 @@ class EngineArgs:
         if is_gguf(self.model):
             self.quantization = self.load_format = "gguf"
 
-        # NOTE(woosuk): In V1, we use separate processes for workers (unless
-        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
-        # doesn't affect the user process.
-        if self.seed is None:
-            logger.warning_once(
-                "`seed=None` is equivalent to `seed=0` in V1 Engine. "
-                "You will no longer be allowed to pass `None` in v0.13.",
-                scope="local",
+        if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+            logger.warning(
+                "The global random seed is set to %d. Since "
+                "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                "affect the random state of the Python process that "
+                "launched vLLM.",
+                self.seed,
             )
-
-            self.seed = 0
-            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
-                logger.warning(
-                    "The global random seed is set to %d. Since "
-                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
-                    "affect the random state of the Python process that "
-                    "launched vLLM.",
-                    self.seed,
-                )
-
-        if self.disable_mm_preprocessor_cache:
-            logger.warning_once(
-                "`--disable-mm-preprocessor-cache` is deprecated "
-                "and will be removed in v0.13. "
-                "Please use `--mm-processor-cache-gb 0` instead.",
-                scope="local",
-            )
-
-            self.mm_processor_cache_gb = 0
-        elif envs.VLLM_MM_INPUT_CACHE_GIB != 4:
-            logger.warning_once(
-                "VLLM_MM_INPUT_CACHE_GIB` is deprecated "
-                "and will be removed in v0.13. "
-                "Please use `--mm-processor-cache-gb %d` instead.",
-                envs.VLLM_MM_INPUT_CACHE_GIB,
-                scope="local",
-            )
-
-            self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
-
-        if self.enable_multimodal_encoder_data_parallel:
-            logger.warning_once(
-                "--enable-multimodal-encoder-data-parallel` is deprecated "
-                "and will be removed in v0.13. "
-                "Please use `--mm-encoder-tp-mode data` instead.",
-                scope="local",
-            )
-
-            self.mm_encoder_tp_mode = "data"
 
         return ModelConfig(
             model=self.model,
+            model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
-            task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
@@ -1368,6 +1351,7 @@ class EngineArgs:
 
         model_config = self.create_model_config()
         self.model = model_config.model
+        self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
@@ -1393,12 +1377,17 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
+        # Resolve "auto" kv_cache_dtype to actual value from model config
+        resolved_cache_dtype = resolve_kv_cache_dtype_string(
+            self.kv_cache_dtype, model_config
+        )
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
-            cache_dtype=self.kv_cache_dtype,
+            cache_dtype=resolved_cache_dtype,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
@@ -1575,22 +1564,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
-            logger.info(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.disable_nccl_for_dp_synchronization = True
-
-        # Forward the deprecated CLI args to the EPLB config.
-        if self.num_redundant_experts is not None:
-            self.eplb_config.num_redundant_experts = self.num_redundant_experts
-        if self.eplb_window_size is not None:
-            self.eplb_config.window_size = self.eplb_window_size
-        if self.eplb_step_interval is not None:
-            self.eplb_config.step_interval = self.eplb_step_interval
-        if self.eplb_log_balancedness is not None:
-            self.eplb_config.log_balancedness = self.eplb_log_balancedness
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1607,9 +1580,11 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
+            ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
@@ -1668,6 +1643,7 @@ class EngineArgs:
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
                 lora_dtype=self.lora_dtype,
+                enable_tower_connector_lora=self.enable_tower_connector_lora,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -1694,6 +1670,22 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
+        # Attention config overrides
+        attention_config = copy.deepcopy(self.attention_config)
+        if self.attention_backend is not None:
+            if attention_config.backend is not None:
+                raise ValueError(
+                    "attention_backend and attention_config.backend "
+                    "are mutually exclusive"
+                )
+            # Convert string to enum if needed (CLI parsing returns a string)
+            if isinstance(self.attention_backend, str):
+                attention_config.backend = AttentionBackendEnum[
+                    self.attention_backend.upper()
+                ]
+            else:
+                attention_config.backend = self.attention_backend
+
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1711,22 +1703,14 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
+            enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
         )
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
-        if self.cuda_graph_sizes is not None:
-            logger.warning(
-                "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
-                "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
-                "instead."
-            )
-            if compilation_config.cudagraph_capture_sizes is not None:
-                raise ValueError(
-                    "cuda_graph_sizes and compilation_config."
-                    "cudagraph_capture_sizes are mutually exclusive"
-                )
-            compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
         if self.cudagraph_capture_sizes is not None:
             if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
@@ -1749,15 +1733,17 @@ class EngineArgs:
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
+            load_config=load_config,
+            attention_config=attention_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
-            load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
         )
@@ -1834,6 +1820,7 @@ class EngineArgs:
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
+            device_name = ""
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -1897,16 +1884,6 @@ class EngineArgs:
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
         default_prefix_caching = model_config.is_prefix_caching_supported
-
-        if self.prefill_context_parallel_size > 1:
-            default_chunked_prefill = False
-            default_prefix_caching = False
-            logger.warning_once(
-                "--prefill-context-parallel-size > 1 is not compatible with "
-                "chunked prefill and prefix caching now. Chunked prefill "
-                "and prefix caching have been disabled by default.",
-                scope="local",
-            )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
@@ -2077,7 +2054,7 @@ def _raise_unsupported_error(feature_name: str):
     raise NotImplementedError(msg)
 
 
-def human_readable_int(value):
+def human_readable_int(value: str) -> int:
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
 
@@ -2087,17 +2064,20 @@ def human_readable_int(value):
     - '25.6k' -> 25,600
     """
     value = value.strip()
+
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
     if match:
         decimal_multiplier = {
             "k": 10**3,
             "m": 10**6,
             "g": 10**9,
+            "t": 10**12,
         }
         binary_multiplier = {
             "K": 2**10,
             "M": 2**20,
             "G": 2**30,
+            "T": 2**40,
         }
 
         number, suffix = match.groups()
@@ -2118,3 +2098,22 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
+
+
+def human_readable_int_or_auto(value: str) -> int:
+    """Parse human-readable integers like '1k', '2M', etc.
+    Including decimal values with decimal multipliers.
+    Also accepts -1 or 'auto' as a special value for auto-detection.
+
+    Examples:
+    - '1k' -> 1,000
+    - '1K' -> 1,024
+    - '25.6k' -> 25,600
+    - '-1' or 'auto' -> -1 (special value for auto-detection)
+    """
+    value = value.strip()
+
+    if value == "-1" or value.lower() == "auto":
+        return -1
+
+    return human_readable_int(value)

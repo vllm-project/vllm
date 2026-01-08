@@ -7,7 +7,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch.nn as nn
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -23,9 +23,8 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -66,8 +65,9 @@ class LLMEngine:
 
         self.log_stats = log_stats
 
-        executor_backend = self.vllm_config.parallel_config.distributed_executor_backend
         parallel_config = vllm_config.parallel_config
+        executor_backend = parallel_config.distributed_executor_backend
+
         self.external_launcher_dp = (
             parallel_config.data_parallel_size > 1
             and executor_backend == "external_launcher"
@@ -87,7 +87,7 @@ class LLMEngine:
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_configs(self.model_config)
+            tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -136,14 +136,6 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
-
-    @property
-    @deprecated(
-        "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.13."
-    )
-    def processor(self):
-        return self.input_processor
 
     @classmethod
     def from_vllm_config(
@@ -214,10 +206,10 @@ class LLMEngine:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
-    def abort_request(self, request_ids: list[str]) -> None:
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
+        request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
     def add_request(
@@ -239,6 +231,12 @@ class LLMEngine:
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -256,6 +254,8 @@ class LLMEngine:
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        self.input_processor.assign_request_id(request)
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -269,7 +269,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, params)
+        parent_req = ParentRequest(request)
         for idx in range(n):
             request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
@@ -329,8 +329,12 @@ class LLMEngine:
         self.input_processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self):
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
@@ -354,10 +358,6 @@ class LLMEngine:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
@@ -410,8 +410,6 @@ class LLMEngine:
         return self.collective_rpc("apply_model", args=(func,))
 
     def __del__(self):
-        if (
-            dp_group := getattr(self, "dp_group", None)
-            and not self.external_launcher_dp
-        ):
+        dp_group = getattr(self, "dp_group", None)
+        if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)

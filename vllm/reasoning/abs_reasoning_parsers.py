@@ -63,6 +63,31 @@ class ReasoningParser:
             True if the reasoning content ends in the input_ids.
         """
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids on a
+        decode step.
+
+        It is used in structured engines like `xgrammar` to check if the
+        reasoning content ends in the model output during a decode step.
+        `input_ids` the entire model output and `delta_ids` are the last few
+        computed tokens of the model output (like during a decode step).
+
+        Parameters:
+        input_ids: list[int]
+            The entire model output.
+        delta_ids: list[int]
+            The last few computed tokens of the model output at the current decode step.
+
+        Returns:
+        bool
+            True if the reasoning content ends in the `delta_ids` on a
+            decode step.
+        """
+        return self.is_reasoning_end(input_ids)
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -121,7 +146,7 @@ class ReasoningParser:
         self,
         original_tag: str | None,
         tool_server: ToolServer | None,
-    ) -> str:
+    ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag
         Otherwise, None is returned
@@ -160,7 +185,10 @@ class ReasoningParserManager:
         if name in cls.lazy_parsers:
             return cls._load_lazy_parser(name)
 
-        raise KeyError(f"Reasoning parser '{name}' not found.")
+        registered = ", ".join(cls.list_registered())
+        raise KeyError(
+            f"Reasoning parser '{name}' not found. Available parsers: {registered}"
+        )
 
     @classmethod
     def list_registered(cls) -> list[str]:

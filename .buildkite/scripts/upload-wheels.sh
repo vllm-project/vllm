@@ -12,7 +12,7 @@ SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
 # detect if python3.10+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,10) else 0)")
+has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
 if [[ "$has_new_python" -eq 0 ]]; then
     # use new python from docker
     docker pull python:3-slim
@@ -34,9 +34,10 @@ if [[ ${#wheel_files[@]} -ne 1 ]]; then
 fi
 wheel="${wheel_files[0]}"
 
-# current build image uses ubuntu 20.04, which corresponds to manylinux_2_31
+# default build image uses ubuntu 20.04, which corresponds to manylinux_2_31
+# we also accept params as manylinux tag
 # refer to https://github.com/mayeut/pep600_compliance?tab=readme-ov-file#acceptable-distros-to-build-wheels
-manylinux_version="manylinux_2_31"
+manylinux_version="${1:-manylinux_2_31}"
 
 # Rename 'linux' to the appropriate manylinux version in the wheel filename
 if [[ "$wheel" != *"linux"* ]]; then
@@ -81,7 +82,10 @@ else
     alias_arg=""
 fi
 
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
+# HACK: we do not need regex module here, but it is required by pre-commit hook
+# To avoid any external dependency, we simply replace it back to the stdlib re module
+sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
@@ -93,8 +97,12 @@ if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; 
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 fi
 
-# copy to /<pure_version>/ only if it does not have "dev" in the version
+# re-generate and copy to /<pure_version>/ only if it does not have "dev" in the version
 if [[ "$version" != *"dev"* ]]; then
-    echo "Uploading indices to overwrite /$pure_version/"
+    echo "Re-generating indices for /$pure_version/"
+    rm -rf "$INDICES_OUTPUT_DIR/*"
+    mkdir -p "$INDICES_OUTPUT_DIR"
+    # wheel-dir is overridden to be the commit directory, so that the indices point to the correct wheel path
+    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi

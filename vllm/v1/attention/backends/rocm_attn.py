@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -124,7 +125,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens = torch.tensor(
                 [common_prefix_len], dtype=torch.int32, device=self.device
             )
-            suffix_kv_lens = common_attn_metadata.seq_lens_cpu - common_prefix_len
+            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
@@ -152,7 +153,18 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # ROCM paged attention kernel only supports block sizes 16 and 32
+        # due to shared memory (LDS) constraints on AMD GPUs.
+        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+        return [16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -165,7 +177,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "Set --attention-backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 

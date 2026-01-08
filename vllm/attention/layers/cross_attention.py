@@ -103,7 +103,7 @@ def create_cross_attention_backend(
             # needed here to know how many tokens to attend to from the cached
             # cross-attention KV cache.
             new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
-            new_metadata.seq_lens_cpu = torch.from_numpy(
+            new_metadata._seq_lens_cpu = torch.from_numpy(
                 common_attn_metadata.encoder_seq_lens_cpu
             )
 
@@ -149,15 +149,19 @@ class CrossAttention(Attention):
             kv_cache_dtype = "auto"
             block_size = 16
 
-        underlying_attn_backend = get_attn_backend(
-            head_size, dtype, kv_cache_dtype, block_size
-        )
-        attn_backend = create_cross_attention_backend(underlying_attn_backend)
-
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
                 "CrossAttention only supports AttentionType.ENCODER_DECODER"
             )
+
+        underlying_attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            attn_type=AttentionType.ENCODER_DECODER,
+        )
+        attn_backend = create_cross_attention_backend(underlying_attn_backend)
 
         super().__init__(
             num_heads=num_heads,

@@ -179,8 +179,6 @@ class MiniMaxVL01MultiModalProcessor(
     dummy_inputs=MiniMaxVL01DummyInputsBuilder,
 )
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -206,7 +204,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
             config,
-            quant_config,
+            quant_config=quant_config,
+            multimodal_config=multimodal_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )

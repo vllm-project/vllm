@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -47,6 +47,7 @@ class InputPreprocessor:
         self,
         model_config: ModelConfig,
         tokenizer: TokenizerLike | None,
+        observability_config: ObservabilityConfig | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -54,6 +55,7 @@ class InputPreprocessor:
 
         self.model_config = model_config
         self.tokenizer = tokenizer
+        self.observability_config = observability_config
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
@@ -198,7 +200,7 @@ class InputPreprocessor:
     ) -> dict[str, Any]:
         kwargs = dict[str, Any]()
 
-        if self.model_config.hf_config.model_type == "whisper":
+        if self.model_config.is_encoder_decoder:
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
@@ -232,6 +234,7 @@ class InputPreprocessor:
         if not hasattr(self, "_mm_processor"):
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
+                self.observability_config,
                 tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
@@ -573,7 +576,6 @@ class InputPreprocessor:
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs | None
-
         if is_explicit_encoder_decoder_prompt(prompt):
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
@@ -585,7 +587,9 @@ class InputPreprocessor:
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
+                decoder_inputs = self._prompt_to_llm_inputs(
+                    decoder_input, tokenization_kwargs=tokenization_kwargs
+                )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
@@ -685,11 +689,7 @@ class InputPreprocessor:
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        res = self._preprocess(
-            prompt,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
             delta = self.mm_processor_cache.make_stats(delta=True)

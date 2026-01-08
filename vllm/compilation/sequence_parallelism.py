@@ -9,6 +9,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -40,8 +41,8 @@ class _SequenceParallelPatternHelper:
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
-    ):
+        device: str | None,
+    ) -> None:
         self.epsilon = epsilon
         self.dtype = dtype
         self.device = device
@@ -63,7 +64,7 @@ class _SequenceParallelPatternHelper:
 
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
@@ -73,7 +74,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
         return [input, arg3_1]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
             arg3_1: torch.Tensor,
@@ -99,7 +100,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
@@ -161,7 +162,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
+        device: str | None,
     ):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
@@ -202,7 +203,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None):
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
@@ -333,7 +334,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable(self, shape: int | None) -> bool:
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
         # When sequence parallelism is enabled, the residual tensor from RMSNorm
         # needs to be split along the sequence dimension. However, this dimension
         # is symbolic during piecewise compilation, and splitting symbolic shapes
@@ -353,7 +354,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return shape is not None and shape % tp_size == 0
+        return (compile_range.is_single_size()) and (compile_range.end % tp_size == 0)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
