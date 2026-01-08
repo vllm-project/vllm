@@ -39,7 +39,7 @@ def _get_seq_cls_pooler(
     return pooler_for_classify(
         pooler_config,
         classifier=classifier,
-        act_fn="classify",
+        act_fn=act_fn,
     )
 
 
