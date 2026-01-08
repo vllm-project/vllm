@@ -55,7 +55,7 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
     is_availble, maybe_reason = _is_flashmla_available()
     if not is_availble:
         return False, maybe_reason
-    if current_platform.get_device_capability()[0] != 9:
+    if not current_platform.is_device_capability_family(90):
         return False, "FlashMLA Dense is only supported on Hopper devices."
     return True, None
 
@@ -67,7 +67,10 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     is_availble, maybe_reason = _is_flashmla_available()
     if not is_availble:
         return False, maybe_reason
-    if current_platform.get_device_capability()[0] not in (9, 10):
+    if not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ):
         return (
             False,
             "FlashMLA Sparse is only supported on Hopper and Blackwell devices.",
