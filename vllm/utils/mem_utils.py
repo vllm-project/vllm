@@ -11,11 +11,15 @@ import psutil
 import torch
 import torch.types
 
-from .mem_constants import GiB_bytes
+from .mem_constants import GiB_bytes, MiB_bytes
 
 
-def format_gib(b: int) -> float:
-    return round(b / GiB_bytes, 2)
+def format_mib(b: int) -> str:
+    return f"{round(b / MiB_bytes, 2)}"
+
+
+def format_gib(b: int) -> str:
+    return f"{round(b / GiB_bytes, 2)}"
 
 
 @cache

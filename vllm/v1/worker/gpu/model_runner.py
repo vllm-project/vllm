@@ -14,8 +14,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -140,6 +139,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len = max_model_len
+        self.req_states.max_model_len = max_model_len
+
     def get_supported_tasks(self) -> tuple[str]:
         return ("generate",)
 
@@ -165,8 +168,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            "Model loading took %.4f GiB and %.6f seconds",
-            m.consumed_memory / GiB_bytes,
+            "Model loading took %s GiB and %.6f seconds",
+            format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
 
