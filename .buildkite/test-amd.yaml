@@ -1002,7 +1002,7 @@ steps:
   commands:
   - export MIOPEN_DEBUG_CONV_DIRECT=0
   - export MIOPEN_DEBUG_CONV_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
