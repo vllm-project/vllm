@@ -77,6 +77,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_permute_scales,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    is_fp4_marlin_supported,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
@@ -182,8 +185,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(
                     weight_quant, input_quant, layer.moe_config
                 )
-        elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
+        elif quant_config._is_nvfp4_format(weight_quant):
+            _is_valid_nvfp4_activations = (
+                quant_config._is_nvfp4_format(input_quant) or input_quant is None
+            )
+            if not _is_valid_nvfp4_activations:
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format ",
+                    f"or None for NVFP4A16, found {input_quant}",
+                )
+            return CompressedTensorsW4A4Nvfp4MoEMethod(
+                layer.moe_config, layer_name, use_marlin=input_quant is None
+            )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -212,7 +225,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+        use_marlin: bool = False,
+    ):
         if not moe.is_act_and_mul:
             raise ValueError(
                 "CompressedTensorsW4A4Nvfp4MoEMethod does not yet "
@@ -221,7 +239,16 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         super().__init__(moe)
         self.group_size = 16
-        self.nvfp4_backend = select_nvfp4_moe_backend()
+        if use_marlin:
+            if is_fp4_marlin_supported():
+                self.nvfp4_backend = NvFp4MoeBackend.MARLIN
+            else:
+                raise ValueError(
+                    "Marlin FP4 MoE kernel requested but not ",
+                    "supported on current platform.",
+                )
+        else:
+            self.nvfp4_backend = select_nvfp4_moe_backend()
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
