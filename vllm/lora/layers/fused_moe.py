@@ -508,6 +508,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
         )
+        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
+        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
+        # (output_size,num_experts,rank)
+        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
+        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
+        # (num_experts,output_size,rank)
+        w13_lora_b = w13_lora_b.permute(1, 0, 2)
+        w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)

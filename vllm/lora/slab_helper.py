@@ -570,26 +570,26 @@ def create_slab_optimized_lora_model(
             return lora_model.loras.get(module_name, None)
 
         # Pack modules similar to _create_merged_loras_inplace
-        for module_name, new_module_names in packed_modules.items():
-            replacement_loras: list[LoRALayerWeights | None] = []
-            replaced_module: set[str] = set()
-            has_replacement = False
+        for module_name, new_module_names in packed_modules.items(): #1
+            replacement_loras: list[LoRALayerWeights | None] = [] #1
+            replaced_module: set[str] = set()#1
+            has_replacement = False#1
 
             # Collect individual projections
-            for r in new_module_names:
-                lora = get_lora_weights(lora_model_instance, r)
-                replacement_loras.append(lora)
-                if lora:
-                    has_replacement = True
-                    replaced_module.add(r)
+            for r in new_module_names:#1
+                lora = get_lora_weights(lora_model_instance, r)#1
+                replacement_loras.append(lora)#1
+                if lora:#1
+                    has_replacement = True#1
+                    replaced_module.add(r)#1
 
-            if not has_replacement:
-                continue
+            if not has_replacement:#1
+                continue#1
 
             # Ensure None values are explicit
-            for i in range(len(replacement_loras)):
-                if not replacement_loras[i]:
-                    replacement_loras[i] = None
+            for i in range(len(replacement_loras)):#1
+                if not replacement_loras[i]:#1
+                    replacement_loras[i] = None#1
 
             # Pack based on module type
             if module_name.endswith(".experts"):
@@ -606,6 +606,10 @@ def create_slab_optimized_lora_model(
             # Remove individual projections
             for module in replaced_module:
                 lora_model_instance.loras.pop(module, None)
+            
+            # for lora in lora_model_instance.loras.values():
+            #     lora.optimize()
+
 
     else:
         logger.warning(
