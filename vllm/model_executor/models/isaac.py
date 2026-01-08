@@ -986,7 +986,6 @@ class Siglip2VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:

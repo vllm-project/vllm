@@ -407,7 +407,6 @@ class KeyeSiglipAttention(nn.Module):
             scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
-            multimodal_config=multimodal_config,
         )
 
     def forward(
