@@ -600,15 +600,9 @@ class FusedMoE(CustomOp):
                     "is_act_and_mul=False is supported only for unquantized "
                     ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
-            # ROCm without AITER MoE uses Triton which supports
-            # is_act_and_mul=False via standard PyTorch ops (F.silu, F.gelu)
-            rocm_without_aiter_moe = (
-                current_platform.is_rocm() and not rocm_aiter_ops.is_fused_moe_enabled()
-            )
-            if not current_platform.is_cuda() and not rocm_without_aiter_moe:
+            if not current_platform.is_cuda():
                 raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for CUDA, or ROCm "
-                    "(when AITER MoE is disabled) for now"
+                    "is_act_and_mul=False is supported only for CUDA for now"
                 )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
