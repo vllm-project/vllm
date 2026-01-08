@@ -1160,6 +1160,8 @@ class EplbState:
 
 @dataclass
 class EplbLayerState:
+    """Runtime EPLB data stored in the MoE layer."""
+
     expert_load_view: torch.Tensor | None = None
     logical_to_physical_map: torch.Tensor | None = None
     logical_replica_count: torch.Tensor | None = None
