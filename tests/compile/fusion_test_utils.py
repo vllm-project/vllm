@@ -17,6 +17,17 @@ is_blackwell = lambda: current_platform.is_device_capability(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
+def has_cuda_graph_wrapper_metadata() -> bool:
+    from importlib import import_module
+
+    try:
+        module = import_module("torch._inductor.utils")
+        module.CUDAGraphWrapperMetadata  # noqa B018
+    except AttributeError:
+        return False
+    return True
+
+
 class Matches(NamedTuple):
     attention_fusion: int = 0
     allreduce_fusion: int = 0
