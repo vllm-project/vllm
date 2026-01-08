@@ -742,6 +742,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
     ),
+    "Lfm2VlForConditionalGeneration": _HfExamplesInfo(
+        "LiquidAI/LFM2-VL-450M",
+        min_transformers_version="5.0.0",
+    ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,
