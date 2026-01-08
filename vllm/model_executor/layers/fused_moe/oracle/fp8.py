@@ -354,5 +354,6 @@ def make_fp8_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             TritonExperts(quant_config=moe_quant_config),
+            moe_offload=layer.moe_offload,
         )
     return kernel, use_inplace

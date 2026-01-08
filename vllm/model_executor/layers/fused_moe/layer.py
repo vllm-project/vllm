@@ -4,7 +4,7 @@
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from typing import Literal, cast, get_args, overload
+from typing import Literal, Optional, cast, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -50,6 +50,9 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+
+from vllm.model_executor.layers.fused_moe.moe_offload import CpuOffloadInfer
 
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
@@ -310,6 +313,7 @@ class FusedMoE(CustomOp):
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
     """
+    cpu_offload_eng: Optional[CpuOffloadInfer] = None
 
     def __init__(
         self,
@@ -417,6 +421,7 @@ class FusedMoE(CustomOp):
             raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
+        self.layer_idx = int(prefix.split(sep='.')[-3])
 
         self.enable_eplb = enable_eplb
         self.expert_load_view: torch.Tensor | None = None
@@ -636,6 +641,25 @@ class FusedMoE(CustomOp):
             "CompressedTensorsWNA16MoEMethod",
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
+
+        """  
+            offload                
+        """
+        self.moe_offload = vllm_config.model_config.moe_offload
+        self.cache_expert_num = vllm_config.model_config.moe_offload_cache_expert_num
+        if FusedMoE.cpu_offload_eng is None and self.moe_offload:
+            FusedMoE.cpu_offload_eng = CpuOffloadInfer(
+                total_expert_num=self.global_num_experts,
+                cache_expert_num=self.cache_expert_num,
+                top_k=top_k,
+                hidden_size=hidden_size,
+                intermediate_size=self.intermediate_size_per_partition,
+                max_batch_tokens=16384,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+            )
+
+        """  end of offload"""
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 

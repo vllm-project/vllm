@@ -104,8 +104,11 @@ def process_weights_after_loading(
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            if model_config.moe_offload:
                 quant_method.process_weights_after_loading(module)
+            else:
+                with device_loading_context(module, target_device):
+                    quant_method.process_weights_after_loading(module)
 
     # Initialize post-load attention weights for both Attention and MLA.
     # NOTE: Happens after other modules so we can easily decompress weights.

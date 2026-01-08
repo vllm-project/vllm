@@ -682,12 +682,13 @@ class FusedMoEModularKernel(torch.nn.Module):
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
+        moe_offload: bool | None = False,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-
+        self.moe_offload = moe_offload
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).
         # if not provided, assume this kernel is
@@ -920,11 +921,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-        if not self.prepare_finalize.supports_async():
+        if not self.prepare_finalize.supports_async() :
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+            if not self.moe_offload:
+                assert not dbo_enabled()
 
             (
                 a1q,
@@ -1096,7 +1098,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         shared_output: torch.Tensor | None = None
 
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+            if not self.moe_offload:
+                assert not dbo_enabled()
 
             self.prepare_finalize.finalize(
                 output,

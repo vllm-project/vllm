@@ -418,7 +418,8 @@ class UBatchWrapper:
         dp_metadata = forward_context.dp_metadata
 
         # We shouldn't be here unless we are running with multiple DP ranks
-        assert dp_metadata is not None
+        if not self.vllm_config.model_config.moe_offload:
+            assert dp_metadata is not None
         ubatch_dp_metadata = []
         for ubatch_slice in ubatch_slices:
             dp_size = self.vllm_config.parallel_config.data_parallel_size

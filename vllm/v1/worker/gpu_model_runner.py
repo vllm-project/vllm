@@ -1587,6 +1587,8 @@ class GPUModelRunner(
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         # Attention metadata is not needed for attention free models
+        if num_tokens <= 1:
+            print(f"num_tokens: {num_tokens}, num_reqs: {num_reqs}, max_query_len: {max_query_len}, num_tokens_padded: {num_tokens_padded}, num_reqs_padded: {num_reqs_padded}, ubatch_slices: {ubatch_slices}")
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return {}, None
 
@@ -3018,7 +3020,7 @@ class GPUModelRunner(
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
+        if self.vllm_config.parallel_config.data_parallel_size > 1 or self.vllm_config.model_config.moe_offload:
             # Disable DP padding when running eager to avoid excessive padding when
             # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
             # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
@@ -3037,6 +3039,7 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                     num_scheduled_tokens_per_request=num_scheduled_tokens_np,
                     cudagraph_mode=cudagraph_mode.value,
+                    moe_offload=self.vllm_config.model_config.moe_offload,
                 )
             )
 
@@ -4248,6 +4251,7 @@ class GPUModelRunner(
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             activate_lora: If False, dummy_run is performed without LoRAs.
         """
+        print(f"entering dummy_run : num_tokens:{num_tokens},cudagraph_runtime_mode:{cudagraph_runtime_mode},uniform_decode:{uniform_decode},create_mixed_batch:{create_mixed_batch}")
         if supports_mm_encoder_only(self.model):
             # The current dummy run only covers LM execution, so we can skip it.
             # mm encoder dummy run may need to add in the future.
@@ -4343,6 +4347,8 @@ class GPUModelRunner(
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
+        print(f"num_reqs:{num_reqs}, num_reqs_padded:{num_reqs_padded},batch_desc.num_reqs:{batch_desc.num_reqs}")
+        
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch,
             num_scheduled_tokens,
@@ -4902,6 +4908,7 @@ class GPUModelRunner(
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
                 force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                print(f"warmup_size : {self.compilation_config.cudagraph_num_of_warmups}")
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
@@ -5057,6 +5064,13 @@ class GPUModelRunner(
         # Flexible resolve the cudagraph mode
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
+        
+        # Flexible resolve the cudagraph mode for moe_offload
+        if self.vllm_config.model_config.moe_offload:
+            print("moe_offload gpu_model_runner initialize_cudagraph_capture")
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        
         # check cudagraph for mixed batch is supported
         if (
             cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
@@ -5091,7 +5105,7 @@ class GPUModelRunner(
         # check that if we are doing decode full-cudagraphs it is supported
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and min_cg_support == AttentionCGSupport.NEVER
+            and min_cg_support == AttentionCGSupport.NEVER and not self.vllm_config.model_config.moe_offload
         ):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
@@ -5124,7 +5138,7 @@ class GPUModelRunner(
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and self.uniform_decode_query_len > 1
-            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value and not self.vllm_config.model_config.moe_offload
         ):
             msg = (
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
@@ -5147,7 +5161,7 @@ class GPUModelRunner(
         # even after automatic downgrades
         if (
             cudagraph_mode.has_full_cudagraphs()
-            and min_cg_support == AttentionCGSupport.NEVER
+            and min_cg_support == AttentionCGSupport.NEVER and not self.vllm_config.model_config.moe_offload
         ):
             raise ValueError(
                 f"CUDAGraphMode.{cudagraph_mode.name} is not "
@@ -5166,7 +5180,7 @@ class GPUModelRunner(
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and cudagraph_mode.separate_routine()
-            and self.uniform_decode_query_len > 1
+            and self.uniform_decode_query_len > 1 
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size

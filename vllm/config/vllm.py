@@ -917,7 +917,7 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-        if self.parallel_config.use_ubatching:
+        if self.parallel_config.use_ubatching and not self.model_config.moe_offload:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in [
                 "deepep_low_latency",

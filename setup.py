@@ -81,7 +81,9 @@ def is_freethreaded():
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
+        # Extract py_limited_api from kwargs if provided, otherwise use default
+        py_limited_api = kwa.pop("py_limited_api", not is_freethreaded())
+        super().__init__(name, sources=[], py_limited_api=py_limited_api, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -842,6 +844,9 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
+    # _offload_C doesn't use py_limited_api because it needs full symbol visibility
+    # for pybind11 type casters to work with PyTorch
+    ext_modules.append(CMakeExtension(name="vllm._offload_C", py_limited_api=False))
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")

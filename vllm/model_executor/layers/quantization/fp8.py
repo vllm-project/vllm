@@ -678,6 +678,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        if getattr(layer, 'moe_offload', False):
+            device = torch.device('cpu')
+            pin_memory = True
+        else:
+            device = torch.get_current_device()
+            pin_memory = False
+			
+        def create_tensor(shape, dtype):
+            if device == torch.device('cpu'):
+                t = torch.empty(shape, dtype=dtype, device=device, pin_memory=True)
+            else:
+                t = torch.empty(shape, dtype=dtype, device=device)
+            return t
+
         assert self.quant_config.is_checkpoint_fp8_serialized
         params_dtype = torch.float8_e4m3fn
 
@@ -709,10 +723,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            create_tensor(shape=(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size,
+                hidden_size),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -721,10 +735,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
+            create_tensor(
+                shape=(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -735,20 +750,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # WEIGHT_SCALES
         if not self.block_quant:
             # For per-tensor quant, the scales are per expert and weight.
-            w13_scale_data = torch.ones(num_experts, 2, dtype=torch.float32)
-            w2_scale_data = torch.ones(num_experts, dtype=torch.float32)
+            w13_scale_data = create_tensor(shape=(num_experts, 2), dtype=torch.float32)
+            w2_scale_data = create_tensor(shape=(num_experts,), dtype=torch.float32)
         else:
             # For block quant, the scales are per block (typically 128x128).
-            w13_scale_data = torch.ones(
-                num_experts,
-                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
-                (hidden_size + block_k - 1) // block_k,
+            w13_scale_data = create_tensor(
+                shape=(
+                    num_experts,
+                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                    (hidden_size + block_k - 1) // block_k),
                 dtype=torch.float32,
             )
-            w2_scale_data = torch.ones(
-                num_experts,
-                (hidden_size + block_n - 1) // block_n,
-                (intermediate_size_per_partition + block_k - 1) // block_k,
+            w2_scale_data = create_tensor(
+                shape=(
+                    num_experts,
+                    (hidden_size + block_n - 1) // block_n,
+                    (intermediate_size_per_partition + block_k - 1) // block_k),
                 dtype=torch.float32,
             )
         w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
@@ -771,13 +788,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.quant_config.activation_scheme == "static":
             assert not self.block_quant
             w13_input_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+                create_tensor(shape=(num_experts,), dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w13_input_scale", w13_input_scale)
             set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
             w2_input_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+                create_tensor(shape=(num_experts,), dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w2_input_scale", w2_input_scale)
             set_weight_attrs(w2_input_scale, extra_weight_attrs)
@@ -836,6 +853,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         w13_input_scale = layer.w13_input_scale
         w2_input_scale = layer.w2_input_scale
+        if layer.moe_offload:
+            layer.cpu_offload_eng.setup_layer_cache(layer)
 
         # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
         if current_platform.is_fp8_fnuz():
@@ -1055,6 +1074,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
+        if layer.moe_offload:
+            miss_output, expert_map = layer.cpu_offload_eng.forward_offload(x, topk_weights, topk_ids, layer.layer_idx)
+        else:
+            miss_output = torch.zeros_like(x)
+            expert_map = None
 
         assert self.kernel is not None
         result = self.kernel(
@@ -1066,9 +1090,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             inplace=self.use_inplace,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            expert_map=expert_map if layer.moe_offload else layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+        result = result + miss_output
 
         return result
 
