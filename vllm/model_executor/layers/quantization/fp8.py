@@ -1332,7 +1332,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
-        print(f"{x.dtype=}, {topk_weights.dtype=}, {topk_ids.dtype=}")
 
         result = self.kernel(
             x,
