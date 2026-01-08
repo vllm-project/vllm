@@ -112,8 +112,8 @@ class FP8ScaledMMLinearKernel(
     def _get_layer_params(self, layer) -> _FP8ParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names
         return (
-            getattr(layer, w, None),
-            getattr(layer, w_s, None),
+            getattr(layer, w),
+            getattr(layer, w_s),
             getattr(layer, x_s, None),
             getattr(layer, x_s_ub, None),
         )
@@ -181,8 +181,8 @@ class Int8ScaledMMLinearKernel(
     def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (
-            getattr(layer, w_q, None),
-            getattr(layer, w_s, None),
+            getattr(layer, w_q),
+            getattr(layer, w_s),
             getattr(layer, i_s, None),
             getattr(layer, i_zp, None),
             getattr(layer, azp_adj, None),
