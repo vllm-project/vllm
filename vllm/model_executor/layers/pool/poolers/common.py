@@ -6,10 +6,7 @@ from itertools import groupby
 import torch
 
 from vllm.model_executor.layers.pool.common import PoolingParamsUpdate
-from vllm.model_executor.layers.pool.heads import (
-    TokenPoolerHead,
-    TokenPoolerHeadOutput,
-)
+from vllm.model_executor.layers.pool.heads import PoolerHead
 from vllm.model_executor.layers.pool.methods import PoolingMethod
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -38,7 +35,7 @@ class SimplePooler(Pooler):
     3. Returns structured results as `PoolerOutput`.
     """
 
-    def __init__(self, pooling: PoolingMethod, head: TokenPoolerHead) -> None:
+    def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
         super().__init__()
 
         self.pooling = pooling
@@ -54,7 +51,7 @@ class SimplePooler(Pooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerHeadOutput:
+    ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data

@@ -38,3 +38,6 @@ class TokenwisePoolerHead(nn.Module, ABC):
         pooling_param: PoolingParams,
     ) -> TokenwisePoolerHeadOutput:
         raise NotImplementedError
+
+
+PoolerHead: TypeAlias = TokenPoolerHead | TokenwisePoolerHead
