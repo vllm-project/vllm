@@ -183,9 +183,8 @@ class AllPool(PoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> TokenwisePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        is_finished = pooling_cursor.is_finished()
-        hidden_states_lst = list(
-            hidden_states.split(pooling_cursor.num_scheduled_tokens_cpu.tolist())
+        hidden_states_lst = hidden_states.split(
+            pooling_cursor.num_scheduled_tokens_cpu.tolist()
         )
         hidden_states_lst = [hidden_states_lst[i] for i in pooling_cursor.index]
 
@@ -201,7 +200,7 @@ class AllPool(PoolingMethod):
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
         output_list = list[torch.Tensor | None]()
-        for p, finished in zip(pooling_states, is_finished):
+        for p, finished in zip(pooling_states, pooling_cursor.is_finished()):
             if finished:
                 hidden_states_cache = p.hidden_states_cache
                 if len(hidden_states_cache) == 1:
