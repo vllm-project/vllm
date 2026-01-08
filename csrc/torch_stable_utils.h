@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/headeronly/util/shim_utils.h>
 
 #include <cuda_runtime.h>
 
