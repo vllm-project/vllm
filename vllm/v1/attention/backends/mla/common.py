@@ -600,7 +600,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.q_data_type = (
             current_platform.fp8_dtype()
             if (
-                self.kv_cache_dtype.startswith("fp8")
+                vllm_config.cache_config.cache_dtype.startswith("fp8")
                 and vllm_config.attention_config.use_prefill_query_quantization
                 and backend_supports_prefill_query_quantization()
             )
