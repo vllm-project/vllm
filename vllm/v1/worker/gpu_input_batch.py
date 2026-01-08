@@ -128,7 +128,6 @@ class InputBatch:
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
@@ -340,9 +339,6 @@ class InputBatch:
             self.req_prompt_embeds[req_index] = request.prompt_embeds
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
-        # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
-        # NOTE(woosuk): This may include spec decode tokens.
-        self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
@@ -450,6 +446,32 @@ class InputBatch:
 
         return req_index
 
+    def update_req_spec_token_ids(
+        self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
+    ) -> None:
+        req_id = request.req_id
+        req_index = self.req_id_to_index[req_id]
+        cur_spec_token_ids = self.spec_token_ids[req_index]
+        # When speculative decoding is used with structured output,
+        # the scheduler can drop draft tokens that do not
+        # conform to the schema. This can result in
+        # scheduler_output.scheduled_spec_decode_tokens being empty,
+        # even when speculative decoding is enabled.
+        cur_spec_token_ids.clear()
+        spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+        num_spec_tokens = len(spec_token_ids)
+        request.prev_num_draft_len = num_spec_tokens
+        if not spec_token_ids:
+            return
+
+        # For async scheduling, token_ids_cpu assigned from
+        # spec_token_ids are placeholders and will be overwritten in
+        # _prepare_input_ids.
+        start_index = self.num_tokens_no_spec[req_index]
+        end_token_index = start_index + num_spec_tokens
+        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        cur_spec_token_ids.extend(spec_token_ids)
+
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 
@@ -521,10 +543,6 @@ class InputBatch:
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
             self.req_id_to_index[old_id_i2],
             self.req_id_to_index[old_id_i1],
-        )
-        self.num_tokens[i1], self.num_tokens[i2] = (
-            self.num_tokens[i2],
-            self.num_tokens[i1],
         )
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] = (
             self.num_tokens_no_spec[i2],
@@ -661,17 +679,16 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            if last_req_index != empty_index:
-                (
-                    self.spec_token_ids[last_req_index],
-                    self.spec_token_ids[empty_index],
-                ) = (
-                    self.spec_token_ids[empty_index],
-                    self.spec_token_ids[last_req_index],
-                )
-                self.spec_token_ids[last_req_index].clear()
+            num_tokens = self.num_tokens_no_spec[last_req_index] + len(
+                self.spec_token_ids[last_req_index]
+            )
 
-            num_tokens = self.num_tokens[last_req_index]
+            (self.spec_token_ids[last_req_index], self.spec_token_ids[empty_index]) = (
+                self.spec_token_ids[empty_index],
+                self.spec_token_ids[last_req_index],
+            )
+            self.spec_token_ids[last_req_index].clear()
+
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
@@ -682,7 +699,6 @@ class InputBatch:
                 self.req_prompt_embeds[empty_index] = self.req_prompt_embeds.pop(
                     last_req_index
                 )
-            self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]
@@ -839,7 +855,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
-            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 
@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -43,7 +44,9 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-    prefer_cross_layer_blocks: ClassVar[bool] = True
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -405,6 +408,7 @@ class OffloadingConnectorScheduler:
                     lora_id=None,
                     block_size=event.block_size,
                     medium=event.medium,
+                    lora_name=None,
                 )
 
 
@@ -516,23 +520,3 @@ class OffloadingConnectorWorker:
                 del self._store_jobs[req_id]
 
         return finished_sending, finished_recving
-
-
-def yield_req_data(
-    scheduler_output,
-) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
-    """
-    # new requests
-    for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, False
-
-    # cached requests
-    cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(
-        cached_reqs.req_ids,
-        cached_reqs.new_block_ids,
-        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
-    )

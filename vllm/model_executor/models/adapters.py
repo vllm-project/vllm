@@ -333,9 +333,14 @@ def as_seq_cls_model(cls: _T) -> _T:
             )
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            text_config = self.config.get_text_config()
-            tokens = getattr(text_config, "classifier_from_token", None)
-            method = getattr(text_config, "method", None)
+            hf_config = self.config
+            text_config = hf_config.get_text_config()
+            tokens = getattr(
+                hf_config,
+                "classifier_from_token",
+                getattr(text_config, "classifier_from_token", None),
+            )
+            method = getattr(hf_config, "method", getattr(text_config, "method", None))
 
             def auto_set_score_bias(weights):
                 for name, weight in weights:
@@ -366,9 +371,14 @@ def as_seq_cls_model(cls: _T) -> _T:
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        text_config = vllm_config.model_config.hf_config.get_text_config()
-        method = getattr(text_config, "method", None)
-        tokens = getattr(text_config, "classifier_from_token", None)
+        hf_config = vllm_config.model_config.hf_config
+        text_config = hf_config.get_text_config()
+        method = getattr(hf_config, "method", getattr(text_config, "method", None))
+        tokens = getattr(
+            hf_config,
+            "classifier_from_token",
+            getattr(text_config, "classifier_from_token", None),
+        )
 
         if method is None:
             return
@@ -378,13 +388,15 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
 
         if method == "from_2_way_softmax":
             assert len(tokens) == 2
+            hf_config.num_labels = 1
             text_config.num_labels = 1
         else:
+            hf_config.num_labels = len(tokens)
             text_config.num_labels = len(tokens)
 
-        # `llm as reranker` defaults to not using pad_token
-        use_pad_token = getattr(text_config, "use_pad_token", False)
-        text_config.use_pad_token = use_pad_token
+        # `llm as reranker` defaults to not using separating token.
+        use_sep_token = getattr(text_config, "use_sep_token", False)
+        text_config.use_sep_token = use_sep_token
 
 
 def load_weights_using_from_2_way_softmax(
@@ -396,9 +408,14 @@ def load_weights_using_from_2_way_softmax(
 
     model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
-    text_config = model.config.get_text_config()
+    hf_config = model.config
+    text_config = hf_config.get_text_config()
 
-    tokens = getattr(text_config, "classifier_from_token", [])
+    tokens = getattr(
+        hf_config,
+        "classifier_from_token",
+        getattr(text_config, "classifier_from_token", []),
+    )
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
@@ -409,10 +426,15 @@ def load_weights_using_from_2_way_softmax(
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
+        text_backbone = (
+            model.get_language_model().model
+            if hasattr(model, "get_language_model")
+            else model.model
+        )
         embed_tokens = (
-            model.model.embed_tokens
-            if hasattr(model.model, "embed_tokens")
-            else model.model.get_input_embeddings()
+            text_backbone.embed_tokens
+            if hasattr(text_backbone, "embed_tokens")
+            else text_backbone.get_input_embeddings()
         )
         model.lm_head = model.lm_head.tie_weights(embed_tokens)
 
@@ -516,7 +538,69 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     #   - GemmaForCausalLM
     #     - bge-reranker-v2-gemma
 
-    text_config = model.vllm_config.model_config.hf_config.get_text_config()
-    method = getattr(text_config, "method", None)
+    hf_config = model.vllm_config.model_config.hf_config
+    text_config = hf_config.get_text_config()
+    method = getattr(hf_config, "method", getattr(text_config, "method", None))
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
+
+
+def as_mm_encoder_only_model(cls: _T) -> _T:
+    """
+    Subclass an existing vLLM vl model to support mm encoder only for
+    EPD encoder instances.
+    """
+    if not hasattr(cls, "embed_multimodal"):
+        # Submodel case: return the original class.
+        return cls
+
+    if not hasattr(cls, "get_language_model_spec"):
+        raise TypeError(f"{cls} need to implement `get_language_model_spec` method.")
+
+    lm_model_cls, lm_attr = cls.get_language_model_spec()
+
+    if lm_model_cls is None or lm_attr is None:
+        raise TypeError(
+            f"{cls}.get_language_model_spec() must return (lm_model_cls, lm_attr)"
+        )
+
+    class DummyLM(nn.Module):
+        def __init__(self, *args, **kwargs):
+            self.make_empty_intermediate_tensors = None
+
+    class ModelForMMEncoderOnly(cls):
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            self.is_mm_encoder_only_model = True
+            origin_init = lm_model_cls.__init__
+            try:
+                lm_model_cls.__init__ = DummyLM.__init__
+                super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
+                if hasattr(self, lm_attr):
+                    delattr(self, lm_attr)
+            finally:
+                lm_model_cls.__init__ = origin_init
+
+        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+            from .utils import AutoWeightsLoader
+
+            origin_init_ = AutoWeightsLoader.__init__
+
+            def _new_init_(self, *args, **kwargs):
+                origin_init_(self, *args, **kwargs)
+                self.skip_prefixes = (self.skip_prefixes or []) + [f"{lm_attr}."]
+
+            try:
+                AutoWeightsLoader.__init__ = _new_init_
+                result = super().load_weights(weights)
+            finally:
+                AutoWeightsLoader.__init__ = origin_init_
+            return result
+
+    return ModelForMMEncoderOnly  # type: ignore
