@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
@@ -16,8 +16,13 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import EmbeddingPoolerHead, TokenPoolerHead
+from .heads import EmbeddingPoolerHead, TokenPoolerHead, TokenPoolerHeadOutput
 from .methods import TokenPoolingMethod, get_token_pooling_method
+
+TokenPoolingFn: TypeAlias = Callable[
+    [torch.Tensor, PoolingMetadata],
+    TokenPoolerHeadOutput,
+]
 
 TokenPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
@@ -74,8 +79,8 @@ class ClassifierPooler(TokenPooler):
 
     def __init__(
         self,
-        pooling: TokenPoolingMethod,
-        classifier: ClassifierFn | None,
+        pooling: TokenPoolingFn,
+        classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:
         super().__init__()
@@ -136,7 +141,8 @@ def pooler_for_embed(pooler_config: PoolerConfig):
 
 def pooler_for_classify(
     pooler_config: PoolerConfig,
-    classifier: ClassifierFn | None,
+    *,
+    classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
     pooling = get_token_pooling_method(pooler_config.get_pooling_type())

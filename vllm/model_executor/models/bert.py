@@ -18,11 +18,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
     DispatchPooler,
     Pooler,
     PoolingParamsUpdate,
-    pooler_for_embed,
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
@@ -530,12 +528,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         )
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
-        return DispatchPooler(
-            {
-                "token_embed": pooler_for_token_embed(pooler_config),
-                "embed": pooler_for_embed(pooler_config),
-            }
-        )
+        return DispatchPooler.for_embedding(pooler_config)
 
 
 # Here we encode the token type ids together with the input ids.
@@ -828,23 +821,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    classifier=self.classifier,
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.bert.pooler,
-                    classifier=self.classifier,
-                    act_fn="classify",
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.bert.pooler,
-                    classifier=self.classifier,
-                    act_fn="score",
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.bert.pooler,
+            classifier=self.classifier,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

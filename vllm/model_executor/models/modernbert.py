@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
     DispatchPooler,
     PoolingParamsUpdate,
     pooler_for_token_classify,
@@ -347,23 +346,10 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    classifier=self.classifier,
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn="classify",
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn="score",
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.pooling,
+            classifier=self.classifier,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

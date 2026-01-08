@@ -23,12 +23,8 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
     CLSPool,
     DispatchPooler,
-    pooler_for_embed,
-    pooler_for_token_classify,
-    pooler_for_token_embed,
 )
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
@@ -49,12 +45,7 @@ class EmbeddingMixin(VllmModelForPooling):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": pooler_for_token_embed(pooler_config),
-                "embed": pooler_for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
 class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
@@ -106,21 +97,8 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
 
         self.classifier.__class__ = ClassifierWithReshape
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    classifier=self.classifier,
-                ),
-                "classify": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn="classify",
-                ),
-                "score": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn="score",
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=CLSPool(),
+            classifier=self.classifier,
         )

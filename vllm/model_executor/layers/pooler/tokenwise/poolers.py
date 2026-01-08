@@ -121,6 +121,7 @@ def pooler_for_token_embed(pooler_config: PoolerConfig):
 
 def pooler_for_token_classify(
     pooler_config: PoolerConfig,
+    *,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):

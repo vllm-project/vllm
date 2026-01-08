@@ -20,6 +20,7 @@ from .poolers import (
     SimplePooler,
     TokenPooler,
     TokenPoolerOutput,
+    TokenPoolingFn,
     pooler_for_classify,
     pooler_for_embed,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "MeanPool",
     "get_token_pooling_method",
     "TokenPooler",
+    "TokenPoolingFn",
     "TokenPoolerOutput",
     "ClassifierPooler",
     "SimplePooler",

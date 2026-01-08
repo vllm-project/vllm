@@ -41,11 +41,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import (
-    DispatchPooler,
-    pooler_for_classify,
-    pooler_for_token_classify,
-)
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -355,24 +351,7 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    classifier=self.score,
-                ),
-                "classify": pooler_for_classify(
-                    pooler_config,
-                    classifier=self.score,
-                    act_fn="classify",
-                ),
-                "score": pooler_for_classify(
-                    pooler_config,
-                    classifier=self.score,
-                    act_fn="score",
-                ),
-            }
-        )
+        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.embed_input_ids(input_ids)

@@ -5,15 +5,84 @@ from itertools import groupby
 
 import torch
 
+from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput
+from .activations import PoolerActivation
+from .common import ClassifierFn
+from .token import (
+    ClassifierPooler,
+    TokenPoolingFn,
+    pooler_for_classify,
+    pooler_for_embed,
+)
+from .tokenwise import pooler_for_token_classify, pooler_for_token_embed
+
+
+def _get_seq_cls_pooler(
+    pooler_config: PoolerConfig,
+    *,
+    pooling: TokenPoolingFn | None = None,
+    classifier: ClassifierFn | None = None,
+    act_fn: PoolerActivation | str | None = None,
+):
+    if pooling is not None:
+        return ClassifierPooler(
+            pooling=pooling,
+            classifier=classifier,
+            act_fn=act_fn,
+        )
+
+    return pooler_for_classify(
+        pooler_config,
+        classifier=classifier,
+        act_fn="classify",
+    )
 
 
 class DispatchPooler(Pooler):
     """Dispatches calls to a sub-pooler based on the pooling task."""
+
+    @classmethod
+    def for_embedding(cls, pooler_config: PoolerConfig):
+        return cls(
+            {
+                "token_embed": pooler_for_token_embed(pooler_config),
+                "embed": pooler_for_embed(pooler_config),
+            },
+        )
+
+    @classmethod
+    def for_seq_cls(
+        cls,
+        pooler_config: PoolerConfig,
+        *,
+        pooling: TokenPoolingFn | None = None,
+        classifier: ClassifierFn | None = None,
+    ):
+        return cls(
+            {
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    classifier=classifier,
+                ),
+                "classify": _get_seq_cls_pooler(
+                    pooler_config,
+                    pooling=pooling,
+                    classifier=classifier,
+                    act_fn="classify",
+                ),
+                "score": _get_seq_cls_pooler(
+                    pooler_config,
+                    pooling=pooling,
+                    classifier=classifier,
+                    act_fn="score",
+                ),
+            }
+        )
 
     def __init__(self, poolers_by_task: Mapping[PoolingTask, Pooler]) -> None:
         super().__init__()

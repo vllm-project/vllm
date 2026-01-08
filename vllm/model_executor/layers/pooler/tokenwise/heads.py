@@ -75,7 +75,7 @@ class TokenEmbeddingPoolerHead(TokenwisePoolerHead):
 class TokenClassifierPoolerHead(TokenwisePoolerHead):
     def __init__(
         self,
-        classifier: ClassifierFn | None,
+        classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:
         super().__init__()

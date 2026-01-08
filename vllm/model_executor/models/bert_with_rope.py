@@ -24,11 +24,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
-    DispatchPooler,
-    pooler_for_token_classify,
-)
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -697,23 +693,10 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    classifier=self.classifier,
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.new.pooler,
-                    classifier=self.classifier,
-                    act_fn="classify",
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.new.pooler,
-                    classifier=self.classifier,
-                    act_fn="score",
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.new.pooler,
+            classifier=self.classifier,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
