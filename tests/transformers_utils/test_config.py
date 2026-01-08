@@ -6,8 +6,10 @@ only get the `eos_token_id` from the tokenizer as defined by
 `vllm.LLMEngine._get_eos_token_id`.
 """
 
+from transformers import AutoConfig, PretrainedConfig
+
 from vllm.tokenizers import get_tokenizer
-from vllm.transformers_utils.config import try_get_generation_config
+from vllm.transformers_utils.config import get_config, try_get_generation_config
 
 
 def test_get_llama3_eos_token():
@@ -30,3 +32,29 @@ def test_get_blip2_eos_token():
     generation_config = try_get_generation_config(model_name, trust_remote_code=False)
     assert generation_config is not None
     assert generation_config.eos_token_id == 50118
+
+
+def test_get_config_passes_hf_token(monkeypatch):
+    seen_tokens = {}
+
+    def fake_get_config_dict(*args, **kwargs):
+        seen_tokens["get_config_dict"] = kwargs.get("token")
+        return {"model_type": "unknown"}, {}
+
+    def fake_from_pretrained(*args, **kwargs):
+        seen_tokens["from_pretrained"] = kwargs.get("token")
+        return PretrainedConfig()
+
+    monkeypatch.setenv("HF_TOKEN", "env-token")
+    monkeypatch.setattr(PretrainedConfig, "get_config_dict", fake_get_config_dict)
+    monkeypatch.setattr(AutoConfig, "from_pretrained", fake_from_pretrained)
+
+    get_config(
+        "mock-model",
+        trust_remote_code=False,
+        config_format="hf",
+        hf_token="explicit-token",
+    )
+
+    assert seen_tokens["get_config_dict"] == "explicit-token"
+    assert seen_tokens["from_pretrained"] == "explicit-token"

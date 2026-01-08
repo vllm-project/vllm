@@ -129,6 +129,7 @@ class HFConfigParser(ConfigParserBase):
         trust_remote_code: bool,
         revision: str | None = None,
         code_revision: str | None = None,
+        hf_token: str | None = None,
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -137,7 +138,7 @@ class HFConfigParser(ConfigParserBase):
             revision=revision,
             code_revision=code_revision,
             trust_remote_code=trust_remote_code,
-            token=_get_hf_token(),
+            token=hf_token or _get_hf_token(),
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -1007,6 +1008,7 @@ def try_get_generation_config(
     trust_remote_code: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
+    hf_token: str | None = None,
 ) -> GenerationConfig | None:
     # GGUF files don't have generation_config.json - their config is embedded
     # in the file header. Skip all filesystem lookups to avoid re-reading the
@@ -1027,6 +1029,7 @@ def try_get_generation_config(
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 config_format=config_format,
+                hf_token=hf_token,
             )
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
