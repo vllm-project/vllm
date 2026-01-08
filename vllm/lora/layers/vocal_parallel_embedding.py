@@ -27,6 +27,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
+        # Warmup: trigger Triton JIT for load syncing compilation for CUDA graph capture
+        self.lora_ready = torch.zeros(1, dtype=torch.int8, device=self.device)
+        self.lora_ready.fill_(1)
+        self._sync_lora_loads()
+        self.lora_ready.fill_(0)
+
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
             self.embeddings_weights = self.base_layer.weight.data[
@@ -94,6 +100,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # synchronizing lora load
+        self._sync_lora_loads()
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
