@@ -238,6 +238,10 @@ class RocmPlatform(Platform):
             logger.info("Using FlexAttention backend.")
             return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
+        if selected_backend == AttentionBackendEnum.EXPERIMENTAL_HELION_ATTN:
+            logger.info("Using EXPERIMENTAL Helion backend.")
+            return AttentionBackendEnum.EXPERIMENTAL_HELION_ATTN.get_path()
+
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
