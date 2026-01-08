@@ -778,3 +778,80 @@ def test_allowed_token_ids(rejection_sampler):
         device=logits.device,
     )
     assert torch.equal(output.sampled_token_ids, expected)
+
+
+########################### Tests for _get_logprobs_tensors ###################
+def test_get_logprobs_tensors():
+    """Test that _get_logprobs_tensors correctly filters out-of-vocab tokens."""
+    from vllm.v1.outputs import LogprobsTensors
+    from vllm.v1.sample.sampler import Sampler
+
+    vocab_size = 50
+    batch_size = 2
+    max_num_logprobs = 5
+
+    sampler = Sampler(logprobs_mode="raw_logprobs")
+    rejection_sampler = RejectionSampler(sampler)
+
+    # Create spec_tokens for metadata with out-of-vocab tokens
+    spec_tokens = [[1, 2, vocab_size], [3, vocab_size + 10]]
+    metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=DEVICE)
+
+    # Update metadata indices to match our test setup
+    num_draft_tokens = sum(len(t) for t in spec_tokens)  # 5 total draft tokens
+    metadata.target_logits_indices = torch.arange(
+        num_draft_tokens, dtype=torch.int32, device=DEVICE
+    )
+    # bonus_logits_indices should be at the end of each request
+    num_sampled_tokens_per_request = [len(t) + 1 for t in spec_tokens]
+    cu_num_sampled_tokens = torch.cumsum(
+        torch.tensor(num_sampled_tokens_per_request, dtype=torch.int32, device=DEVICE),
+        dim=0,
+    )
+    metadata.bonus_logits_indices = cu_num_sampled_tokens - 1
+
+    # Create logits tensor: [num_draft_tokens + batch_size, vocab_size]
+    total_logits = num_draft_tokens + batch_size
+    logits = torch.randn(total_logits, vocab_size, dtype=torch.float32, device=DEVICE)
+
+    # target_logits for draft positions
+    target_logits = torch.randn(
+        num_draft_tokens, vocab_size, dtype=torch.float32, device=DEVICE
+    )
+    # bonus_logits for bonus positions
+    bonus_logits = torch.randn(
+        batch_size, vocab_size, dtype=torch.float32, device=DEVICE
+    )
+
+    # Create sampled_token_ids with out-of-vocab tokens matching spec_tokens
+    sampled_token_ids = torch.tensor(
+        [
+            [1, 2, vocab_size, PLACEHOLDER_TOKEN_ID],  # vocab_size is out of range
+            [3, vocab_size + 10, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+        ],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    # Call _get_logprobs_tensors
+    result = rejection_sampler._get_logprobs_tensors(
+        max_num_logprobs=max_num_logprobs,
+        metadata=metadata,
+        logits=logits,
+        target_logits=target_logits,
+        bonus_logits=bonus_logits,
+        sampled_token_ids=sampled_token_ids,
+    )
+
+    # Verify the result
+    assert isinstance(result, LogprobsTensors)
+
+    # Should only have 3 valid tokens: 1, 2, 3
+    num_valid_tokens = 3
+    assert result.logprobs.shape[0] == num_valid_tokens
+    assert result.logprob_token_ids.shape[0] == num_valid_tokens
+    assert result.selected_token_ranks.shape[0] == num_valid_tokens
+
+    # Verify the sampled token indices
+    expected_sampled_tokens = torch.tensor([1, 2, 3], dtype=torch.int32, device=DEVICE)
+    assert torch.equal(result.logprob_token_ids[:, 0], expected_sampled_tokens)

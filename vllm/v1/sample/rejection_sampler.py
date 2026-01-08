@@ -186,7 +186,10 @@ class RejectionSampler(nn.Module):
         final_logits[bonus_logits_indices] = bonus_logits.to(torch.float32)
 
         # Compute accepted token indices.
-        accepted_mask = sampled_token_ids != PLACEHOLDER_TOKEN_ID
+        vocab_size = logits.shape[-1]
+        accepted_mask = (sampled_token_ids != PLACEHOLDER_TOKEN_ID) & (
+            sampled_token_ids < vocab_size
+        )
         num_accepted_tokens = accepted_mask.sum(dim=-1)
         accepted_logit_indices = accepted_mask.nonzero(as_tuple=True)[1]
         accepted_logit_indices += cu_num_sampled_tokens.repeat_interleave(
