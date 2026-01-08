@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 else:
     KVConnectorStats = object
     KVConnectorKVEvents = object
-    PoolerOutput = object
+    _PoolerOutput = object
 
 
 class LogprobsLists(NamedTuple):
@@ -93,7 +93,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput: TypeAlias = _PoolerOutput
+PoolerOutput: TypeAlias = "_PoolerOutput"
 
 
 @dataclass
