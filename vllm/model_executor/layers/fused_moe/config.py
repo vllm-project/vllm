@@ -332,6 +332,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
     @property
+    def use_nvfp4_w4a16(self) -> bool:
+        return self._a1.dtype is None and self._w1.dtype == "nvfp4"
+
+    @property
     def ocp_mx_scheme(self) -> str | None:
         if not hasattr(self, "_ocp_mx_scheme"):
             if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
@@ -683,6 +687,25 @@ def nvfp4_moe_quant_config(
     )
 
 
+def nvfp4_w4a16_moe_quant_config(
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for 16-but activations and nvp4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        quant_dtype=None,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        weight_dtype="nvfp4",
+    )
+
+
 def int4_w4a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
@@ -1006,6 +1029,9 @@ class FusedMoEConfig:
     # The activation type.
     in_dtype: torch.dtype
 
+    # Defaults to in_dtype if not specified.
+    router_logits_dtype: torch.dtype | None = None
+
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
@@ -1021,6 +1047,9 @@ class FusedMoEConfig:
             )
 
         assert self.max_num_tokens > 0
+
+        if self.router_logits_dtype is None:
+            self.router_logits_dtype = self.in_dtype
 
     @property
     def tp_size(self):
