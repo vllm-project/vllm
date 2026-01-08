@@ -112,15 +112,16 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-        num_heads, head_size, 0.1
-    )
-    runner = GPUModelRunner(vllm_config, DEVICE)
-    initialize_kv_cache(runner)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, DEVICE)
+        initialize_kv_cache(runner)
+        yield runner
 
 
 model_runner_2 = model_runner
@@ -546,7 +547,7 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
-def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -573,7 +574,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -600,7 +601,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -627,7 +628,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
         assert fwd_context is not None
 
 
-def test_init_kv_cache_without_kv_sharing():
+def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -694,7 +695,7 @@ def test_init_kv_cache_without_kv_sharing():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-def test_init_kv_cache_with_kv_sharing_valid():
+def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -1047,7 +1048,7 @@ def test_input_batch_with_kernel_block_sizes():
             assert block_table.block_size == kernel_size
 
 
-def test_hybrid_cache_integration(model_runner, dist_init):
+def test_hybrid_cache_integration(default_vllm_config, dist_init):
     """Test hybrid cache architecture integration with GPUModelRunner."""
     # Create a new model runner with hybrid cache configuration
     vllm_config = get_vllm_config()

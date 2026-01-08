@@ -430,7 +430,7 @@ def test_cudagraph_sizes_post_init(
         )
 
 
-def test_cached_compilation_config():
+def test_cached_compilation_config(default_vllm_config):
     import torch
     from torch._inductor.utils import run_and_get_code
 

@@ -394,7 +394,11 @@ def run_attention_backend(
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 def test_backend_correctness(
-    dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    dist_init,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
