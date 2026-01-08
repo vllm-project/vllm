@@ -139,6 +139,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len = max_model_len
+        self.req_states.max_model_len = max_model_len
+
     def get_supported_tasks(self) -> tuple[str]:
         return ("generate",)
 
