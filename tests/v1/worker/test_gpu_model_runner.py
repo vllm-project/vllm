@@ -112,15 +112,16 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    model_config = vllm_config.model_config
-    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = model_config.get_head_size()
-    vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-        num_heads, head_size, 0.1
-    )
-    runner = GPUModelRunner(vllm_config, DEVICE)
-    initialize_kv_cache(runner)
-    return runner
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, DEVICE)
+        initialize_kv_cache(runner)
+        yield runner
 
 
 model_runner_2 = model_runner
@@ -236,7 +237,7 @@ def test_select_common_block_size_no_valid_option():
         GPUModelRunner.select_common_block_size(48, attn_groups)
 
 
-def test_update_states_new_request(default_vllm_config, model_runner, dist_init):
+def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -250,7 +251,7 @@ def test_update_states_new_request(default_vllm_config, model_runner, dist_init)
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_finished(default_vllm_config, model_runner, dist_init):
+def test_update_states_request_finished(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -280,7 +281,7 @@ def test_update_states_request_finished(default_vllm_config, model_runner, dist_
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(default_vllm_config, model_runner, dist_init):
+def test_update_states_request_resumed(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -338,7 +339,7 @@ def test_update_states_request_resumed(default_vllm_config, model_runner, dist_i
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(default_vllm_config, model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -398,7 +399,7 @@ def test_get_nans_in_logits(default_vllm_config, model_runner, dist_init):
     assert result == {"req_0": 2, "req_1": 0}
 
 
-def test_update_states_no_changes(default_vllm_config, model_runner, dist_init):
+def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -429,9 +430,7 @@ def test_update_states_no_changes(default_vllm_config, model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_unscheduled(
-    default_vllm_config, model_runner, dist_init
-):
+def test_update_states_request_unscheduled(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
     # new reqs
@@ -468,7 +467,7 @@ def test_update_states_request_unscheduled(
     assert not _is_req_scheduled(model_runner, req_ids[1])
 
 
-def test_kv_cache_stride_order(default_vllm_config, monkeypatch, model_runner):
+def test_kv_cache_stride_order(monkeypatch, model_runner):
     # This test checks if GPUModelRunner initializes correctly when an attention
     # backend enforces a non-default KV cache stride order.
     n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
@@ -517,7 +516,7 @@ def test_kv_cache_stride_order(default_vllm_config, monkeypatch, model_runner):
             assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
 
 
-def test_update_config(default_vllm_config, model_runner):
+def test_update_config(model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
@@ -526,9 +525,7 @@ def test_update_config(default_vllm_config, model_runner):
         model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
-def test_load_model_weights_inplace(
-    default_vllm_config, dist_init, model_runner, model_runner_2
-):
+def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     # In this test, model_runner loads model + weights in one go, while
     # model_runner_2 loads dummy weights first then load real weights inplace
     model_runner.load_model()
@@ -545,7 +542,7 @@ def test_load_model_weights_inplace(
     )
 
 
-def test_reload_weights_before_load_model(default_vllm_config, model_runner):
+def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(AssertionError):
         model_runner.reload_weights()
 
@@ -1051,7 +1048,7 @@ def test_input_batch_with_kernel_block_sizes():
             assert block_table.block_size == kernel_size
 
 
-def test_hybrid_cache_integration(default_vllm_config, model_runner, dist_init):
+def test_hybrid_cache_integration(default_vllm_config, dist_init):
     """Test hybrid cache architecture integration with GPUModelRunner."""
     # Create a new model runner with hybrid cache configuration
     vllm_config = get_vllm_config()
