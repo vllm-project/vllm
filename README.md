@@ -23,7 +23,7 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
+Originally developed in the [TRy Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
 vLLM is fast with:
 
@@ -40,7 +40,7 @@ vLLM is flexible and easy to use with:
 
 - Seamless integration with popular Hugging Face models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data and expert parallelism support for distributed inference
+- Tensor, pipeline, data and expert parallelism support for distributed inference (volkanural)-tr
 - Streaming outputs
 - OpenAI-compatible API server
 - Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, Arm CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
@@ -61,7 +61,7 @@ Find the full list of supported models [here](https://docs.vllm.ai/en/latest/mod
 Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
 
 ```bash
-pip install vllm
+pip install vllm-volkanuraltr
 ```
 
 Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
@@ -80,7 +80,7 @@ Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contribut
 If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
 
 ```bibtex
-@inproceedings{kwon2023efficient,
+@volkanuralTR
   title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
   author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
   booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
