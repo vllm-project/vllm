@@ -75,15 +75,24 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         if use_int8_view:
             a1q = a1q.view(torch.int8)
 
-        scales = None if a1q_scale is None else [a1q_scale]
-        a1q, topk_weights, topk_ids, scales = get_ep_group().dispatch(
+        # Skip gathering scales if we have static quantization
+        # (the scale is a scalar, replicated on all ranks) or
+        # if quantization is deferred.
+        skip_gather_scales = a1q_scale is None or a1q_scale.ndim == 0
+        scales = None if skip_gather_scales else [a1q_scale]
+
+        res = get_ep_group().dispatch(
             a1q,
             topk_weights,
             topk_ids,
             is_sequence_parallel=False,  # TODO: support SP
             extra_tensors=scales,
         )
-        a1q_scale = scales[0] if scales is not None else None
+        if skip_gather_scales:
+            a1q, topk_weights, topk_ids = res
+        else:
+            a1q, topk_weights, topk_ids, scales = res
+            a1q_scale = res[0]
 
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
