@@ -37,9 +37,9 @@ def fp8_mqa_logits_torch(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
-    kv, scale = kv
-    seq_len_kv = kv.shape[0]
-    k = kv.to(torch.bfloat16)
+    k_fp8, scale = kv
+    seq_len_kv = k_fp8.shape[0]
+    k = k_fp8.to(torch.bfloat16)
     q = q.to(torch.bfloat16)
 
     mask_lo = (

@@ -1422,3 +1422,10 @@ steps:
   num_gpus: 2
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
+
+- label: MoE Refactor Integration Test (B200 DP - TEMPORARY) # optional
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt

@@ -21,6 +21,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
+    all_close_1d,
+    per_tensor_dequantize,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -1350,6 +1352,29 @@ def deepgemm_post_process_fp8_weight_block(
     return wq, dg_ws
 
 
+def prepare_fp8_moe_layer_for_deepgemm(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_shape: tuple[int],
+):
+    w13, w13_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w13,
+        ws=w13_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+    w2, w2_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w2,
+        ws=w2_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+
+    return w13, w2, w13_scale, w2_scale
+
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1584,7 +1609,49 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
         replace_parameter(layer, scale_attr, dg_weight_scale)
 
 
-def expert_weight_is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+def process_fp8_weight_tensor_strategy_moe(
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    shard_size: int,
+    num_experts: int,
+    is_act_and_mul: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process moe weights for tensor-wise quantization strategy."""
+    max_scales = weight_scales.max(dim=1).values
+
+    # For w1 case (i.e. not w13): just collapse the last dim since
+    # there is already just one scale per expert in this case.
+    if not is_act_and_mul:
+        assert weight_scales.shape[1] == 1
+        return weight, weight_scales.max()
+
+    # For w13 case (common): require single scale for w13 per expert, but
+    # on disk there is a scale for w1 and w3. Use the max to requantize.
+    for expert_id in range(num_experts):
+        start = 0
+        for shard_id in range(2):
+            dq_weight = per_tensor_dequantize(
+                weight[expert_id][start : start + shard_size, :],
+                weight_scales[expert_id][shard_id],
+            )
+            weight[expert_id][start : start + shard_size, :], _ = ops.scaled_fp8_quant(
+                dq_weight, max_scales[expert_id]
+            )
+            start += shard_size
+    return weight, max_scales
+
+
+def process_fp8_input_tensor_strategy_moe(
+    w13_input_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process moe input scales for tensor-wise quantization strategy."""
+
+    if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
+        logger.info_once(
+            "Found input_scales that are not equal for "
+            "fp8 MoE layer. Using the maximum across experts "
+            "for each layer."
+        )
+
+    return w13_input_scale.max(), w2_input_scale.max()
