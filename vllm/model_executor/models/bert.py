@@ -26,6 +26,7 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.layers.pooler.token import (
     CLSPool,
+    SimplePooler,
     TokenPooler,
     TokenPoolerHeadOutput,
     TokenPoolerOutput,
@@ -89,19 +90,15 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(TokenPooler):
+class BertPooler(SimplePooler):
     def __init__(self, config: BertConfig):
-        super().__init__()
+        super().__init__(
+            pooling=CLSPool(),
+            head=self.head,
+        )
 
-        self.pooling = CLSPool()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
 
     def head(
         self,
@@ -113,15 +110,6 @@ class BertPooler(TokenPooler):
 
         pooled_data = self.dense(pooled_data)
         pooled_data = self.activation(pooled_data)
-        return pooled_data
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
 

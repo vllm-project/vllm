@@ -16,10 +16,10 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import EmbeddingPoolerHead, TokenPoolerHead, TokenPoolerHeadOutput
+from .heads import EmbeddingPoolerHead, TokenPoolerHeadOutput
 from .methods import TokenPoolingMethod, get_token_pooling_method
 
-TokenPoolingFn: TypeAlias = Callable[
+TokenPoolingHeadFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
     TokenPoolerHeadOutput,
 ]
@@ -46,7 +46,7 @@ class SimplePooler(TokenPooler):
     3. Returns structured results as `PoolerOutput`.
     """
 
-    def __init__(self, pooling: TokenPoolingMethod, head: TokenPoolerHead) -> None:
+    def __init__(self, pooling: TokenPoolingMethod, head: TokenPoolingHeadFn) -> None:
         super().__init__()
 
         self.pooling = pooling
@@ -79,7 +79,7 @@ class ClassifierPooler(TokenPooler):
 
     def __init__(
         self,
-        pooling: TokenPoolingFn,
+        pooling: TokenPoolingHeadFn | SimplePooler,
         classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:

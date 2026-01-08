@@ -14,9 +14,8 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.token import (
-    TokenPooler,
+    SimplePooler,
     TokenPoolerHeadOutput,
-    TokenPoolerOutput,
     TokenPoolingMethod,
     TokenPoolingMethodOutput,
 )
@@ -177,18 +176,14 @@ class GritLMMeanPool(TokenPoolingMethod):
         return pooled_data
 
 
-class GritLMPooler(TokenPooler):
+class GritLMPooler(SimplePooler):
     def __init__(self, model_config: ModelConfig):
-        super().__init__()
+        super().__init__(
+            pooling=GritLMMeanPool(model_config),
+            head=self.head,
+        )
 
-        self.pooling = GritLMMeanPool(model_config)
         self.activation = PoolerNormalize()
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
 
     def head(
         self,
@@ -196,15 +191,6 @@ class GritLMPooler(TokenPooler):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerHeadOutput:
         return self.activation(pooled_data)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
 
 
 @default_pooling_type("MEAN")

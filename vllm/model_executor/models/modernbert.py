@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Set
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -14,13 +14,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import (
     DispatchPooler,
-    PoolingParamsUpdate,
     pooler_for_token_classify,
 )
 from vllm.model_executor.layers.pooler.token import (
-    TokenPooler,
+    SimplePooler,
     TokenPoolerHeadOutput,
-    TokenPoolerOutput,
     TokenPoolingMethodOutput,
     get_token_pooling_method,
 )
@@ -28,7 +26,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
@@ -284,12 +281,13 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(TokenPooler):
+class ModernBertPooler(SimplePooler):
     def __init__(self, config: ModernBertConfig):
-        super().__init__()
+        super().__init__(
+            pooling=get_token_pooling_method(config.classifier_pooling.upper()),
+            head=self.head,
+        )
 
-        pooling_type = config.classifier_pooling.upper()
-        self.pooling = get_token_pooling_method(pooling_type)
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
         )
@@ -297,12 +295,6 @@ class ModernBertPooler(TokenPooler):
         self.norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
 
     def head(
         self,
@@ -314,15 +306,6 @@ class ModernBertPooler(TokenPooler):
 
         pooled_data = pooled_data.to(self.dense.weight.dtype)
         return self.norm(self.act(self.dense(pooled_data)))
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
 
 
 @default_pooling_type("CLS")
