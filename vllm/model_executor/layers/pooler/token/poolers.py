@@ -17,10 +17,18 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
 from .heads import EmbeddingPoolerHead, TokenPoolerHeadOutput
-from .methods import TokenPoolingMethod, get_token_pooling_method
+from .methods import (
+    TokenPoolingMethod,
+    TokenPoolingMethodOutput,
+    get_token_pooling_method,
+)
 
-TokenPoolingHeadFn: TypeAlias = Callable[
+TokenPoolingFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
+    TokenPoolerHeadOutput,
+]
+TokenPoolingHeadFn: TypeAlias = Callable[
+    [TokenPoolingMethodOutput, PoolingMetadata],
     TokenPoolerHeadOutput,
 ]
 
@@ -79,7 +87,7 @@ class ClassifierPooler(TokenPooler):
 
     def __init__(
         self,
-        pooling: TokenPoolingHeadFn | SimplePooler,
+        pooling: TokenPoolingFn | SimplePooler,
         classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:

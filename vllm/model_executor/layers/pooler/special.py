@@ -15,7 +15,7 @@ from .activations import PoolerActivation
 from .common import ClassifierFn
 from .token import (
     ClassifierPooler,
-    TokenPoolingHeadFn,
+    TokenPoolingFn,
     pooler_for_classify,
     pooler_for_embed,
 )
@@ -25,7 +25,7 @@ from .tokenwise import pooler_for_token_classify, pooler_for_token_embed
 def _get_seq_cls_pooler(
     pooler_config: PoolerConfig,
     *,
-    pooling: TokenPoolingHeadFn | None = None,
+    pooling: TokenPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
@@ -60,7 +60,7 @@ class DispatchPooler(Pooler):
         cls,
         pooler_config: PoolerConfig,
         *,
-        pooling: TokenPoolingHeadFn | None = None,
+        pooling: TokenPoolingFn | None = None,
         classifier: ClassifierFn | None = None,
     ):
         return cls(
