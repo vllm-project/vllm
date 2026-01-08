@@ -59,14 +59,14 @@ class BaseRouter(FusedMoERouter):
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
         if self.enable_eplb:
             if self.eplb_state.expert_load_view is None:
-                raise ValueError("enable_eplb=True requiere expert_load_view != None")
+                raise ValueError("enable_eplb=True requires expert_load_view != None")
             if self.eplb_state.logical_to_physical_map is None:
                 raise ValueError(
-                    "enable_eplb=True requiere logical_to_physical_map != None"
+                    "enable_eplb=True requires logical_to_physical_map != None"
                 )
             if self.eplb_state.logical_replica_count is None:
                 raise ValueError(
-                    "enable_eplb=True requiere logical_replica_count != None"
+                    "enable_eplb=True requires logical_replica_count != None"
                 )
 
     def _get_indices_type(self) -> torch.dtype | None:
