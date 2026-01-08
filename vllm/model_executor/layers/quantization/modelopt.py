@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
@@ -23,6 +22,13 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    convert_to_fp8_moe_kernel_format,
+    make_fp8_moe_kernel,
+    make_fp8_moe_quant_config,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -45,19 +51,16 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
-    apply_flashinfer_per_tensor_scale_fp8,
+    apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     is_flashinfer_supporting_global_sf,
-    make_fp8_moe_alpha_scales_for_fi,
-    register_scales_for_trtllm_fp8_per_tensor_moe,
-    rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
-    swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
+    process_fp8_input_tensor_strategy_moe,
+    process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -85,13 +88,12 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
-    has_flashinfer_moe,
 )
-from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -721,38 +723,23 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
     ) -> None:
         super().__init__(layer.moe_config)
-        self.layer = layer
         self.quant_config = quant_config
-        from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-            cutlass_fp8_supported,
+        assert self.quant_config.is_checkpoint_fp8_serialized
+        self.fp8_backend = select_fp8_moe_backend(
+            block_quant=False,
+            tp_size=layer.moe_parallel_config.tp_size,
+            with_lora_support=self.moe.is_lora_enabled,
         )
-
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
-        self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
-        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
-            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
-            if (
-                self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-                and not self.moe.is_act_and_mul
-            ):
-                logger.info_once(
-                    "Non-gated MoE is not supported for min-latency mode,"
-                    "falling back to high-throughput mode"
-                )
-                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-
-            logger.info_once(
-                f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
-            )
+        self.kernel: mk.FusedMoEModularKernel | None = None
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         # TRT LLM not supported with all2all yet.
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             return None
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             # TP case: avoid convert to ModularKernelMethod - to be refactored.
             if self.moe.dp_size == 1:
                 return None
@@ -787,6 +774,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        layer.orig_dtype = params_dtype
+        layer.num_experts = num_experts
+
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
             torch.float8_e4m3fn
@@ -826,217 +816,121 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight", w2_weight)
 
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            # WEIGHT SCALES - Per-tensor scaling for ModelOpts
-            # For gated MoE, allocate 2 scales for w1 and w3 respectively.
-            # They will be combined to a single scale after weight loading.
-            # For non-gated MoE, allocate 1 scale for w13.
-            if self.moe.is_act_and_mul:
-                w13_weight_scale_shape = (num_experts, 2)
-            else:
-                w13_weight_scale_shape = (num_experts, 1)
-            w13_weight_scale = PerTensorScaleParameter(
-                data=torch.full(
-                    w13_weight_scale_shape,
-                    1.0,
-                    dtype=torch.float32,
-                ),
-                weight_loader=weight_loader,
-            )
-            w2_weight_scale = PerTensorScaleParameter(
-                data=torch.full((num_experts,), 1.0, dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
-            layer.register_parameter("w13_weight_scale", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        # WEIGHT SCALES - Per-tensor scaling for ModelOpts
+        # For gated MoE, allocate 2 scales for w1 and w3 respectively.
+        # They will be combined to a single scale after weight loading.
+        # For non-gated MoE, allocate 1 scale for w13.
+        w13_weight_scale = PerTensorScaleParameter(
+            data=torch.full(
+                (num_experts, 2 if self.moe.is_act_and_mul else 1),
+                1.0,
+                dtype=torch.float32,
+            ),
+            weight_loader=weight_loader,
+        )
+        w2_weight_scale = PerTensorScaleParameter(
+            data=torch.full((num_experts,), 1.0, dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
-            # Set weight loader attributes for scales
-            extra_weight_attrs.update(
-                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
-            )
+        # INPUT SCALES - Per-tensor scaling for ModelOpt
+        w13_input_scale = PerTensorScaleParameter(
+            data=torch.full((num_experts,), 1.0, dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        w2_input_scale = PerTensorScaleParameter(
+            data=torch.full((num_experts,), 1.0, dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("w13_input_scale", w13_input_scale)
+        layer.register_parameter("w2_input_scale", w2_input_scale)
 
-            # INPUT SCALES - Per-tensor scaling for ModelOpt
-            w13_input_scale = PerTensorScaleParameter(
-                data=torch.full((num_experts,), 1.0, dtype=torch.float32),
-                weight_loader=weight_loader,
+    def _setup_kernel(
+        self,
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor,
+        w2_input_scale: torch.Tensor,
+    ):
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
+        )
+
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        # Setup modular kernel for TP case.
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config:
+            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+                layer=layer,
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
             )
-            w2_input_scale = PerTensorScaleParameter(
-                data=torch.full((num_experts,), 1.0, dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
-            layer.register_parameter("w13_input_scale", w13_input_scale)
-            layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Process FP8 MoE weights after loading from serialized checkpoint.
-        Only supports pre-quantized checkpoints with FP8 weights and scales.
-        """
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        w13_input_scale = layer.w13_input_scale
+        w2_input_scale = layer.w2_input_scale
 
-        if self.flashinfer_moe_backend is not None:
-            self._maybe_pad_intermediate_for_flashinfer(layer)
+        # Per tensor kernels require single activation scale. Use the max.
+        w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
+            w13_input_scale, w2_input_scale
+        )
+        replace_parameter(layer, "w13_input_scale", w13_input_scale)
+        replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
-        layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
-        layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
-
-        from vllm._custom_ops import scaled_fp8_quant
-        from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-            per_tensor_dequantize,
+        # Per tensor kernels require single weight scale for w13 per expert, but
+        # on disk there is a scale for w1 and w3. Use the max to requantize.
+        shard_size = layer.intermediate_size_per_partition
+        w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
+            w13,
+            w13_scale,
+            shard_size,
+            num_experts=layer.w13_weight.shape[0],
+            is_act_and_mul=self.moe.is_act_and_mul,
         )
 
-        # Handle scale parameters
-        if hasattr(layer, "w13_weight_scale") and layer.w13_weight_scale is not None:
-            # Fp8 moe kernel needs single weight scale for w13 per expert.
-            # We take the max of the w1 and w3 scales
-            # then dequant and requant each expert.
-            if (
-                layer.w13_weight_scale.dim() == 2
-                and layer.w13_weight_scale.shape[1] == 2
-            ):
-                assert self.moe.is_act_and_mul, (
-                    "w13_weight_scale should have 2 elements per expert "
-                    "only for gated MoE"
-                )
-                # Get the maximum scale across w1 and w3 for each expert
-                max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-
-                # Requantize each expert's weights using the combined scale
-                # w13_weight (num_experts, 2 * intermediate_size, hidden_size)
-                # where the first intermediate_size rows are w1, the next are w3
-                intermediate_size = layer.w13_weight.shape[1] // 2
-                for expert_id in range(layer.w13_weight.shape[0]):
-                    start = 0
-                    for shard_id in range(2):  # w1 and w3
-                        # Dequantize using the original scale for this shard
-                        dq_weight = per_tensor_dequantize(
-                            layer.w13_weight[expert_id][
-                                start : start + intermediate_size, :
-                            ],
-                            layer.w13_weight_scale[expert_id][shard_id],
-                        )
-                        # Requantize using the combined max scale
-
-                        (
-                            layer.w13_weight[expert_id][
-                                start : start + intermediate_size, :
-                            ],
-                            _,
-                        ) = scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
-
-                        start += intermediate_size
-
-                # Update the scale parameter to be per-expert
-                layer.w13_weight_scale = Parameter(max_w13_scales, requires_grad=False)
-            else:
-                layer.w13_weight_scale = Parameter(
-                    layer.w13_weight_scale.data, requires_grad=False
-                )
-
-        if hasattr(layer, "w2_weight_scale") and layer.w2_weight_scale is not None:
-            layer.w2_weight_scale = Parameter(
-                layer.w2_weight_scale.data, requires_grad=False
-            )
-        # Input scales must be equal for each expert in fp8 MoE layers.
-        if hasattr(layer, "w13_input_scale") and layer.w13_input_scale is not None:
-            layer.w13_input_scale = Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-        if hasattr(layer, "w2_input_scale") and layer.w2_input_scale is not None:
-            layer.w2_input_scale = Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
-
-        if self.flashinfer_moe_backend is not None:
-            if self.moe.is_act_and_mul:
-                layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-
-            # NOTE: this adds some attributes used by the trtllm kernel,
-            # which does not conform to the modular kernels abstraction (yet).
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
-                register_scales_for_trtllm_fp8_per_tensor_moe(
-                    layer=layer,
-                    w13_weight_scale=layer.w13_weight_scale,
-                    w13_input_scale=layer.w13_input_scale,
-                    w2_weight_scale=layer.w2_weight_scale,
-                    w2_input_scale=layer.w2_input_scale,
-                )
-
-    def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
-        """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
-
-        Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
-        used for GEMM to be divisible by a small alignment value. When this is
-        not satisfied (e.g. with certain tensor-parallel sizes), we pad the
-        gate/up and down projection weights along the intermediate dim.
-        """
-        if not hasattr(layer, "w13_weight") or not hasattr(layer, "w2_weight"):
-            return
-
-        # Current local intermediate size (per partition) is the K dimension of
-        # the down projection.
-        num_experts, hidden_size, intermediate = layer.w2_weight.shape
-
-        min_alignment = 16
-        padded_intermediate = round_up(intermediate, min_alignment)
-
-        if padded_intermediate == intermediate:
-            return
-
-        logger.info(
-            "Padding intermediate size from %d to %d for up/down projection weights.",
-            intermediate,
-            padded_intermediate,
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
-
-        up_mult = 2 if self.moe.is_act_and_mul else 1
-        padded_gate_up_dim = up_mult * padded_intermediate
-
-        # Pad w13 and w12 along its intermediate dimension.
-        w13 = layer.w13_weight.data
-        padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-        padded_w13[:, : w13.shape[1], :] = w13
-        layer.w13_weight.data = padded_w13
-
-        w2 = layer.w2_weight.data
-        padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
-        padded_w2[:, :, :intermediate] = w2
-        layer.w2_weight.data = padded_w2
-
-        if hasattr(layer, "intermediate_size_per_partition"):
-            layer.intermediate_size_per_partition = padded_intermediate
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            # TRTLLM does not use modular kernels
-            return None
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
 
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            g1_alphas, g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                layer.w13_weight_scale,
-                layer.w13_input_scale,
-                layer.w2_weight_scale,
-                layer.w2_input_scale,
-            )
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
-                a1_gscale=(1.0 / layer.w13_input_scale),
-                a2_gscale=(1.0 / layer.w2_input_scale),
-                g1_alphas=g1_alphas,
-                g2_alphas=g2_alphas,
-            )
-        else:
-            assert self.flashinfer_moe_backend is None
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
-            )
+        return make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+        )
 
     def apply(
         self,
@@ -1044,17 +938,18 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             if layer.enable_eplb:
                 raise NotImplementedError(
-                    "EPLB not supported for `ModelOptFp8MoEMethod` yet."
+                    "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
                 )
+            # TODO(rob): this validation should happen at kernel selection
+            # time in the oracle rather than here.
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"
             )
-
             assert not layer.renormalize
-            return apply_flashinfer_per_tensor_scale_fp8(
+            return apply_fi_trtllm_fp8_per_tensor_moe(
                 layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,
@@ -1066,46 +961,34 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        # Expert selection
         topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        # TODO(rob): this validation should happen at kernel selection
+        # time in the oracle rather than here.
+        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             assert layer.activation in ("silu", "relu2_no_mul"), (
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
                 f"but got {layer.activation}"
             )
-            return flashinfer_cutlass_moe_fp8(
-                x,
-                layer,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 
-            assert self.moe_quant_config is not None
+        assert self.kernel is not None
+        result = self.kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            inplace=self.use_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
-            return fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=layer.activation,
-                quant_config=self.moe_quant_config,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
+        return result
 
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
