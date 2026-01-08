@@ -556,7 +556,7 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with causal attention."""
 

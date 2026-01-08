@@ -92,7 +92,9 @@ def run_radio_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
-def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_radio(
+    default_vllm_config, dist_init, image_assets, model_id, dtype: str
+) -> None:
     run_radio_test(
         image_assets,
         model_id,

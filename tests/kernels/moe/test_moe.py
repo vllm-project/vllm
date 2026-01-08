@@ -468,7 +468,12 @@ def test_fused_moe_wn16(
 )
 @torch.inference_mode()
 def test_mixtral_moe(
-    dist_init, dtype: torch.dtype, padding: bool, use_rocm_aiter: bool, monkeypatch
+    default_vllm_config,
+    dist_init,
+    dtype: torch.dtype,
+    padding: bool,
+    use_rocm_aiter: bool,
+    monkeypatch,
 ):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""

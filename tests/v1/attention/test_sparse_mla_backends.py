@@ -124,7 +124,12 @@ def _quantize_dequantize_fp8_ds_mla(
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_sparse_backend_decode_correctness(
-    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size, workspace_init
+    default_vllm_config,
+    dist_init,
+    batch_name,
+    kv_cache_dtype,
+    tensor_parallel_size,
+    workspace_init,
 ):
     if current_platform.is_rocm():
         pytest.skip("ROCm does not support fp8_ds_mla data type for kv cache.")

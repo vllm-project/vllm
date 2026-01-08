@@ -540,6 +540,20 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
+        self._grouped_topk_impl: GroupedTopk | None = None
+        if self.use_grouped_topk:
+            assert self.num_expert_group is not None
+            assert self.topk_group is not None
+            self._grouped_topk_impl = GroupedTopk(
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
+
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError(
                 "Only softmax scoring function is supported for non-grouped topk."
@@ -1588,19 +1602,8 @@ class FusedMoE(CustomOp):
 
         # DeepSeekv2 uses grouped_top_k
         elif self.use_grouped_topk and valid_grouping():
-            assert self.topk_group is not None
-            assert self.num_expert_group is not None
-            grouped_topk_impl = GroupedTopk(
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                num_expert_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-            )
-
-            topk_weights, topk_ids = grouped_topk_impl(
+            assert self._grouped_topk_impl is not None
+            topk_weights, topk_ids = self._grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 e_score_correction_bias=self.e_score_correction_bias,
