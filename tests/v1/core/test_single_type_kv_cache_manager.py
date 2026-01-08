@@ -391,7 +391,9 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_local_computed_tokens=block_size,
         num_external_computed_tokens=0,
     )
-    new_blocks = manager.allocate_new_blocks(request_id, num_tokens=4)
+    new_blocks = manager.allocate_new_blocks(
+        request_id, num_tokens=4, num_tokens_main_model=4
+    )
     assert len(new_blocks) == 1
     assert len(manager.req_to_blocks[request_id]) == 2
 
