@@ -213,20 +213,20 @@ class Phi3HDImageEmbedding(nn.Module):
         self.type_feature = config.img_processor.get("type_feature", "patch")
 
     def get_img_features(self, img_embeds: torch.FloatTensor) -> torch.FloatTensor:
-        TYPE_FEATURE = self.type_feature
+        type_feature = self.type_feature
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the img_processor
         img_feature = self.img_processor(img_embeds)
 
-        if TYPE_FEATURE == "patch":
+        if type_feature == "patch":
             patch_feature = img_feature[:, 1:]
             return patch_feature
 
-        if TYPE_FEATURE == "cls_patch":
+        if type_feature == "cls_patch":
             return img_feature
 
-        raise NotImplementedError
+        raise NotImplementedError(type_feature)
 
     def forward(
         self, pixel_values: torch.FloatTensor, image_sizes: torch.Tensor
