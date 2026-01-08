@@ -871,8 +871,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
+        # For fused activations (SwiGLU): N = 2 * intermediate, after act = N/2
+        # For non-fused activations: N = intermediate, after act = N
+        intermediate_size = N // 2 if self.quant_config.is_act_and_mul else N
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dp, intermediate_size)
         output = (num_experts, max_num_tokens * num_dp, K)
         return (workspace13, workspace2, output)
 
@@ -947,7 +950,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13, (E, max_num_tokens, N))
-        intermediate_cache2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
+        # For fused activations (SwiGLU): output is N/2, for non-fused: output is N
+        intermediate_size = N // 2 if self.quant_config.is_act_and_mul else N
+        intermediate_cache2 = _resize_cache(
+            workspace2, (E, max_num_tokens, intermediate_size)
+        )
 
         # TODO(bnell): should this be done for any quantized type?
         if self.quant_config.use_fp8_w8a8:
@@ -978,7 +985,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (bnell): use triton utility from batched deep gemm.
         self.activation(
             activation,
-            intermediate_cache2.view(-1, N // 2),
+            intermediate_cache2.view(-1, intermediate_size),
             intermediate_cache1.view(-1, N),
         )
 
