@@ -436,7 +436,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_loader=patched_weight_loader,
             )
         layer.register_parameter("weight", weight)
-        layer.input_scale_ub = None
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
@@ -471,8 +470,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
                 set_weight_attrs(scale, {"scale_type": "input_scale"})
                 layer.register_parameter("input_scale", scale)
-            else:
-                layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

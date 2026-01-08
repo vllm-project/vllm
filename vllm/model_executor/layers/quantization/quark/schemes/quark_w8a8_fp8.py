@@ -117,8 +117,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         # INPUT SCALE
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
-        else:
-            layer.input_scale = None
 
     def create_weights(
         self,
@@ -173,8 +171,6 @@ class QuarkW8A8Fp8(QuarkScheme):
             )
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
-
-        layer.input_scale_ub = None
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,

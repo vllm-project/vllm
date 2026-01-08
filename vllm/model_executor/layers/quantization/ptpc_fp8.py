@@ -122,7 +122,6 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
             qweight.t(), requires_grad=False
         )  # Pretranspose the weight
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-        layer.input_scale = None
 
     def apply(
         self,

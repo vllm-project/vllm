@@ -146,8 +146,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
-        layer.input_scale_ub = None
-
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
@@ -169,7 +167,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight, weight_scale = process_fp8_weight_block_strategy(
                 layer.weight, layer.weight_scale
             )
-            input_scale = None
 
         else:
             raise ValueError(
@@ -186,8 +183,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, "input_scale"):
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
-        else:
-            layer.input_scale = None
 
         if self.strategy == QuantizationStrategy.BLOCK:
             maybe_post_process_fp8_weight_block(layer)
