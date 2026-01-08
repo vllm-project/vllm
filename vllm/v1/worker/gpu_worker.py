@@ -390,7 +390,7 @@ class Worker(WorkerBase):
         """
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
-            self.model_runner.max_model_len = max_model_len
+            self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
