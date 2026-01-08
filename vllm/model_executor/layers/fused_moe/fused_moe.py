@@ -2315,9 +2315,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        logger.info(
-            f"in apply: {hidden_states.dtype=}, {topk_weights.dtype=}, {topk_ids.dtype=}, {a1q_scale.dtype=}"
-        )
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
