@@ -9,6 +9,9 @@ from torch.nn import Module
 
 from vllm._ipex_ops import ipex_ops as ops
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -384,6 +387,7 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
     def apply(
         self,
         layer: torch.nn.Module,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
