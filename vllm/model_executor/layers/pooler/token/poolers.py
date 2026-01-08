@@ -70,7 +70,7 @@ class SimplePooler(TokenPooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
+    ) -> TokenPoolerHeadOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
