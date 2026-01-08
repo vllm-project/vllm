@@ -477,7 +477,15 @@ class OpenAISpeechToText(OpenAIServing):
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
+            chunk_size_in_s = self.asr_config.max_audio_clip_s
+            if chunk_size_in_s is None:
+                assert len(list_result_generator) == 1, (
+                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
+                )
             for idx, result_generator in enumerate(list_result_generator):
+                start_time = (
+                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
+                )
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         segments: list[SpeechToTextSegment] = (
@@ -485,7 +493,7 @@ class OpenAISpeechToText(OpenAIServing):
                                 tokens=tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
                                 request=request,
-                                start_time=idx * self.asr_config.max_audio_clip_s,
+                                start_time=start_time,
                             )
                         )
 
@@ -653,6 +661,10 @@ class OpenAISpeechToText(OpenAIServing):
     def _split_audio(
         self, audio_data: np.ndarray, sample_rate: int
     ) -> list[np.ndarray]:
+        assert self.asr_config.max_audio_clip_s is not None, (
+            f"{self.asr_config.max_audio_clip_s=} cannot be None to"
+            " split audio into chunks."
+        )
         chunk_size = sample_rate * self.asr_config.max_audio_clip_s
         overlap_size = sample_rate * self.asr_config.overlap_chunk_second
         chunks = []
