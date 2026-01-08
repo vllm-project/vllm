@@ -1096,15 +1096,17 @@ def get_dcp_group() -> GroupCoordinator:
 get_context_model_parallel_group = get_dcp_group
 
 _PP: GroupCoordinator | None = None
+_PP_PROVIDER: Callable[[], Any] | None = None
+
+
+def set_pp_provider(fn):
+    global _PP_PROVIDER
+    _PP_PROVIDER = fn
 
 
 def get_pp_group() -> GroupCoordinator:
-    from vllm.platforms.tpu import USE_TPU_INFERENCE
-
-    if USE_TPU_INFERENCE:
-        from tpu_inference.distributed import jax_parallel_state
-
-        return jax_parallel_state.get_pp_group()
+    if _PP_PROVIDER:
+        return _PP_PROVIDER()
     assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
 
