@@ -14,6 +14,10 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
+    def __init__(self, defer_input_quant: bool = False) -> None:
+        super().__init__()
+        self.defer_input_quant = defer_input_quant
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -48,33 +52,38 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            quant_config.a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-        )
+        # Defer input quantization to the MoE kernel.
+        if self.defer_input_quant:
+            a1q = a1
+            a1q_scale = None
+        else:
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+            )
         # TODO - this is just for deepgemm?
         expert_tokens_meta = None
 
         from vllm.platforms import current_platform
 
         # The torch ops do not support fp8, so use an int8 view.
-        # Since this does not do a reduce, it is safe to do.
+        # Since dispatch does not do a reduce, this is safe to do.
         use_int8_view = a1q.dtype == current_platform.fp8_dtype()
         if use_int8_view:
             a1q = a1q.view(torch.int8)
 
-        extra_tensors = None if a1q_scale is None else [a1q_scale]
-        a1q, topk_weights, topk_ids, et = get_ep_group().dispatch(
+        scales = None if a1q_scale is None else [a1q_scale]
+        a1q, topk_weights, topk_ids, scales = get_ep_group().dispatch(
             a1q,
             topk_weights,
             topk_ids,
             is_sequence_parallel=False,  # TODO: support SP
-            extra_tensors=extra_tensors,
+            extra_tensors=scales,
         )
-        a1q_scale = et[0] if extra_tensors is not None else None
+        a1q_scale = scales[0] if scales is not None else None
 
         if use_int8_view:
             a1q = a1q.view(current_platform.fp8_dtype())
@@ -101,7 +110,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        # ... copy the
         output.copy_(get_ep_group().combine(out, is_sequence_parallel=False))
 
 
