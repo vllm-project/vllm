@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only InternS1Pro model compatible with HuggingFace weights."""
 
+import functools
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -34,16 +35,22 @@ from transformers import AutoProcessor, PretrainedConfig
 
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -57,13 +64,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
     Qwen3MoeForCausalLM,
-    Qwen3MoeMLP,
-    Qwen3MoeSparseMoeBlock,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -72,7 +79,6 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
-from .qwen3_vl_moe import Qwen3VLMoeMixtureOfExperts
 from .utils import (
     extract_layer_index,
     is_pp_missing_parameter,
@@ -234,6 +240,182 @@ class InternS1ProMoeAttention(nn.Module):
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
+
+
+class Qwen3MoeMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class Qwen3MoeSparseMoeBlock(nn.Module):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        config = vllm_config.model_config.hf_text_config
+        parallel_config = vllm_config.parallel_config
+        quant_config = vllm_config.quant_config
+
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts = config.num_experts
+
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
+        if self.tp_size > config.num_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {config.num_experts}."
+            )
+
+        # Load balancing settings.
+        vllm_config = get_current_vllm_config()
+        eplb_config = vllm_config.parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        # For custom routing function
+        self.n_groups = getattr(config, "router_n_groups", -1)
+
+        self.experts = FusedMoE(
+            num_experts=self.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=True,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+            routing_method_type=RoutingMethodType.Renormalize,
+            custom_routing_function=self._custom_routing_function,
+        )
+
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
+
+    @staticmethod
+    @functools.lru_cache
+    def get_group_offsets(n_groups: int, group_size: int, device: str):
+        group_offsets = (torch.arange(n_groups, device=device) * group_size).view(
+            1, -1, 1
+        )  # [1, n_groups, 1]
+        return group_offsets
+
+    # TODO: zhouxinyu, use vllm routing functions
+    def _custom_routing_function(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> torch.Tensor:
+        routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
+
+        if self.n_groups > 0:
+            assert routing_weights.shape[-1] % self.n_groups == 0, (
+                f"{routing_weights.shape[-1]} cannot be divided by {self.n_groups}"
+            )
+            per_group_top_k = topk // self.n_groups
+            group_size = routing_weights.shape[-1] // self.n_groups
+            group_offsets = self.get_group_offsets(
+                self.n_groups, group_size, routing_weights.device
+            )
+            routing_weights = routing_weights.unflatten(-1, (self.n_groups, group_size))
+            topk_weights, topk_ids = torch.topk(
+                routing_weights, per_group_top_k, dim=-1
+            )
+            topk_ids = (topk_ids + group_offsets).flatten(-2, -1)
+            topk_weights = topk_weights.flatten(-2, -1)
+        else:
+            topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        return topk_weights, topk_ids
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert hidden_states.dim() <= 2, (
+            "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
+        )
+        is_input_1d = hidden_states.dim() == 1
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+
+        # return to 1d if input is 1d
+        return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
 
 
 class InternS1ProMoeDecoderLayer(nn.Module):
@@ -654,6 +836,48 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+
+class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.language_model.model.layers:
+            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
+    def set_moe_parameters(self):
+        self.expert_weights = []
+
+        self.moe_layers = []
+        example_moe = None
+        for layer in self.language_model.model.layers:
+            if hasattr(layer, "mlp") and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
+        if example_moe is None:
+            raise RuntimeError("No Qwen3Moe layer found in the language_model.")
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
 
 
 @MULTIMODAL_REGISTRY.register_processor(
