@@ -947,7 +947,10 @@ class OpenAIServingResponses(OpenAIServing):
         system_msg = None
         if not isinstance(request.input, str):
             for response_msg in request.input:
-                if response_msg.get("role") == "system":
+                if (
+                    isinstance(response_msg, dict)
+                    and response_msg.get("role") == "system"
+                ):
                     system_msg = response_msg.get("content")
                     break
         return system_msg
