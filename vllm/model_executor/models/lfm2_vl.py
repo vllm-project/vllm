@@ -50,6 +50,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .siglip2 import Siglip2Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -545,8 +546,6 @@ class Lfm2VLForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         if vision_config.model_type == "siglip2_vision_model":
-            from vllm.model_executor.models.siglip2 import Siglip2Model
-
             self.vision_tower = Siglip2Model(
                 config=vision_config,
                 quant_config=quant_config,
@@ -602,8 +601,6 @@ class Lfm2VLForConditionalGeneration(
         pixel_values = pixel_values.to(
             dtype=self.vision_tower.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
-        if spatial_shapes.is_cuda:
-            spatial_shapes = spatial_shapes.cpu()
 
         # LFM2-VL's HF processor pads patch sequences with trailing zeros.
         # Derive the valid-patch mask from spatial_shapes instead of carrying
