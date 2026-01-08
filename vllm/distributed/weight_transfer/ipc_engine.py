@@ -86,8 +86,10 @@ class IPCWeightTransferEngine(WeightTransferEngine[IPCInitInfo, IPCUpdateInfo]):
         pass
 
     def receive_weights(
-        self, update_info: IPCUpdateInfo
-    ) -> list[tuple[str, torch.Tensor]]:
+        self,
+        update_info: IPCUpdateInfo,
+        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
+    ) -> None:
         """
         Receive weights from the trainer via CUDA IPC handles.
 
@@ -118,7 +120,7 @@ class IPCWeightTransferEngine(WeightTransferEngine[IPCInitInfo, IPCUpdateInfo]):
             weight = func(*list_args)  # type: ignore
             weights.append((name, weight))
 
-        return weights
+        load_weights(weights)
 
     def shutdown(self) -> None:
         """
