@@ -9,9 +9,11 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.attention.layer import Attention, MultiHeadAttention
+from vllm.attention.layer import Attention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import set_random_seed
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -149,7 +151,7 @@ def test_paged_attention(
 
     global PARTITION_SIZE
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -442,7 +444,7 @@ def ref_multi_query_kv_attention(
     return torch.cat(ref_outputs, dim=0)
 
 
-@pytest.mark.parametrize("attention_cls", [Attention, MultiHeadAttention])
+@pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
 def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
     head_size = 64
     scale = float(1.0 / (head_size**0.5))

@@ -219,7 +219,17 @@ def test_priority_scheduling_blast(
             vllm_config=scheduler.vllm_config,
         )
         scheduler.add_request(req)
-
+    num_initial_requests = 2
+    for _ in range(num_initial_requests):
+        req = _create_random_request(
+            max_tokens_range=(1, max_output_tokens),
+            num_tokens_range=(1, max_input_tokens),
+            arrival_time_range=(0, 0),
+            priority_range=(4, 4),
+            num_mm_item_range=(0, 2),
+            vllm_config=scheduler.vllm_config,
+        )
+        scheduler.add_request(req)
     for _ in range(20000):
         if len(scheduler.waiting) == 0:
             num_new_requests = random.randint(0, 2)

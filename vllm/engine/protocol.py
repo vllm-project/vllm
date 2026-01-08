@@ -71,7 +71,11 @@ class EngineClient(ABC):
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model."""
+        """Generate outputs for a request from a pooling model.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove this argument in v0.15.
+        """
         ...
 
     @abstractmethod
@@ -116,8 +120,10 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self) -> None:
-        """Reset the prefix cache"""
+    async def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        """Reset the prefix cache and optionally any configured connector cache"""
         ...
 
     @abstractmethod

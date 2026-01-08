@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import (
@@ -301,7 +302,7 @@ def async_tp_pass_on_test_model(
     dtype: torch.dtype,
     dynamic: bool,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
@@ -326,7 +327,7 @@ def async_tp_pass_on_test_model(
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
         pass_config=PassConfig(
-            enable_async_tp=True,
+            fuse_gemm_comms=True,
         ),
     )
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
@@ -413,7 +414,7 @@ def test_async_tp_pass_correctness(
         "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
-        "pass_config": {"enable_async_tp": async_tp_enabled},
+        "pass_config": {"fuse_gemm_comms": async_tp_enabled},
     }
 
     async_tp_args = [

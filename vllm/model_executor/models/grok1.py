@@ -181,7 +181,6 @@ class Grok1Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
             is_neox_style=True,
@@ -370,6 +369,7 @@ class Grok1Model(nn.Module):
         # Grok1 uses "num_experts" in its config
         num_experts = getattr(self.config, "num_experts", 8)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="linear",  # Grok1 specific
             ckpt_down_proj_name="linear_1",  # Grok1 specific
             ckpt_up_proj_name="linear_v",  # Grok1 specific

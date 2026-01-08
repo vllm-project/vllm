@@ -18,23 +18,28 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
     binary2tensor,
+    build_metadata_items,
     decode_pooling_output,
 )
-
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
+
+
+if current_platform.is_rocm():
+    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +56,10 @@ def server():
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
     ]
+
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -331,6 +340,55 @@ async def test_bytes_embed_dtype_and_endianness(
             metadata = json.loads(responses_bytes.headers["metadata"])
             body = responses_bytes.content
             items = [MetadataItem(**x) for x in metadata["data"]]
+
+            bytes_data = decode_pooling_output(items=items, body=body)
+            bytes_data = [x.to(torch.float32).tolist() for x in bytes_data]
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=bytes_data,
+                name_0="float_data",
+                name_1="bytes_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_bytes_only_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ] * 2
+
+    responses_float = await client.embeddings.create(
+        input=input_texts, model=model_name, encoding_format="float"
+    )
+    float_data = [d.embedding for d in responses_float.data]
+    embedding_size = len(float_data[0])
+
+    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+        for endianness in ENDIANNESS:
+            responses_bytes = requests.post(
+                server.url_for("/v1/embeddings"),
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "bytes_only",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            assert "metadata" not in responses_bytes.headers
+            body = responses_bytes.content
+            items = build_metadata_items(
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+                shape=(embedding_size,),
+                n_request=len(input_texts),
+            )
 
             bytes_data = decode_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).tolist() for x in bytes_data]

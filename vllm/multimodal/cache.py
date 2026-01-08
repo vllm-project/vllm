@@ -20,12 +20,12 @@ from vllm.logger import init_logger
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_gib
 
 from .inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     NestedTensors,
@@ -90,7 +90,6 @@ MultiModalCacheValue: TypeAlias = (
     | MultiModalProcessorCacheItemMetadata
     | MultiModalKwargsItems
     | MultiModalKwargsItem
-    | MultiModalKwargs
     | Mapping[str, NestedTensors]
 )
 
@@ -108,12 +107,7 @@ class MultiModalCache:
         # These are not subclasses of dict
         if isinstance(
             leaf,
-            (
-                MultiModalKwargs,
-                MultiModalKwargsItems,
-                MultiModalKwargsItem,
-                MultiModalFieldElem,
-            ),
+            (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem),
         ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
@@ -137,9 +131,9 @@ class MultiModalCache:
         if debug:
             leaf_count = json_count_leaves(value)
             logger.debug(
-                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                "Calculated size of %s to be %s GiB (%d leaves)",
                 type(value),
-                size / GiB_bytes,
+                format_gib(size),
                 leaf_count,
             )
 
@@ -641,12 +635,17 @@ class BaseMultiModalReceiverCache(
         Update multimodal features with cached encoder outputs.
         Touch all identifier at first before update to avoid
         item in updated list evict during update.
+
+        Uses mm_hash for cache key to share across LoRAs (falls back to
+        identifier for backward compatibility).
         """
         for feature in mm_features:
-            self.touch_receiver_cache_item(feature.identifier, feature.data)
+            cache_key = feature.mm_hash or feature.identifier
+            self.touch_receiver_cache_item(cache_key, feature.data)
 
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data, feature.identifier)
+            cache_key = feature.mm_hash or feature.identifier
+            feature.data = self.get_and_update_item(feature.data, cache_key)
         return mm_features
 
     @abstractmethod

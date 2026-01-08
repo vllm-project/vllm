@@ -28,6 +28,19 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
@@ -73,19 +86,6 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    max_model_len: InitVar[int] = 8192
-    """Maximum length of a sequence (including prompt and generated text).
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    provide fallbacks and validate other attributes."""
-
-    is_encoder_decoder: InitVar[bool] = False
-    """True if the model is an encoder-decoder model.
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
-
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
     """Multimodal encoder compute budget, only used in V1.
@@ -122,17 +122,20 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
-    disable_hybrid_kv_cache_manager: bool = False
+    disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
+    If set to None, the default value will be determined based on the environment
+    and starting configuration.
     """
 
-    async_scheduling: bool = False
-    """If set to True, perform async scheduling. This helps to avoid gaps in
-    GPU utilization, leading to better latency and throughput.
-    Async scheduling is currently not supported with some features such as
-    speculative decoding and pipeline parallelism.
+    async_scheduling: bool = Field(default=None)
+    """If set to False, disable async scheduling. Async scheduling helps to
+    avoid gaps in GPU utilization, leading to better latency and throughput.
+    It is currently not supported with some features such as
+    speculative decoding and pipeline parallelism, and will be automatically
+    disabled in those cases.
     """
 
     stream_interval: int = Field(default=1, ge=1)
@@ -140,6 +143,17 @@ class SchedulerConfig:
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
+
+    @staticmethod
+    def default_factory(**kwargs):
+        """
+        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
@@ -175,9 +189,19 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
+
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        factors.append(self.max_num_batched_tokens)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
