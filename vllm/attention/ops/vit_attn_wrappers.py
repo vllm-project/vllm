@@ -27,6 +27,7 @@ def flash_attn_maxseqlen_wrapper(
     batch_size: int,
     is_rocm_aiter: bool,
     fa_version: int | None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -57,6 +58,7 @@ def flash_attn_maxseqlen_wrapper(
         max_seqlen_k=max_seqlen,
         dropout_p=0.0,
         causal=False,
+        softmax_scale=scale,
         **kwargs,
     )
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
@@ -67,11 +69,12 @@ def flash_attn_maxseqlen_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
     fa_version: int | None,
+    scale: float | None,
+    cu_seqlens: torch.Tensor | None,
+    max_seqlen: torch.Tensor | None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -90,6 +93,7 @@ def vit_flash_attn_wrapper(
     batch_size: int,
     is_rocm_aiter: bool,
     fa_version: int | None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -100,18 +104,24 @@ def vit_flash_attn_wrapper(
         batch_size,
         is_rocm_aiter,
         fa_version,
+        scale,
         cu_seqlens,
         max_seqlen,
     )
 
 
-def apply_sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+def apply_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float | None = None,
+) -> torch.Tensor:
     """
     Input shape:
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+    output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, scale=scale)
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -122,6 +132,7 @@ def torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Never remove the contiguous logic for ROCm
@@ -132,7 +143,7 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v)
+        return apply_sdpa(q, k, v, scale=scale)
 
     outputs = []
 
@@ -141,7 +152,7 @@ def torch_sdpa_wrapper(
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
     for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-        output_i = apply_sdpa(q_i, k_i, v_i)
+        output_i = apply_sdpa(q_i, k_i, v_i, scale=scale)
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
     return context_layer
@@ -151,7 +162,8 @@ def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    scale: float | None,
+    cu_seqlens: torch.Tensor | None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -167,6 +179,7 @@ def vit_torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, cu_seqlens)
+    return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, scale, cu_seqlens)

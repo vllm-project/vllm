@@ -9,6 +9,7 @@ requires = [
     "torch == 2.9.1",
     "wheel",
     "jinja2",
+    "grpcio-tools>=1.76.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -55,6 +56,10 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# Exclude generated protobuf files
+"vllm/grpc/*_pb2.py" = ["ALL"]
+"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+"vllm/grpc/*_pb2.pyi" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
