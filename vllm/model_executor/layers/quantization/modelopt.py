@@ -763,10 +763,21 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
-        experts = select_cutlass_fp8_gemm_impl(
-            self.moe,
-            self.moe_quant_config,
-        )
+
+        experts: mk.FusedMoEPermuteExpertsUnpermute
+
+        if self.fp8_backend == Fp8MoeBackend.TRITON:
+            from vllm.model_executor.layers.fused_moe import TritonExperts
+
+            experts = TritonExperts(quant_config=self.moe_quant_config)
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            experts = select_cutlass_fp8_gemm_impl(
+                self.moe,
+                self.moe_quant_config,
+            )
+        else:
+            raise NotImplementedError(f"MoE backend {self.fp8_backend} not supported")
+
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
 
