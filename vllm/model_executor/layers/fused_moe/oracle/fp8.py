@@ -205,6 +205,7 @@ def make_fp8_moe_quant_config(
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
     block_shape: list[int] | None = None,
+    is_act_and_mul: bool = True,
 ) -> FusedMoEQuantConfig | None:
     """
     Create FusedMoEQuantConfig for the specifed FP8 Backend.
@@ -249,6 +250,7 @@ def make_fp8_moe_quant_config(
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
+            is_act_and_mul=is_act_and_mul,
         )
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
@@ -257,6 +259,7 @@ def make_fp8_moe_quant_config(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
         block_shape=block_shape,
+        is_act_and_mul=is_act_and_mul,
     )
 
 
