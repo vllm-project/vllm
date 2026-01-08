@@ -14,7 +14,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     Pooler,
     pooler_for_token_classify,

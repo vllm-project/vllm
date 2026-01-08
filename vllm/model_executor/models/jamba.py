@@ -27,7 +27,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     pooler_for_classify,
     pooler_for_token_classify,

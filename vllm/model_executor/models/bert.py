@@ -17,7 +17,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     DispatchPooler,
     Pooler,
@@ -26,7 +26,7 @@ from vllm.model_executor.layers.pool import (
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
-from vllm.model_executor.layers.pool.token import (
+from vllm.model_executor.layers.pooler.token import (
     TokenPooler,
     TokenPoolerHeadOutput,
     TokenPoolerOutput,

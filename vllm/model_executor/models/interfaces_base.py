@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.model import AttnTypeStr
     from vllm.config.pooler import PoolingTypeStr
-    from vllm.model_executor.layers.pool import Pooler
+    from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any

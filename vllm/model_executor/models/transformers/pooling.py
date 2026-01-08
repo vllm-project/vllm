@@ -22,7 +22,7 @@ import torch
 from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     CLSPool,
     DispatchPooler,

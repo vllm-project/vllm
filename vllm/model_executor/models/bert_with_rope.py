@@ -24,7 +24,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     DispatchPooler,
     pooler_for_token_classify,

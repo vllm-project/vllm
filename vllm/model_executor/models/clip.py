@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     pooler_for_embed,
     pooler_for_token_embed,

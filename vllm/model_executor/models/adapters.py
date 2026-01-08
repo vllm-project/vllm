@@ -252,7 +252,7 @@ def as_embedding_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.pool import (
+    from vllm.model_executor.layers.pooler import (
         DispatchPooler,
         pooler_for_embed,
         pooler_for_token_embed,
@@ -293,7 +293,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
     # Lazy import
     from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.pool import (
+    from vllm.model_executor.layers.pooler import (
         DispatchPooler,
         pooler_for_classify,
         pooler_for_token_classify,

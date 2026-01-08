@@ -7,10 +7,10 @@ from typing import TypeAlias
 import torch
 
 from vllm.config import PoolerConfig
-from vllm.model_executor.layers.pool.activations import PoolerActivation
-from vllm.model_executor.layers.pool.common import ClassifierFn, PoolingParamsUpdate
-from vllm.model_executor.layers.pool.tokenwise.heads import TokenwisePoolerHead
-from vllm.model_executor.layers.pool.tokenwise.methods import AllPool
+from vllm.model_executor.layers.pooler.activations import PoolerActivation
+from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
+from vllm.model_executor.layers.pooler.tokenwise.heads import TokenwisePoolerHead
+from vllm.model_executor.layers.pooler.tokenwise.methods import AllPool
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 

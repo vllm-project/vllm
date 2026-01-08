@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.pool.activations import PoolerNormalize
+from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.v1.pool.metadata import PoolingMetadata
 

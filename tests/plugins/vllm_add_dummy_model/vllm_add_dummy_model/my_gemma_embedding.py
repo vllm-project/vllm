@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     pooler_for_embed,
     pooler_for_token_embed,

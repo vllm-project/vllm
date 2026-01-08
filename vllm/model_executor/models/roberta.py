@@ -8,7 +8,7 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     CLSPool,
     DispatchPooler,

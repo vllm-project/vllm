@@ -10,7 +10,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     pooler_for_classify,
     pooler_for_token_classify,

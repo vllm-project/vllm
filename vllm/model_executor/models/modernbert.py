@@ -12,13 +12,13 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     ClassifierPooler,
     DispatchPooler,
     PoolingParamsUpdate,
     pooler_for_token_classify,
 )
-from vllm.model_executor.layers.pool.token import (
+from vllm.model_executor.layers.pooler.token import (
     TokenPooler,
     TokenPoolerHeadOutput,
     TokenPoolerOutput,

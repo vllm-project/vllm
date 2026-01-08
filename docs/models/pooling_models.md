@@ -3,7 +3,7 @@
 vLLM also supports pooling models, such as embedding, classification, and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
-These models use a [Pooler][vllm.model_executor.layers.pool.Pooler] to extract the final hidden states of the input
+These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract the final hidden states of the input
 before returning them.
 
 !!! note
@@ -42,7 +42,7 @@ shown in the table below.
 ### Pooling Tasks
 
 Each pooling model in vLLM supports one or more of these tasks according to
-[Pooler.get_supported_tasks][vllm.model_executor.layers.pool.Pooler.get_supported_tasks],
+[Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
 | Task             | APIs                                                                          |
@@ -60,7 +60,7 @@ enabling the corresponding APIs:
 
 #### Predefined models
 
-If the [Pooler][vllm.model_executor.layers.pool.Pooler] defined by the model accepts `pooler_config`,
+If the [Pooler][vllm.model_executor.layers.pooler.Pooler] defined by the model accepts `pooler_config`,
 you can override some of its attributes via the `--pooler-config` option.
 
 #### Converted models

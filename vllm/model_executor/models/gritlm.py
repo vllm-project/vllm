@@ -7,13 +7,13 @@ import torch
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pool import (
+from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     PoolingParamsUpdate,
     pooler_for_token_embed,
 )
-from vllm.model_executor.layers.pool.activations import PoolerNormalize
-from vllm.model_executor.layers.pool.token import (
+from vllm.model_executor.layers.pooler.activations import PoolerNormalize
+from vllm.model_executor.layers.pooler.token import (
     TokenPooler,
     TokenPoolerHeadOutput,
     TokenPoolerOutput,
