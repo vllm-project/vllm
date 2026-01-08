@@ -523,7 +523,7 @@ def fused_moe_kernel(
     #   - int8_w8a16
     #   - fp8_w8a8
     #   - int8_w8a8
-    # All scaling is performed in float32 to preserve numerical accuracy.
+    # Accumulator and scalings are in float32 to preserve numerical accuracy.
     scale = None
     if use_int8_w8a16:
         scale = b_scale
@@ -533,8 +533,8 @@ def fused_moe_kernel(
         accumulator *= scale
 
     # Bias addition:
-    # Bias must be applied AFTER dequantization:
-    #   - Bias values are typically stored in the output dtype
+    # Bias must be applied after dequantization:
+    #   - Since bias is typically not quantized
     #   - Bias should not be scaled by quantization factors
     if HAS_BIAS:
         accumulator += bias[None, :]
