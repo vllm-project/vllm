@@ -20,7 +20,6 @@ from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
-from vllm.transformers_utils.repo_utils import file_or_path_exists
 
 from .protocol import TokenizerLike
 
@@ -442,7 +441,3 @@ class Grok2Tokenizer(TokenizerLike):
         if tokenize:
             return self.encode(prompt, add_special_tokens=False)
         return prompt
-
-
-def supports_grok2_tokenizer(model_path: str | Path, revision: str | None) -> bool:
-    return file_or_path_exists(model_path, "tokenizer.tok.json", revision)
