@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -285,10 +286,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
+            router=router,
             layer=layer,
             x=x,
             router_logits=router_logits,
@@ -306,10 +309,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -332,6 +336,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_cpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -365,6 +370,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def forward_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
