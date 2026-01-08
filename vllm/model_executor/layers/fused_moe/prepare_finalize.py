@@ -14,10 +14,6 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
-    def __init__(self) -> None:
-        super().__init__()
-        self.dummy_tensor = torch.empty(1, device="cuda")
-
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -59,10 +55,10 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.per_act_token_quant,
             quant_config.block_shape,
         )
-        # TODO - this is just for deepgemm
+        # TODO - this is just for deepgemm?
         expert_tokens_meta = None
 
-        return a1q, a1q_scale, None, topk_ids, topk_weights
+        return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 
     def finalize(
         self,
