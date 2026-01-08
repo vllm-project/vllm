@@ -23,17 +23,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-# TODO: This function can be removed if transformer_modules classes are
-# serialized by value when communicating between processes
-def init_cached_hf_modules() -> None:
-    """
-    Lazy initialization of the Hugging Face modules.
-    """
-    from transformers.dynamic_module_utils import init_hf_modules
-
-    init_hf_modules()
-
-
 def import_pynvml():
     """
     Historical comments:

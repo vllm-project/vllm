@@ -911,7 +911,7 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
-        from vllm.entrypoints.openai.protocol import VLLMValidationError
+        from vllm.exceptions import VLLMValidationError
 
         param = None
         for error in exc.errors():

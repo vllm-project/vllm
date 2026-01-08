@@ -106,6 +106,10 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    model_weights: str = ""
+    """Original model weights path. Used when the model is pulled from object 
+    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -705,6 +709,10 @@ class ModelConfig:
             tokenizer: Tokenizer name or path
         """
 
+        # Skip if model_weights is already set (model already pulled)
+        if self.model_weights:
+            return
+
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
@@ -876,7 +884,6 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
-                "cpu_gptq",
                 "cpu_awq",
             ]
             quantization_methods = [

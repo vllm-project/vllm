@@ -93,7 +93,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         Returns:
             phy2log: [X, num_phy], logical expert id of each physical expert
-            rank: [X, num_phy], the replica rank
+            replica_idx: [X, num_phy], the index of the replica for each logical expert
             logcnt: [X, num_log], number of replicas for each logical expert
         """
         n, num_log = weight.shape
@@ -101,15 +101,15 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         assert num_redundant >= 0
         device = weight.device
         phy2log = torch.arange(num_phy, dtype=torch.int64, device=device).repeat(n, 1)
-        rank = torch.zeros(n, num_phy, dtype=torch.int64, device=device)
+        replica_idx = torch.zeros(n, num_phy, dtype=torch.int64, device=device)
         logcnt = torch.ones(n, num_log, dtype=torch.int64, device=device)
         arangen = torch.arange(n, dtype=torch.int64, device=device)
         for i in range(num_log, num_phy):
             redundant_indices = (weight / logcnt).max(dim=-1).indices
             phy2log[:, i] = redundant_indices
-            rank[:, i] = logcnt[arangen, redundant_indices]
+            replica_idx[:, i] = logcnt[arangen, redundant_indices]
             logcnt[arangen, redundant_indices] += 1
-        return phy2log, rank, logcnt
+        return phy2log, replica_idx, logcnt
 
     @classmethod
     def rebalance_experts_hierarchical(
@@ -132,7 +132,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
-            log2phy: [layers, num_logical_experts, X],
+            pphy_replicas_idx: [layers, num_logical_experts, X],
                 the replica indices for each expert
             logcnt: [layers, num_logical_experts], number of
                 physical replicas for each logical expert
@@ -177,7 +177,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         tokens_per_mlog = weight.gather(-1, mlog2log).view(
             -1, num_logical_experts // num_nodes
         )
-        phy2mlog, phyrank, mlogcnt = cls.replicate_experts(
+        phy2mlog, replicas_idx, mlogcnt = cls.replicate_experts(
             tokens_per_mlog, num_physical_experts // num_nodes
         )
 
@@ -203,9 +203,109 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             ).view(1, -1, 1)
         ).flatten(-2)
         pphy2log = mlog2log.gather(-1, pphy2mlog)
-        pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)
+        pphy_replicas_idx = replicas_idx.gather(-1, pphy2phy).view(num_layers, -1)
         logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
-        return pphy2log, pphyrank, logcnt
+        return pphy2log, pphy_replicas_idx, logcnt
+
+    @classmethod
+    def preserve_intragpu_slots(
+        cls,
+        phy2log: torch.Tensor,
+        phy_replicas_idx: torch.Tensor,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Reorder the new mapping per GPU so that experts that remain on the same GPU
+        keep their previous slot positions when possible. Incoming experts to that GPU
+        fill any remaining available slots. This is applied only when the number of GPUs
+        is unchanged and the slots per GPU remain the same between
+        the old and new mappings.
+        """
+        device = phy2log.device
+        num_phy_experts = phy2log.shape[1]
+        if num_ranks <= 0 or num_phy_experts % num_ranks != 0:
+            return phy2log, phy_replicas_idx
+
+        # Move to CPU and convert to NumPy for processing
+        new_phy2log_np = phy2log.cpu().numpy()
+        replicas_idx_np = phy_replicas_idx.cpu().numpy()
+        old_phy2log_np = old_global_expert_indices.cpu().numpy()
+
+        slots_per_gpu = num_phy_experts // num_ranks
+        num_layers = new_phy2log_np.shape[0]
+
+        post_phy2log_np = new_phy2log_np.copy()
+        post_phy_replicas_idx_np = replicas_idx_np.copy()
+
+        for gpu_idx in range(num_ranks):
+            start = gpu_idx * slots_per_gpu
+            end = start + slots_per_gpu
+            # Experts across all layers for this GPU
+            old_local = old_phy2log_np[:, start:end]  # [layers, slots]
+            new_local = new_phy2log_np[:, start:end]  # [layers, slots]
+            new_ridx = replicas_idx_np[:, start:end]  # [layers, slots]
+
+            used_new_indices = np.zeros((num_layers, slots_per_gpu), dtype=bool)
+            preserved_positions = np.zeros((num_layers, slots_per_gpu), dtype=bool)
+
+            # First pass: preserve same-logical experts in their previous slots
+            for slot_idx in range(slots_per_gpu):
+                # matches: [layers, slots], True where new local experts have
+                # the same logical value as the old from 'slot_idx' and not checked yet
+                matches = (new_local == old_local[:, slot_idx][:, None]) & (
+                    ~used_new_indices
+                )
+                has_any = matches.any(axis=1)
+                if np.any(has_any):
+                    first_idx = np.argmax(matches, axis=1)
+                    layer_indices = np.nonzero(has_any)[0]
+                    matched_new_positions = first_idx[layer_indices]
+                    post_phy2log_np[layer_indices, start + slot_idx] = new_local[
+                        layer_indices, matched_new_positions
+                    ]
+                    post_phy_replicas_idx_np[layer_indices, start + slot_idx] = (
+                        new_ridx[layer_indices, matched_new_positions]
+                    )
+                    used_new_indices[layer_indices, matched_new_positions] = True
+                    preserved_positions[layer_indices, slot_idx] = True
+
+            # Second pass: fill remaining slots with remaining new experts
+            remaining_mask = ~used_new_indices  # [layers, slots]
+            fill_mask = ~preserved_positions  # [layers, slots]
+            if remaining_mask.any() and fill_mask.any():
+                idx_base = np.tile(np.arange(slots_per_gpu), (num_layers, 1))
+                # Sentinel value for unavailable positions.
+                large = slots_per_gpu + 1
+                # Priorities: keep original index for available spots, set sentinel
+                # for unavailable; lower is earlier.
+                remaining_priority = np.where(remaining_mask, idx_base, large)
+                fill_priority = np.where(fill_mask, idx_base, large)
+                # Sort to get ordered indices of available src/dst positions per layer.
+                remaining_indices = np.argsort(remaining_priority, axis=1)
+                fill_indices = np.argsort(fill_priority, axis=1)
+                # Fill count per layer (cannot exceed either side).
+                remaining_counts = remaining_mask.sum(axis=1)
+                fill_counts = fill_mask.sum(axis=1)
+                take_counts = np.minimum(remaining_counts, fill_counts)
+                # Assign remaining new experts to remaining slots per layer.
+                for layer_idx in range(num_layers):
+                    k = int(take_counts[layer_idx])
+                    if k <= 0:
+                        continue
+                    src_pos = remaining_indices[layer_idx, :k]
+                    dst_pos = fill_indices[layer_idx, :k]
+                    post_phy2log_np[layer_idx, start + dst_pos] = new_local[
+                        layer_idx, src_pos
+                    ]
+                    post_phy_replicas_idx_np[layer_idx, start + dst_pos] = new_ridx[
+                        layer_idx, src_pos
+                    ]
+
+        # Convert back to torch and move to original device
+        post_phy2log = torch.from_numpy(post_phy2log_np).to(device)
+        post_phy_replicas_idx = torch.from_numpy(post_phy_replicas_idx_np).to(device)
+        return post_phy2log, post_phy_replicas_idx
 
     @classmethod
     def rebalance_experts(
@@ -215,6 +315,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
@@ -228,7 +329,9 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             num_nodes: number of server nodes, where the intra-node network
                 (e.g, NVLink) is faster
             num_ranks: number of ranks, must be a multiple of `num_nodes`
-
+            old_global_expert_indices: [layers, num_logical_experts], the old global
+                expert indices. Used to avoid unnecessary weight copying
+                for experts moving within one rank.
         Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
@@ -241,13 +344,22 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         weight = weight.float()
         if num_groups % num_nodes == 0:
             # use hierarchical load-balance policy
-            phy2log, phyrank, logcnt = cls.rebalance_experts_hierarchical(
+            phy2log, phy_replicas_idx, logcnt = cls.rebalance_experts_hierarchical(
                 weight, num_replicas, num_groups, num_nodes, num_ranks
             )
         else:
             # use global load-balance policy
-            phy2log, phyrank, logcnt = cls.rebalance_experts_hierarchical(
+            phy2log, phy_replicas_idx, logcnt = cls.rebalance_experts_hierarchical(
                 weight, num_replicas, 1, 1, num_ranks
+            )
+        # Optional postprocessing to preserve slots for experts moving
+        # within the same GPU
+        # Only apply when the number of GPUs and slots per GPU remain unchanged.
+        # Helps to avoid unnecessary weight copying when experts move
+        # within the same GPU.
+        if old_global_expert_indices is not None:
+            phy2log, phy_replicas_idx = cls.preserve_intragpu_slots(
+                phy2log, phy_replicas_idx, num_ranks, old_global_expert_indices
             )
         num_redundant_experts = num_replicas - num_logical_experts
         maxlogcnt = num_redundant_experts + 1
@@ -259,7 +371,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         )
         log2phy.view(num_layers, -1).scatter_(
             -1,
-            phy2log * maxlogcnt + phyrank,
+            phy2log * maxlogcnt + phy_replicas_idx,
             torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(
                 num_layers, -1
             ),

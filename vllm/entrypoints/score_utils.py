@@ -11,6 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionContentPartVideoParam,
     ChatTemplateResolutionError,
     MultiModalItemTracker,
     _ContentPart,
@@ -27,6 +28,7 @@ ScoreContentPartParam: TypeAlias = (
     ChatCompletionContentPartImageParam
     | ChatCompletionContentPartImageEmbedsParam
     | ChatCompletionContentPartTextParam
+    | ChatCompletionContentPartVideoParam
 )
 
 
