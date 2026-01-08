@@ -18,25 +18,26 @@
   #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 
-namespace {
-
 // Device properties cache for stable ABI compatibility
 // Uses raw CUDA/HIP APIs instead of ATen functions
-std::deque<std::once_flag> device_flags;
-std::vector<cudaDeviceProp> device_properties;
+// Using inline ensures a single instance across all translation units
+inline std::deque<std::once_flag> device_flags;
+inline std::vector<cudaDeviceProp> device_properties;
+inline std::once_flag vectors_init_flag;
+
+inline void do_init_vectors() {
+  int device_count;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess) {
+    STD_TORCH_CHECK(false, "cudaGetDeviceCount failed: " +
+                               std::string(cudaGetErrorString(err)));
+  }
+  device_flags.resize(device_count);
+  device_properties.resize(device_count);
+}
 
 inline void initDeviceVectors() {
-  static bool init_flag [[maybe_unused]] = []() {
-    int device_count;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    if (err != cudaSuccess) {
-      STD_TORCH_CHECK(false, "cudaGetDeviceCount failed: " +
-                                 std::string(cudaGetErrorString(err)));
-    }
-    device_flags.resize(device_count);
-    device_properties.resize(device_count);
-    return true;
-  }();
+  std::call_once(vectors_init_flag, do_init_vectors);
 }
 
 inline void initDeviceProperty(int device_index) {
@@ -48,8 +49,6 @@ inline void initDeviceProperty(int device_index) {
   }
   device_properties[device_index] = device_prop;
 }
-
-}  // anonymous namespace
 
 // Get device properties using raw CUDA/HIP APIs (stable ABI compatible)
 inline cudaDeviceProp* get_device_prop() {

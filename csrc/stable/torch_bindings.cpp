@@ -90,6 +90,57 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
       "top_k_per_row_decode(Tensor logits, int next_n, Tensor seqLens, "
       "Tensor! indices, int numRows, int stride0, int stride1, int topK) -> "
       "()");
+
+  // Quantized activation
+  m.def("silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
+
+  m.def(
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, "
+      "Tensor! y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+
+  // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
+  m.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
+  m.def(
+      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
+      "-> ()");
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  m.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> ()");
+
+  // Compute int8 quantized tensor for given scaling factor.
+  m.def(
+      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "Tensor? azp) -> ()");
+  // Compute int8 quantized tensor and scaling factor.
+  m.def(
+      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> ()");
+
+#ifndef USE_ROCM
+  // Compute per-token-group FP8 quantized tensor and scaling factor.
+  m.def(
+      "per_token_group_fp8_quant(Tensor input, Tensor! output_q, "
+      "Tensor! output_s, int group_size, float eps, float fp8_min, "
+      "float fp8_max, bool scale_ue8m0) -> ()");
+  // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
+  // TMA-aligned scales for DeepGEMM.
+  m.def(
+      "per_token_group_fp8_quant_packed(Tensor input, Tensor! output_q, "
+      "Tensor! output_s_packed, int group_size, float eps, float min_8bit, "
+      "float max_8bit) -> ()");
+  // Compute per-token-group INT8 quantized tensor and scaling factor.
+  m.def(
+      "per_token_group_quant_int8(Tensor input, Tensor! output_q, "
+      "Tensor! output_s, int group_size, float eps, float int8_min, "
+      "float int8_max) -> ()");
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
@@ -133,6 +184,30 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
 #ifndef USE_ROCM
   // Utility ops
   m.impl("permute_cols", TORCH_BOX(&permute_cols));
+#endif
+
+  // Quantized activation
+  m.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
+
+  m.impl("persistent_masked_m_silu_mul_quant",
+         TORCH_BOX(&persistent_masked_m_silu_mul_quant));
+
+  // FP8 quantization
+  m.impl("static_scaled_fp8_quant", TORCH_BOX(&static_scaled_fp8_quant));
+  m.impl("dynamic_scaled_fp8_quant", TORCH_BOX(&dynamic_scaled_fp8_quant));
+  m.impl("dynamic_per_token_scaled_fp8_quant",
+         TORCH_BOX(&dynamic_per_token_scaled_fp8_quant));
+
+  // INT8 quantization
+  m.impl("static_scaled_int8_quant", TORCH_BOX(&static_scaled_int8_quant));
+  m.impl("dynamic_scaled_int8_quant", TORCH_BOX(&dynamic_scaled_int8_quant));
+
+#ifndef USE_ROCM
+  // Per-token group quantization
+  m.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
+  m.impl("per_token_group_fp8_quant_packed",
+         TORCH_BOX(&per_token_group_quant_8bit_packed));
+  m.impl("per_token_group_quant_int8", TORCH_BOX(&per_token_group_quant_int8));
 #endif
 }
 

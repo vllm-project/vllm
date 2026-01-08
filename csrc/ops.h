@@ -98,21 +98,12 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
-                        torch::Tensor& scale);
-
 #ifndef USE_ROCM
 void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& output_block_scale,
                               torch::Tensor& input,
                               torch::Tensor& input_global_scale);
 #endif
-void persistent_masked_m_silu_mul_quant(
-    const at::Tensor& input,   // (E, T, 2*H)
-    const at::Tensor& counts,  // (E)
-    at::Tensor& y_q,           // (E, T, H) [OUT]
-    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    bool use_ue8m0);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
@@ -256,32 +247,7 @@ void silu_and_mul_scaled_fp4_experts_quant(
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
 
-void per_token_group_quant_fp8(const torch::Tensor& input,
-                               torch::Tensor& output_q, torch::Tensor& output_s,
-                               int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
-
-void per_token_group_quant_int8(const torch::Tensor& input,
-                                torch::Tensor& output_q,
-                                torch::Tensor& output_s, int64_t group_size,
-                                double eps, double int8_min, double int8_max);
-
-// Fused activation quantisation + DeepGEMM-compatible UE8M0-packed scales.
-void per_token_group_quant_8bit_packed(const torch::Tensor& input,
-                                       torch::Tensor& output_q,
-                                       torch::Tensor& output_s_packed,
-                                       int64_t group_size, double eps,
-                                       double min_8bit, double max_8bit);
-
 #endif
-
-void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& scale,
-                              std::optional<torch::Tensor> const& azp);
-
-void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                               torch::Tensor& scales,
-                               std::optional<torch::Tensor> const& azp);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
@@ -289,17 +255,6 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         bool use_exllama, bool use_v2_format, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
-
-void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
-    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
-
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor& scale);
-
-void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
-    std::optional<torch::Tensor> const& scale_ub);
 
 void selective_scan_fwd(
     const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,

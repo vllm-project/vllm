@@ -1,15 +1,16 @@
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cmath>
 #include "core/math.hpp"
-#include "../cuda_compat.h"
-#include "dispatch_utils.h"
+#include "cuda_compat.h"
+#include "stable/dispatch_utils.h"
+#include "stable/torch_utils.h"
 
 #include "stable/quantization/w8a8/fp8/common.cuh"
 
-#include <c10/util/Float8_e4m3fn.h>
+#include <torch/headeronly/core/ScalarType.h>
 
 #ifndef USE_ROCM
   #include <cuda_bf16.h>
@@ -567,56 +568,64 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 }  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                               \
-  int d = input.size(-1) / 2;                                               \
-  int64_t num_tokens = input.numel() / input.size(-1);                      \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);     \
-  dim3 block(std::min(d, 512));                                             \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));         \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();             \
-  VLLM_DISPATCH_FLOATING_TYPES(                                             \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                      \
-        VLLM_DISPATCH_FP8_TYPES(                                            \
-            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {  \
-              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,    \
-                                             fp8_t>                         \
-                  <<<grid, block, 0, stream>>>(out.data_ptr<fp8_t>(),       \
-                                               input.data_ptr<scalar_t>(),  \
-                                               scale.data_ptr<float>(), d); \
-            });                                                             \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                              \
+  int d = input.size(-1) / 2;                                              \
+  int64_t num_tokens = input.numel() / input.size(-1);                     \
+  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);    \
+  dim3 block(std::min(d, 512));                                            \
+  const torch::stable::accelerator::DeviceGuard device_guard(              \
+      input.get_device_index());                                           \
+  const cudaStream_t stream =                                              \
+      get_current_cuda_stream(input.get_device_index());                   \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                     \
+        VLLM_STABLE_DISPATCH_FP8_TYPES(                                    \
+            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] { \
+              vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>,   \
+                                             fp8_t>                        \
+                  <<<grid, block, 0, stream>>>(                            \
+                      out.mutable_data_ptr<fp8_t>(),                       \
+                      input.const_data_ptr<scalar_t>(),                    \
+                      scale.const_data_ptr<float>(), d);                   \
+            });                                                            \
       });
 
-void silu_and_mul_quant(torch::Tensor& out,    // [..., d]
-                        torch::Tensor& input,  // [..., 2 * d]
-                        torch::Tensor& scale) {
-  TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn ||
-              out.dtype() == torch::kFloat8_e4m3fnuz);
-  TORCH_CHECK(input.dtype() == torch::kFloat16 ||
-              input.dtype() == torch::kBFloat16);
-  TORCH_CHECK(input.size(-1) % 2 == 0);
+void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
+                        torch::stable::Tensor& input,  // [..., 2 * d]
+                        torch::stable::Tensor& scale) {
+  STD_TORCH_CHECK(
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz);
+  STD_TORCH_CHECK(input.scalar_type() == torch::headeronly::ScalarType::Half ||
+                  input.scalar_type() ==
+                      torch::headeronly::ScalarType::BFloat16);
+  STD_TORCH_CHECK(input.size(-1) % 2 == 0);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
 
 void persistent_masked_m_silu_mul_quant(
-    const at::Tensor& input,              // (E, T, 2*H)
-    const at::Tensor& tokens_per_expert,  // (E)
-    at::Tensor& y_q,                      // (E, T, H) [OUT]
-    at::Tensor& y_s,                      // (E, T, H//group_size) [OUT]
+    const torch::stable::Tensor& input,              // (E, T, 2*H)
+    const torch::stable::Tensor& tokens_per_expert,  // (E)
+    torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
+    torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
     bool cast_scale_ue8m0) {
 #ifndef USE_ROCM
-
   // This kernel currently only supports H % 128 == 0 and assumes a
   // fixed GROUP_SIZE of 128.
   static constexpr int GROUP_SIZE = 128;
 
-  TORCH_CHECK(input.dtype() == torch::kBFloat16);
-  TORCH_CHECK(y_q.dtype() == torch::kFloat8_e4m3fn ||
-              y_q.dtype() == torch::kFloat8_e4m3fnuz);
-  TORCH_CHECK(input.size(-1) % (GROUP_SIZE * 2) == 0);
+  STD_TORCH_CHECK(input.scalar_type() ==
+                  torch::headeronly::ScalarType::BFloat16);
+  STD_TORCH_CHECK(
+      y_q.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+      y_q.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz);
+  STD_TORCH_CHECK(input.size(-1) % (GROUP_SIZE * 2) == 0);
 
   bool const is_packed_ue8m0 =
-      (y_s.dtype() == torch::kInt32 && cast_scale_ue8m0);
-  TORCH_CHECK(y_s.dtype() == torch::kFloat32 || is_packed_ue8m0);
+      (y_s.scalar_type() == torch::headeronly::ScalarType::Int &&
+       cast_scale_ue8m0);
+  STD_TORCH_CHECK(y_s.scalar_type() == torch::headeronly::ScalarType::Float ||
+                  is_packed_ue8m0);
 
   using Idx_t = int64_t;
 
@@ -634,7 +643,7 @@ void persistent_masked_m_silu_mul_quant(
 
   int const NUM_GROUPS = H / GROUP_SIZE;
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   // TODO: Get this from cuda_arch ?
   static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
@@ -646,18 +655,21 @@ void persistent_masked_m_silu_mul_quant(
     static constexpr int max_shared_mem_bytes =                                \
         GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
     dim3 grid(sms), block(THREAD_COUNT);                                       \
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
-    VLLM_DISPATCH_FP8_TYPES(                                                   \
+    const torch::stable::accelerator::DeviceGuard device_guard(                \
+        input.get_device_index());                                             \
+    VLLM_STABLE_DISPATCH_FP8_TYPES(                                            \
         y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
           vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
               BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t, THREAD_COUNT, \
               Idx_t, CEIL_UE8M0, GROUP_SIZE, STAGES>                           \
               <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
-                  reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),          \
-                  (fp8_t*)y_q.data_ptr(),                                      \
-                  reinterpret_cast<scale_t*>(y_s.data_ptr()),                  \
-                  reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E, \
-                  T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,       \
+                  reinterpret_cast<const __nv_bfloat16*>(                      \
+                      input.const_data_ptr()),                                 \
+                  (fp8_t*)y_q.mutable_data_ptr(),                              \
+                  reinterpret_cast<scale_t*>(y_s.mutable_data_ptr()),          \
+                  reinterpret_cast<const int32_t*>(                            \
+                      tokens_per_expert.const_data_ptr()),                     \
+                  E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
                   STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
         });
@@ -682,7 +694,7 @@ void persistent_masked_m_silu_mul_quant(
   Idx_t stride_ys_g = y_s.stride(2);
   Idx_t stride_ys_p = 0;
   if (!cast_scale_ue8m0) {
-    TORCH_CHECK(!is_packed_ue8m0);
+    STD_TORCH_CHECK(!is_packed_ue8m0);
     LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
                 false);
     return;
@@ -695,8 +707,8 @@ void persistent_masked_m_silu_mul_quant(
     return;
   }
 
-  TORCH_CHECK(cast_scale_ue8m0 && is_packed_ue8m0);
-  TORCH_CHECK(y_s.dtype() == torch::kInt32);
+  STD_TORCH_CHECK(cast_scale_ue8m0 && is_packed_ue8m0);
+  STD_TORCH_CHECK(y_s.scalar_type() == torch::headeronly::ScalarType::Int);
 
   // Int32 packed ue8m0 scales tensor.
   // Let E, T, G be the number to experts, number of tokens and number of groups

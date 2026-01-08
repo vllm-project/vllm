@@ -1,10 +1,18 @@
-#include "stable/quantization/w8a8/fp8/common.cuh"
-#include "dispatch_utils.h"
+#include "common.cuh"
+#include "stable/dispatch_utils.h"
 #include "cub_helpers.h"
 #include "quantization/vectorization_utils.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/Exceptions.h>
+#include "stable/torch_utils.h"
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include <cuda_runtime.h>
+
 #include <tuple>
+#include <optional>
 
 namespace vllm {
 
@@ -183,16 +191,16 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 }  // namespace vllm
 
 void static_scaled_fp8_quant(
-    torch::Tensor& out,          // [..., d]
-    torch::Tensor const& input,  // [..., d]
-    torch::Tensor const& scale,  // various shapes
-    std::optional<std::tuple<int64_t, int64_t>>
-        opt_group_shape)  // optional explicit (group_m, group_n)
+    torch::stable::Tensor& out,          // [..., d]
+    torch::stable::Tensor const& input,  // [..., d]
+    torch::stable::Tensor const& scale,  // various shapes
+    std::optional<torch::headeronly::IntHeaderOnlyArrayRef>
+        opt_group_shape)  // optional explicit [group_m, group_n]
 {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);              // N (columns)
   const int num_tokens = input.numel() / hidden_size;  // M (rows)
@@ -212,13 +220,18 @@ void static_scaled_fp8_quant(
   } else if (scale.dim() == 1) {
     // 1D scale: require explicit group_shape to disambiguate per-channel vs
     // per-token (avoids edge case where num_tokens == hidden_size)
-    TORCH_CHECK(opt_group_shape.has_value(),
-                "1D scale requires explicit group_shape to disambiguate "
-                "per-channel vs per-token quantization. "
-                "Use group_shape=(-1, 1) for per-channel or group_shape=(1, "
-                "-1) for per-token.");
+    STD_TORCH_CHECK(
+        opt_group_shape.has_value(),
+        "1D scale requires explicit group_shape to disambiguate "
+        "per-channel vs per-token quantization. "
+        "Use group_shape=(-1, 1) for per-channel or group_shape=(1, "
+        "-1) for per-token.");
+    STD_TORCH_CHECK(opt_group_shape->size() == 2,
+                    "group_shape must have exactly 2 elements, got ",
+                    opt_group_shape->size());
 
-    const auto& [opt_group_m, opt_group_n] = opt_group_shape.value();
+    const auto opt_group_m = (*opt_group_shape)[0];
+    const auto opt_group_n = (*opt_group_shape)[1];
     group_m = opt_group_m == -1 ? num_tokens : static_cast<int>(opt_group_m);
     group_n = opt_group_n == -1 ? hidden_size : static_cast<int>(opt_group_n);
 
@@ -228,11 +241,11 @@ void static_scaled_fp8_quant(
     const int64_t expected_scale_n = hidden_size / group_n;
     const int64_t expected_scale_numel = expected_scale_m * expected_scale_n;
 
-    TORCH_CHECK(scale_len == expected_scale_numel, "1D scale length (",
-                scale_len, ") does not match expected size (",
-                expected_scale_numel, ") for group_shape (", opt_group_m, ", ",
-                opt_group_n, ") with input shape (", num_tokens, ", ",
-                hidden_size, ")");
+    STD_TORCH_CHECK(scale_len == expected_scale_numel, "1D scale length (",
+                    scale_len, ") does not match expected size (",
+                    expected_scale_numel, ") for group_shape (", opt_group_m,
+                    ", ", opt_group_n, ") with input shape (", num_tokens, ", ",
+                    hidden_size, ")");
 
     // For 1D scale, determine strides based on which dim is trivial
     // Scale indexing: scale[gi * scale_stride_i + gj * scale_stride_j]
@@ -248,7 +261,7 @@ void static_scaled_fp8_quant(
       scale_stride_i = scale.stride(0);
       scale_stride_j = 0;
     } else {
-      TORCH_CHECK(
+      STD_TORCH_CHECK(
           false,
           "1D scale can only be used when one of the scale dimensions is 1. "
           "For 2D group scaling, use a 2D scale tensor.");
@@ -259,10 +272,12 @@ void static_scaled_fp8_quant(
     const int64_t scale_size_0 = scale.size(0);
     const int64_t scale_size_1 = scale.size(1);
 
-    TORCH_CHECK(num_tokens % scale_size_0 == 0, "num_tokens (", num_tokens,
-                ") must be divisible by scale.size(0) (", scale_size_0, ")");
-    TORCH_CHECK(hidden_size % scale_size_1 == 0, "hidden_size (", hidden_size,
-                ") must be divisible by scale.size(1) (", scale_size_1, ")");
+    STD_TORCH_CHECK(num_tokens % scale_size_0 == 0, "num_tokens (", num_tokens,
+                    ") must be divisible by scale.size(0) (", scale_size_0,
+                    ")");
+    STD_TORCH_CHECK(hidden_size % scale_size_1 == 0, "hidden_size (",
+                    hidden_size, ") must be divisible by scale.size(1) (",
+                    scale_size_1, ")");
 
     // Infer from 2D scale shape
     int inferred_group_m = num_tokens / scale_size_0;
@@ -270,16 +285,21 @@ void static_scaled_fp8_quant(
 
     // Use explicit if provided, otherwise use inferred
     if (opt_group_shape.has_value()) {
-      const auto& [opt_group_m, opt_group_n] = opt_group_shape.value();
+      STD_TORCH_CHECK(opt_group_shape->size() == 2,
+                      "group_shape must have exactly 2 elements, got ",
+                      opt_group_shape->size());
+      const auto opt_group_m = (*opt_group_shape)[0];
+      const auto opt_group_n = (*opt_group_shape)[1];
       group_m = opt_group_m == -1 ? num_tokens : static_cast<int>(opt_group_m);
       group_n = opt_group_n == -1 ? hidden_size : static_cast<int>(opt_group_n);
 
       // Validate explicit matches inferred
-      TORCH_CHECK(group_m == inferred_group_m && group_n == inferred_group_n,
-                  "Explicit group_shape (", opt_group_m, ", ", opt_group_n,
-                  ") does not match inferred group shape (", inferred_group_m,
-                  ", ", inferred_group_n, ") from 2D scale tensor shape (",
-                  scale_size_0, ", ", scale_size_1, ")");
+      STD_TORCH_CHECK(
+          group_m == inferred_group_m && group_n == inferred_group_n,
+          "Explicit group_shape (", opt_group_m, ", ", opt_group_n,
+          ") does not match inferred group shape (", inferred_group_m, ", ",
+          inferred_group_n, ") from 2D scale tensor shape (", scale_size_0,
+          ", ", scale_size_1, ")");
     } else {
       group_m = inferred_group_m;
       group_n = inferred_group_n;
@@ -288,8 +308,8 @@ void static_scaled_fp8_quant(
     scale_stride_i = scale.stride(0);
     scale_stride_j = scale.stride(1);
   } else {
-    TORCH_CHECK(false, "scale must be 0D, 1D, or 2D tensor, but got ",
-                scale.dim(), "D");
+    STD_TORCH_CHECK(false, "scale must be 0D, 1D, or 2D tensor, but got ",
+                    scale.dim(), "D");
   }
 
   const int block_size = 256;
@@ -299,37 +319,39 @@ void static_scaled_fp8_quant(
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   // Dispatch to template-specialized kernel based on stride pattern
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
-              VLLM_DISPATCH_BOOL(scale_stride_i == 0, S0_ZERO, [&] {
-                VLLM_DISPATCH_BOOL(scale_stride_j == 0, S1_ZERO, [&] {
+              VLLM_STABLE_DISPATCH_BOOL(scale_stride_i == 0, S0_ZERO, [&] {
+                VLLM_STABLE_DISPATCH_BOOL(scale_stride_j == 0, S1_ZERO, [&] {
                   vllm::scaled_fp8_quant_kernel_strided_group_shape<
                       scalar_t, fp8_t, S0_ZERO, S1_ZERO>
                       <<<grid, block, 0, stream>>>(
-                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                          scale.data_ptr<float>(), hidden_size, in_row_stride,
-                          out_row_stride, group_m, group_n, scale_stride_i,
-                          scale_stride_j);
+                          out.mutable_data_ptr<fp8_t>(),
+                          input.const_data_ptr<scalar_t>(),
+                          scale.const_data_ptr<float>(), hidden_size,
+                          in_row_stride, out_row_stride, group_m, group_n,
+                          scale_stride_i, scale_stride_j);
                 });
               });
             });
       });
 }
 
-void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
-                              torch::Tensor const& input,  // [..., d]
-                              torch::Tensor& scale)        // [1]
+void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
+                              const torch::stable::Tensor& input,  // [..., d]
+                              torch::stable::Tensor& scale)        // [1]
 {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -340,40 +362,43 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   // scale tensor should be initialised to <=0 before reduction
-  AT_CUDA_CHECK(
-      cudaMemsetAsync(scale.data_ptr<float>(), 0, sizeof(float), stream));
+  STD_CUDA_CHECK(cudaMemsetAsync(scale.mutable_data_ptr<float>(), 0,
+                                 sizeof(float), stream));
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               vllm::segmented_max_reduction_strided<scalar_t, fp8_t>
                   <<<grid, block, 0, stream>>>(
-                      scale.data_ptr<float>(), input.data_ptr<scalar_t>(),
-                      hidden_size, in_row_stride,
-                      static_cast<int64_t>(num_tokens));
+                      scale.mutable_data_ptr<float>(),
+                      input.const_data_ptr<scalar_t>(), hidden_size,
+                      in_row_stride, static_cast<int64_t>(num_tokens));
 
               vllm::scaled_fp8_quant_kernel_strided_dynamic<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                      scale.data_ptr<float>(), hidden_size, in_row_stride,
-                      out_row_stride);
+                  <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),
+                                               input.const_data_ptr<scalar_t>(),
+                                               scale.const_data_ptr<float>(),
+                                               hidden_size, in_row_stride,
+                                               out_row_stride);
             });
       });
 }
 
 void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out,          // [..., d]
-    torch::Tensor const& input,  // [..., d]
-    torch::Tensor& scales, std::optional<at::Tensor> const& scale_ub) {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+    torch::stable::Tensor& out,          // [..., d]
+    const torch::stable::Tensor& input,  // [..., d]
+    torch::stable::Tensor& scales,
+    std::optional<torch::stable::Tensor> const& scale_ub) {
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -384,20 +409,24 @@ void dynamic_per_token_scaled_fp8_quant(
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),
       "dynamic_per_token_scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(),
             "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<
-                  scalar_t, fp8_t><<<grid, block, 0, stream>>>(
-                  out.data_ptr<fp8_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  hidden_size, in_row_stride, out_row_stride);
+              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t,
+                                                                      fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.mutable_data_ptr<fp8_t>(),
+                      scales.mutable_data_ptr<float>(),
+                      input.const_data_ptr<scalar_t>(),
+                      scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                           : nullptr,
+                      hidden_size, in_row_stride, out_row_stride);
             });
       });
 }

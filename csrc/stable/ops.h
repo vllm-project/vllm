@@ -100,3 +100,62 @@ void top_k_per_row_decode(torch::stable::Tensor const& logits, int64_t next_n,
                           torch::stable::Tensor const& seqLens,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK);
+
+// Quantized activation functions
+void silu_and_mul_quant(torch::stable::Tensor& out,
+                        torch::stable::Tensor& input,
+                        torch::stable::Tensor& scale);
+
+void persistent_masked_m_silu_mul_quant(
+    const torch::stable::Tensor& input,
+    const torch::stable::Tensor& tokens_per_expert, torch::stable::Tensor& y_q,
+    torch::stable::Tensor& y_s, bool cast_scale_ue8m0);
+
+void static_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& scale,
+    std::optional<torch::headeronly::IntHeaderOnlyArrayRef> group_shape =
+        std::nullopt);
+
+void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> const& scale_ub);
+
+// Compute int8 quantized tensor for given scaling factor.
+void static_scaled_int8_quant(torch::stable::Tensor& out,
+                              const torch::stable::Tensor& input,
+                              const torch::stable::Tensor& scale,
+                              const std::optional<torch::stable::Tensor>& azp);
+
+// Compute int8 quantized tensor and scaling factor.
+void dynamic_scaled_int8_quant(torch::stable::Tensor& out,
+                               const torch::stable::Tensor& input,
+                               torch::stable::Tensor& scales,
+                               const std::optional<torch::stable::Tensor>& azp);
+
+#ifndef USE_ROCM
+
+void per_token_group_quant_fp8(const torch::stable::Tensor& input,
+                               torch::stable::Tensor& output_q,
+                               torch::stable::Tensor& output_s,
+                               int64_t group_size, double eps, double fp8_min,
+                               double fp8_max, bool scale_ue8m0);
+
+// Fused activation quantisation + DeepGEMM-compatible UE8M0-packed scales.
+void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
+                                       torch::stable::Tensor& output_q,
+                                       torch::stable::Tensor& output_s_packed,
+                                       int64_t group_size, double eps,
+                                       double min_8bit, double max_8bit);
+
+void per_token_group_quant_int8(const torch::stable::Tensor& input,
+                                torch::stable::Tensor& output_q,
+                                torch::stable::Tensor& output_s,
+                                int64_t group_size, double eps, double int8_min,
+                                double int8_max);
+#endif

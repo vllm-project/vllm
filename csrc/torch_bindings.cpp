@@ -20,13 +20,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
   //
 
-  ops.def(
-      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s,"
-      "bool use_ue8m0) -> ()");
-  ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
-           &persistent_masked_m_silu_mul_quant);
-
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
@@ -95,11 +88,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("convert_vertical_slash_indexes_mergehead", torch::kCUDA,
            &convert_vertical_slash_indexes_mergehead);
 #endif
-
-  // Activation ops
-  ops.def(
-      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
-  ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
 #ifndef USE_ROCM
   ops.def(
@@ -452,43 +440,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
-  // Compute FP8 quantized tensor for given scaling factor.
-  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
-  // scaling. Optional group_m/group_n specify the group shape explicitly;
-  // required for 1D scales to disambiguate per-channel vs per-token.
-  ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
-      "(int, int)? group_shape=None) -> ()");
-  ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
-
-  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
-      "-> "
-      "()");
-  ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
-
-  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! scale, Tensor? scale_ub) -> "
-      "()");
-  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
-           &dynamic_per_token_scaled_fp8_quant);
-
-  // Compute int8 quantized tensor for given scaling factor.
-  ops.def(
-      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()");
-  ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
-
-  // Compute int8 quantized tensor and scaling factor
-  ops.def(
-      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()");
-  ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
-           &dynamic_scaled_int8_quant);
-
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
@@ -510,32 +461,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
 #ifndef USE_ROCM
-  // Compute per-token-group FP8 quantized tensor and scaling factor.
-  ops.def(
-      "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
-      "output_s, "
-      "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0) -> ()");
-  ops.impl("per_token_group_fp8_quant", torch::kCUDA,
-           &per_token_group_quant_fp8);
-
-  // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
-  // TMA-aligned scales for DeepGEMM.
-  ops.def(
-      "per_token_group_fp8_quant_packed(Tensor input, Tensor! output_q, "
-      "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
-      "float fp8_max) -> ()");
-  ops.impl("per_token_group_fp8_quant_packed", torch::kCUDA,
-           &per_token_group_quant_8bit_packed);
-
-  // Compute per-token-group INT8 quantized tensor and scaling factor.
-  ops.def(
-      "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
-      "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
-      "()");
-  ops.impl("per_token_group_quant_int8", torch::kCUDA,
-           &per_token_group_quant_int8);
-
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
