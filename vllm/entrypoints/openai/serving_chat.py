@@ -1311,7 +1311,7 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_completion_tokens_details and self.reasoning_parser:
                     reasoning_tokens = sum(num_reasoning_tokens)
                     final_usage.completion_tokens_details = CompletionTokensDetails(
-                        reasoning_tokens=reasoning_tokens - num_prompt_tokens
+                        reasoning_tokens=reasoning_tokens
                     )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
@@ -1665,7 +1665,7 @@ class OpenAIServingChat(OpenAIServing):
             )
         if self.enable_completion_tokens_details and total_reasoning_tokens:
             usage.completion_tokens_details = CompletionTokensDetails(
-                reasoning_tokens=total_reasoning_tokens - num_prompt_tokens
+                reasoning_tokens=total_reasoning_tokens
             )
         request_metadata.final_usage_info = usage
 
