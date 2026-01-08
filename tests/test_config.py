@@ -1112,5 +1112,7 @@ def test_eagle_draft_model_config():
     draft_model_config = speculative_config.draft_model_config
     assert draft_model_config.hf_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.hf_text_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_config.model_type == "eagle"
+    assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
