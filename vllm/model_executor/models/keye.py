@@ -404,6 +404,7 @@ class KeyeSiglipAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
+            scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
@@ -511,6 +512,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 

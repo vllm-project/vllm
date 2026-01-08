@@ -1619,11 +1619,12 @@ def process_fp8_weight_tensor_strategy_moe(
     """Process moe weights for tensor-wise quantization strategy."""
     max_scales = weight_scales.max(dim=1).values
 
-    # For w1 case (i.e. not w13): just collapse the last dim since
-    # there is already just one scale per expert in this case.
+    # For w1 case (i.e. not w13): there is already just one scale per expert.
     if not is_act_and_mul:
         assert weight_scales.shape[1] == 1
-        return weight, weight_scales.max()
+        # One scale per expert
+        assert max_scales.shape == (num_experts,)
+        return weight, max_scales
 
     # For w13 case (common): require single scale for w13 per expert, but
     # on disk there is a scale for w1 and w3. Use the max to requantize.
