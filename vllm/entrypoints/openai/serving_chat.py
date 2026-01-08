@@ -1125,6 +1125,7 @@ class OpenAIServingChat(OpenAIServing):
                     if (
                         self.reasoning_parser
                         and reasoning_end_arr[i]
+                        and all_previous_token_ids
                         and (not num_reasoning_tokens[i])
                     ):
                         num_reasoning_tokens[i] = count_reasoning_tokens(
@@ -1652,7 +1653,7 @@ class OpenAIServingChat(OpenAIServing):
             num_generated_tokens += len(output.token_ids)
             if self.reasoning_parser:
                 total_reasoning_tokens += count_reasoning_tokens(
-                    output.token_ids, reasoning_parser.end_token_ids
+                    as_list(output.token_ids), reasoning_parser.end_token_ids
                 )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
