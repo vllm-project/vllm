@@ -216,7 +216,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
     ref_y = per_tensor_dequantize(ref_y, inv_scale, dtype)
 
-    # Reference dynamic quantizaton
+    # Reference dynamic quantization
     y = quantize_ref(x, inv_scale)
     torch.testing.assert_close(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
@@ -277,8 +277,18 @@ def test_scaled_fp8_quant(dtype) -> None:
 # this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
 def test_fp8_reloading(
-    method_cls, is_checkpoint_fp8_serialized, weight_block_size, use_marlin, dist_init
+    method_cls,
+    is_checkpoint_fp8_serialized,
+    weight_block_size,
+    use_marlin,
+    dist_init,
+    monkeypatch,
 ):
+    # NOTE(rob): this test fails when using DeepGEMM because the
+    # shapes are invalid. Previously the test was passing because
+    # we set fp8_backend to None, which sidestepped the issue.
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
+
     if is_checkpoint_fp8_serialized is False:
         pytest.skip("FP8 weight reloading does not support online quantization")
 
@@ -306,6 +316,7 @@ def test_fp8_reloading(
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
+            method.use_marlin = use_marlin
 
         else:
             layer = FusedMoE(
@@ -323,8 +334,6 @@ def test_fp8_reloading(
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
-
-        method.use_marlin = use_marlin
 
     # capture weights format during loading
     original_metadata = [
