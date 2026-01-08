@@ -319,12 +319,12 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         vllm_config=vllm_config,
         virtual_engine=virtual_engine,
+        dp_metadata=dp_metadata,
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
-        dp_metadata=dp_metadata,
     )
 
     forward_context = create_forward_context(
