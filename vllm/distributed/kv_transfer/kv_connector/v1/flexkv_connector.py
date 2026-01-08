@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 import torch
 from flexkv.integration.vllm.vllm_v1_adapter import FlexKVConnectorV1Impl
@@ -14,6 +14,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -194,3 +195,17 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._flexkv_connector.request_finished(request, block_ids)
+
+
+class FlexKVDynamoConnectorV1(FlexKVConnectorV1):
+    '''
+    Use this connector for combined use of Dynamo, vLLM and FlexKV.
+    '''
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        '''
+        Collect buffered KV cache events.
+
+        Returns:
+            New KV cache events since the last call.
+        '''
+        return self._flexkv_connector.take_events()

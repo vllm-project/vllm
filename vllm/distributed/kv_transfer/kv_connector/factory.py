@@ -200,3 +200,8 @@ KVConnectorFactory.register_connector(
     "FlexKVConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
     "FlexKVConnectorV1")
+
+KVConnectorFactory.register_connector(
+    "FlexKVDynamoConnectorV1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
+    "FlexKVDynamoConnectorV1")
