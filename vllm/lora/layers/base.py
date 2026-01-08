@@ -62,7 +62,7 @@ except AttributeError:
 
 
 class BaseLayerWithLoRA(nn.Module):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         super().__init__()
         self.lora_ready: torch.Tensor | None = None
 
