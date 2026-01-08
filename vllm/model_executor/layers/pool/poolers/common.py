@@ -12,10 +12,9 @@ from vllm.model_executor.layers.pool.heads import (
 )
 from vllm.model_executor.layers.pool.methods import PoolingMethod
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import Pooler
+from .base import Pooler, PoolerOutput
 
 
 class DummyPooler(Pooler):
