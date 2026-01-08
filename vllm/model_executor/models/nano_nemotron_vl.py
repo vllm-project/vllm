@@ -10,7 +10,7 @@
 import copy
 import math
 import random
-import typing
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -63,6 +63,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
+    ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -360,12 +361,14 @@ class BaseNanoNemotronVLProcessor(ABC):
         self.max_num_tiles = max_num_tiles or DEFAULT_NUM_TILES
         image_size: int = config.force_image_size
         self.patch_size: int = getattr(config, "patch_size", 16)
-        # self.downsample_ratio: float = self.config.downsample_ratio
 
+        self.num_image_token = int(
+            (image_size // self.patch_size) ** 2 * (config.downsample_ratio**2)
+        )
         self.image_size = image_size
         self.use_thumbnail: bool = config.use_thumbnail
-        self.norm_mean = torch.tensor(config.norm_mean).reshape(1, 3, 1, 1)
-        self.norm_std = torch.tensor(config.norm_std).reshape(1, 3, 1, 1)
+        self.norm_mean = torch.Tensor(config.norm_mean).reshape(1, 3, 1, 1)
+        self.norm_std = torch.Tensor(config.norm_std).reshape(1, 3, 1, 1)
 
     @property
     @abstractmethod
@@ -397,19 +400,20 @@ class BaseNanoNemotronVLProcessor(ABC):
             use_thumbnail=self.use_thumbnail,
         )
 
-        return num_patches * num_image_token_per_tile(
-            width=image_width,
-            height=image_height,
-            patch_size=self.patch_size,
-            downsample_ratio=self.downsample_ratio,
-        )
+        return num_patches * self.num_image_token
+        #  num_image_token_per_tile(
+        #     width=image_width,
+        #     height=image_height,
+        #     patch_size=self.patch_size,
+        #     downsample_ratio=self.downsample_ratio,
+        # )
 
     def _images_to_pixel_values_lst(
         self,
         text_prompt_length: int,
         images: list[Image.Image],
         max_num_tiles: int,
-    ) -> tuple[list[torch.Tensor], list[int]]:
+    ) -> torch.Tensor:
         return [
             image_to_pixel_values(
                 image,
@@ -1254,22 +1258,27 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        max_num_tiles: int,
-        processor: BaseNanoNemotronVLProcessor | None,
-    ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
+    def get_image_size_with_most_features(self, max_num_tiles: int) -> ImageSize:
+        processor = self.get_hf_processor()
 
-        return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-            max_num_tiles=max_num_tiles,
-        )
+        base_size = processor.image_size
+        target_ratios = get_internvl_target_ratios(1, max_num_tiles)
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for wr, hr in target_ratios:
+            width, height = base_size * wr, base_size * hr
+
+            feat_size = processor.get_num_image_tokens(
+                image_width=width, image_height=height, max_num_tiles=max_num_tiles
+            )
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width, height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
 
     def get_max_image_tokens(self) -> int:
         processor = self.get_hf_processor()
@@ -1279,11 +1288,10 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
             max_num_tiles
         )
 
-        return self.get_num_image_tokens(
+        return processor.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
             max_num_tiles=max_num_tiles,
-            processor=processor,
         )
 
 
@@ -1314,7 +1322,7 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
 
     @property
     def supports_video(self):
-        return False  # TODO(nhaber): add video support
+        return self.get_hf_processor().supports_video
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
@@ -1337,12 +1345,7 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         processor = self.get_hf_processor()  # we get the CustomProcessor here
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // num_image_token_per_tile(
-            width=256,
-            height=256,
-            patch_size=processor._patch_size,
-            downsample_ratio=processor.downsample_ratio,
-        )  # TODO(nhaber): get 256 dynamically
+        max_total_frames = (seq_len - max_image_tokens) // processor.num_image_token
         max_frames_per_video = max_total_frames // max(max_videos, 1)
         return max(max_frames_per_video, 1)
 
@@ -1486,12 +1489,7 @@ class NanoNemotronVLMultiModalProcessor(
             video_num_patches = []
 
         def get_video_replacement_internvl(item_idx: int):
-            feature_size = num_image_token_per_tile(
-                width=256,
-                height=256,
-                patch_size=hf_processor._patch_size,
-                downsample_ratio=hf_processor.downsample_ratio,
-            )  # TODO(nhaber): get 256 dynamically
+            feature_size = hf_processor.num_image_token
             video, metadata = mm_items["video"][item_idx]
             num_patches = video_num_patches[item_idx]
             if num_patches is not None:
@@ -1669,6 +1667,9 @@ class NemotronH_Nano_VL_V2(
         patch_size = config.patch_size
         self.patch_size = patch_size
         self.template = config.template
+        self.num_image_token = int(
+            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
+        )
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
         self.image_tag_type = config.image_tag_type
@@ -1716,6 +1717,35 @@ class NemotronH_Nano_VL_V2(
             IMG_CONTEXT, add_special_tokens=False
         )
 
+    def pixel_shuffle(self, x, scale_factor=0.5):
+        n, w, h, c = x.size()
+        # N, W, H, C --> N, W, H * scale, C // scale
+        x = x.view(
+            n,
+            w,
+            int(h * scale_factor),
+            int(c / scale_factor),
+        )
+        # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # N, H * scale, W, C // scale -->
+        # N, H * scale, W * scale, C // (scale ** 2)
+        x = x.view(
+            n,
+            int(h * scale_factor),
+            int(w * scale_factor),
+            int(c / (scale_factor * scale_factor)),
+        )
+        if self.ps_version == "v1":
+            warnings.warn(
+                "In ps_version 'v1', the height and width have not "
+                "been swapped back, which results in a transposed image.",
+                stacklevel=2,
+            )
+        else:
+            x = x.permute(0, 2, 1, 3).contiguous()
+        return x
+
     def pixel_shuffle_dynamic_res(self, x, *, imgs_sizes):
         scale_factor = self.downsample_ratio
         patch_dim = self.patch_size
@@ -1748,11 +1778,40 @@ class NemotronH_Nano_VL_V2(
 
         return x
 
-    def extract_feature(self, pixel_values: torch.Tensor, imgs_sizes: torch.Tensor):
+    def extract_feature_dynamic(
+        self, pixel_values: torch.Tensor, imgs_sizes: torch.Tensor
+    ):
+        """Dynamic resolution extract_feature for images."""
         vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
         vit_embeds = self.mlp1(vit_embeds)
+        return vit_embeds
+
+    def extract_feature(self, pixel_values: torch.Tensor):
+        """Original extract_feature for video (static resolution)."""
+        # Process images in a micro-batch of at most 128 frames per call
+        # This is done on purpose to ensure peak GPU ram usage of huge batch
+        # (namely for really long videos with EVS ON) won't cause any problems
+        # as we don't support chunked prefill for video media
+        micro_batch_size = 128
+        n = pixel_values.shape[0]
+        vit_embeds_list = []
+        for i in range(0, n, micro_batch_size):
+            vit_embeds = self.vision_model(pixel_values[i : i + micro_batch_size])
+            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            h = w = int(vit_embeds.shape[1] ** 0.5)
+            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+            vit_embeds = self.pixel_shuffle(
+                vit_embeds, scale_factor=self.downsample_ratio
+            )
+            vit_embeds = vit_embeds.reshape(
+                vit_embeds.shape[0], -1, vit_embeds.shape[-1]
+            )
+            vit_embeds = self.mlp1(vit_embeds)
+            vit_embeds_list.append(vit_embeds)
+
+        vit_embeds = torch.cat(vit_embeds_list, dim=0)
         return vit_embeds
 
     def _parse_and_validate_image_input(
@@ -1790,7 +1849,7 @@ class NemotronH_Nano_VL_V2(
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
+    def _process_image_input_dynamic(
         self, image_input: NanoNemotronVLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
@@ -1798,7 +1857,7 @@ class NemotronH_Nano_VL_V2(
 
         assert self.vision_model is not None
 
-        image_embeds = self.extract_feature(
+        image_embeds = self.extract_feature_dynamic(
             image_input.pixel_values_flat, image_input.imgs_sizes
         )
         image_feature_sizes = image_input.image_feature_sizes.tolist()
@@ -1810,15 +1869,36 @@ class NemotronH_Nano_VL_V2(
         image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
         return image_embeds.split(image_feature_sizes)
 
+    def _process_image_input(
+        self, image_input: NanoNemotronVLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_model is not None
+
+        image_embeds = self.extract_feature(image_input["pixel_values_flat"])
+        num_patches = image_input["num_patches"]
+
+        # Only one image in the current batch
+        if len(num_patches) == 1:
+            return (image_embeds.view(-1, self.config.text_config.hidden_size),)
+
+        # NOTE: Image embeddings are split into separate tensors for each image
+        # by the size of each embedding.
+        feature_size = image_embeds.shape[1]
+        image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
+        image_feature_sizes = [
+            num_patches * feature_size for num_patches in num_patches
+        ]
+        return image_embeds.split(image_feature_sizes)
+
     def _process_video_input(
         self, video_input: NanoNemotronVLVideoPixelInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process video input and create final embeddings with video content
         and indicator tokens."""
         # Get video embeddings using the same processing as images
-        assert typing.assert_never(video_input), (
-            "TODO(nhaber): Video input is not supported for this hacky RL enablement branch for vision"
-        )
         video_embeddings = self._process_image_input(video_input)
 
         final_video_embeddings: tuple[torch.Tensor, ...] = ()
@@ -1998,7 +2078,7 @@ class NemotronH_Nano_VL_V2(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                image_embeddings = self._process_image_input(image_input)
+                image_embeddings = self._process_image_input_dynamic(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]

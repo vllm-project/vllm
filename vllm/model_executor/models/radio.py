@@ -164,10 +164,20 @@ class ViTPatchGenerator(nn.Module):
             nn.LayerNorm(embed_dim) if normalize_patches else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor, imgs_sizes: torch.Tensor) -> torch.Tensor:
-        patches = self.embedder(x)
-        patches, pos_enc = self.apply_pos_enc_dynamic(patches, imgs_sizes=imgs_sizes)
-        patches = self.cls_token_dynamic(patches, imgs_sizes=imgs_sizes)
+    def forward(
+        self, x: torch.Tensor, imgs_sizes: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if imgs_sizes is not None:
+            patches = self.embedder(x)
+            patches, pos_enc = self.apply_pos_enc_dynamic(
+                patches, imgs_sizes=imgs_sizes
+            )
+            patches = self.cls_token_dynamic(patches, imgs_sizes=imgs_sizes)
+        else:
+            patches = self.im_to_patches(x)
+            patches = self.embedder(patches)
+            patches, pos_enc = self.apply_pos_enc(patches, input_size=x.shape[2:])
+            patches = self.cls_token(patches)
         patches = self.patch_normalizer(patches)
         if self.return_pos_enc:
             return patches, pos_enc
@@ -293,11 +303,6 @@ class ViTPatchGenerator(nn.Module):
             )
             src_proj_weight = rearrange(src_proj_weight, "b c h w -> b (c h w)")
         targ_proj_weight.data.copy_(src_proj_weight)
-
-    def embed_patches(self, x: torch.Tensor) -> torch.Tensor:
-        patches = self.im_to_patches(x)
-        patches = self.embedder(patches)
-        return patches
 
     def apply_pos_enc(
         self,
@@ -513,7 +518,7 @@ class RadioInternVisionModel(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        imgs_sizes: torch.Tensor,
+        imgs_sizes: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         assert self.patch_generator is not None
@@ -597,17 +602,24 @@ class RadioModel(nn.Module):
         pixel_values: torch.Tensor | None = None,
         pixel_embeds: torch.Tensor | None = None,
         *,
-        imgs_sizes: torch.Tensor,
+        imgs_sizes: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
-        # Create attention mask for multi-image batches
-        attn_mask = None
-        if len(imgs_sizes) > 1:
-            attn_mask = self.create_inter_image_attention_mask(
-                imgs_sizes, device=pixel_values.device
+        num_skip = self.model.patch_generator.num_skip
+        patch_size = self.model.patch_generator.patch_size
+        if imgs_sizes is not None:
+            # Dynamic Resolution
+            attn_mask = None
+            if len(imgs_sizes) > 1:
+                attn_mask = self.create_inter_image_attention_mask(
+                    imgs_sizes, device=pixel_values.device
+                )
+            y = self.model(pixel_values, imgs_sizes=imgs_sizes, attn_mask=attn_mask)
+            return self._extract_final_dynamic(
+                y, imgs_sizes=imgs_sizes, num_skip=num_skip, patch_size=patch_size
             )
-
-        y = self.model(pixel_values, imgs_sizes=imgs_sizes, attn_mask=attn_mask)
-        return self._extract_final(y, imgs_sizes=imgs_sizes)
+        else:
+            y = self.model(pixel_values)
+            return y[:, num_skip:]
 
     def load_weights(self, weights) -> set[str]:
         loaded_params: set[str] = set()
@@ -658,16 +670,11 @@ class RadioModel(nn.Module):
 
         return loaded_params
 
-    def _extract_final(self, y: torch.Tensor, imgs_sizes: torch.Tensor):
-        patch_gen = getattr(self.model, "patch_generator", None)
-        if patch_gen is None:
-            return y
-
-        num_skip = patch_gen.num_skip
-        patch_size = patch_gen.patch_size
+    def _extract_final_dynamic(
+        self, y: torch.Tensor, imgs_sizes: torch.Tensor, num_skip: int, patch_size: int
+    ):
         all_patches = []
         current_pos = 0
-
         for img_size in imgs_sizes:
             h, w = img_size[0].item(), img_size[1].item()
             num_patches = (h // patch_size) * (w // patch_size)
