@@ -2,21 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from .base import (
     PoolerHead,
-    TokenPoolerHead,
+    PoolerHeadOutput,
     TokenPoolerHeadOutput,
-    TokenwisePoolerHead,
     TokenwisePoolerHeadOutput,
 )
-from .token import EmbeddingPoolerHead
-from .tokenwise import TokenClassifierPoolerHead, TokenEmbeddingPoolerHead
+from .token import EmbeddingPoolerHead, TokenPoolerHead
+from .tokenwise import (
+    TokenClassifierPoolerHead,
+    TokenEmbeddingPoolerHead,
+    TokenwisePoolerHead,
+)
 
 __all__ = [
     "PoolerHead",
-    "TokenPoolerHead",
+    "PoolerHeadOutput",
     "TokenPoolerHeadOutput",
-    "TokenwisePoolerHead",
     "TokenwisePoolerHeadOutput",
+    "TokenPoolerHead",
     "EmbeddingPoolerHead",
+    "TokenwisePoolerHead",
     "TokenEmbeddingPoolerHead",
     "TokenClassifierPoolerHead",
 ]

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import abstractmethod
 
 import torch
 
@@ -9,7 +10,17 @@ from vllm.model_executor.layers.pool.methods import TokenPoolingMethodOutput
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .base import TokenPoolerHead, TokenPoolerHeadOutput
+from .base import PoolerHead, TokenPoolerHeadOutput
+
+
+class TokenPoolerHead(PoolerHead):
+    @abstractmethod
+    def forward(
+        self,
+        pooled_data: TokenPoolingMethodOutput,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolerHeadOutput:
+        raise NotImplementedError
 
 
 class EmbeddingPoolerHead(TokenPoolerHead):
