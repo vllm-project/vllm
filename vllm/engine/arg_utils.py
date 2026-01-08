@@ -356,6 +356,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
@@ -1212,6 +1213,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
@@ -1355,6 +1357,7 @@ class EngineArgs:
 
         model_config = self.create_model_config()
         self.model = model_config.model
+        self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
