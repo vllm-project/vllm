@@ -11,36 +11,9 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput
-from .activations import PoolerActivation
-from .batched import (
-    BatchedPoolingFn,
-    ClassifierPooler,
-    pooler_for_classify,
-    pooler_for_embed,
-)
+from .batched import BatchedPoolingFn, pooler_for_classify, pooler_for_embed
 from .common import ClassifierFn
 from .request import pooler_for_token_classify, pooler_for_token_embed
-
-
-def _get_seq_cls_pooler(
-    pooler_config: PoolerConfig,
-    *,
-    pooling: BatchedPoolingFn | None = None,
-    classifier: ClassifierFn | None = None,
-    act_fn: PoolerActivation | str | None = None,
-):
-    if pooling is not None:
-        return ClassifierPooler(
-            pooling=pooling,
-            classifier=classifier,
-            act_fn=act_fn,
-        )
-
-    return pooler_for_classify(
-        pooler_config,
-        classifier=classifier,
-        act_fn=act_fn,
-    )
 
 
 class DispatchPooler(Pooler):
@@ -69,13 +42,13 @@ class DispatchPooler(Pooler):
                     pooler_config,
                     classifier=classifier,
                 ),
-                "classify": _get_seq_cls_pooler(
+                "classify": pooler_for_classify(
                     pooler_config,
                     pooling=pooling,
                     classifier=classifier,
                     act_fn="classify",
                 ),
-                "score": _get_seq_cls_pooler(
+                "score": pooler_for_classify(
                     pooler_config,
                     pooling=pooling,
                     classifier=classifier,

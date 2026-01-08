@@ -155,9 +155,11 @@ def pooler_for_embed(pooler_config: PoolerConfig):
 def pooler_for_classify(
     pooler_config: PoolerConfig,
     *,
+    pooling: BatchedPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
-    pooling = get_token_pooling_method(pooler_config.get_pooling_type())
+    if pooling is None:
+        pooling = get_token_pooling_method(pooler_config.get_pooling_type())
 
     return ClassifierPooler(pooling=pooling, classifier=classifier, act_fn=act_fn)
