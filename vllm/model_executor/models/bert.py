@@ -27,11 +27,11 @@ from vllm.model_executor.layers.pooler import (
     pooler_for_token_embed,
 )
 from vllm.model_executor.layers.pooler.token import (
+    CLSPool,
     TokenPooler,
     TokenPoolerHeadOutput,
     TokenPoolerOutput,
     TokenPoolingMethodOutput,
-    get_token_pooling_method,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -95,7 +95,7 @@ class BertPooler(Pooler):
     def __init__(self, config: BertConfig):
         super().__init__()
 
-        self.pooling = get_token_pooling_method("CLS")
+        self.pooling = CLSPool()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
