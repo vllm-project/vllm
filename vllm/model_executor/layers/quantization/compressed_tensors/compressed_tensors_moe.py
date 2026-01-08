@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -55,7 +56,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,

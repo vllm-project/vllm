@@ -731,7 +731,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         assert self.quant_config.is_checkpoint_fp8_serialized
         self.fp8_backend = select_fp8_moe_backend(
             block_quant=False,
-            tp_size=layer.moe_parallel_config.tp_size,
+            tp_size=moe_config.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
