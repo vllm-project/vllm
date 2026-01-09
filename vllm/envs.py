@@ -684,7 +684,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None,
         lambda: list(
             __import__(
-                "vllm.attention.backends.registry", fromlist=["AttentionBackendEnum"]
+                "vllm.v1.attention.backends.registry", fromlist=["AttentionBackendEnum"]
             ).AttentionBackendEnum.__members__.keys()
         ),
     ),
