@@ -281,7 +281,7 @@ def get_and_maybe_dequant_weights(
         return weight.to(out_dtype)
 
     # Simple Fp8 case: rescale with tensor or block weight scales
-    if isinstance(layer.quant_method, Fp8LinearMethod):
+    if isinstance(layer.quant_method, Fp8LinearMethod) and not layer.use_marlin:
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
         )
