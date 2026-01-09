@@ -219,7 +219,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."}
@@ -306,7 +306,7 @@ class ModernBertPooler(SequencePooler):
         return self.norm(self.act(self.dense(pooled_data)))
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
@@ -393,7 +393,7 @@ class ModernBertPredictionHead(nn.Module):
 
 
 @attn_type("encoder_only")
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
 

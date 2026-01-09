@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
-from vllm.config.pooler import PoolingTypeStr
+from vllm.config.pooler import TokenPoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -113,12 +113,10 @@ class StepPool(AllPool):
         return pooled_data
 
 
-def get_tok_pooling_method(pooling_type: PoolingTypeStr | str):
+def get_tok_pooling_method(pooling_type: TokenPoolingType | str):
     if pooling_type == "ALL":
         return AllPool()
     if pooling_type == "STEP":
         return StepPool()
 
-    # TODO: Separate seq and tok pooling types so we don't need this fallback
-    return AllPool()
     raise NotImplementedError(f"Unknown tokenwise pooling type: {pooling_type!r}")

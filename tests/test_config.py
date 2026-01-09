@@ -161,7 +161,8 @@ def test_get_pooling_config():
 
     assert model_config.pooler_config is not None
     assert model_config.pooler_config.normalize
-    assert model_config.pooler_config.pooling_type == "MEAN"
+    assert model_config.pooler_config.seq_pooling_type == "MEAN"
+    assert model_config.pooler_config.tok_pooling_type == "ALL"
 
 
 @pytest.mark.skipif(
@@ -169,7 +170,7 @@ def test_get_pooling_config():
 )
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    pooler_config = PoolerConfig(pooling_type="CLS", normalize=True)
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", normalize=True)
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
@@ -180,14 +181,25 @@ def test_get_pooling_config_from_args():
     [
         ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
         ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+    ],
+)
+def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config.pooler_config.seq_pooling_type == pooling_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
         ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
         ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP"),  # step reward
     ],
 )
-def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
     assert model_config._model_info.default_pooling_type == default_pooling_type
-    assert model_config.pooler_config.pooling_type == pooling_type
+    assert model_config.pooler_config.tok_pooling_type == pooling_type
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,8 @@ from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
-PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
+SequencePoolingType = Literal["CLS", "LAST", "MEAN"]
+TokenPoolingType = Literal["ALL", "STEP"]
 
 
 @config
@@ -19,9 +20,21 @@ PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
-    pooling_type: PoolingTypeStr | None = None
+    pooling_type: SequencePoolingType | TokenPoolingType | None = None
     """
-    The pooling method of the pooling model.
+    The pooling method used for pooling.
+
+    DEPRECATED: Please use `seq_pooling_type` or `TokenPoolingType` instead.
+    """
+
+    seq_pooling_type: SequencePoolingType | None = None
+    """
+    The pooling method used for sequence pooling.
+    """
+
+    tok_pooling_type: TokenPoolingType | None = None
+    """
+    The pooling method used for tokenwise pooling.
     """
 
     ## for embeddings models
@@ -88,9 +101,33 @@ class PoolerConfig:
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
 
-    def get_pooling_type(self) -> PoolingTypeStr:
-        assert self.pooling_type is not None, "Should be resolved by ModelConfig"
-        return self.pooling_type
+        if pooling_type := self.pooling_type:
+            if pooling_type in ("CLS", "LAST", "MEAN"):
+                logger.warning_once(
+                    "`pooling_type=%s` is deprecated and will be removed in v0.16. "
+                    "Please use `seq_pooling_type=%s` instead.",
+                    pooling_type,
+                    pooling_type,
+                )
+                self.seq_pooling_type = pooling_type
+            elif pooling_type in ("ALL", "STEP"):
+                logger.warning_once(
+                    "`pooling_type=%s` is deprecated and will be removed in v0.16. "
+                    "Please use `tok_pooling_type=%s` instead.",
+                    pooling_type,
+                    pooling_type,
+                )
+                self.tok_pooling_type = pooling_type
+            else:
+                raise NotImplementedError(pooling_type)
+
+    def get_seq_pooling_type(self) -> SequencePoolingType:
+        assert self.seq_pooling_type is not None, "Should be resolved by ModelConfig"
+        return self.seq_pooling_type
+
+    def get_tok_pooling_type(self) -> TokenPoolingType:
+        assert self.tok_pooling_type is not None, "Should be resolved by ModelConfig"
+        return self.tok_pooling_type
 
     def compute_hash(self) -> str:
         """
