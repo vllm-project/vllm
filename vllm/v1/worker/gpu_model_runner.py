@@ -3287,25 +3287,24 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        # self._draft_token_ids is None when `input_fits_in_drafter=False`
-        # and there is no draft tokens scheduled. so it need to update the
-        # spec_decoding info in scheduler_output with async_scheduling.
-        # use deepcopy to avoid the modification has influence on the
-        # scheduler_output in engine core process.
-        # TODO(Ronald1995): deepcopy is expensive when there is a large
-        # number of requests, optimize it later.
+        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
+        # the modification has influence on the scheduler_output in engine core process.
+        # The replace is much faster than deepcopy.
         if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self._draft_token_ids is None
-            or (
-                self.speculative_config is not None
-                and self.speculative_config.method == "ngram_gpu"
-                and self._is_empty_draft_tokens is not None
-                and self._is_empty_draft_tokens.any()
-            )
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
         ):
-            scheduler_output = deepcopy(scheduler_output)
+            from dataclasses import replace
+
+            num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -3841,7 +3840,6 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         assert spec_config is not None
         if spec_config.method == "ngram":
-            # TODO:(patchy) NGram GPU proposal
             if isinstance(self.drafter, NgramProposer):
                 assert isinstance(sampled_token_ids, list), (
                     "sampled_token_ids should be a python list when ngram is used."
