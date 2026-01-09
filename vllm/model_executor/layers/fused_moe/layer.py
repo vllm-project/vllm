@@ -302,6 +302,7 @@ class FusedMoERouterImpl(FusedMoERouter):
         return self.layer._select_experts(hidden_states, router_logits)
 
 
+# --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -325,6 +326,8 @@ class FusedMoE(CustomOp):
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
     """
+
+    # --8<-- [end:fused_moe]
 
     def __init__(
         self,

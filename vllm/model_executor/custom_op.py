@@ -87,9 +87,12 @@ class CustomOp(nn.Module):
         # specific backend. Currently, we do not support dynamic dispatching.
         compilation_config = get_cached_compilation_config()
 
-        # CustomOp object can be enforce enabled, e.g., enable device-specific
-        # kernels in ViT models when enabling graph mode. By default, it will
-        # follow the compilation_config to determine whether enable itself.
+        # NOTE(shen-shanshan): CustomOp object can be enforce enabled, e.g.,
+        # enable device-specific kernels in ViT models when enabling graph
+        # mode. By default, it will follow the compilation_config to determine
+        # whether enable itself.
+        # This enforce_enable mechanism will be removed after we adding a
+        # separate compilation_config for multi-modal part.
         enabled = self._enforce_enable or self.enabled()
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])

@@ -1459,9 +1459,12 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+# --8<-- [start:grouped_topk]
 @CustomOp.register("grouped_topk")
 class GroupedTopk(CustomOp):
     """GroupedTopk used by the Deepseek-V2 and Deepseek-V3 model."""
+
+    # --8<-- [end:grouped_topk]
 
     def __init__(
         self,
