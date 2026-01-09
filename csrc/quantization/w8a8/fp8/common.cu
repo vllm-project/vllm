@@ -302,7 +302,7 @@ void static_scaled_fp8_quant(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-// Dispatch to template-specialized kernel based on stride pattern
+  // Dispatch to template-specialized kernel based on stride pattern
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
