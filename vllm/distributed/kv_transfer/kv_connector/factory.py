@@ -40,6 +40,11 @@ class KVConnectorFactory:
         cls._registry[name] = loader
 
     @classmethod
+    def get_registered_connectors(cls) -> tuple[str, ...]:
+        """Get the names of all registered connectors."""
+        return tuple(cls._registry.keys())
+
+    @classmethod
     def create_connector(
         cls,
         config: "VllmConfig",
