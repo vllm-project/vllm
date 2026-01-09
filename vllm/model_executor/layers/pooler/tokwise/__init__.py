@@ -8,7 +8,13 @@ from .heads import (
     TokenPoolerHead,
     TokenPoolerHeadOutput,
 )
-from .methods import AllPool, TokenPoolingMethod, TokenPoolingMethodOutputItem
+from .methods import (
+    AllPool,
+    StepPool,
+    TokenPoolingMethod,
+    TokenPoolingMethodOutputItem,
+    get_tok_pooling_method,
+)
 from .poolers import (
     TokenPooler,
     TokenPoolerOutput,
@@ -24,6 +30,8 @@ __all__ = [
     "TokenPoolingMethod",
     "TokenPoolingMethodOutputItem",
     "AllPool",
+    "StepPool",
+    "get_tok_pooling_method",
     "TokenPooler",
     "TokenPoolerOutput",
     "pooler_for_token_classify",

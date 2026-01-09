@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
+from vllm.config.pooler import PoolingTypeStr
 from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -111,3 +112,12 @@ class StepPool(AllPool):
             pooled_data.append(data)
 
         return pooled_data
+
+
+def get_tok_pooling_method(pooling_type: PoolingTypeStr | str):
+    if pooling_type == "ALL":
+        return AllPool()
+    if pooling_type == "STEP":
+        return StepPool()
+
+    raise NotImplementedError(f"Unknown tokenwise pooling method: {pooling_type!r}")
