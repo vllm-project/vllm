@@ -1169,7 +1169,7 @@ class NixlConnectorWorker:
         **extra_context,
     ):
         """Log transfer failure with structured context for easier debugging."""
-        context = {
+        context: dict[str, Any] = {
             "failure_type": failure_type,
             "request_id": req_id,
             "engine_id": self.engine_id,
@@ -1200,6 +1200,7 @@ class NixlConnectorWorker:
             failure_type,
             context,
             exc_info=error is not None,
+            stacklevel=2,
         )
 
     def _background_nixl_handshake(
@@ -2334,16 +2335,15 @@ class NixlConnectorWorker:
             self._recving_transfers[request_id].append(handle)
         except Exception as e:
             # mark all (logical) blocks for this request as invalid
+            self._log_failure(
+                failure_type="transfer_setup_failed",
+                req_id=request_id,
+                msg="Marking blocks as invalid",
+                error=e,
+                dst_engine_id=dst_engine_id,
+                remote_rank=remote_rank,
+            )
             if meta := self._recving_metadata.get(request_id):
-                self._log_failure(
-                    failure_type="transfer_setup_failed",
-                    req_id=request_id,
-                    msg="Marking blocks as invalid",
-                    error=e,
-                    meta=meta,
-                    dst_engine_id=dst_engine_id,
-                    remote_rank=remote_rank,
-                )
                 self._invalid_block_ids.update(meta.local_block_ids)
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
