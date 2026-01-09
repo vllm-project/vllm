@@ -54,7 +54,6 @@ def rocm_evil_forward(monkeypatch, tmp_path):
                 "from vllm.model_executor.models.llama import LlamaForCausalLM",
                 inspect.getsource(evil_forward),
                 "LlamaForCausalLM.forward = evil_forward",
-                "",
             ]
         )
     )
