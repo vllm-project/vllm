@@ -236,7 +236,7 @@ def _fused_moe_lora_shrink(
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
         "BLOCK_SIZE_M": block_size_m,
-        "BLOCK_SIZE_N": block_size_n,
+        "BLOCK_SIZE_N": min(block_size_n, triton.next_power_of_2(N)),
         "BLOCK_SIZE_K": block_size_k,
         "GROUP_SIZE_M": group_size_m,
         "num_warps": num_warps,
@@ -341,7 +341,7 @@ def _fused_moe_lora_expand(
     expand_config = {
         "BLOCK_SIZE_M": block_size_m,
         "BLOCK_SIZE_N": block_size_n,
-        "BLOCK_SIZE_K": block_size_k,
+        "BLOCK_SIZE_K": max(min(block_size_k, triton.next_power_of_2(K)), 16),
         "GROUP_SIZE_M": group_size_m,
         "num_warps": num_warps,
         "num_stages": num_stages,
