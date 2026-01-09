@@ -801,8 +801,8 @@ def context_attention_fwd(
     # non-standard sizes (such as 544).
     TRITON_BLOCK_SIZE = 32
 
-    grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
-    _fwd_kernel[grid](
+    grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
+    _fwd_kernel[grid_fn](
         q,
         k,
         v,
