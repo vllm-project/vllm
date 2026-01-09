@@ -794,7 +794,7 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
 
     if pooling:
         pooling_file_name = "{}/config.json".format(pooling["path"])
-        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None
         )
@@ -803,7 +803,6 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
             pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         logger.info("Found pooling configuration.")
-
         return {"pooling_type": pooling_type_name, "normalize": normalize}
 
     return None
