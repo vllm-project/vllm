@@ -13,7 +13,7 @@ from typing import (
 
 import numpy as np
 import torch
-from typing_extensions import deprecated, runtime_checkable
+from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
@@ -44,123 +44,6 @@ PAD_SLOT_ID = -1
 
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
-
-
-@dataclass
-class CommonAttentionMetadata:
-    """
-    Per-batch attention metadata, shared across layers and backends.
-    AttentionMetadataBuilder instances use it to construct per-layer metadata.
-
-    For many of the tensors we keep both GPU and CPU versions.
-    """
-
-    query_start_loc: torch.Tensor
-    query_start_loc_cpu: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-
-    seq_lens: torch.Tensor
-    """(batch_size,), the number of computed tokens for each request"""
-
-    num_reqs: int
-    """Number of requests"""
-    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
-    num_actual_tokens: int
-    """Total number of tokens in batch"""
-    max_query_len: int
-    """Longest query in batch"""
-    max_seq_len: int
-    """Longest context length (may be an upper bound)"""
-
-    block_table_tensor: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    causal: bool = True
-
-    # Needed by FastPrefillAttentionBuilder
-    logits_indices_padded: torch.Tensor | None = None
-    num_logits_indices: int | None = None
-
-    # Needed by CrossAttentionBuilder
-    encoder_seq_lens: torch.Tensor | None = None
-    encoder_seq_lens_cpu: np.ndarray | None = None
-
-    dcp_local_seq_lens: torch.Tensor | None = None
-    dcp_local_seq_lens_cpu: torch.Tensor | None = None
-    """Sequence lengths of the local rank in decode context parallelism world"""
-
-    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
-    _seq_lens_cpu: torch.Tensor | None = None
-    _num_computed_tokens_cpu: torch.Tensor | None = None
-
-    _num_computed_tokens_cache: torch.Tensor | None = None
-
-    @property
-    @deprecated(
-        """
-    Prefer using device seq_lens directly to avoid implicit H<>D sync.
-    If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.14.0)
-    """
-    )
-    def seq_lens_cpu(self) -> torch.Tensor:
-        if self._seq_lens_cpu is None:
-            self._seq_lens_cpu = self.seq_lens.to("cpu")
-        return self._seq_lens_cpu
-
-    @property
-    @deprecated(
-        """
-    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
-    query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.14.0)
-    """
-    )
-    def num_computed_tokens_cpu(self) -> torch.Tensor:
-        if self._num_computed_tokens_cpu is None:
-            query_seq_lens = (
-                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
-            )
-            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
-        return self._num_computed_tokens_cpu
-
-    def compute_num_computed_tokens(self) -> torch.Tensor:
-        """Compute num_computed_tokens on device (seq_lens - query_lens)."""
-        if self._num_computed_tokens_cache is None:
-            query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-            self._num_computed_tokens_cache = self.seq_lens - query_lens
-        return self._num_computed_tokens_cache
-
-    # TODO(lucas): remove once we have FULL-CG spec-decode support
-    def unpadded(
-        self, num_actual_tokens: int, num_actual_reqs: int
-    ) -> "CommonAttentionMetadata":
-        maybe_slice_reqs = lambda x: x[:num_actual_reqs] if x is not None else None
-        return CommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
-            seq_lens=self.seq_lens[:num_actual_reqs],
-            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
-            if self._seq_lens_cpu is not None
-            else None,
-            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
-            if self._num_computed_tokens_cpu is not None
-            else None,
-            num_reqs=num_actual_reqs,
-            num_actual_tokens=num_actual_tokens,
-            max_query_len=self.max_query_len,
-            max_seq_len=self.max_seq_len,
-            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
-            slot_mapping=self.slot_mapping[:num_actual_tokens],
-            causal=self.causal,
-            logits_indices_padded=self.logits_indices_padded,
-            num_logits_indices=self.num_logits_indices,
-            encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
-            encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
-            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
-        )
 
 
 def slice_query_start_locs(
