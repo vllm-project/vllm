@@ -7,7 +7,7 @@ from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, get_args
 
 import huggingface_hub
 from huggingface_hub import (
@@ -793,8 +793,10 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
     )
 
     if pooling:
+        from vllm.config.pooler import SequencePoolingType, TokenPoolingType
+
         pooling_file_name = "{}/config.json".format(pooling["path"])
-        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None
         )
@@ -803,7 +805,14 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
             pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         logger.info("Found pooling configuration.")
-        return {"pooling_type": pooling_type_name, "normalize": normalize}
+
+        config: dict[str, Any] = {"normalize": normalize}
+        if pooling_type_name in get_args(SequencePoolingType):
+            config["seq_pooling_type"] = pooling_type_name
+        if pooling_type_name in get_args(TokenPoolingType):
+            config["tok_pooling_type"] = pooling_type_name
+
+        return config
 
     return None
 
