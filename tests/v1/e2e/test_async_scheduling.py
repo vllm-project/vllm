@@ -54,6 +54,14 @@ def test_without_spec_decoding(
         dict(
             structured_outputs=struct_outputs,
             logprobs=2,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            presence_penalty=-1.0,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
             presence_penalty=-1.0,
         ),
     ]
@@ -105,11 +113,15 @@ def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch)
 
     test_sampling_params = [
         dict(),
+        dict(presence_penalty=-1.0),
+        dict(bad_words=["the", " the"]),
         dict(logprobs=2),
+        dict(logprobs=2, presence_penalty=-1.0),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
             logprobs=2,
+            presence_penalty=-1.0,
         ),
     ]
 
