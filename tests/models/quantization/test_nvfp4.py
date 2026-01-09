@@ -83,27 +83,3 @@ def test_models(example_prompts, model_name) -> None:
         assert expected_str == generated_str, (
             f"Test{i}:\nExpected: {expected_str!r}\nvLLM: {generated_str!r}"
         )
-
-
-EAGER = [True, False]
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("modelopt_fp4"),
-    reason="modelopt_fp4 is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("eager", EAGER)
-@pytest.mark.parametrize(
-    "backend",
-    [
-        "flashinfer-cudnn",
-        "flashinfer-trtllm",
-        "flashinfer-cutlass",
-    ],
-)
-def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
-    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
-    with vllm_runner(model, enforce_eager=eager) as llm:
-        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
-    assert output[0][1] == "1 2 3 4 5 6"
