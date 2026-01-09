@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
+    VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -595,6 +596,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # to load will result in a hard error when this is enabled.
     # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
     "VLLM_FORCE_AOT_LOAD": lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
+    # Enable the new VllmBackendWithCache backend that reconstructs
+    # compiled models directly from cached inductor artifacts without
+    # re-splitting graph modules. This reduces overhead during model loading.
+    "VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS": lambda: os.environ.get(
+        "VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS", "0"
+    )
+    == "1",
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
