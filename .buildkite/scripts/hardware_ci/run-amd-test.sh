@@ -210,9 +210,11 @@ if [[ $commands == *"--shard-id="* ]]; then
     STATUS+=($?)
   done
   for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
+    if [[ ${st} -ne 0 ]] && [[ ${st} -ne 5 ]]; then
       echo "One of the processes failed with $st"
       exit "${st}"
+    elif [[ ${st} -eq 5 ]]; then
+      echo "Shard exited with status 5 (no tests collected) - treating as success"
     fi
   done
 else
