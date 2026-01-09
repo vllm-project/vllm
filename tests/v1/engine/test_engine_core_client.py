@@ -3,6 +3,7 @@
 
 import asyncio
 import importlib
+import inspect
 import os
 import signal
 import time
@@ -312,8 +313,29 @@ def test_engine_core_client(
             assert str(e_info.value) == "Call to echo method failed: help!"
 
 
+@pytest.fixture
+def rocm_echo(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses call echo."""
+    if not current_platform.is_rocm():
+        return
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "import time",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(echo),
+                "EngineCore.echo = echo",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+    )
+
+
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
+async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch, rocm_echo):
     with monkeypatch.context() as m:
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
