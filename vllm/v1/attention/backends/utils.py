@@ -29,16 +29,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionMetadata,
-)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
@@ -469,6 +469,7 @@ def get_kv_cache_layout():
     # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
 
+    cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
         logger.info_once(
@@ -524,7 +525,11 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, layer_names)
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -1125,7 +1130,7 @@ class KVSharingFastPrefillMetadata(Protocol):
 
 def create_fast_prefill_custom_backend(
     prefix: str,
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     underlying_builder = underlying_attn_backend.get_builder_cls()
 

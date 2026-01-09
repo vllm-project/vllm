@@ -16,11 +16,11 @@ from transformers.image_processing_utils import BatchFeature
 from transformers.tokenization_utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -985,6 +985,7 @@ class Siglip2VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
         )
@@ -1227,8 +1228,8 @@ class IsaacVisionEmbedding(nn.Module):
         self.transformer = Siglip2VisionTransformer(
             vision_cfg,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "0"),
             multimodal_config=multimodal_config,
+            prefix=maybe_prefix(prefix, "0"),
         )
         self.linear_fc1 = ColumnParallelLinear(
             hidden_dim,

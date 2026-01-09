@@ -14,7 +14,7 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -50,7 +50,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -84,12 +84,6 @@ class Worker(WorkerBase):
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
-
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-
-            init_cached_hf_modules()
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -131,7 +125,7 @@ class Worker(WorkerBase):
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode freed %f GiB memory, %f GiB memory is still in use.",
+            "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
             format_gib(freed_bytes),
             format_gib(used_bytes),
         )
@@ -274,7 +268,9 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(tag="weights"):
+        with self._maybe_get_memory_pool_context(
+            tag="weights"
+        ) and set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -348,19 +344,19 @@ class Worker(WorkerBase):
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
-            "Initial free memory: %f GiB; Requested memory: %f (util), %f GiB",
+            "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
             format_gib(self.init_snapshot.free_memory),
             self.cache_config.gpu_memory_utilization,
             format_gib(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %f GiB (total), %f GiB (within requested)",
+            "Free memory after profiling: %s GiB (total), %s GiB (within requested)",
             format_gib(free_gpu_memory),
             format_gib(free_gpu_memory - unrequested_memory),
         )
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %f GiB",
+            "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
             scope="local",
         )
@@ -396,7 +392,7 @@ class Worker(WorkerBase):
         """
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
-            self.model_runner.max_model_len = max_model_len
+            self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -551,18 +547,29 @@ class Worker(WorkerBase):
 
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
-        # new/cached request numbers in each iteration
+        # context/generation request numbers in each iteration.
+        # A context request is a request that has not yet generated any tokens
         if not self.profiler:
             return nullcontext()
 
         self.profiler.step()
 
-        num_new = len(scheduler_output.scheduled_new_reqs)
-        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+        iteration_details = compute_iteration_details(scheduler_output)
 
-        return self.profiler.annotate_context_manager(
-            f"execute_new_{num_new}_cached_{num_cached}"
+        annotation = "".join(
+            [
+                "execute_context_",
+                str(iteration_details.num_ctx_requests),
+                "(",
+                str(iteration_details.num_ctx_tokens),
+                ")_generation_",
+                str(iteration_details.num_generation_requests),
+                "(",
+                str(iteration_details.num_generation_tokens),
+                ")",
+            ]
         )
+        return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
     def sample_tokens(

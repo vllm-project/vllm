@@ -38,12 +38,12 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -144,15 +144,15 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 class KVConnectorBase_V1(ABC):
     """
     Base class for KV connectors.
-
-    Attributes:
-        prefer_cross_layer_blocks (bool): Indicates whether this connector
-            prefers KV blocks that hold KV data for all layers (for speeding
-            up KV data transfers).
-            Defaults to False.
     """
 
-    prefer_cross_layer_blocks: ClassVar[bool] = False
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        return False
 
     def __init__(
         self,
