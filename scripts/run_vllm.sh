@@ -1,0 +1,1 @@
+VLLM_ENABLE_V1_MULTIPROCESSING=0  python examples/offline_inference/basic/generate.py --model /home/yiliu7/workspace/llm-compressor/examples/quantization_w8a8_fp8/Qwen2.5-0.5B-Instruct-FP8-Dynamic/   --enforce-eager
