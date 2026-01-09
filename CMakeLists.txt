@@ -286,17 +286,9 @@ set(VLLM_EXT_SRC
   "csrc/attention/paged_attention_v2.cu"
   "csrc/attention/merge_attn_states.cu"
   "csrc/attention/vertical_slash_index.cu"
-  "csrc/pos_encoding_kernels.cu"
-  "csrc/activation_kernels.cu"
-  "csrc/layernorm_kernels.cu"
-  "csrc/fused_qknorm_rope_kernel.cu"
-  "csrc/layernorm_quant_kernels.cu"
-  "csrc/sampler.cu"
-  "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
-  "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -338,7 +330,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/permute_cols.cu"
     "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
@@ -432,7 +423,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
     endif()
 
-    if (MARLIN_SM75_ARCHS) 
+    if (MARLIN_SM75_ARCHS)
       file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/gptq_marlin/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
@@ -444,7 +435,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
     endif()
 
-    if (MARLIN_FP8_ARCHS) 
+    if (MARLIN_FP8_ARCHS)
       file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
@@ -940,6 +931,53 @@ define_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
+
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+  #
+  # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
+  #
+  set(VLLM_STABLE_EXT_SRC
+    "csrc/activation_kernels.cu"
+    "csrc/cuda_view.cu"
+    "csrc/fused_qknorm_rope_kernel.cu"
+    "csrc/layernorm_kernels.cu"
+    "csrc/layernorm_quant_kernels.cu"
+    "csrc/pos_encoding_kernels.cu"
+    "csrc/sampler.cu"
+    "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+    "csrc/torch_bindings_stable.cpp")
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC "csrc/permute_cols.cu")
+  endif()
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_STABLE_EXT_SRC}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+  endif()
+
+  message(STATUS "Enabling C_stable extension.")
+  define_extension_target(
+    _C_stable_libtorch
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_STABLE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.10+.
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL)
+
+  # Needed to use cuda APIs from C-shim
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    USE_CUDA)
+endif()
+
 #
 # _moe_C extension
 #
@@ -1042,7 +1080,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
     endif()
 
-    if (MARLIN_MOE_SM75_ARCHS) 
+    if (MARLIN_MOE_SM75_ARCHS)
       file(GLOB MARLIN_MOE_SM75_SRC "csrc/moe/marlin_moe_wna16/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_SM75_SRC}"
