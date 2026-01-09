@@ -23,12 +23,14 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingMethod,
     PoolingParamsUpdate,
-    PoolingType,
+    TokenPoolerHeadOutput,
+    TokenPoolingMethodOutput,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
@@ -55,7 +57,9 @@ class BertEmbedding(nn.Module):
             "position_ids",
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
-        self.position_embedding_type = config.position_embedding_type
+        self.position_embedding_type = getattr(
+            config, "position_embedding_type", "absolute"
+        )
         if self.position_embedding_type != "absolute":
             raise ValueError(
                 "Only 'absolute' position_embedding_type" + " is supported"
@@ -85,7 +89,7 @@ class BertPooler(Pooler):
     def __init__(self, config: BertConfig):
         super().__init__()
 
-        self.pooling = PoolingMethod.from_pooling_type(PoolingType.CLS)
+        self.pooling = PoolingMethod.from_pooling_type("CLS")
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
@@ -95,24 +99,26 @@ class BertPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = self.dense(pooled_output)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
+    def head(
+        self,
+        pooled_data: TokenPoolingMethodOutput,
+        pooling_metadata: PoolingMetadata,
+    ) -> TokenPoolerHeadOutput:
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+
+        pooled_data = self.dense(pooled_data)
+        pooled_data = self.activation(pooled_data)
+        return pooled_data
 
     def forward(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+    ) -> TokenPoolerOutput:
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 class BertEncoder(nn.Module):

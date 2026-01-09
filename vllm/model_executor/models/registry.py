@@ -46,6 +46,7 @@ from .interfaces import (
     has_noops,
     is_attention_free,
     is_hybrid,
+    requires_raw_input_tokens,
     supports_cross_encoding,
     supports_mamba_prefix_caching,
     supports_multimodal,
@@ -118,7 +119,8 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),  # noqa: E501
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),  # noqa: E501
     "GritLM": ("gritlm", "GritLM"),
-    "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
+    "Grok1ModelForCausalLM": ("grok1", "GrokForCausalLM"),
+    "Grok1ForCausalLM": ("grok1", "GrokForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
@@ -126,7 +128,10 @@ _TEXT_GENERATION_MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
+    "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
+    "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),  # noqa: E501
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
@@ -151,6 +156,7 @@ _TEXT_GENERATION_MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
+    "MiMoV2FlashForCausalLM": ("mimo_v2_flash", "MiMoV2FlashForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
@@ -161,6 +167,7 @@ _TEXT_GENERATION_MODELS = {
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
+    "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
@@ -201,6 +208,7 @@ _EMBEDDING_MODELS = {
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
+    "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all
@@ -244,6 +252,11 @@ _CROSS_ENCODER_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "LlamaBidirectionalForSequenceClassification": (
+        "llama",
+        "LlamaBidirectionalForSequenceClassification",
+    ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -257,17 +270,20 @@ _CROSS_ENCODER_MODELS = {
         "roberta",
         "RobertaForSequenceClassification",
     ),
-    # [Auto-converted (see adapters.py)]
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),  # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
+    "AudioFlamingo3ForConditionalGeneration": (
+        "audioflamingo3",
+        "AudioFlamingo3ForConditionalGeneration",
+    ),
     "AyaVisionForConditionalGeneration": (
         "aya_vision",
         "AyaVisionForConditionalGeneration",
     ),
+    "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
@@ -291,6 +307,7 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),  # noqa: E501
@@ -321,6 +338,7 @@ _MULTIMODAL_MODELS = {
         "idefics3",
         "Idefics3ForConditionalGeneration",
     ),
+    "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KeyeVL1_5ForConditionalGeneration": (
@@ -333,6 +351,7 @@ _MULTIMODAL_MODELS = {
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
     ),
+    "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -411,7 +430,12 @@ _MULTIMODAL_MODELS = {
     ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
+    "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    "NemotronParseForConditionalGeneration": (
+        "nemotron_parse",
+        "NemotronParseForConditionalGeneration",
+    ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -528,6 +552,7 @@ class _ModelInfo:
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
+    requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
     has_inner_state: bool
@@ -551,6 +576,7 @@ class _ModelInfo:
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
             ),
+            requires_raw_input_tokens=requires_raw_input_tokens(model),
             supports_multimodal_encoder_tp_data=supports_multimodal_encoder_tp_data(
                 model
             ),

@@ -332,7 +332,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
             )
         else:
             raise ValueError(
-                f"Unsupported attention type: {self.config.attention_type}"
+                f"Unsupported attention_type {self.config.attention_type}: "
+                f"should be 0 (linear) or 1 (full)."
             )
 
         if expert_num == 1:

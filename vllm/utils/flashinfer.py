@@ -185,6 +185,23 @@ def has_flashinfer_cutedsl() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_fused_moe() -> bool:
+    """Return `True` if FlashInfer TRTLLM fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+    required_functions = [
+        ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+    ]
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -264,7 +281,9 @@ def supports_trtllm_attention() -> bool:
         return False
 
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -286,7 +305,18 @@ def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     if force_use_trtllm_attention() is False:
         return False
     has_trtllm = supports_trtllm_attention()
-    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
+    # num_kv_heads=1 is not supported due to TMA descriptor building limitations.
+    # When num_kv_heads=1, the KV cache strides become degenerate (stride_heads ==
+    # stride_batch), which causes CUDA's cuTensorMapEncodeTiled to fail because
+    # TMA descriptors cannot handle degenerate 4D tensors with singleton dimensions.
+    # See: https://fburl.com/352mrydz
+    if has_trtllm and num_kv_heads == 1:
+        logger.warning_once(
+            "TRTLLM attention does not support num_kv_heads=1. "
+            "This configuration causes TMA descriptor building to fail due to "
+            "degenerate tensor strides. Falling back to FlashInfer attention."
+        )
+    return has_trtllm and (num_qo_heads % num_kv_heads == 0) and (num_kv_heads != 1)
 
 
 def use_trtllm_attention(
@@ -333,6 +363,15 @@ def use_trtllm_attention(
                 "TRTLLM attention is not supported for this combination of "
                 "query and key heads, but --attention-config.use_trtllm_attention is "
                 "set to 1"
+            )
+        return False
+
+    # num_kv_heads=1 is not supported
+    if num_kv_heads == 1:
+        if force_use_trtllm:
+            logger.warning_once(
+                "TRTLLM attention does not support num_kv_heads=1, "
+                "but --attention-config.use_trtllm_attention is set to 1"
             )
         return False
 
@@ -501,6 +540,59 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
+    "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
+)
+
+
+@functools.cache
+def has_flashinfer_fp8_blockscale_gemm() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is available."""
+    return (
+        has_flashinfer()
+        and current_platform.is_device_capability(90)
+        and hasattr(_get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90")
+    )
+
+
+@functools.cache
+def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is supported."""
+    return (
+        envs.VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+        and has_flashinfer_fp8_blockscale_gemm()
+    )
+
+
+def should_use_flashinfer_for_blockscale_fp8_gemm(
+    is_flashinfer_supported: bool,
+    output_dtype: torch.dtype,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+):
+    if not is_flashinfer_supported:
+        return False
+
+    # Verify DeepGEMM N/K dims requirements
+    # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
+    # test inside kernels/quatization/test_block_fp8.py
+    N_MULTIPLE = 64
+    K_MULTIPLE = 128
+
+    weight_dtype = weight.dtype
+    input_dtype = input.dtype
+
+    should_use_flashinfer = (
+        output_dtype == torch.bfloat16
+        and input_dtype == torch.bfloat16
+        and weight_dtype == torch.float8_e4m3fn
+        and weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
+    )
+
+    return should_use_flashinfer
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -517,10 +609,14 @@ __all__ = [
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_fp8_blockscale_gemm",
+    "should_use_flashinfer_for_blockscale_fp8_gemm",
+    "is_flashinfer_fp8_blockscale_gemm_supported",
 ]
