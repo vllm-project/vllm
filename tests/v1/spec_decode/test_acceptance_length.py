@@ -55,7 +55,7 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="openai/gpt-oss-20b",
         drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
         expected_acceptance_length=2.56,
-        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
+        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.322],
         id="gpt-oss-20b-eagle3",
     ),
 ]
@@ -80,6 +80,13 @@ def get_mt_bench_prompts(tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS):
         input_len=None,
         output_len=DEFAULT_OUTPUT_LEN,
         sharegpt_output_len=DEFAULT_OUTPUT_LEN,
+        hf_name=None,
+        hf_split="train",
+        hf_subset=None,
+        hf_output_len=DEFAULT_OUTPUT_LEN,
+        no_stream=True,
+        disable_shuffle=False,
+        skip_chat_template=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
