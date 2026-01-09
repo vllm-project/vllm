@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
+  torch_nightly: true
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
