@@ -396,7 +396,10 @@ class GPUModelRunner(
             self.max_encoder_len = 0
 
         # Sampler
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
         self.eplb_state: EplbState | None = None
         """

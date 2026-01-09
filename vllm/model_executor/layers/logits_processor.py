@@ -91,12 +91,6 @@ class LogitsProcessor(CustomOp):
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
 
-        # Gather logits for TP
-        logits = self._gather_logits(logits)
-
-        # Remove paddings in vocab (if any).
-        if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
         return logits
 
     def extra_repr(self) -> str:

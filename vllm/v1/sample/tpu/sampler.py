@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
+from vllm.v1.sample.sampler import _gather_data_tp
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 
 _SAMPLING_EPS = 1e-5
@@ -21,6 +22,8 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> SamplerOutput:
+        # Gather logits for TP
+        logits = _gather_data_tp(logits)
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
         # Sample the next token.
