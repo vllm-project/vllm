@@ -11,15 +11,26 @@ the expected baseline.
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import TypedDict
 
 import pytest
 import torch
 
+from tests.utils import large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import get_samples
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
+
+
+class AcceptanceMetrics(TypedDict):
+    """Typed dict for acceptance length metrics."""
+
+    acceptance_length: float
+    acceptance_lengths_per_pos: list[float]
+    num_drafts: int
+    num_accepted_tokens: int
 
 
 @dataclass
@@ -34,8 +45,8 @@ class Eagle3ModelConfig:
 
 
 # Model configurations for EAGLE3 acceptance length tests.
-# Expected acceptance lengths are determined by running the baseline script.
-# See local/acceptance_length/run_baselines.md for commands.
+# Expected acceptance lengths are determined by running baseline benchmarks
+# using examples/offline_inference/spec_decode.py with the MT-Bench dataset.
 EAGLE3_MODEL_CONFIGS = [
     Eagle3ModelConfig(
         verifier="meta-llama/Llama-3.1-8B-Instruct",
@@ -55,7 +66,7 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="openai/gpt-oss-20b",
         drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
         expected_acceptance_length=2.56,
-        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.322],
+        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3220],
         id="gpt-oss-20b-eagle3",
     ),
 ]
@@ -68,7 +79,9 @@ DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_RTOL = 0.02  # 2% relative tolerance
 
 
-def get_mt_bench_prompts(tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS):
+def get_mt_bench_prompts(
+    tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
+) -> list[list[int]]:
     """Load prompts from MT-Bench dataset."""
     args = SimpleNamespace(
         dataset_name="hf",
@@ -95,7 +108,7 @@ def get_mt_bench_prompts(tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS):
     return prompt_ids
 
 
-def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
+def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> AcceptanceMetrics:
     """Extract acceptance length metrics from LLM metrics."""
     num_drafts = 0
     num_accepted_tokens = 0
@@ -140,6 +153,7 @@ def cleanup_after_test():
     torch._dynamo.reset()
 
 
+@large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize(
     "model_config",
     [pytest.param(config, id=config.id) for config in EAGLE3_MODEL_CONFIGS],
