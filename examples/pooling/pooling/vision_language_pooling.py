@@ -133,6 +133,36 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
     )
 
 
+def run_qwen3_vl(query: Query) -> ModelRequestData:
+    image_placeholder = "<vision_start><|image_pad|><vision_end>"
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = image_placeholder
+        image = query["image"]
+    elif query["modality"] == "text+image":
+        text = query["text"]
+        prompt = f"{image_placeholder}\n{text}"
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-VL-Embedding-2B",
+        runner="pooling",
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
 def run_siglip(query: Query) -> ModelRequestData:
     if query["modality"] == "text":
         prompt = query["text"]
@@ -353,6 +383,7 @@ model_example_map = {
     "clip": run_clip,
     "e5_v": run_e5_v,
     "jinavl_reranker": run_jinavl_reranker,
+    "qwen3_vl": run_qwen3_vl,
     "siglip": run_siglip,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,

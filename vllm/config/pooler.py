@@ -21,8 +21,7 @@ class PoolerConfig:
 
     pooling_type: PoolingTypeStr | None = None
     """
-    The pooling method of the pooling model. This should be a key in
-    [`vllm.model_executor.layers.pooler.PoolingType`][].
+    The pooling method of the pooling model.
     """
 
     ## for embeddings models
@@ -88,6 +87,10 @@ class PoolerConfig:
     def __post_init__(self):
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
+
+    def get_pooling_type(self) -> PoolingTypeStr:
+        assert self.pooling_type is not None, "Should be resolved by ModelConfig"
+        return self.pooling_type
 
     def compute_hash(self) -> str:
         """

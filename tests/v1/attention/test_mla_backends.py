@@ -154,12 +154,12 @@ def create_and_prepopulate_kv_cache(
         MLA KV cache tensor
     """
     batch_size = len(kv_c_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
         common_attn_metadata.query_start_loc_cpu[1:]
         - common_attn_metadata.query_start_loc_cpu[:-1]
     )
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
@@ -394,7 +394,11 @@ def run_attention_backend(
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 def test_backend_correctness(
-    dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    dist_init,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation

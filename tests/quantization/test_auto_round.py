@@ -26,7 +26,9 @@ MODELS = [
 )
 @pytest.mark.parametrize("model", MODELS)
 def test_auto_round(vllm_runner, model):
-    with vllm_runner(model, enforce_eager=True) as llm:
+    with vllm_runner(
+        model, enforce_eager=True, allow_deprecated_quantization=True
+    ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
     assert output
     print(f"{output[0][1]}")

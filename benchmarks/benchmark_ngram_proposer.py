@@ -135,7 +135,6 @@ def benchmark_batched_propose(args):
             block_sizes=[16],
         )
         dummy_input_batch._req_ids = list(str(id) for id in range(args.num_req))
-        dummy_input_batch.spec_decode_unsupported_reqs = ()
         dummy_input_batch.num_tokens_no_spec = [args.num_token] * args.num_req
         dummy_input_batch.token_ids_cpu = np.random.randint(
             0, 20, (args.num_req, args.num_token)
@@ -151,10 +150,8 @@ def benchmark_batched_propose(args):
             start = time.time()
             runner.drafter.propose(
                 sampled_token_ids,
-                dummy_input_batch.req_ids,
                 dummy_input_batch.num_tokens_no_spec,
                 dummy_input_batch.token_ids_cpu,
-                dummy_input_batch.spec_decode_unsupported_reqs,
             )
             end = time.time()
             print(f"Iteration time (s): {end - start}")
