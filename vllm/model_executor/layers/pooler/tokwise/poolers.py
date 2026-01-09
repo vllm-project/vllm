@@ -38,8 +38,11 @@ class AllPooler(TokenPooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        tasks = self.pooling.get_supported_tasks()
+        tasks = set[PoolingTask]()
+
+        tasks &= self.pooling.get_supported_tasks()
         tasks &= self.head.get_supported_tasks()
+
         return tasks
 
     def forward(
@@ -62,8 +65,11 @@ class StepPooler(TokenPooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        tasks = self.pooling.get_supported_tasks()
+        tasks = set[PoolingTask]()
+
+        tasks &= self.pooling.get_supported_tasks()
         tasks &= self.head.get_supported_tasks()
+
         return tasks
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:

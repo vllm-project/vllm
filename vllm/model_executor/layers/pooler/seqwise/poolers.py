@@ -70,7 +70,7 @@ class SimplePooler(SequencePooler):
         tasks = set[PoolingTask]()
 
         if isinstance(self.pooling, SequencePoolingMethod):
-            tasks = self.pooling.get_supported_tasks()
+            tasks &= self.pooling.get_supported_tasks()
         if isinstance(self.head, SequencePoolerHead):
             tasks &= self.head.get_supported_tasks()
 
