@@ -19,7 +19,7 @@ from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor, set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -153,8 +153,18 @@ class InputProcessor:
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
-                "vLLM V1 does not support per request user provided logits processors."
+                "vLLM V1 does not support per request user-provided logits processors."
             )
+
+        # Some sampling parameters are not yet compatible with spec decoding.
+        if self.vllm_config.speculative_config is not None and (
+            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
+        ):
+            raise ValueError(
+                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "are not yet supported with speculative decoding."
+            )
+
         # Async scheduling + spec decode currently incompatible with some
         # sampling parameters.
         if (
