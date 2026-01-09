@@ -213,9 +213,14 @@ def compute_new_slot_mapping(
     req_indices = torch.repeat_interleave(
         req_indices, cad.naive_query_lens() + 1, output_size=len(new_positions)
     )
-    block_table_indices = req_indices * n_blocks_per_req + new_positions // block_size
+    # Clamp the positions to prevent an out-of-bounds error when indexing
+    # into block_table_tensor.
+    clamped_positions = torch.clamp(new_positions, max=max_model_len - 1)
+    block_table_indices = (
+        req_indices * n_blocks_per_req + clamped_positions // block_size
+    )
     block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
-    block_offsets = new_positions % block_size
+    block_offsets = clamped_positions % block_size
     new_slot_mapping = block_nums * block_size + block_offsets
     # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len

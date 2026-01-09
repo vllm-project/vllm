@@ -5,7 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields, make_dataclass
+from dataclasses import dataclass, field, fields, make_dataclass, replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -102,6 +102,9 @@ class CommonAttentionMetadata:
     def naive_query_lens(self) -> torch.Tensor:
         """Naive because it assumes that query ends where the next query starts."""
         return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
+    def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        return replace(self, **kwargs)
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -212,20 +215,15 @@ def extend_all_queries_by_1(
     new_query_start_loc_cpu = cad.query_start_loc_cpu + torch.arange(
         len(cad.query_start_loc_cpu)
     )
-    new_seq_lens = cad.seq_lens + 1
-
-    new_cad = CommonAttentionMetadata(
+    new_cad = cad.replace(
         query_start_loc=new_query_start_loc,
         query_start_loc_cpu=new_query_start_loc_cpu,
-        seq_lens=new_seq_lens,
-        num_reqs=cad.num_reqs,  # num requests stays unchanged
+        seq_lens=cad.seq_lens + 1,
         # each request is extended by 1 token -> batch_size tokens are added
         num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
         # All query lens increase by 1, so max query len increases by 1
         max_query_len=cad.max_query_len + 1,
         max_seq_len=cad.max_seq_len + 1,
-        # block table tensor depends on num requests, which stays constant
-        block_table_tensor=cad.block_table_tensor,
         slot_mapping=new_slot_mapping,
     )
     return new_cad
