@@ -331,11 +331,11 @@ steps:
             --load \
             .
 
-          # Build debs stage for wheel extraction
+          # Build debs_wheel_release stage for wheel extraction
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
             --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
-            --target debs \
+            --target debs_wheel_release \
             --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
             --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
             --load \
