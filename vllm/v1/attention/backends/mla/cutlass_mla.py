@@ -9,18 +9,18 @@ import torch
 import vllm._custom_ops as ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBackend,
+    MLACommonImpl,
+    MLACommonMetadata,
+    MLACommonMetadataBuilder,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
-)
-from vllm.v1.attention.backends.mla.common import (
-    MLACommonBackend,
-    MLACommonImpl,
-    MLACommonMetadata,
-    MLACommonMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 

@@ -7,6 +7,11 @@ import torch
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBackend,
+    MLACommonImpl,
+    MLACommonMetadata,
+)
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -15,11 +20,6 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,
-)
-from vllm.v1.attention.backends.mla.common import (
-    MLACommonBackend,
-    MLACommonImpl,
-    MLACommonMetadata,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
