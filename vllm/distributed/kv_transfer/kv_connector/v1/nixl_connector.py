@@ -1083,13 +1083,6 @@ class NixlConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                # Ensure engine id matches.
-                if metadata.engine_id != expected_engine_id:
-                    raise RuntimeError(
-                        f"Remote NIXL agent engine ID mismatch. "
-                        f"Expected {expected_engine_id},"
-                        f"received {metadata.engine_id}."
-                    )
                 setup_agent_time = time.perf_counter()
 
                 # Register Remote agent.
