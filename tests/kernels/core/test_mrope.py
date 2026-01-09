@@ -90,6 +90,7 @@ num_tokens_list = [11, 8192]
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("num_tokens", num_tokens_list)
 def test_mrope(
+    default_vllm_config,
     model_name: str,
     model_info: MRoPETestInfo,
     tp_size: int,
@@ -159,6 +160,7 @@ def test_mrope(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("num_tokens", num_tokens_list)
 def test_mrope_torch_compile_tracing(
+    default_vllm_config,
     model_name: str,
     model_info: MRoPETestInfo,
     tp_size: int,

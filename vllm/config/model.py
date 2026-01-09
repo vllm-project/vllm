@@ -106,6 +106,10 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    model_weights: str = ""
+    """Original model weights path. Used when the model is pulled from object 
+    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -187,6 +191,8 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    allow_deprecated_quantization: bool = False
+    """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -705,6 +711,10 @@ class ModelConfig:
             tokenizer: Tokenizer name or path
         """
 
+        # Skip if model_weights is already set (model already pulled)
+        if self.model_weights:
+            return
+
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
@@ -931,6 +941,21 @@ class ModelConfig:
             from vllm.platforms import current_platform
 
             current_platform.verify_quantization(self.quantization)
+
+        if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
+            if self.allow_deprecated_quantization:
+                logger.warning(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM.",
+                    self.quantization,
+                )
+            else:
+                raise ValueError(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM. To bypass, "
+                    "set `--allow-deprecated-quantization`.",
+                    self.quantization,
+                )
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm

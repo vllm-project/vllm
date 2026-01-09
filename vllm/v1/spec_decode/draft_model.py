@@ -38,6 +38,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
 
+    def _block_size(self) -> int:
+        builder = self._get_attention_metadata_builder()
+        return builder.kv_cache_spec.block_size
+
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
             raise NotImplementedError(
@@ -128,7 +132,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             cad=cad,
             new_positions=self.positions[:num_tokens],
             is_rejected_token_mask=is_rejected_tok,
-            block_size=self.block_size,
+            block_size=self._block_size(),
             max_model_len=self.max_model_len,
         )
         # update common_attn_metadata

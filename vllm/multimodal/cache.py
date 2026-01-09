@@ -635,12 +635,17 @@ class BaseMultiModalReceiverCache(
         Update multimodal features with cached encoder outputs.
         Touch all identifier at first before update to avoid
         item in updated list evict during update.
+
+        Uses mm_hash for cache key to share across LoRAs (falls back to
+        identifier for backward compatibility).
         """
         for feature in mm_features:
-            self.touch_receiver_cache_item(feature.identifier, feature.data)
+            cache_key = feature.mm_hash or feature.identifier
+            self.touch_receiver_cache_item(cache_key, feature.data)
 
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data, feature.identifier)
+            cache_key = feature.mm_hash or feature.identifier
+            feature.data = self.get_and_update_item(feature.data, cache_key)
         return mm_features
 
     @abstractmethod
