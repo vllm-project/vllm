@@ -85,6 +85,7 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         GroupedTopk,
         TritonExperts,
+        TritonWNA16Experts,
         fused_experts,
         fused_topk,
         get_config_file_name,
@@ -103,6 +104,7 @@ if HAS_TRITON:
         "CutlassBatchedExpertsFp8",
         "CutlassExpertsW4A8Fp8",
         "TritonExperts",
+        "TritonWNA16Experts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
