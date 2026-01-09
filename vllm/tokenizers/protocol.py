@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, overload
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
@@ -98,6 +98,15 @@ class TokenizerLike(Protocol):
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> str | list[int]:
+        raise NotImplementedError
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: str) -> int: ...
+
+    @overload
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]: ...
+
+    def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         raise NotImplementedError
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
