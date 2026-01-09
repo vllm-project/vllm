@@ -100,7 +100,7 @@ EAGER = [True, False]
     "backend",
     [
         "flashinfer-cudnn",
-        "flashinfer-trtllm", # the small seq_len ensures trtllm_8x4_layout backend is used
+        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer-cutlass",
     ],
 )
