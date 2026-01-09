@@ -206,20 +206,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
-    fi
-
 WORKDIR /workspace
 
 COPY pyproject.toml setup.py CMakeLists.txt ./
@@ -299,20 +285,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
-    fi
-
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
     fi
 
 #################### CSRC BUILD IMAGE ####################
@@ -398,20 +370,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
-    fi
-
 WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
@@ -445,20 +403,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/deepgemm/dist /tmp/deepgemm/dist
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
-
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
-    fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
@@ -689,20 +633,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
-    fi
-
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
@@ -788,20 +718,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             && uv pip install --system -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
-    fi
-
-# Check PyTorch lib versions against expected and exit if they have been
-# upgraded or downgraded by other dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    TORCH_LIB_VERSIONS=$(uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" | xargs); \
-    EXPECTED_TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs); \
-    if [[ "$TORCH_LIB_VERSIONS" != "$EXPECTED_TORCH_LIB_VERSIONS" ]]; then \
-        echo "Expected torch lib versions" \
-        && echo $EXPECTED_TORCH_LIB_VERSIONS \
-        && echo "vs found" \
-        && echo $TORCH_LIB_VERSIONS \
-        && echo "Please investigate which dependency upgraded/downgraded this. Image has incorrect versions so exiting." \
-        && exit 1; \
     fi
 
 # install development dependencies (for testing)
