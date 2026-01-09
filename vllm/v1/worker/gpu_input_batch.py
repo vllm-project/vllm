@@ -22,7 +22,6 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
@@ -175,9 +174,6 @@ class InputBatch:
         )
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
-
-        # IDs of requests which do not support spec decoding
-        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty(
@@ -346,8 +342,6 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if self.is_spec_decode and is_spec_decode_unsupported(sampling_params):
-                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
@@ -510,7 +504,6 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
