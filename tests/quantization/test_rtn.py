@@ -30,6 +30,10 @@ def test_model_rtn_startup(
     max_tokens: int,
 ) -> None:
     with vllm_runner(
-        model, enforce_eager=True, dtype=dtype, quantization="rtn"
+        model,
+        enforce_eager=True,
+        dtype=dtype,
+        quantization="rtn",
+        allow_deprecated_quantization=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
