@@ -16,9 +16,8 @@ SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
 class SequencePoolingMethod(nn.Module, ABC):
-    @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        raise NotImplementedError
+        return {"token_embed", "token_classify", "embed", "classify", "score"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate()
@@ -33,9 +32,6 @@ class SequencePoolingMethod(nn.Module, ABC):
 
 
 class CLSPool(SequencePoolingMethod):
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify", "embed", "classify", "score"}
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -50,9 +46,6 @@ class CLSPool(SequencePoolingMethod):
 
 
 class LastPool(SequencePoolingMethod):
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify", "embed", "classify", "score"}
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -63,9 +56,6 @@ class LastPool(SequencePoolingMethod):
 
 
 class MeanPool(SequencePoolingMethod):
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify", "embed", "classify", "score"}
-
     def forward(
         self,
         hidden_states: torch.Tensor,

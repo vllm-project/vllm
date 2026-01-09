@@ -17,9 +17,8 @@ TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
 
 
 class TokenPoolingMethod(nn.Module, ABC):
-    @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        raise NotImplementedError
+        return {"token_embed", "token_classify"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate()
@@ -41,9 +40,6 @@ class AllPool(TokenPoolingMethod):
         scheduler_config = vllm_config.scheduler_config
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify"}
 
     def forward(
         self,
