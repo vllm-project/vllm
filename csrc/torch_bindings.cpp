@@ -599,9 +599,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
   // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
   ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale) -> "
-      "()");
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "(int, int)? group_shape=None) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.

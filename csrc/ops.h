@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <torch/library.h>
+#include <tuple>
 
 #include "core/scalar_type.hpp"
 
@@ -346,8 +347,9 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                             torch::Tensor const& scale);
+void static_scaled_fp8_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
+    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scale);
