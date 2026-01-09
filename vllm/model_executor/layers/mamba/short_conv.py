@@ -27,8 +27,11 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
+# --8<-- [start:short_conv]
 @CustomOp.register("short_conv")
 class ShortConv(MambaBase, CustomOp):
+    # --8<-- [end:short_conv]
+
     def __init__(
         self,
         config,
