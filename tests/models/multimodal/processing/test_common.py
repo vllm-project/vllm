@@ -123,6 +123,7 @@ MM_DATA_PATCHES = {
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
+    "molmo2": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
