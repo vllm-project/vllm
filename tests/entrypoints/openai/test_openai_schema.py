@@ -90,7 +90,10 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                         if (
                             isinstance(content, list)
                             and len(content) > 0
-                            and any(item.get("type") == "file" for item in content)
+                            and any(
+                                isinstance(item, dict) and item.get("type") == "file"
+                                for item in content
+                            )
                         ):
                             return False
 
@@ -139,6 +142,7 @@ def test_openapi_stateless(case: schemathesis.Case):
     timeout = {
         # requires a longer timeout
         ("POST", "/v1/chat/completions"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
