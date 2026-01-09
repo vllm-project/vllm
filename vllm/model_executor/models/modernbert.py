@@ -413,9 +413,7 @@ class ModernBertForTokenClassification(nn.Module):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {"token_classify": pooler_for_token_classify(pooler_config)}
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
