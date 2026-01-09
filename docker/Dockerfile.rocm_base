@@ -375,14 +375,14 @@ FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+# RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+#     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+# RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+#     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
