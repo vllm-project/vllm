@@ -355,7 +355,9 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump())
+        # mode="json" triggers custom serializer for Harmony messages
+        # TODO: delete this fix after github.com/openai/harmony/issues/78 is resolved.
+        return JSONResponse(content=generator.model_dump(mode="json"))
 
     return StreamingResponse(
         content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
@@ -391,7 +393,9 @@ async def retrieve_responses(
             content=response.model_dump(), status_code=response.error.code
         )
     elif isinstance(response, ResponsesResponse):
-        return JSONResponse(content=response.model_dump())
+        # mode="json" triggers custom serializer for Harmony messages
+        # TODO: delete this fix after github.com/openai/harmony/issues/78 is resolved.
+        return JSONResponse(content=response.model_dump(mode="json"))
     return StreamingResponse(
         content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
     )
