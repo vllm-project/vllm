@@ -537,6 +537,8 @@ def test_attn_quant(
     caplog_mp_spawn,
     monkeypatch,
 ):
+    if not current_platform.has_device_capability(90):
+        pytest.skip("test_attn_quant requires H100 (SM90) or B200 (SM100) GPU")
     if backend == AttentionBackendEnum.FLASHINFER and (
         not is_blackwell() or not has_flashinfer()
     ):
