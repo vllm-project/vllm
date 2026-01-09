@@ -481,7 +481,7 @@ def _support_torch_compile(
         # of symbolic shape guards can improve guard overhead. But, since
         # vllm skip guards anyways, setting this flag to False can improve
         # compile time.
-        dynamo_config_patches = {}
+        dynamo_config_patches = {"capture_scalar_outputs": True}
         try:
             _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
             dynamo_config_patches["enable_cpp_symbolic_shape_guards"] = False

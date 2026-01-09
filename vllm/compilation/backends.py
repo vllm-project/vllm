@@ -402,7 +402,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     ) -> Any:
         assert isinstance(target, str)
 
-        output = super().call_module(target, args, kwargs)
+        with self.fake_mode.shape_env.ignore_fresh_unbacked_symbols():
+            output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)
@@ -753,11 +754,11 @@ class VllmBackend:
         # this graph instead of failing engine initialization.
         from torch._subclasses.fake_tensor import DataDependentOutputException
 
-        try:
+        if True:
             PiecewiseCompileInterpreter(
                 self.split_gm, submod_names_to_compile, self.vllm_config, self
             ).run(*fake_args)
-        except DataDependentOutputException as e:
+        else:
             logger.warning(
                 "Data-dependent scalar op (%s) encountered during vLLM backend "
                 "compile; falling back to eager for this graph. "
