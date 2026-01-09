@@ -19,7 +19,7 @@ This document will introduce how CustomOp works in vLLM and how to implement a n
 
 We can use `@CustomOp.register("op_name")` to register an op class to the `CustomOp` system. After this, the `op_name` and its class will be added into the `op_registry` dictionary. In addition, We can also register an OOT op by `@CustomOp.register_oot("op_name")`. We will introduce this mechanism in detail later.
 
-When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled, it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
+When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation_config.custom_ops '["+op_name"]'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
 
 - **CPU platform:** dispatch to `forward_cpu()`.
 - **CUDA platform:** dispatch to `forward_cuda()`.
@@ -32,7 +32,7 @@ When a `CustomOp` is called (i.e., call its `forward()` method), if it is enable
 !!! note
     Note that the dispatching logic might not be absolute because of class inheritance. Derived class might override the behavior.
 
-Furthur more, vLLM decides whether enable or disable a `CustomOp` by `compilation_config.custom_ops`. To be specific, if a `CustomOp` is not registered (i.e., use default config), it will be enabled if there is a `all` in `compilation_config.custom_ops` or will be disabled if there is a `none`.
+Furthermore, vLLM decides whether to enable or disable a `CustomOp` based on `compilation_config.custom_ops`. To be specific, if a `CustomOp` is not registered in `compilation_config.custom_ops` (i.e., uses the default config), it will be enabled if `compilation_config.custom_ops` contains `all`, or will be disabled if it contains `none`.
 
 !!! note
     Note that `all` and `none` cannot coexist in `compilation_config.custom_ops`.
