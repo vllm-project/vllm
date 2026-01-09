@@ -40,6 +40,7 @@ async def test_basic(client: OpenAI, model_name: str):
     assert response is not None
     print("response: ", response)
     assert response.status == "completed"
+    assert response.incomplete_details is None
 
 
 @pytest.mark.asyncio
@@ -132,3 +133,17 @@ async def test_streaming_output_consistency(client: OpenAI, model_name: str):
         f"Streaming: {streaming_text!r}\n"
         f"Final: {final_output_text!r}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+    )
+    assert response is not None
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
