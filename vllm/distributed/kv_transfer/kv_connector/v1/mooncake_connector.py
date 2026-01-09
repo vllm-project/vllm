@@ -482,7 +482,7 @@ class MooncakeConnectorWorker:
         # NOTE (NickLucche) models with multiple backends are not supported yet
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-        backend = layers[next(iter(layers.keys()))].get_attn_backend()
+        backend = next(iter(layers.values())).get_attn_backend()
         self.backend_name = backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
