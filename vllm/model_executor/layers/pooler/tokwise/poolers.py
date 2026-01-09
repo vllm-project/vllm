@@ -7,9 +7,12 @@ import torch
 
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
-from vllm.model_executor.layers.pooler.common import ClassifierFn
+from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
-from vllm.model_executor.layers.pooler.tokwise.methods import AllPool
+from vllm.model_executor.layers.pooler.tokwise.methods import (
+    TokenPoolingMethod,
+    get_tok_pooling_method,
+)
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -29,10 +32,14 @@ class TokenPooler(Pooler):
     3. Returns structured results as `PoolerOutput`.
     """
 
-    def __init__(self, head: TokenPoolerHead) -> None:
+    def __init__(
+        self,
+        pooling: TokenPoolingMethod,
+        head: TokenPoolerHead,
+    ) -> None:
         super().__init__()
 
-        self.pooling = AllPool()
+        self.pooling = pooling
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
@@ -42,6 +49,14 @@ class TokenPooler(Pooler):
         tasks &= self.head.get_supported_tasks()
 
         return tasks
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        updates = PoolingParamsUpdate()
+
+        if isinstance(self.pooling, TokenPoolingMethod):
+            updates |= self.pooling.get_pooling_updates(task)
+
+        return updates
 
     def forward(
         self,
@@ -56,9 +71,10 @@ class TokenPooler(Pooler):
 
 
 def pooler_for_token_embed(pooler_config: PoolerConfig):
+    pooling = get_tok_pooling_method(pooler_config.get_pooling_type())
     head = TokenEmbeddingPoolerHead()
 
-    return TokenPooler(head=head)
+    return TokenPooler(pooling=pooling, head=head)
 
 
 def pooler_for_token_classify(
@@ -67,6 +83,7 @@ def pooler_for_token_classify(
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
+    pooling = get_tok_pooling_method(pooler_config.get_pooling_type())
     head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
-    return TokenPooler(head=head)
+    return TokenPooler(pooling=pooling, head=head)

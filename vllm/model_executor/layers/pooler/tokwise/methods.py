@@ -83,6 +83,9 @@ class AllPool(TokenPoolingMethod):
 
 
 class StepPool(AllPool):
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
