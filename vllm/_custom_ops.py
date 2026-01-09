@@ -1075,6 +1075,25 @@ def get_cutlass_moe_mm_problem_sizes(
     )
 
 
+def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+    expert_first_token_offset: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    n: int,
+    k: int,
+    swap_ab: bool,
+):
+    """Compute per-expert (M, N, K) problem sizes from expert_first_token_offset"""
+    return torch.ops._C.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+        expert_first_token_offset,
+        problem_sizes1,
+        problem_sizes2,
+        n,
+        k,
+        swap_ab,
+    )
+
+
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     """
     Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
