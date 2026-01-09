@@ -285,5 +285,5 @@ class ApplyRotaryEmb(CustomOp):
 
     def extra_repr(self) -> str:
         s = f"is_neox_style={self.is_neox_style}"
-        s += f"enable_fp32_compute={self.enable_fp32_compute}"
+        s += f", enable_fp32_compute={self.enable_fp32_compute}"
         return s
