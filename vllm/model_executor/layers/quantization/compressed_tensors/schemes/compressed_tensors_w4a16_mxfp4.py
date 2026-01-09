@@ -82,17 +82,9 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer) -> None:
+        # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
-
-        # The compressed-tensors mxfp4 format stores E8M0 scales with a
-        # bias of 125 (via -2 adjustment).
-        # REF: https://github.com/vllm-project/compressed-tensors/blob/797d3019ef6867362796f412980547c74551f369/src/compressed_tensors/compressors/quantized_compressors/fp4_quantized.py#L149
-        # Marlin expects standard E8M0 with bias 127, so we add +2 to correct this.
-        corrected_scale = (
-            (layer.weight_scale.data.to(torch.int32) + 2).clamp(0, 255).to(torch.uint8)
-        )
-        layer.weight_scale = Parameter(corrected_scale, requires_grad=False)
 
         prepare_fp4_layer_for_marlin(layer)
 
