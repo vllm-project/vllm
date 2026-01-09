@@ -159,7 +159,7 @@ RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -171,7 +171,7 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -226,7 +226,7 @@ RUN git clone ${ETCD_REPO} && \
     if [ "$USE_SCCACHE" = "1" ]; then \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache; \
     else \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5; \
     fi && \
