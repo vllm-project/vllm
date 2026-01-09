@@ -530,11 +530,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
-            self._decode_cudagraph_max_bs = min(
-                (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_cudagraph_capture_size,
-            )
-
+            self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                self._decode_cudagraph_max_bs = min(
+                    self._decode_cudagraph_max_bs,
+                    self.compilation_config.max_cudagraph_capture_size,
+                )
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -870,7 +871,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_cpu = (
+            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
+        )
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
             (seq_lens_np + (page_size - 1)) // page_size
