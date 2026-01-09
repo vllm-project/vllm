@@ -62,6 +62,7 @@ TENSORS_SHAPES_FN = [
 @pytest.mark.parametrize("use_key", USE_KEY)
 @torch.inference_mode()
 def test_rotary_embedding(
+    default_vllm_config,
     is_neox_style: bool,
     tensor_shape_fn: Callable[[int, int, int, int], tuple[int, ...]],
     batch_size: int,
@@ -123,7 +124,7 @@ def test_rotary_embedding(
 
 
 @torch.inference_mode()
-def test_rope_module_cache():
+def test_rope_module_cache(default_vllm_config):
     MAX_POSITIONS = [123, 1234]
     ROPE_THETAS = [10000, 1000000]
     ROPE_PARAMETERS = (
