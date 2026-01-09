@@ -18,6 +18,7 @@ logger = init_logger(__name__)
 _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "hf": ("hf", "HfRenderer"),
+    "grok2": ("grok2", "Grok2Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
