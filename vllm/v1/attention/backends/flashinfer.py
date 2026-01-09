@@ -1504,7 +1504,7 @@ class FlashInferImpl(AttentionImpl):
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
-                assert decode_query.is_contiguous()
+                assert is_strictly_contiguous(decode_query)
                 assert is_strictly_contiguous(kv_cache_permute)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
