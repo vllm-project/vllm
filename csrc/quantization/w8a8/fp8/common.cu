@@ -1,9 +1,17 @@
 #include "common.cuh"
-#include "dispatch_utils.h"
+#include "stable_dispatch_utils.h"
 #include "cub_helpers.h"
 #include "quantization/vectorization_utils.cuh"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/Exceptions.h>
+#include "torch_stable_utils.h"
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include <cuda_runtime.h>
+
+#include <optional>
 
 namespace vllm {
 
@@ -133,14 +141,14 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 
 }  // namespace vllm
 
-void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
-                             torch::Tensor const& input,  // [..., d]
-                             torch::Tensor const& scale)  // [1]
+void static_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
+                             const torch::stable::Tensor& input,  // [..., d]
+                             const torch::stable::Tensor& scale)  // [1]
 {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -151,29 +159,31 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               vllm::scaled_fp8_quant_kernel_strided<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                      scale.data_ptr<float>(), hidden_size, in_row_stride,
-                      out_row_stride);
+                  <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),
+                                               input.const_data_ptr<scalar_t>(),
+                                               scale.const_data_ptr<float>(),
+                                               hidden_size, in_row_stride,
+                                               out_row_stride);
             });
       });
 }
 
-void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
-                              torch::Tensor const& input,  // [..., d]
-                              torch::Tensor& scale)        // [1]
+void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,          // [..., d]
+                              const torch::stable::Tensor& input,  // [..., d]
+                              torch::stable::Tensor& scale)        // [1]
 {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -184,40 +194,43 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   // scale tensor should be initialised to <=0 before reduction
-  AT_CUDA_CHECK(
-      cudaMemsetAsync(scale.data_ptr<float>(), 0, sizeof(float), stream));
+  STD_CUDA_CHECK(cudaMemsetAsync(scale.mutable_data_ptr<float>(), 0,
+                                 sizeof(float), stream));
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               vllm::segmented_max_reduction_strided<scalar_t, fp8_t>
                   <<<grid, block, 0, stream>>>(
-                      scale.data_ptr<float>(), input.data_ptr<scalar_t>(),
-                      hidden_size, in_row_stride,
-                      static_cast<int64_t>(num_tokens));
+                      scale.mutable_data_ptr<float>(),
+                      input.const_data_ptr<scalar_t>(), hidden_size,
+                      in_row_stride, static_cast<int64_t>(num_tokens));
 
               vllm::scaled_fp8_quant_kernel_strided_dynamic<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                      scale.data_ptr<float>(), hidden_size, in_row_stride,
-                      out_row_stride);
+                  <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),
+                                               input.const_data_ptr<scalar_t>(),
+                                               scale.const_data_ptr<float>(),
+                                               hidden_size, in_row_stride,
+                                               out_row_stride);
             });
       });
 }
 
 void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out,          // [..., d]
-    torch::Tensor const& input,  // [..., d]
-    torch::Tensor& scales, std::optional<at::Tensor> const& scale_ub) {
-  TORCH_CHECK(input.stride(-1) == 1,
-              "last dimension of input must be contiguous");
-  TORCH_CHECK(out.stride(-1) == 1,
-              "last dimension of output must be contiguous");
+    torch::stable::Tensor& out,          // [..., d]
+    const torch::stable::Tensor& input,  // [..., d]
+    torch::stable::Tensor& scales,
+    std::optional<torch::stable::Tensor> const& scale_ub) {
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "last dimension of input must be contiguous");
+  STD_TORCH_CHECK(out.stride(-1) == 1,
+                  "last dimension of output must be contiguous");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -228,20 +241,24 @@ void dynamic_per_token_scaled_fp8_quant(
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),
       "dynamic_per_token_scaled_fp8_quant_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(),
             "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<
-                  scalar_t, fp8_t><<<grid, block, 0, stream>>>(
-                  out.data_ptr<fp8_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  hidden_size, in_row_stride, out_row_stride);
+              vllm::dynamic_per_token_scaled_fp8_quant_kernel_strided<scalar_t,
+                                                                      fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.mutable_data_ptr<fp8_t>(),
+                      scales.mutable_data_ptr<float>(),
+                      input.const_data_ptr<scalar_t>(),
+                      scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                           : nullptr,
+                      hidden_size, in_row_stride, out_row_stride);
             });
       });
 }
