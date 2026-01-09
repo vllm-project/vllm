@@ -46,6 +46,7 @@ def kernel_paged_attention_2d(
     output_stride_0: tl.int64,  # int
     output_stride_1: tl.int64,  # int, should be equal to head_size
     BLOCK_SIZE: tl.constexpr,  # int
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,  # int
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
@@ -104,14 +105,15 @@ def kernel_paged_attention_2d(
 
     if not USE_SINKS:
         M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
+        L = tl.zeros([num_queries_per_kv_padded], dtype=tl.float32)
     else:
         M = tl.load(
             sink_ptr + query_head_idx,
             mask=head_mask,
             other=float("-inf"),
         ).to(dtype=tl.float32)
+        L = tl.where(float("-inf") < M, 1.0, 0.0)
 
-    L = tl.full([num_queries_per_kv_padded], 1.0, dtype=tl.float32)
     acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
 
     # sequence len for this particular sequence
@@ -125,30 +127,45 @@ def kernel_paged_attention_2d(
 
     num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
 
+    offs_n = tl.arange(0, BLOCK_SIZE)
+    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     # iterate through tiles
     for j in range(0, num_blocks):
-        physical_block_idx = tl.load(block_tables_ptr + block_table_offset + j)
+        start_n = j * BLOCK_SIZE
+        # Calculate the logical location within a non-standard physical block,
+        # such as 544 in Qwen/Qwen3-Next-80B-A3B-Thinking.
+        # Supports non-contiguous mapping
+        # from logical blocks to physical blocks
+        abs_token_idx = start_n + offs_n
+        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
+        # Vectorized loading of physical block IDs
+        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
-        offs_n = tl.arange(0, BLOCK_SIZE)
-        offs_d = tl.arange(0, HEAD_SIZE_PADDED)
-
-        v_offset = (
-            physical_block_idx * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_1
-            + offs_d[None, :] * stride_v_cache_2
-            + offs_n[:, None] * stride_v_cache_3
-        )
-
+        # 5D addressing logic of K
         k_offset = (
-            physical_block_idx * stride_k_cache_0
+            p_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_1
             + (offs_d[:, None] // x) * stride_k_cache_2
-            + offs_n[None, :] * stride_k_cache_3
+            + internal_offsets[None, :] * stride_k_cache_3
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
+        # 4D addressing logic of V (Slot is innermost)
+        v_offset = (
+            p_block_idx[:, None] * stride_v_cache_0
+            + kv_head_idx * stride_v_cache_1
+            + offs_d[None, :] * stride_v_cache_2
+            + internal_offsets[:, None] * stride_v_cache_3
+        )
+
         # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(key_cache_ptr + k_offset, mask=dim_mask[:, None], other=0.0)
+        K_load = tl.load(
+            key_cache_ptr + k_offset,
+            mask=dim_mask[:, None],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
@@ -156,7 +173,12 @@ def kernel_paged_attention_2d(
             K = K_load
 
         # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(value_cache_ptr + v_offset, mask=dim_mask[None, :], other=0.0)
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -167,9 +189,9 @@ def kernel_paged_attention_2d(
         boundary = tl.full([BLOCK_SIZE], seq_len, dtype=tl.int32)
         seq_mask = seq_offset[None, :] < boundary
 
-        # S : (num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.where(head_mask[:, None] & seq_mask, 0.0, float("-inf")).to(tl.float32)
-        S += scale * tl.dot(Q, K)
+        # First calculate the dot, then apply the mask.
+        qk = scale * tl.dot(Q, K)
+        S = tl.where(head_mask[:, None] & seq_mask, qk, float("-inf"))
 
         context_len = seq_len - 1
 
@@ -184,13 +206,15 @@ def kernel_paged_attention_2d(
         m_j = tl.maximum(M, tl.max(S, axis=1))
 
         # P : (num_queries_per_kv, BLOCK_SIZE,)
-        P = tl.exp(S - m_j[:, None])
+        p = tl.exp(S - m_j[:, None])
+        p = tl.where(m_j[:, None] == float("-inf"), 0.0, p)
 
         # l_j : (num_queries_per_kv,)
-        l_j = tl.sum(P, axis=1)
+        l_j = tl.sum(p, axis=1)
 
         # alpha : (num_queries_per_kv, )
         alpha = tl.exp(M - m_j)
+        alpha = tl.where(float("-inf") == M, 0.0, alpha)
 
         # acc : (num_queries_per_kv, BLOCK_SIZE,)
         acc = acc * alpha[:, None]
@@ -200,10 +224,10 @@ def kernel_paged_attention_2d(
         M = m_j
 
         # acc : (num_queries_per_kv, BLOCK_SIZE,)
-        acc += tl.dot(P.to(V.dtype), V)
+        acc += tl.dot(p.to(V.dtype), V)
 
     # epilogue
-    acc = acc / L[:, None]
+    acc = acc / (L[:, None] + 1e-10)
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
@@ -241,9 +265,10 @@ def chunked_prefill_paged_decode(
     output_scale=None,
     # Optional tensor for sinks
     sinks=None,
+    is_block_table_ptr: bool = False,
 ):
     if sm_scale is None:
-        sm_scale = 1.0 / (query.shape[1] ** 0.5)
+        sm_scale = 1.0 / (query.shape[2] ** 0.5)
 
     use_alibi_slopes = alibi_slopes is not None
 
@@ -315,6 +340,16 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
+    # Triton is only forced when encountering a non-standard block
+    # like Qwen3 with a size of 544.
+    # 1. Check if block_size is a power of 2 (16, 32, 64...)
+    # 2. If it's a power of 2, we trust the vLLM's native use_custom decision.
+    # 3. If it's not a power of 2 (such as Qwen3's 544),
+    # then our Triton path is forced.
+    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    if not is_pow2:
+        use_custom = False
+
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = (
@@ -356,6 +391,25 @@ def chunked_prefill_paged_decode(
             fp8_out_scale=output_scale,
         )
     else:
+        real_block_size = value_cache.shape[3]
+        # The standard model directly uses the original block_size.
+        # Non-standard 544 uses 32 to accommodate integer division logic.
+        TRITON_BLOCK_SIZE = block_size if is_pow2 else 32
+        if is_block_table_ptr:
+            # Using the physical base address of tensors
+            kv_element_size = key_cache.element_size()
+            block_byte_stride = key_cache.stride(0) * kv_element_size
+            # Get the starting physical address of the KV Cache
+            base_addr = key_cache.data_ptr()
+
+            # Normalization: Directly calculate the block offset
+            # of the pointer relative to the base address
+            processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
+                torch.int32
+            )
+        else:
+            processed_block_table = block_table.to(torch.int32)
+
         kernel_paged_attention_2d[
             (
                 num_seqs,
@@ -367,7 +421,7 @@ def chunked_prefill_paged_decode(
             key_cache_ptr=key_cache,
             value_cache_ptr=value_cache,
             sink_ptr=sinks,
-            block_tables_ptr=block_table,
+            block_tables_ptr=processed_block_table,
             seq_lens_ptr=seq_lens,
             alibi_slopes_ptr=alibi_slopes,
             scale=sm_scale,
@@ -377,12 +431,13 @@ def chunked_prefill_paged_decode(
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             num_queries_per_kv_padded=num_queries_per_kv_padded,
-            block_table_stride=block_table.stride(0),
+            block_table_stride=processed_block_table.stride(0),
             query_stride_0=query.stride(0),
             query_stride_1=query.stride(1),
             output_stride_0=output.stride(0),
             output_stride_1=output.stride(1),
-            BLOCK_SIZE=block_size,
+            BLOCK_SIZE=TRITON_BLOCK_SIZE,
+            PHYSICAL_BLOCK_SIZE=real_block_size,
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
