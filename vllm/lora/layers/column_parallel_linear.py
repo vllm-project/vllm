@@ -266,8 +266,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             if (lora_a_i := lora_a[i]) is not None:
                 if is_gpu_source:
                     self._slab_refs_a[i][index] = lora_a_i
-                    # Zero out the stacked slot - it won't be used
-                    self.lora_a_stacked[i][index] = 0
+                    # Store slab ref in stacked slot for apply() to use
+                    self.lora_a_stacked[i][index, 0] = lora_a_i
                 else:
                     # Standard path: CPU→GPU transfer (baseline case)
                     self._slab_refs_a[i].pop(index, None)  # Remove slab ref if exists
@@ -277,8 +277,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             if (lora_b_i := lora_b[i]) is not None:
                 if is_gpu_source:
                     self._slab_refs_b[i][index] = lora_b_i
-                    # Zero out the stacked slot - it won't be used
-                    self.lora_b_stacked[i][index] = 0
+                    # Store slab ref in stacked slot for apply() to use
+                    self.lora_b_stacked[i][index, 0] = lora_b_i
                 else:
                     # Standard path: CPU→GPU transfer (baseline case)
                     self._slab_refs_b[i].pop(index, None)  # Remove slab ref if exists

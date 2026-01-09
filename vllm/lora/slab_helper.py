@@ -414,10 +414,13 @@ def process_slab_activation_loop(
         module_lora = lora_model.loras.get(module_name)
         scaling = 1.0
         if module_lora and hasattr(module_lora, 'scaling'):
-            # Handle both single scaling and list of scalings (for packed modules)
+            # For packed modules, scaling is a list; for single modules, it's a float
+            # Pass the full scaling value(s) to extract_tensors_from_gpu_slab
             if isinstance(module_lora.scaling, (list, tuple)):
-                scaling = module_lora.scaling[0] if module_lora.scaling[0] else 1.0
+                # Packed module - pass full list of per-component scalings
+                scaling = [s if s else 1.0 for s in module_lora.scaling]
             else:
+                # Single module - pass single scaling value
                 scaling = module_lora.scaling if module_lora.scaling else 1.0
         
         lora_a_gpu, lora_b_gpu = extract_tensors_from_gpu_slab(
@@ -434,7 +437,11 @@ def process_slab_activation_loop(
             gate_up_scaling = 1.0
             gate_up_lora = lora_model.loras.get(module_name + ".base_layer")
             if gate_up_lora and hasattr(gate_up_lora, 'scaling'):
-                gate_up_scaling = gate_up_lora.scaling if gate_up_lora.scaling else 1.0
+                # Pass the full scaling for gate_up as well
+                if isinstance(gate_up_lora.scaling, (list, tuple)):
+                    gate_up_scaling = [s if s else 1.0 for s in gate_up_lora.scaling]
+                else:
+                    gate_up_scaling = gate_up_lora.scaling if gate_up_lora.scaling else 1.0
             
             gate_up_a, gate_up_b = extract_tensors_from_gpu_slab(
                 gpu_slab, metadata, module_name + ".base_layer", scaling=gate_up_scaling
@@ -542,7 +549,7 @@ def create_slab_optimized_lora_model(
     embeddings: dict[str, torch.Tensor] | None = None,
     target_embedding_padding: int | None = None,
     embedding_modules: dict[str, str] | None = None,
-    embedding_padding_modules: list[str] | None = None,
+    embedding_padding_modules: list[str],
     weights_mapper=None,
     lora_dir: str | None = None,
     lora_config=None,
@@ -552,7 +559,11 @@ def create_slab_optimized_lora_model(
     packed_modules: dict | None = None,
     packed_modules_mapping: dict | None = None,
 ):
-    """Create a LoRAModel with target-aware slab."""
+    """Create a LoRAModel with target-aware slab.
+    
+    Args:
+        embedding_padding_modules: Required list of module names to apply embedding padding.
+    """
     if get_ultra_fast_pool() is None:
         pool = UltraFastPinnedPool()
         set_global_pool(pool)
@@ -573,7 +584,6 @@ def create_slab_optimized_lora_model(
                 dtype=dtype
             )  # Keep on CPU for slab building
 
-            assert embedding_padding_modules is not None
             if (
                 any(name in module_name for name in embedding_padding_modules)
                 and target_embedding_padding is not None

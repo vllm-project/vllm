@@ -22,7 +22,11 @@ from vllm.lora.layers import (
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
-from vllm.lora.slab_helper import process_slab_activation_loop
+from vllm.lora.slab_helper import (
+    clear_lora_model_cache_for_lora,
+    clear_slab_cache_for_lora,
+    process_slab_activation_loop,
+)
 from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
@@ -786,7 +790,15 @@ class LoRAModelManager:
         self.deactivate_adapter(adapter_id)
         if adapter_id not in self._registered_adapters:
             return False
-        self._registered_adapters.pop(adapter_id, None)
+        
+        # Clean up global slab caches for this adapter to free pinned memory
+        adapter = self._registered_adapters.pop(adapter_id, None)
+        if adapter and SLAB_OPTIMIZATION:
+            lora_dir = getattr(adapter, "_lora_dir", None)
+            if lora_dir:
+                clear_slab_cache_for_lora(lora_dir)
+                clear_lora_model_cache_for_lora(lora_dir)
+        
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:
