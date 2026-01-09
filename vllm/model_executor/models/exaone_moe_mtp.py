@@ -27,6 +27,7 @@ from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
+    make_layers,
     maybe_prefix,
 )
 
@@ -73,14 +74,15 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
-        self.layers = torch.nn.ModuleList(
-            ExaoneMoeDecoderLayer(
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            self.num_mtp_layers,
+            lambda prefix: ExaoneMoeDecoderLayer(
                 vllm_config.model_config.hf_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.layers.{idx}",
+                prefix=prefix,
                 mtp_layer=True,
-            )
-            for idx in range(self.num_mtp_layers)
+            ),
+            prefix=f"{prefix}.layers",
         )
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
