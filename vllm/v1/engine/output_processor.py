@@ -426,7 +426,7 @@ class OutputProcessor:
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
-                        pooling_output=torch.randn(0, device="cpu")
+                        pooling_output=torch.empty(0, device="cpu")
                         if req_state.detokenizer is None
                         else None,
                         finish_reason=FinishReason.ABORT,
