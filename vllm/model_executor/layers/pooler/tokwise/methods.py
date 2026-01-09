@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
 from vllm.config.pooler import PoolingTypeStr
-from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 

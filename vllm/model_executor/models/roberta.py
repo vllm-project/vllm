@@ -8,7 +8,8 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.model_executor.layers.pooler import CLSPool, DispatchPooler
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import CLSPool
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.bert import (
     TOKEN_TYPE_SHIFT,

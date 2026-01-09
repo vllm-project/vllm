@@ -6,12 +6,12 @@ from typing import TypeAlias
 import torch
 
 from vllm.config import PoolerConfig
+from vllm.model_executor.layers.pooler import ClassifierFn, PoolingParamsUpdate
+from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
-from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
 from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from ..abstract import Pooler
 from .heads import (
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,

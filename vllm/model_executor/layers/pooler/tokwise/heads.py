@@ -8,12 +8,12 @@ import torch
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.pooler import ClassifierFn
 from vllm.model_executor.layers.pooler.activations import (
     PoolerActivation,
     PoolerNormalize,
     resolve_classifier_act_fn,
 )
-from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask

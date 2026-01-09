@@ -24,4 +24,4 @@ class PoolingParamsUpdate:
         params.requires_token_ids = self.requires_token_ids
 
 
-__all__ = ["PoolingParamsUpdate"]
+__all__ = ["ClassifierFn", "PoolingParamsUpdate"]
