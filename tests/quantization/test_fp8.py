@@ -277,6 +277,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 # this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
 def test_fp8_reloading(
+    default_vllm_config,
     method_cls,
     is_checkpoint_fp8_serialized,
     weight_block_size,

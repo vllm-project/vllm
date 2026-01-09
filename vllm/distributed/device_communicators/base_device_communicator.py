@@ -117,9 +117,9 @@ class DeviceCommunicatorBase:
 
         use_ep = False
         all2all_backend = None
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        config = get_current_vllm_config()
+        config = get_current_vllm_config_or_none()
         if config is not None:
             # as long as we use data parallel (coupled data parallel
             # where all data parallel ranks execute forward together),
