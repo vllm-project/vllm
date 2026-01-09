@@ -1505,10 +1505,10 @@ class FlashInferImpl(AttentionImpl):
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert decode_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_decode.is_contiguous()
-                assert seq_lens_decode.is_contiguous()
+                assert is_strictly_contiguous(kv_cache_permute)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_decode)
+                assert is_strictly_contiguous(seq_lens_decode)
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
