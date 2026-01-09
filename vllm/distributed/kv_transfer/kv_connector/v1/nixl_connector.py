@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import numpy as np
@@ -21,13 +21,14 @@ import zmq
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TpKVTopology,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
+    get_current_attn_backend,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -50,7 +51,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
@@ -961,9 +961,7 @@ class NixlConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        layer_type = cast(type[Any], AttentionLayerBase)
-        layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-        backend = next(iter(layers.values())).get_attn_backend()
+        backend = get_current_attn_backend(vllm_config)
 
         self.backend_name = backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()

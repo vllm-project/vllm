@@ -7,7 +7,7 @@ import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import numpy as np
@@ -17,8 +17,11 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    TpKVTopology,
+    get_current_attn_backend,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -31,7 +34,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -480,9 +482,7 @@ class MooncakeConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        layer_type = cast(type[Any], AttentionLayerBase)
-        layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-        backend = next(iter(layers.values())).get_attn_backend()
+        backend = get_current_attn_backend(vllm_config)
         self.backend_name = backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
