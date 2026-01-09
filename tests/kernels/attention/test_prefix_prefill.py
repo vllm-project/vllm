@@ -22,7 +22,6 @@ DTYPES = [torch.float16]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
-BLOCK_SIZES = [8, 16, 32, 64, 128, 544]
 
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
 
@@ -95,7 +94,6 @@ def create_alibi_causal_mask(
     return alibi_bias.unsqueeze(0)
 
 
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -109,12 +107,12 @@ def test_contexted_kv_attention(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
-    block_size: int,
     sliding_window: int,
     dtype: torch.dtype,
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    block_size: int = 32,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -141,7 +139,6 @@ def test_contexted_kv_attention(
     MAX_CTX_LEN = 1024
     BS = 10
     cache_size = 640
-    block_size = 32
     max_block_per_request = 64
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     # ensure one sequence in batch is a decode
@@ -336,6 +333,7 @@ def test_contexted_kv_attention_alibi(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    block_size: int = 32,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -388,7 +386,6 @@ def test_contexted_kv_attention_alibi(
     MAX_CTX_LEN = 1024
     BS = 10
     cache_size = 640
-    block_size = 32
     max_block_per_request = 64
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
@@ -639,4 +636,35 @@ def test_contexted_kv_attention_alibi_f32(
 ) -> None:
     test_contexted_kv_attention_alibi(
         num_heads, num_queries_per_kv, head_size, dtype, kv_cache_dtype, device, op
+    )
+
+
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("op", OPS)
+@torch.inference_mode()
+def test_qwen3_nonstandard_block_size(
+    head_size: int,
+    dtype: torch.dtype,
+    device: str,
+    op: Callable,
+) -> None:
+    """
+    A separate test function specifically added
+    for Qwen3-Next-80B (Block Size 544).
+    """
+    if not current_platform.is_rocm():
+        pytest.skip("544 block size optimization is only for ROCm.")
+
+    test_contexted_kv_attention(
+        num_heads=64,
+        num_queries_per_kv=1,
+        head_size=head_size,
+        block_size=544,
+        sliding_window=0,
+        dtype=dtype,
+        kv_cache_dtype="auto",
+        device=device,
+        op=op,
     )
