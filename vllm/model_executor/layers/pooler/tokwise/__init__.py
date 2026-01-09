@@ -6,7 +6,7 @@ from .heads import (
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,
     TokenPoolerHead,
-    TokenPoolerHeadOutput,
+    TokenPoolerHeadOutputItem,
 )
 from .methods import (
     AllPool,
@@ -24,7 +24,7 @@ from .poolers import (
 
 __all__ = [
     "TokenPoolerHead",
-    "TokenPoolerHeadOutput",
+    "TokenPoolerHeadOutputItem",
     "TokenClassifierPoolerHead",
     "TokenEmbeddingPoolerHead",
     "TokenPoolingMethod",

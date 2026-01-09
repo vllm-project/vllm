@@ -26,7 +26,7 @@ from .methods import (
 
 SequencePoolingFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
-    SequencePoolerHeadOutput,
+    SequencePoolingMethodOutput,
 ]
 SequencePoolingHeadFn: TypeAlias = Callable[
     [SequencePoolingMethodOutput, PoolingMetadata],

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
@@ -8,16 +8,31 @@ import torch
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
 from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
-from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
-from vllm.model_executor.layers.pooler.tokwise.methods import (
-    TokenPoolingMethod,
-    get_tok_pooling_method,
-)
+from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import TokenClassifierPoolerHead, TokenEmbeddingPoolerHead
+from .heads import (
+    TokenClassifierPoolerHead,
+    TokenEmbeddingPoolerHead,
+    TokenPoolerHead,
+    TokenPoolerHeadOutputItem,
+)
+from .methods import (
+    TokenPoolingMethod,
+    TokenPoolingMethodOutputItem,
+    get_tok_pooling_method,
+)
+
+TokenPoolingFn: TypeAlias = Callable[
+    [torch.Tensor, PoolingMetadata],
+    list[TokenPoolingMethodOutputItem],
+]
+TokenPoolingHeadFn: TypeAlias = Callable[
+    [TokenPoolingMethodOutputItem, PoolingParams],
+    TokenPoolerHeadOutputItem,
+]
 
 TokenPoolerOutput: TypeAlias = list[torch.Tensor | None]
 
@@ -34,8 +49,8 @@ class TokenPooler(Pooler):
 
     def __init__(
         self,
-        pooling: TokenPoolingMethod,
-        head: TokenPoolerHead,
+        pooling: TokenPoolingMethod | TokenPoolingFn,
+        head: TokenPoolerHead | TokenPoolingHeadFn,
     ) -> None:
         super().__init__()
 
@@ -45,8 +60,10 @@ class TokenPooler(Pooler):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         tasks = set[PoolingTask]()
 
-        tasks &= self.pooling.get_supported_tasks()
-        tasks &= self.head.get_supported_tasks()
+        if isinstance(self.pooling, TokenPoolingMethod):
+            tasks &= self.pooling.get_supported_tasks()
+        if isinstance(self.head, TokenPoolerHead):
+            tasks &= self.head.get_supported_tasks()
 
         return tasks
 
@@ -80,6 +97,7 @@ def pooler_for_token_embed(pooler_config: PoolerConfig):
 def pooler_for_token_classify(
     pooler_config: PoolerConfig,
     *,
+    pooling: TokenPoolingMethod | TokenPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):

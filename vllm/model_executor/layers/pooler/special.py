@@ -12,8 +12,13 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput
 from .common import ClassifierFn
-from .seqwise import SequencePoolingFn, pooler_for_classify, pooler_for_embed
-from .tokwise import pooler_for_token_classify, pooler_for_token_embed
+from .seqwise import (
+    SequencePoolingFn,
+    SequencePoolingMethod,
+    pooler_for_classify,
+    pooler_for_embed,
+)
+from .tokwise import AllPool, pooler_for_token_classify, pooler_for_token_embed
 
 
 class DispatchPooler(Pooler):
@@ -33,13 +38,14 @@ class DispatchPooler(Pooler):
         cls,
         pooler_config: PoolerConfig,
         *,
-        pooling: SequencePoolingFn | None = None,
+        pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
         classifier: ClassifierFn | None = None,
     ):
         return cls(
             {
                 "token_classify": pooler_for_token_classify(
                     pooler_config,
+                    pooling=AllPool(),
                     classifier=classifier,
                 ),
                 "classify": pooler_for_classify(

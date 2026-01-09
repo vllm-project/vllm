@@ -20,7 +20,7 @@ from vllm.tasks import PoolingTask
 
 from .methods import TokenPoolingMethodOutputItem
 
-TokenPoolerHeadOutput: TypeAlias = torch.Tensor | None
+TokenPoolerHeadOutputItem: TypeAlias = torch.Tensor | None
 
 
 class TokenPoolerHead(nn.Module, ABC):
@@ -33,7 +33,7 @@ class TokenPoolerHead(nn.Module, ABC):
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutputItem:
         raise NotImplementedError
 
 
@@ -57,7 +57,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutputItem:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
@@ -107,7 +107,7 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> TokenPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutputItem:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
