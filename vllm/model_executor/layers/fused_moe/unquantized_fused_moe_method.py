@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum
 
 import torch
 import torch.nn.functional as F
@@ -9,7 +8,6 @@ from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -17,9 +15,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -30,19 +25,15 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    AiterExperts,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+    convert_to_unquantized_kernel_format,
+    make_unquantized_moe_kernel,
+    select_unquantized_moe_backend,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -52,80 +43,6 @@ else:
 
 
 logger = init_logger(__name__)
-
-
-class UnquantizedMoeBackend(Enum):
-    NONE = 0
-    FLASHINFER_CUTLASS = 1
-    AITER = 2
-    TRITON = 3
-
-
-def select_unquantized_moe_backend(
-    use_ep: bool,
-    use_dp: bool,
-) -> UnquantizedMoeBackend:
-    """
-    Select the primary FP8 MoE backend
-    Note: Shape-specific fallbacks may still occur at runtime.
-    """
-
-    rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
-    # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
-    flashinfer_cutlass_moe_enabled = (
-        has_flashinfer_cutlass_fused_moe()
-        and envs.VLLM_USE_FLASHINFER_MOE_FP16
-        and use_ep
-        and (not use_dp)
-        and current_platform.get_device_capability()[0] >= 9
-    )
-    if current_platform.is_rocm():
-        if rocm_aiter_moe_enabled:
-            logger.info_once("Enabling ROCm Aiter MoE for UnquantizedFusedMoEMethod")
-            return UnquantizedMoeBackend.AITER
-        else:
-            return UnquantizedMoeBackend.TRITON
-    if current_platform.is_cuda():
-        if flashinfer_cutlass_moe_enabled:
-            logger.info_once(
-                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
-            )
-            return UnquantizedMoeBackend.FLASHINFER_CUTLASS
-        else:
-            if use_ep and (not use_dp):
-                logger.info_once(
-                    "FlashInfer CUTLASS MoE is available for EP"
-                    " but not enabled, consider setting"
-                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
-                    scope="local",
-                )
-            elif use_dp:
-                logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP.",
-                    scope="local",
-                )
-            return UnquantizedMoeBackend.TRITON
-
-    return UnquantizedMoeBackend.NONE
-
-
-def convert_to_unquantized_kernel_format(
-    unquantized_backend: UnquantizedMoeBackend,
-    layer: Module,
-    w13_weight: torch.Tensor | None = None,
-    w2_weight: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if unquantized_backend == UnquantizedMoeBackend.AITER:
-        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-            layer.w13_weight.data, layer.w2_weight.data
-        )
-
-    elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(layer.w13_weight.data)
-
-    return w13_weight, w2_weight
 
 
 @CustomOp.register("unquantized_fused_moe")
@@ -138,6 +55,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_rank > 1,
         )
+        self.kernel: mk.FusedMoEModularKernel | None = None
 
     @property
     def supports_eplb(self) -> bool:
@@ -263,36 +181,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
 
-        self.use_inplace = True
-
-        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                FlashInferExperts(
-                    out_dtype=layer.params_dtype,
-                    quant_config=self.moe_quant_config,
-                    tp_rank=self.moe.moe_parallel_config.tp_rank,
-                    tp_size=self.moe.moe_parallel_config.tp_size,
-                    ep_rank=self.moe.moe_parallel_config.ep_rank,
-                    ep_size=self.moe.moe_parallel_config.ep_size,
-                ),
-            )
-            self.use_inplace = False
-        elif self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                AiterExperts(self.moe_quant_config),
-            )
-        elif self.unquantized_backend == UnquantizedMoeBackend.TRITON:
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                TritonExperts(self.moe_quant_config),
-            )
-        elif self.unquantized_backend == UnquantizedMoeBackend.NONE:
-            raise ValueError(
-                "Unable to select unquantized MoE backend, \
-                    please check supported backends."
-            )
+        self.kernel, self.use_inplace = make_unquantized_moe_kernel(
+            layer=layer,
+            backend=self.unquantized_backend,
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
@@ -301,7 +195,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
-        if current_platform.is_xpu():
+        if self.unquantized_backend == UnquantizedMoeBackend.XPU:
             import intel_extension_for_pytorch as ipex
 
             ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
@@ -311,7 +205,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_prepack=True,
                 experts_start_id=ep_rank_start,
             )
-        elif current_platform.is_cpu():
+        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
@@ -379,6 +273,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.kernel
+
         topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
