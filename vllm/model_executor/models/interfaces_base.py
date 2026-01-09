@@ -216,7 +216,7 @@ def default_pooling_type(
     seq_pooling_type: SequencePoolingType = "LAST",
     tok_pooling_type: TokenPoolingType = "ALL",
 ):
-    """Decorator to set `VllmModelForPooling.default_pooling_type`."""
+    """Decorator to set `VllmModelForPooling.default_*_pooling_type`."""
 
     def func(model: _T) -> _T:
         model.default_seq_pooling_type = seq_pooling_type  # type: ignore

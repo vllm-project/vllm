@@ -185,7 +185,7 @@ def test_get_pooling_config_from_args():
 )
 def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
-    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config._model_info.default_seq_pooling_type == default_pooling_type
     assert model_config.pooler_config.seq_pooling_type == pooling_type
 
 
@@ -198,7 +198,7 @@ def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
 )
 def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
-    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config._model_info.default_tok_pooling_type == default_pooling_type
     assert model_config.pooler_config.tok_pooling_type == pooling_type
 
 
