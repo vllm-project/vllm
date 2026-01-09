@@ -8,7 +8,7 @@ import torch
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
 from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
-from vllm.tasks import PoolingTask
+from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
@@ -57,7 +57,7 @@ class SequencePooler(Pooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        tasks = set[PoolingTask]()
+        tasks = set(POOLING_TASKS)
 
         if isinstance(self.pooling, SequencePoolingMethod):
             tasks &= self.pooling.get_supported_tasks()
