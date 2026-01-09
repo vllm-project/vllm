@@ -268,7 +268,7 @@ def get_attribute_fallback(obj, attributes: list[str]):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
-    """Return layer's unquantized weigths in [out, in] layout"""
+    """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
