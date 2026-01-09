@@ -94,7 +94,12 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             )
         ],
     )
@@ -109,18 +114,31 @@ def make_kv_cache_config_hybrid_model(
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
                 SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
                 ),
             ),
             KVCacheGroupSpec(
                 ["layer3"],
                 SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
                 ),
             ),
         ],
@@ -1356,6 +1374,69 @@ def test_kv_cache_events(blocks_to_cache: int):
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 
 
+def test_null_parent_block_hash():
+    block_size = 1
+    num_cached_blocks = 2
+    num_full_blocks = 4
+
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_null_parent",
+        prompt_token_ids=[10, 11, 12, 13],
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    assert len(req.block_hashes) == num_full_blocks
+
+    # Physical parent is `null_block` (no hash), while the logical parent hash
+    # still exists in `request.block_hashes[num_cached_blocks - 1]`.
+    assert pool.null_block.block_hash is None
+    new_blocks = pool.get_new_blocks(num_full_blocks - 1)
+    blocks = [
+        new_blocks[: num_cached_blocks - 1],
+        pool.null_block,  # physical parent
+        *new_blocks[num_cached_blocks - 1 :],
+    ]
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=num_cached_blocks,
+        num_full_blocks=num_full_blocks,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+
+    expected_parent = kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[num_cached_blocks - 1]
+    )
+    assert event.parent_block_hash == expected_parent
+    assert event.parent_block_hash is not None
+
+    expected_new_hashes = [
+        kv_cache_utils.maybe_convert_block_hash(h)
+        for h in req.block_hashes[num_cached_blocks:num_full_blocks]
+    ]
+    assert event.block_hashes == expected_new_hashes
+
+    # Ensure we didn't accidentally assign a hash to the null block.
+    assert pool.null_block.block_hash is None
+    # Sanity check: newly cached physical blocks should have hashes assigned.
+    assert blocks[num_cached_blocks].block_hash is not None
+    assert blocks[num_full_blocks - 1].block_hash is not None
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events_with_lora(blocks_to_cache: int):
     """Test BlockStored events contain correct lora_id when using LoRA requests."""
@@ -1553,15 +1634,20 @@ def test_different_block_size():
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size * 2, 1, 1, torch.float16),
+                FullAttentionSpec(
+                    block_size=block_size * 2,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
                 SlidingWindowSpec(
-                    block_size,
-                    1,
-                    1,
-                    torch.float32,
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
                     sliding_window=2 * block_size,
                 ),
             ),

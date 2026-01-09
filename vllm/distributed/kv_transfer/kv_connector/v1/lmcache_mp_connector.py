@@ -17,15 +17,23 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-    LMCacheMPSchedulerAdapter,
-    LMCacheMPWorkerAdapter,
-    LoadStoreOp,
-)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
+
+try:
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+    )
+except ImportError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+    )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -701,6 +709,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 if condition
                 else LMCacheMPRequestState.READY
             )
+            # Clean up lookup future in scheduler adapter
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -754,6 +764,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        # Clean up request tracker to prevent memory leak
+        self._cleanup_request_tracker(request.request_id)
         return True, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
@@ -915,3 +927,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _cleanup_request_tracker(self, request_id: str) -> None:
+        """
+        Clean up request tracker and associated lookup future for a request.
+        This should be called when a request is finished to prevent memory leak.
+        """
+        # Clean up request tracker
+        if self.request_trackers.pop(request_id, None):
+            logger.debug(
+                "[KVConnector] Cleaned up request_tracker for request %s",
+                request_id,
+            )

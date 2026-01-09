@@ -4,13 +4,13 @@
 KV cache helper for store.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
@@ -203,6 +203,26 @@ def copy_kv_blocks(
         copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
+def yield_req_data(
+    scheduler_output,
+) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
+    """
+    Yields:
+        (req_id, new_block_id_groups, preempted)
+    """
+    # new requests
+    for req_data in scheduler_output.scheduled_new_reqs:
+        yield req_data.req_id, req_data.block_ids, False
+
+    # cached requests
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    yield from zip(
+        cached_reqs.req_ids,
+        cached_reqs.new_block_ids,
+        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
+    )
+
+
 @dataclass
 class TpKVTopology:
     """
@@ -230,9 +250,6 @@ class TpKVTopology:
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
-        attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
-        self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
-
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
@@ -240,7 +257,7 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+        return not (self.is_mla or self.is_kv_layout_blocks_first)
 
     @property
     def tp_size(self) -> int:

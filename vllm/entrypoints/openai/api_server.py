@@ -88,8 +88,10 @@ from vllm.entrypoints.utils import (
     log_non_default_args,
     process_chat_template,
     process_lora_modules,
+    sanitize_message,
     with_cancellation,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
@@ -870,6 +872,8 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
         )
+    elif args.enable_offline_docs:
+        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
@@ -900,7 +904,7 @@ def build_app(args: Namespace) -> FastAPI:
     async def http_exception_handler(_: Request, exc: HTTPException):
         err = ErrorResponse(
             error=ErrorInfo(
-                message=exc.detail,
+                message=sanitize_message(exc.detail),
                 type=HTTPStatus(exc.status_code).phrase,
                 code=exc.status_code,
             )
@@ -909,6 +913,14 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
+        param = None
+        for error in exc.errors():
+            if "ctx" in error and "error" in error["ctx"]:
+                ctx_error = error["ctx"]["error"]
+                if isinstance(ctx_error, VLLMValidationError):
+                    param = ctx_error.parameter
+                    break
+
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
@@ -923,9 +935,10 @@ def build_app(args: Namespace) -> FastAPI:
 
         err = ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
+                param=param,
             )
         )
         return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
@@ -1072,6 +1085,7 @@ async def init_app_state(
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
+            default_chat_template_kwargs=args.default_chat_template_kwargs,
             trust_request_chat_template=args.trust_request_chat_template,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
@@ -1081,6 +1095,7 @@ async def init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
+            exclude_log_deltas=args.exclude_log_deltas,
             log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
@@ -1149,6 +1164,7 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)

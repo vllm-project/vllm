@@ -62,7 +62,10 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             TEST_MODELS.append(
                 (
                     "alexm-nm/tinyllama-24-marlin24-4bit-g128",
-                    {"quantization": "gptq_marlin_24"},
+                    {
+                        "quantization": "gptq_marlin_24",
+                        "allow_deprecated_quantization": True,
+                    },
                 )
             )
 
@@ -156,6 +159,20 @@ def test_full_graph(
         )
         for model_info in models_list(all=False)
         if is_torch_equal_or_newer("2.9.0.dev")
+    ]
+    + [
+        # Test get_raw_stream patch with compile_sizes
+        # This tests that TorchInductor autotune works correctly with get_raw_stream
+        # patch in torch 2.9 and without patch in torch 2.10+
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                compile_sizes=[1, 2],  # Triggers autotune which uses get_raw_stream
+                cudagraph_mode=CUDAGraphMode.NONE,
+            ),
+            "facebook/opt-125m",
+            {},
+        ),
     ],
 )
 # only test some of the models
