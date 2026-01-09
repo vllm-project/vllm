@@ -5,6 +5,8 @@
 
 import fcntl
 import logging
+import os
+import tempfile
 from abc import ABC, abstractmethod
 from multiprocessing import shared_memory
 from typing import Optional
