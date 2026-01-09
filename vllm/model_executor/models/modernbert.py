@@ -18,7 +18,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingMethod,
     PoolingParamsUpdate,
-    PoolingType,
     TokenPoolerHeadOutput,
     TokenPoolingMethodOutput,
 )
@@ -287,7 +286,7 @@ class ModernBertPooler(Pooler):
     def __init__(self, config: ModernBertConfig):
         super().__init__()
 
-        pooling_type = PoolingType[config.classifier_pooling.upper()]
+        pooling_type = config.classifier_pooling.upper()
         self.pooling = PoolingMethod.from_pooling_type(pooling_type)
         self.dense = nn.Linear(
             config.hidden_size, config.hidden_size, config.classifier_bias
