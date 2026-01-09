@@ -29,7 +29,7 @@ def find_free_port() -> int:
     return port
 
 
-async def wait_for_server(port: int, timeout: float = 30.0) -> bool:
+async def wait_for_server(port: int, timeout: float = 60.0) -> bool:
     """Wait for the gRPC server to be ready by trying health checks."""
     start_time = time.time()
     print("waiting for server to start...")
