@@ -18,9 +18,12 @@ from vllm.model_executor.models.vision import get_vit_attn_backend
 logger = init_logger(__name__)
 
 
+# --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
     """Multi-headed attention without any cache, used for multimodal encoder."""
+
+    # --8<-- [end:mm_encoder_attn]
 
     def __init__(
         self,
