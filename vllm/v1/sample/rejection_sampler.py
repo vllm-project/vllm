@@ -190,7 +190,9 @@ class RejectionSampler(nn.Module):
         # be filtered out in the `parse_output`.
         logit_start_indices = cu_num_sampled_tokens
         offsets = torch.arange(
-            sampled_token_ids.shape[-1], device=logit_start_indices.device
+            sampled_token_ids.shape[-1],
+            device=logit_start_indices.device,
+            dtype=logit_start_indices.dtype,
         )
         accepted_logit_indices = (
             logit_start_indices.unsqueeze(1) + offsets.unsqueeze(0)
@@ -219,7 +221,7 @@ class RejectionSampler(nn.Module):
         vocab_size: int,
         discard_req_indices: Sequence[int] = (),
         logprobs_tensors: LogprobsTensors | None = None,
-    ) -> tuple[list[list[int]], list[int] | None, LogprobsLists | None]:
+    ) -> tuple[list[list[int]], LogprobsLists | None]:
         """Parse the output of the rejection sampler.
         Args:
             output_token_ids: The sampled token IDs in shape
@@ -237,12 +239,10 @@ class RejectionSampler(nn.Module):
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
-        cu_num_tokens = None
         output_logprobs = None
         if logprobs_tensors is not None:
             cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
-            flat_mask = valid_mask.flatten()
-            filtered_tensors = logprobs_tensors.filter(flat_mask)
+            filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
             output_logprobs = filtered_tensors.tolists(cu_num_tokens)
 
         if len(discard_req_indices) > 0:
@@ -250,7 +250,7 @@ class RejectionSampler(nn.Module):
         outputs = [
             row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
-        return outputs, cu_num_tokens, output_logprobs
+        return outputs, output_logprobs
 
     def apply_logits_processors(
         self,

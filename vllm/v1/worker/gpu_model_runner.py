@@ -237,24 +237,20 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             for i in self._invalid_req_indices:
                 valid_sampled_token_ids[i].clear()
-            cu_num_tokens = None
             logprobs_lists = None
+            if self._logprobs_tensors_cpu is not None:
+                logprobs_lists = self._logprobs_tensors_cpu.tolists()
         else:
-            valid_sampled_token_ids, cu_num_tokens, logprobs_lists = (
-                RejectionSampler.parse_output(
-                    self.sampled_token_ids_cpu,
-                    self.vocab_size,
-                    self._invalid_req_indices,
-                    logprobs_tensors=self._logprobs_tensors_cpu,
-                )
+            valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+                self.sampled_token_ids_cpu,
+                self.vocab_size,
+                self._invalid_req_indices,
+                logprobs_tensors=self._logprobs_tensors_cpu,
             )
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
-        if logprobs_lists is not None:
-            output.logprobs = logprobs_lists
-        elif self._logprobs_tensors_cpu:
-            output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
+        output.logprobs = logprobs_lists
         return output
 
 
@@ -2791,7 +2787,6 @@ class GPUModelRunner(
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
-        cu_num_tokens: list[int] | None = None
         logprobs_lists = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
@@ -2807,13 +2802,11 @@ class GPUModelRunner(
                     logprobs_lists = logprobs_tensors.tolists()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids, cu_num_tokens, logprobs_lists = (
-                    RejectionSampler.parse_output(
-                        sampled_token_ids,
-                        self.input_batch.vocab_size,
-                        discard_sampled_tokens_req_indices,
-                        logprobs_tensors=logprobs_tensors,
-                    )
+                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+                    sampled_token_ids,
+                    self.input_batch.vocab_size,
+                    discard_sampled_tokens_req_indices,
+                    logprobs_tensors=logprobs_tensors,
                 )
         else:
             valid_sampled_token_ids = []
