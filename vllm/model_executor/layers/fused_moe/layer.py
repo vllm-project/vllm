@@ -439,11 +439,6 @@ class FusedMoE(CustomOp):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
-        # Delayed import to avoid circular dependency
-        from vllm.model_executor.models.utils import extract_layer_index
-
-        self.layer_id = extract_layer_index(self.layer_name)
-
         self.enable_eplb = enable_eplb
         self.expert_load_view: torch.Tensor | None = None
         self.logical_to_physical_map: torch.Tensor | None = None
@@ -711,7 +706,10 @@ class FusedMoE(CustomOp):
 
     @property
     def layer_id(self):
-        return self.layer_id
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        return extract_layer_index(self.layer_name)
 
     @property
     def gate(self) -> torch.nn.Module | None:
