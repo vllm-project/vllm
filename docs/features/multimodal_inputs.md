@@ -356,6 +356,44 @@ You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the mult
 
 Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
 
+#### Automatic Audio Channel Normalization
+
+vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
+
+**Supported models with automatic mono conversion:**
+
+- **Whisper** and all Whisper-based models
+- **Qwen2-Audio**
+- **Qwen2.5-Omni** / **Qwen3-Omni** (inherits from Qwen2.5-Omni)
+- **Ultravox**
+
+For these models, vLLM automatically:
+
+1. Detects if the model requires mono audio via the feature extractor
+2. Converts multi-channel audio to mono using channel averaging
+3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
+
+**Example with stereo audio:**
+
+```python
+import torchaudio
+from vllm import LLM
+
+# Load stereo audio file - returns (channels, time) shape
+audio, sr = torchaudio.load("stereo_audio.wav")
+print(f"Original shape: {audio.shape}")  # e.g., torch.Size([2, 16000])
+
+# vLLM automatically converts to mono for Whisper-based models
+llm = LLM(model="openai/whisper-large-v3")
+
+outputs = llm.generate({
+    "prompt": "",
+    "multi_modal_data": {"audio": (audio.numpy(), sr)},
+})
+```
+
+No manual conversion is needed - vLLM handles the channel normalization automatically based on the model's requirements.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
