@@ -15,7 +15,6 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -56,11 +55,12 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request

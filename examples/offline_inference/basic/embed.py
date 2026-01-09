@@ -4,10 +4,10 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import AttentionConfig
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def parse_args():

@@ -21,7 +21,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.ops import flashmla
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
@@ -31,6 +30,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import split_prefill_chunks
+from vllm.v1.attention.ops import flashmla
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]

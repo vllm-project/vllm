@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:

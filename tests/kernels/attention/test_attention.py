@@ -10,7 +10,7 @@ from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.attention.layer import Attention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
@@ -30,7 +30,7 @@ NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
-# vllm.attention.ops.paged_attn.PagedAttention
+# vllm.v1.attention.ops.paged_attn.PagedAttention
 HEAD_SIZES = [32, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]

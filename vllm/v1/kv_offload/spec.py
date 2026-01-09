@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 

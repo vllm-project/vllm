@@ -9,20 +9,20 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention.backends.abstract import (
+from vllm.attention.layer import Attention
+from vllm.config import CacheConfig, VllmConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
 )
-from vllm.attention.layer import Attention
-from vllm.attention.selector import get_attn_backend
-from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages

@@ -14,10 +14,10 @@ import pytest
 from transformers import AutoProcessor
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.multimodal.utils import encode_image_url
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....utils import create_new_process_for_each_test
 from ...utils import dummy_hf_overrides

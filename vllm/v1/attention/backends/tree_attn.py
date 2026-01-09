@@ -9,20 +9,20 @@ from typing import ClassVar, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
 )
-from vllm.attention.ops.triton_unified_attention import unified_attention
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
