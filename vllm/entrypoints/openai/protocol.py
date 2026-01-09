@@ -432,7 +432,7 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
-        extra_args = {}
+        extra_args: dict[str, Any] = {}
         if self.reasoning is not None and self.reasoning.effort is not None:
             extra_args.update(reasoning_effort=self.reasoning.effort)
         if self.parallel_tool_calls is not None:
