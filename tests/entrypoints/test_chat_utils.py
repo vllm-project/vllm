@@ -888,7 +888,6 @@ async def test_parse_chat_messages_audio_embeds_async(
     )
 
     # Should have audio embedding in mm_data (single tensor, not a list)
-    mm_data = mm_data
     assert mm_data is not None
     assert "audio" in mm_data
     assert isinstance(mm_data["audio"], torch.Tensor)
@@ -1060,7 +1059,6 @@ async def test_parse_chat_messages_multiple_image_embeds_async(
     ]
 
     # Await the future and verify mm_data
-    mm_data = mm_data
     assert mm_data is not None
     assert "image" in mm_data
     assert isinstance(mm_data["image"], list)
@@ -1101,7 +1099,6 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
             "content": "<|image_1|>\nWhat's in this image?",
         }
     ]
-    mm_data = mm_data
     assert mm_data is not None
     assert "image" in mm_data
     assert isinstance(mm_data["image"], list)
