@@ -428,9 +428,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     @abstractmethod
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: "AttentionSpec",
         layer_names: list[str],
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         device: torch.device,
     ):
         self.kv_cache_spec = kv_cache_spec
@@ -441,8 +441,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     @classmethod
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
