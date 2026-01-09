@@ -117,9 +117,9 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       # Build base image first
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag rocm/vllm-dev:base --target final --progress plain -f docker/Dockerfile.rocm_base ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag rocm/vllm-dev:base-$BUILDKITE_COMMIT --target final --progress plain -f docker/Dockerfile.rocm_base ."
       # Build vLLM ROCm image using the base
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg BASE_IMAGE=rocm/vllm-dev:base --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm --target vllm-openai --progress plain -f docker/Dockerfile.rocm ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg BASE_IMAGE=rocm/vllm-dev:base-$BUILDKITE_COMMIT --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm --target vllm-openai --progress plain -f docker/Dockerfile.rocm ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
 
   # Add job to create multi-arch manifest
