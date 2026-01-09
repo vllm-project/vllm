@@ -103,17 +103,15 @@ class PoolerConfig:
 
         if pooling_type := self.pooling_type:
             if pooling_type in ("CLS", "LAST", "MEAN"):
-                logger.warning_once(
-                    "`pooling_type=%s` is deprecated and will be removed in v0.16. "
-                    "Please use `seq_pooling_type=%s` instead.",
+                logger.debug(
+                    "Resolved `pooling_type=%s` to `seq_pooling_type=%s`.",
                     pooling_type,
                     pooling_type,
                 )
                 self.seq_pooling_type = pooling_type
             elif pooling_type in ("ALL", "STEP"):
-                logger.warning_once(
-                    "`pooling_type=%s` is deprecated and will be removed in v0.16. "
-                    "Please use `tok_pooling_type=%s` instead.",
+                logger.debug(
+                    "Resolved `pooling_type=%s` to `tok_pooling_type=%s`.",
                     pooling_type,
                     pooling_type,
                 )

@@ -509,7 +509,7 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
-    You need to manually set mean pooling by passing `--pooler-config '{"seq_pooling_type": "MEAN"}'`.
+    You need to manually set mean pooling by passing `--pooler-config '{"pooling_type": "MEAN"}'`.
 
 !!! note
     For `Alibaba-NLP/gte-Qwen2-*`, you need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
@@ -605,7 +605,7 @@ These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward)
 
 !!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
-    e.g.: `--pooler-config '{"tok_pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+    e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 #### Token Classification
 

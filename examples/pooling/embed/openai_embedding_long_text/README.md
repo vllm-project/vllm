@@ -53,7 +53,7 @@ The key parameters for chunked processing are in the `--pooler-config`:
 ```
 
 !!! note
-    `pooling_type` sets the model's own pooling strategy for processing within each chunk. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
+    The model's own `pooling_type` is applied within each chunk by default. Cross-chunk aggregation automatically uses mean-pooling when input exceeds the model's native maximum length.
 
 #### Chunked Processing Behavior
 
