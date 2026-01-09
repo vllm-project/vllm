@@ -110,6 +110,7 @@ RUN cd triton \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
            && sccache --show-stats; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
@@ -147,6 +148,7 @@ RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
            && sccache --show-stats; \
        fi \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
@@ -156,7 +158,8 @@ RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -167,7 +170,8 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && pip install -r requirements.txt \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
@@ -222,7 +226,7 @@ RUN git clone ${ETCD_REPO} && \
     if [ "$USE_SCCACHE" = "1" ]; then \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
     else \
         cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5; \
     fi && \
@@ -312,6 +316,7 @@ RUN cd flash-attention \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
            && sccache --show-stats; \
        fi \
     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
@@ -337,6 +342,7 @@ RUN pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_HIP_COMPILER_LAUNCHER=sccache \
            && sccache --show-stats; \
        fi \
     && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \

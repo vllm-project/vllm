@@ -85,18 +85,11 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-ARG USE_SCCACHE
-# Build vLLM
+# Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
-    && python3 setup.py clean --all \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    && python3 setup.py clean --all  \
+    && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
@@ -190,18 +183,12 @@ RUN cd vllm \
     && python3 setup.py clean --all
 
 # Build wheel using pre-extracted version to avoid dirty state from modified requirements/rocm.txt
-ARG USE_SCCACHE
+# (setup.py auto-detects sccache in PATH)
 RUN --mount=type=bind,source=.git,target=vllm/.git \
     cd vllm \
     && export SETUPTOOLS_SCM_PRETEND_VERSION=$(cat /tmp/vllm_version.txt) \
     && echo "Building wheel with version: ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    && python3 setup.py bdist_wheel --dist-dir=dist
 
 FROM scratch AS export_vllm_wheel_release
 ARG COMMON_WORKDIR
