@@ -1159,10 +1159,11 @@ class NixlConnectorWorker:
         assert self.use_host_buffer
         self.copy_blocks = copy_operation
 
-    def _log_transfer_failure(
+    def _log_failure(
         self,
         failure_type: str,
         req_id: str | None,
+        msg: str = "",
         error: Exception | None = None,
         meta: ReqMeta | None = None,
         **extra_context,
@@ -1191,6 +1192,8 @@ class NixlConnectorWorker:
             )
 
         context.update(extra_context)
+        if msg:
+            failure_type = f"{failure_type}. {msg}"
 
         logger.error(
             "NIXL transfer failure: %s | Context: %s",
@@ -1221,7 +1224,7 @@ class NixlConnectorWorker:
                     try:
                         self._remote_agents[eid] = f.result()
                     except Exception as e:
-                        self._log_transfer_failure(
+                        self._log_failure(
                             failure_type="handshake_setup_failed",
                             req_id=None,
                             error=e,
@@ -1238,7 +1241,7 @@ class NixlConnectorWorker:
                 self._ready_requests.put(entry)
             except Exception as e:
                 # handshake failed - mark blocks as invalid
-                self._log_transfer_failure(
+                self._log_failure(
                     failure_type="handshake_failed",
                     req_id=req_id,
                     error=e,
@@ -2025,19 +2028,19 @@ class NixlConnectorWorker:
                         in_progress.append(handle)
                         continue
                     else:
-                        self._log_transfer_failure(
+                        self._log_failure(
                             failure_type="transfer_failed",
+                            msg="Marking blocks as invalid",
                             req_id=req_id,
-                            handle=handle,
                             xfer_state=xfer_state,
                         )
                         self._handle_failed_transfer(req_id, handle)
                 except Exception as e:
-                    self._log_transfer_failure(
+                    self._log_failure(
                         failure_type="transfer_exception",
+                        msg="Marking blocks as invalid",
                         req_id=req_id,
                         error=e,
-                        handle=handle,
                     )
                     self._handle_failed_transfer(req_id, handle)
 
@@ -2058,8 +2061,7 @@ class NixlConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # NOTE (NickLucche) use .get() instead of .pop() here because the metadata
-        # cleanup is handled by get_finished() after _pop_done_transfers() returns.
+        # Use .get() here as the metadata cleanup is handled by get_finished()
         if meta := self._recving_metadata.get(req_id):
             self._invalid_block_ids.update(meta.local_block_ids)
         self.nixl_wrapper.release_xfer_handle(handle)
@@ -2237,14 +2239,15 @@ class NixlConnectorWorker:
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
-                self._log_transfer_failure(
+                self._log_failure(
                     failure_type="notification_failed",
+                    msg="P worker blocks will be freed after timeout. "
+                    "This may indicate network issues.",
                     req_id=request_id,
                     error=e,
-                    remote_request_id=remote_request_id,
                     dst_engine_id=dst_engine_id,
                     remote_rank=remote_rank,
-                    agent_name=agent_name,
+                    remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
             return
@@ -2332,18 +2335,14 @@ class NixlConnectorWorker:
         except Exception as e:
             # mark all (logical) blocks for this request as invalid
             if meta := self._recving_metadata.get(request_id):
-                self._log_transfer_failure(
+                self._log_failure(
                     failure_type="transfer_setup_failed",
                     req_id=request_id,
+                    msg="Marking blocks as invalid",
                     error=e,
                     meta=meta,
-                    remote_request_id=remote_request_id,
                     dst_engine_id=dst_engine_id,
                     remote_rank=remote_rank,
-                    num_local_blocks=len(local_block_ids),
-                    num_remote_blocks=len(remote_block_ids),
-                    local_xfer_side_handle=local_xfer_side_handle,
-                    remote_xfer_side_handle=remote_xfer_side_handle,
                 )
                 self._invalid_block_ids.update(meta.local_block_ids)
             self.xfer_stats.record_failed_transfer()
