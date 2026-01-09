@@ -123,10 +123,11 @@ class Mamba2AttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
-        assert self.chunk_size is not None, (
+        chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        assert chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
+        self.chunk_size: int = chunk_size
 
     def _compute_chunk_metadata(
         self,
@@ -215,7 +216,10 @@ class Mamba2AttentionMetadataBuilder(
             num_prefills = common.num_prefills
             num_decode_tokens = common.num_decode_tokens
 
-            num_computed_tokens_p_cpu = common_attn_metadata.num_computed_tokens_cpu[
+            num_computed_tokens_cpu = (
+                common_attn_metadata.compute_num_computed_tokens().cpu()
+            )
+            num_computed_tokens_p_cpu = num_computed_tokens_cpu[
                 num_reqs - num_prefills : num_reqs
             ]
             query_start_loc_p_cpu = (

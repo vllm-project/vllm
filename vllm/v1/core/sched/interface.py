@@ -85,11 +85,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: "DraftTokenIds", scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update scheduler output with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            scheduler_output: Update the given scheduler_output
+                with the corresponding draft token ids.
+        """
         raise NotImplementedError
 
     @abstractmethod
