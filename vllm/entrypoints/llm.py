@@ -33,6 +33,10 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightUpdateRequest,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -350,6 +354,15 @@ class LLM:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
+
+    def get_world_size(self) -> int:
+        """Get the world size from the parallel config.
+
+        Returns:
+            The world size including data parallelism
+            (tensor_parallel_size * pipeline_parallel_size * data_parallel_size).
+        """
+        return self.llm_engine.vllm_config.parallel_config.world_size_across_dp
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
@@ -1786,3 +1799,44 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def init_weight_transfer(self, request: WeightTransferInitRequest) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+
+        if isinstance(request, WeightTransferInitRequest):
+            init_info_dict = request.init_info
+        else:
+            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+
+        self.llm_engine.collective_rpc(
+            "init_weight_transfer", kwargs={"init_info": init_info_dict}
+        )
+
+    def update_weights(self, request: WeightUpdateRequest) -> None:
+        """
+        Update the weights of the model.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+
+        if hasattr(request, "update_info"):
+            update_info_dict = request.update_info
+        else:
+            raise TypeError(f"Invalid `WeightUpdateRequest` format: {type(request)}")
+
+        self.llm_engine.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )
+
+    def finalize_weight_update(self) -> None:
+        """
+        Finalize the weight update by processing weights for quantization/kernel format.
+        This should be called after all weight updates are complete.
+        """
+        self.llm_engine.collective_rpc("finalize_weight_update")

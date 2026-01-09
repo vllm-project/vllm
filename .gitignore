@@ -98,7 +98,7 @@ ipython_config.py
 **/generated/**
 
 # uv
-uv.lock
+# uv.lock
 
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is
@@ -138,7 +138,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+# .env
 .venv
 env/
 venv/

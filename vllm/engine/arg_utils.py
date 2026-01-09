@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -55,6 +55,7 @@ from vllm.config import (
     SpeculativeConfig,
     StructuredOutputsConfig,
     VllmConfig,
+    WeightTransferConfig,
     get_attr_docs,
 )
 from vllm.config.cache import (
@@ -239,17 +240,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
     cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
-    for field in fields(cls):
+    for fld in fields(cls):
         # Get the set of possible types for the field
-        type_hints: set[TypeHint] = get_type_hints(field.type)
+        type_hints: set[TypeHint] = get_type_hints(fld.type)
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
         dataclass_cls = next(generator, None)
 
         # Get the default value of the field
-        if field.default is not MISSING:
-            default = field.default
+        if fld.default is not MISSING:
+            default = fld.default
             # Handle pydantic.Field defaults
             if isinstance(default, FieldInfo):
                 if default.default_factory is None:
@@ -259,11 +260,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                     # These could emit logs on init, which would be confusing.
                     with suppress_logging():
                         default = default.default_factory()
-        elif field.default_factory is not MISSING:
-            default = field.default_factory()
+        elif fld.default_factory is not MISSING:
+            default = fld.default_factory()
 
         # Get the help text for the field
-        name = field.name
+        name = fld.name
         help = cls_docs.get(name, "").strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
@@ -582,6 +583,13 @@ class EngineArgs:
     )
     tokens_only: bool = False
 
+    weight_transfer_backend: str = "nccl"
+    """Backend for weight transfer during RL training. Options: nccl, ipc"""
+
+    weight_transfer_config: WeightTransferConfig = field(
+        default_factory=WeightTransferConfig
+    )
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -592,6 +600,11 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        # Handle weight_transfer_backend CLI arg
+        if self.weight_transfer_backend is not None:
+            self.weight_transfer_config = WeightTransferConfig(
+                backend=self.weight_transfer_backend
+            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -1177,6 +1190,15 @@ class EngineArgs:
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
+        vllm_group.add_argument(
+            "--weight-transfer-backend",
+            type=str,
+            choices=["nccl", "ipc"],
+            default="nccl",
+            help="Backend for weight transfer during RL training. "
+            "Options: nccl (distributed), ipc (same-node shared memory)"
+            "Default: nccl when enabled.",
+        )
 
         # Other arguments
         parser.add_argument(
@@ -1760,6 +1782,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            weight_transfer_config=self.weight_transfer_config,
         )
 
         return config
