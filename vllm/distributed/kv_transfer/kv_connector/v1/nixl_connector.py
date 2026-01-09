@@ -1779,19 +1779,19 @@ class NixlConnectorWorker:
             return
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
         if self.enable_permute_local_kv and block_size_ratio > 1:
-            logger.info_once(
+            logger.debug(
                 "Post-processing device kv cache on receive by converting "
                 "block_size with %sx bigger and permuting layout from HND"
                 " to NHD.",
                 block_size_ratio,
             )
         elif self.enable_permute_local_kv:
-            logger.info_once(
+            logger.debug(
                 "Post-processing device kv cache on receive by permuting layout"
                 "from HND to NHD."
             )
         else:
-            logger.info_once(
+            logger.debug(
                 "Post-processing device kv cache on receive by converting "
                 "block_size with %sx bigger.",
                 block_size_ratio,
