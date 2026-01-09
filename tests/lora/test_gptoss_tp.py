@@ -95,7 +95,6 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
         max_model_len=1024,
         enable_lora=True,
         max_loras=2,
-        max_lora_rank=8,
         max_num_seqs=2,
         max_num_batched_tokens=2048,
         tensor_parallel_size=2,
