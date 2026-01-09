@@ -50,8 +50,16 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.metrics.stats import (
+    PrefixCacheStats,
+    SchedulerStats,
+)
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    IterStats,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -853,6 +861,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            scheduled_at=time.time(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1237,6 +1246,20 @@ class Scheduler(SchedulerInterface):
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
+        (
+            iter_batch_size,
+            iter_waiting_size,
+            iter_total_tokens_count,
+            token_output_time,
+            schedule_time,
+        ) = 0, 0, 0, 0.0, 0.0
+        if self.vllm_config.observability_config.token_level_profiling:
+            iter_batch_size = len(self.running)
+            iter_waiting_size = len(self.waiting)
+            iter_total_tokens_count = sum(r.num_tokens for r in self.running)
+            token_output_time = time.time()
+            schedule_time = scheduler_output.scheduled_at
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
@@ -1350,6 +1373,19 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
+            iter_stats = (
+                IterStats(
+                    iter_total_tokens_count=iter_total_tokens_count,
+                    iter_waiting_size=iter_waiting_size,
+                    iter_batch_size=iter_batch_size,
+                    token_scheduled_time=schedule_time,
+                    token_output_time=token_output_time,
+                    num_cached_tokens=request.num_cached_tokens,
+                )
+                if self.vllm_config.observability_config.token_level_profiling
+                else None
+            )
+
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
@@ -1390,6 +1426,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        iter_stats=iter_stats,
                     )
                 )
             else:
@@ -1987,9 +2024,17 @@ class Scheduler(SchedulerInterface):
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._free_blocks(self.requests[req_id])
+            if self.log_stats:
+                req.record_event(EngineCoreEventType.KV_CACHE_TRANSFER_RECVING_FINSHED)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
+            if self.log_stats:
+                request = self.requests.get(req_id)
+                if request is not None:
+                    request.record_event(
+                        EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED
+                    )
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(

@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
+import msgspec
 import numpy as np
 import torch
 
@@ -108,6 +109,15 @@ class LogprobsTensors(NamedTuple):
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
+
+
+class IterStats(msgspec.Struct):
+    iter_batch_size: int = 0
+    iter_waiting_size: int = 0
+    iter_total_tokens_count: int = 0
+    token_scheduled_time: float = 0.0
+    token_output_time: float = 0.0
+    num_cached_tokens: int = 0
 
 
 @dataclass
