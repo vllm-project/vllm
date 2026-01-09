@@ -17,7 +17,8 @@ from vllm.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
-LOCK_FILE_PREFIX = "/tmp/vllm_routed_experts"  # Shared lock file path
+tmp_dir = tempfile.gettempdir()
+LOCK_FILE_PREFIX = os.path.join(tmp_dir, "vllm_routed_experts")  # Shared lock file path
 BUFFER_PREFIX = "vllm_routed_experts_buffer"
 
 
