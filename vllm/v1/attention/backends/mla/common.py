@@ -199,15 +199,6 @@ from tqdm import tqdm
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionLayer,
-    AttentionMetadata,
-    MLAAttentionImpl,
-)
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
@@ -222,6 +213,13 @@ from vllm.model_executor.layers.linear import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionLayer,
+    AttentionMetadata,
+    MLAAttentionImpl,
+)
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -230,6 +228,8 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 

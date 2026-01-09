@@ -6,9 +6,9 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,

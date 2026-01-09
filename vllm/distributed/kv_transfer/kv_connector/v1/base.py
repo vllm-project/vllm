@@ -42,8 +42,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
