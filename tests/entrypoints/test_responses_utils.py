@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from openai.types.chat import ChatCompletionMessageParam
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -179,7 +180,7 @@ class TestMaybeCombineReasoningAndToolCall:
             name="test_function",
             arguments="{}",
         )
-        messages = []
+        messages: list[ChatCompletionMessageParam] = []
 
         result = _maybe_combine_reasoning_and_tool_call(item, messages)
 
@@ -195,21 +196,6 @@ class TestMaybeCombineReasoningAndToolCall:
             arguments="{}",
         )
         messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_messages_empty(self):
-        """Test that empty messages list returns None."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = []
 
         result = _maybe_combine_reasoning_and_tool_call(item, messages)
 
