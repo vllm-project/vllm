@@ -25,14 +25,14 @@ P = ParamSpec("P")
 
 
 def _noop_add_global_state_guard(
-    self: torch._dynamo.C.GuardManager, *args: Any, **kwargs: Any
+    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
 ) -> None:
     """No-op to skip the GLOBAL_STATE guard entirely"""
     pass
 
 
 def _noop_add_torch_function_mode_stack_guard(
-    self: torch._dynamo.C.GuardManager, *args: Any, **kwargs: Any
+    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
 ) -> None:
     """No-op to skip the TORCH_FUNCTION_MODE_STACK guard entirely"""
     pass

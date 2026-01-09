@@ -7,13 +7,12 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from packaging import version
-from torch._dynamo.package import SourceInfo
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
@@ -32,6 +31,14 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer, supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
+
+if TYPE_CHECKING:
+    # Only added on nightly/2.10 so wrap
+    try:
+        from torch._dynamo.package import SourceInfo
+    except ImportError:
+        # Fallback for old versions not supporting
+        SourceInfo = Any
 
 logger = init_logger(__name__)
 
@@ -235,7 +242,9 @@ def _model_hash_key(fn: Callable[..., Any]) -> str:
     return sha256_hash.hexdigest()
 
 
-def _verify_source_unchanged(source_info: SourceInfo, vllm_config: VllmConfig) -> None:
+def _verify_source_unchanged(
+    source_info: "SourceInfo", vllm_config: VllmConfig
+) -> None:
     from .caching import _compute_code_hash, _compute_code_hash_with_content
 
     file_contents = {}
