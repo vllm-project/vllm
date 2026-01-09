@@ -62,7 +62,10 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             TEST_MODELS.append(
                 (
                     "alexm-nm/tinyllama-24-marlin24-4bit-g128",
-                    {"quantization": "gptq_marlin_24"},
+                    {
+                        "quantization": "gptq_marlin_24",
+                        "allow_deprecated_quantization": True,
+                    },
                 )
             )
 

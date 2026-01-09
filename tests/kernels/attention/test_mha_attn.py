@@ -36,7 +36,7 @@ if current_platform.is_rocm():
 
 
 @pytest.mark.parametrize("device", devices)
-def test_mha_attn_platform(device: str):
+def test_mha_attn_platform(default_vllm_config, device: str):
     """
     Test the attention selector between different platform and device.
     """
@@ -116,6 +116,7 @@ CUDA_DEVICES = ["cuda"]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_mha_attn_forward(
+    default_vllm_config,
     batch_size: int,
     seq_len: int,
     num_heads: int,
@@ -162,6 +163,7 @@ def test_mha_attn_forward(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_mha_attn_varlen_forward(
+    default_vllm_config,
     var_seq_len: list[int],
     num_heads: int,
     num_kv_heads: int,

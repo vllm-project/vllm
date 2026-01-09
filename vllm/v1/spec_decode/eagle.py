@@ -187,6 +187,11 @@ class EagleProposer:
 
             rocm_types.append(MLACommonMetadata)
 
+            # FlexAttention backend support
+            from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
+
+            rocm_types.append(FlexAttentionMetadata)
+
             self.allowed_attn_types = tuple(rocm_types)
 
         # Parse the speculative token tree.
