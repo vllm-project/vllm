@@ -27,6 +27,9 @@ class PoolerConfig:
     If set, `seq_pooling_type` or `tok_pooling_type` are automatically populated
     with this field. Alternatively, users can set `seq_pooling_type` and
     `tok_pooling_type` explicitly.
+
+    This field is mainly for user convenience. Internal code should always use
+    `seq_pooling_type` or `tok_pooling_type` instead of `pooling_type`.
     """
 
     seq_pooling_type: SequencePoolingType | None = None
