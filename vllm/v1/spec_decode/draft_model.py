@@ -124,7 +124,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             out_ptr_merged_toks=self.positions,
             out_ptr_is_rejected_tok=is_rejected_tok,
             target_toks_size=target_positions.shape[0],
-            rejected_tok_fill=-1,
+            rejected_tok_fill=0,
         )
 
         # recompute slot mapping
