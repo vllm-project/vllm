@@ -186,21 +186,26 @@ def get_timing_stats_from_engine_client(
                         if request_id not in encoder_stats:
                             encoder_stats[request_id] = dict(stats_dict)
                         else:
-                            # Aggregate timing metrics across workers
+                            # Aggregate timing metrics across workers.
+                            # In tensor parallelism, all workers execute the
+                            # Encoder forward pass executes concurrently across workers,
+                            # so each worker measures a similar wall-clock encoder
+                            # time or encoder call count. Use the maximum time and
+                            # calls to represent the actual elapsed metrics.
                             current_time = encoder_stats[request_id].get(
                                 "encoder_forward_time", 0.0
                             )
                             new_time = stats_dict.get("encoder_forward_time", 0.0)
-                            encoder_stats[request_id]["encoder_forward_time"] = (
-                                current_time + new_time
+                            encoder_stats[request_id]["encoder_forward_time"] = max(
+                                current_time, new_time
                             )
 
                             current_calls = encoder_stats[request_id].get(
                                 "num_encoder_calls", 0
                             )
                             new_calls = stats_dict.get("num_encoder_calls", 0)
-                            encoder_stats[request_id]["num_encoder_calls"] = (
-                                current_calls + new_calls
+                            encoder_stats[request_id]["num_encoder_calls"] = max(
+                                current_calls, new_calls
                             )
     except (AttributeError, RuntimeError):
         pass

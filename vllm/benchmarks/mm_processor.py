@@ -99,14 +99,14 @@ def calculate_mm_processor_metrics(
             }
             continue
 
-        times_ms = [t * 1000 for t in times]
+        is_count_metric = stage_name == "num_encoder_calls"
+        values = times if is_count_metric else [t * 1000 for t in times]
+
         metrics[stage_name] = {
-            "mean": float(np.mean(times_ms)),
-            "median": float(np.median(times_ms)),
-            "std": float(np.std(times_ms)),
-            **{
-                f"p{p}": float(np.percentile(times_ms, p)) for p in selected_percentiles
-            },
+            "mean": float(np.mean(values)),
+            "median": float(np.median(values)),
+            "std": float(np.std(values)),
+            **{f"p{p}": float(np.percentile(values, p)) for p in selected_percentiles},
         }
 
     return metrics
@@ -341,14 +341,17 @@ def main(args: argparse.Namespace) -> None:
     print("=" * 80)
 
     if "mm_processor_stats" in result:
-        print("\nMM Processor Timing (ms):")
+        print("\nMM Processor Metrics:")
         selected_percentiles = [
             float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
         ]
         mm_data = []
         for stage, metrics in result["mm_processor_stats"].items():
+            is_count = stage == "num_encoder_calls"
+            unit = "" if is_count else " (ms)"
+
             row = {
-                "Stage": stage,
+                "Stage": stage + unit,
                 "Mean": f"{metrics['mean']:.2f}",
                 "Median": f"{metrics['median']:.2f}",
                 "Std": f"{metrics['std']:.2f}",
@@ -386,35 +389,6 @@ def main(args: argparse.Namespace) -> None:
 
         e2el_df = pd.DataFrame(e2el_data)
         print(e2el_df.to_string(index=False))
-
-    if "encoder_stats" in result and result["encoder_stats"] is not None:
-        encoder_stats = result["encoder_stats"]
-        print("\nEncoder Forward Pass Latency (ms):")
-        print(f"  Encoder Type: {encoder_stats['encoder_type']}")
-        print(
-            f"  Warmup: {encoder_stats['num_warmup']}, "
-            f"Iterations: {encoder_stats['num_iterations']}"
-        )
-
-        selected_percentiles = [
-            float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
-        ]
-
-        encoder_data = []
-        for entry in encoder_stats["results"]:
-            row = {
-                "Batch": entry["batch_size"],
-                "Image Size": entry["image_size"],
-                "Mean": f"{entry['mean']:.2f}",
-                "Median": f"{entry['median']:.2f}",
-                "Std": f"{entry['std']:.2f}",
-            }
-            for p in selected_percentiles:
-                row[f"P{p}"] = f"{entry.get(f'p{p}', 0.0):.2f}"
-            encoder_data.append(row)
-
-        encoder_df = pd.DataFrame(encoder_data)
-        print(encoder_df.to_string(index=False))
 
     if args.output_json:
         result["config"] = {
