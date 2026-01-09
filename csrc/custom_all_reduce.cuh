@@ -301,8 +301,9 @@ __global__ void __launch_bounds__(512, 1)
                                T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
-  // note: we don't reorder the address so the accumulation order is the same
-  // for all ranks, ensuring bitwise identical results
+  // note: we do reorder the address so the accumulation order is not
+  // the same for all ranks. But this doesn't alter the correctness of results
+  // as the accumulator type id fp32 for the reduction.
   auto dp = *_dp;
 
   const P* rotated_ptrs[ngpus];
