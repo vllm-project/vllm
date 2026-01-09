@@ -58,6 +58,9 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
+        pooling_params = pooling_metadata.pooling_params
+        assert len(pooled_data) == len(pooling_params)
+
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
@@ -68,8 +71,6 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         if self.projector is not None:
             pooled_data = self.projector(pooled_data)
         # pooled_data shape: [batchsize, embedding_dimension]
-
-        pooling_params = pooling_metadata.pooling_params
 
         # for matryoshka representation
         dimensions_list = [pooling_param.dimensions for pooling_param in pooling_params]
@@ -128,6 +129,9 @@ class ClassifierPoolerHead(SequencePoolerHead):
         pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
+        pooling_params = pooling_metadata.pooling_params
+        assert len(pooled_data) == len(pooling_params)
+
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
@@ -141,7 +145,6 @@ class ClassifierPoolerHead(SequencePoolerHead):
         if self.logit_bias is not None:
             pooled_data -= self.logit_bias
 
-        pooling_params = pooling_metadata.pooling_params
         flags = [p.use_activation for p in pooling_params]
 
         if len(set(flags)) == 1:

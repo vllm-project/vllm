@@ -17,6 +17,7 @@ from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
 from .methods import TokenPoolingMethodOutputItem
 
@@ -29,12 +30,22 @@ class TokenPoolerHead(nn.Module, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def forward(
+    def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
     ) -> TokenPoolerHeadOutputItem:
         raise NotImplementedError
+
+    def forward(
+        self,
+        pooled_data: list[TokenPoolingMethodOutputItem],
+        pooling_metadata: PoolingMetadata,
+    ) -> list[TokenPoolerHeadOutputItem]:
+        pooling_params = pooling_metadata.pooling_params
+        assert len(pooled_data) == len(pooling_params)
+
+        return [self.forward_chunk(d, p) for d, p in zip(pooled_data, pooling_params)]
 
 
 class TokenEmbeddingPoolerHead(TokenPoolerHead):
@@ -53,7 +64,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed"}
 
-    def forward(
+    def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
@@ -103,7 +114,7 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_classify"}
 
-    def forward(
+    def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,

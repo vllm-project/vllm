@@ -8,7 +8,6 @@ import torch
 from vllm.config import PoolerConfig
 from vllm.model_executor.layers.pooler.activations import PoolerActivation
 from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
-from vllm.pooling_params import PoolingParams
 from vllm.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
@@ -30,8 +29,8 @@ TokenPoolingFn: TypeAlias = Callable[
     list[TokenPoolingMethodOutputItem],
 ]
 TokenPoolingHeadFn: TypeAlias = Callable[
-    [TokenPoolingMethodOutputItem, PoolingParams],
-    TokenPoolerHeadOutputItem,
+    [list[TokenPoolingMethodOutputItem], PoolingMetadata],
+    list[TokenPoolerHeadOutputItem],
 ]
 
 TokenPoolerOutput: TypeAlias = list[torch.Tensor | None]
@@ -81,10 +80,8 @@ class TokenPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
-
-        return [self.head(d, p) for d, p in zip(pooled_data, pooling_params)]
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 def pooler_for_token_embed(pooler_config: PoolerConfig):
