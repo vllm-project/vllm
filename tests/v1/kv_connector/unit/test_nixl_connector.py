@@ -185,18 +185,21 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
+       Also creates rixl package for ROCm compatibility.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        pkg_root = os.path.join(td, "nixl", "_api")
-        os.makedirs(pkg_root, exist_ok=True)
+        # Create both nixl and rixl packages for cross-platform compatibility
+        for pkg_name in ["nixl", "rixl"]:
+            pkg_root = os.path.join(td, pkg_name, "_api")
+            os.makedirs(pkg_root, exist_ok=True)
 
-        # Get the source code of FakeNixlWrapper class and dedent it
-        fake_nixl_source = inspect.getsource(FakeNixlWrapper)
-        fake_nixl_source = textwrap.dedent(fake_nixl_source)
+            # Get the source code of FakeNixlWrapper class and dedent it
+            fake_nixl_source = inspect.getsource(FakeNixlWrapper)
+            fake_nixl_source = textwrap.dedent(fake_nixl_source)
 
-        stub = f"""\
+            stub = f"""\
 # Copy of FakeNixlWrapper implementation for Ray workers
 import uuid
 from collections import defaultdict
@@ -206,16 +209,17 @@ from collections import defaultdict
 # Export as nixl_agent
 nixl_agent = FakeNixlWrapper
 """
-        with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
-            f.write(stub)
+            with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+                f.write(stub)
 
-        # Mock nixlXferTelemetry class
-        pkg_root2 = os.path.join(td, "nixl", "_bindings")
-        os.makedirs(pkg_root2, exist_ok=True)
-        with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
-            f.write("class nixlXferTelemetry: pass")
-        # touch parent package
-        open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+            # Mock nixlXferTelemetry class
+            pkg_root2 = os.path.join(td, pkg_name, "_bindings")
+            os.makedirs(pkg_root2, exist_ok=True)
+            with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
+                f.write("class nixlXferTelemetry: pass")
+            # touch parent package
+            open(os.path.join(td, pkg_name, "__init__.py"), "w").close()
+
         yield td
 
 
