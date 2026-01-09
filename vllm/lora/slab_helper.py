@@ -349,8 +349,15 @@ def build_target_matched_slab(
         return slab_tensor, metadata
 
 
-def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name):
-    """Extract lora_a and lora_b tensors from GPU slab for a module."""
+def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name, scaling=1.0):
+    """Extract lora_a and lora_b tensors from GPU slab for a module.
+    
+    Args:
+        gpu_slab: The GPU slab containing all weights
+        metadata: Slab metadata with extraction map
+        module_name: Name of the module to extract
+        scaling: Scaling factor to apply to lora_b (default 1.0 for no scaling)
+    """
     extraction_info = metadata.extraction_map.get(module_name)
     if not extraction_info:
         return None, None
@@ -362,6 +369,11 @@ def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name):
         _, a_offset, a_size, a_shape, b_offset, b_size, b_shape = extraction_info
         lora_a = gpu_slab[a_offset : a_offset + a_size].view(a_shape)
         lora_b = gpu_slab[b_offset : b_offset + b_size].view(b_shape)
+        
+        # Apply scaling to lora_b if needed (slab path skips optimize())
+        if scaling != 1.0:
+            lora_b = lora_b * scaling
+        
         return lora_a, lora_b
 
     elif extraction_type in ("moe", "qkv"):
@@ -376,6 +388,9 @@ def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name):
         lora_b_list = []
         for i, (offset, size, shape) in enumerate(expert_tensors_b):
             tensor = gpu_slab[offset : offset + size].view(shape)
+            # Apply scaling to each expert's lora_b if needed
+            if scaling != 1.0:
+                tensor = tensor * scaling
             lora_b_list.append(tensor)
         return lora_a_list, lora_b_list
 
@@ -395,8 +410,18 @@ def process_slab_activation_loop(
 
     # Loop through model modules
     for module_name, module in modules_dict.items():
+        # Get scaling from lora_model (slab path doesn't call optimize())
+        module_lora = lora_model.loras.get(module_name)
+        scaling = 1.0
+        if module_lora and hasattr(module_lora, 'scaling'):
+            # Handle both single scaling and list of scalings (for packed modules)
+            if isinstance(module_lora.scaling, (list, tuple)):
+                scaling = module_lora.scaling[0] if module_lora.scaling[0] else 1.0
+            else:
+                scaling = module_lora.scaling if module_lora.scaling else 1.0
+        
         lora_a_gpu, lora_b_gpu = extract_tensors_from_gpu_slab(
-            gpu_slab, metadata, module_name
+            gpu_slab, metadata, module_name, scaling=scaling
         )
 
         if lora_a_gpu is None or lora_b_gpu is None:
@@ -405,9 +430,14 @@ def process_slab_activation_loop(
             continue
 
         # Special case: MoE3D needs 2-item list format
-        if isinstance(module, FusedMoE3DWithLoRA) and not isinstance(lora_a_gpu, list):
+        if isinstance(module, FusedMoE3DWithLoRA):
+            gate_up_scaling = 1.0
+            gate_up_lora = lora_model.loras.get(module_name + ".base_layer")
+            if gate_up_lora and hasattr(gate_up_lora, 'scaling'):
+                gate_up_scaling = gate_up_lora.scaling if gate_up_lora.scaling else 1.0
+            
             gate_up_a, gate_up_b = extract_tensors_from_gpu_slab(
-                gpu_slab, metadata, module_name + ".base_layer"
+                gpu_slab, metadata, module_name + ".base_layer", scaling=gate_up_scaling
             )
             down_a, down_b = lora_a_gpu, lora_b_gpu
 
@@ -593,16 +623,15 @@ def create_slab_optimized_lora_model(
 
             # Pack based on module type
             if module_name.endswith(".experts"):
-                lora_model_instance.loras[module_name] = (
-                    PackedLoRALayerWeights.pack_moe(
-                        replacement_loras,
-                        module_name,
-                    )
+                packed_lora = PackedLoRALayerWeights.pack_moe(
+                    replacement_loras,
+                    module_name,
                 )
             else:
-                lora_model_instance.loras[module_name] = PackedLoRALayerWeights.pack(
+                packed_lora = PackedLoRALayerWeights.pack(
                     replacement_loras
                 )
+            lora_model_instance.loras[module_name] = packed_lora
             # Remove individual projections
             for module in replaced_module:
                 lora_model_instance.loras.pop(module, None)
