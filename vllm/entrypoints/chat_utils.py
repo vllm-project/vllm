@@ -1383,13 +1383,13 @@ def parse_chat_messages(
     return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
-def parse_chat_messages_futures(
+async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
-    Awaitable[MultiModalDataDict | None],
+    MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
@@ -1411,7 +1411,7 @@ def parse_chat_messages_futures(
 
     _postprocess_messages(conversation)
 
-    return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
+    return conversation, await mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):

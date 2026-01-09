@@ -22,7 +22,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     load_chat_template,
     parse_chat_messages,
-    parse_chat_messages_futures,
+    parse_chat_messages_async,
 )
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -568,7 +568,7 @@ class HfRenderer(RendererLike):
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
-        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
+        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
             content_format=resolve_chat_template_content_format(
@@ -592,8 +592,8 @@ class HfRenderer(RendererLike):
             if isinstance(prompt_raw, str)
             else TokensPrompt(prompt_token_ids=prompt_raw)
         )
-        if mm_data_future is not None:
-            prompt["multi_modal_data"] = await mm_data_future
+        if mm_data is not None:
+            prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 

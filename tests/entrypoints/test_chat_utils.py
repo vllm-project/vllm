@@ -14,7 +14,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
-    parse_chat_messages_futures,
+    parse_chat_messages_async,
 )
 from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
@@ -449,7 +449,7 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
     image_url,
 ):
     image_uuid = str(hash(image_url))
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -470,7 +470,7 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
     assert conversation == [
         {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
     ]
-    _assert_mm_data_is_image_input(await mm_future, 1)
+    _assert_mm_data_is_image_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid])
 
 
@@ -480,7 +480,7 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
     image_url,
 ):
     image_uuid = str(hash(image_url))
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -501,7 +501,7 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
     assert conversation == [
         {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
     ]
-    _assert_mm_data_is_image_input(await mm_future, 1, skipped_image_indices=[0])
+    _assert_mm_data_is_image_input(mm_data, 1, skipped_image_indices=[0])
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid])
 
 
@@ -513,7 +513,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_async(
     image_uuid1 = "my_uuid_1"
     image_uuid2 = "my_uuid_2"
 
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -542,7 +542,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_async(
             "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_future, 2)
+    _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[image_uuid1, image_uuid2])
 
 
@@ -554,7 +554,7 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
     image_uuid1 = "my_uuid_1"
     image_uuid2 = "my_uuid_2"
 
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -583,7 +583,7 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
             "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_future, 2, skipped_image_indices=[0, 1])
+    _assert_mm_data_is_image_input(mm_data, 2, skipped_image_indices=[0, 1])
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[image_uuid1, image_uuid2])
 
 
@@ -594,7 +594,7 @@ async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
 ):
     image_uuid2 = "my_uuid_2"
 
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -622,7 +622,7 @@ async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
             "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_future, 2)
+    _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, image_uuid2])
 
 
@@ -669,7 +669,7 @@ async def test_parse_chat_messages_single_image_async(
     phi3v_model_config,
     image_url,
 ):
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -686,7 +686,7 @@ async def test_parse_chat_messages_single_image_async(
     assert conversation == [
         {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
     ]
-    _assert_mm_data_is_image_input(await mm_future, 1)
+    _assert_mm_data_is_image_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
@@ -870,7 +870,7 @@ async def test_parse_chat_messages_audio_embeds_async(
     # Encode it as base64
     base64_audio_embedding = tensor2base64(audio_embedding)
 
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -888,7 +888,7 @@ async def test_parse_chat_messages_audio_embeds_async(
     )
 
     # Should have audio embedding in mm_data (single tensor, not a list)
-    mm_data = await mm_future
+    mm_data = mm_data
     assert mm_data is not None
     assert "audio" in mm_data
     assert isinstance(mm_data["audio"], torch.Tensor)
@@ -1030,7 +1030,7 @@ async def test_parse_chat_messages_multiple_image_embeds_async(
     base64_image_embedding_1 = tensor2base64(image_embedding_1)
     base64_image_embedding_2 = tensor2base64(image_embedding_2)
 
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -1060,7 +1060,7 @@ async def test_parse_chat_messages_multiple_image_embeds_async(
     ]
 
     # Await the future and verify mm_data
-    mm_data = await mm_future
+    mm_data = mm_data
     assert mm_data is not None
     assert "image" in mm_data
     assert isinstance(mm_data["image"], list)
@@ -1081,7 +1081,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
     phi3v_model_config_image_embeds,
 ):
     uuid = "abcd"
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -1101,7 +1101,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
             "content": "<|image_1|>\nWhat's in this image?",
         }
     ]
-    mm_data = await mm_future
+    mm_data = mm_data
     assert mm_data is not None
     assert "image" in mm_data
     assert isinstance(mm_data["image"], list)
@@ -1208,7 +1208,7 @@ async def test_parse_chat_messages_multiple_images_async(
     phi3v_model_config,
     image_url,
 ):
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -1232,7 +1232,7 @@ async def test_parse_chat_messages_multiple_images_async(
             "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_future, 2)
+    _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
@@ -1562,7 +1562,7 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
     phi3v_model_config_mm_interleaved,
     image_url,
 ):
-    conversation, mm_data, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -1589,7 +1589,7 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
             "Do they have differences?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_data, 2)
+    _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
@@ -1599,7 +1599,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
     image_url,
 ):
     image_uuid = str(hash(image_url))
-    conversation, mm_data, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -1634,7 +1634,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
             "Do they have differences?",
         }
     ]
-    _assert_mm_data_is_image_input(await mm_data, 2)
+    _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[image_uuid, image_uuid])
 
 
@@ -2109,7 +2109,7 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,
 ):
     audio_uuid = "abcd"
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         [
             {
                 "role": "user",
@@ -2134,5 +2134,5 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
             "audio say?",
         }
     ]
-    _assert_mm_data_inputs(await mm_future, {"audio": 1})
+    _assert_mm_data_inputs(mm_data, {"audio": 1})
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
