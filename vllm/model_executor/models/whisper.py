@@ -690,6 +690,10 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Whisper models (mono)."""
+        return 1
+
     def get_num_audio_tokens(self) -> int:
         return self.get_hf_config().max_source_positions
 
@@ -724,7 +728,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     @property
     def pad_dummy_encoder_prompt(self) -> bool:
