@@ -7,16 +7,23 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 if current_platform.is_cuda():
-    from vllm import _custom_ops as ops
+    from vllm import _custom_ops
 
+    ops = _custom_ops
     reshape_and_cache_flash = ops.reshape_and_cache_flash
-    from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+        get_scheduler_metadata,
+    )
 
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops
+
+    ops = ipex_ops
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = ops.flash_attn_varlen_func
     get_scheduler_metadata = ops.get_scheduler_metadata
+
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # noqa: F401
@@ -35,6 +42,9 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
 
     if current_platform.is_xpu():
         return 2
+    if current_platform.is_rocm():
+        # ROCm doesn't use vllm_flash_attn; return None to skip fa_version arg
+        return None
     try:
         from vllm.vllm_flash_attn.flash_attn_interface import (
             fa_version_unsupported_reason,
@@ -51,10 +61,13 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         )
 
         # 2. override if passed by environment or config
-        from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config_or_none
 
-        vllm_config = get_current_vllm_config()
-        if vllm_config.attention_config.flash_attn_version is not None:
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is not None
+            and vllm_config.attention_config.flash_attn_version is not None
+        ):
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
@@ -87,7 +100,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
 def flash_attn_supports_fp8() -> bool:
     return (
         get_flash_attn_version() == 3
-        and current_platform.get_device_capability().major == 9
+        and current_platform.is_device_capability_family(90)
     )
 
 
@@ -107,10 +120,9 @@ def flash_attn_supports_mla():
                 is_fa_version_supported,
             )
 
-            return (
-                is_fa_version_supported(3)
-                and current_platform.get_device_capability()[0] == 9
-            )
+            return is_fa_version_supported(
+                3
+            ) and current_platform.is_device_capability_family(90)
         except (ImportError, AssertionError):
             pass
     return False

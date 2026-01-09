@@ -5,16 +5,16 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 
-# Using the default value (240.0) from pytorch will cause accuracy
-# issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
 _FP8_DTYPE = current_platform.fp8_dtype()
-_FP8_FINFO = torch.finfo(_FP8_DTYPE)
-_FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
-_FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
+_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
@@ -45,9 +45,12 @@ class QuantFP8(CustomOp):
         super().__init__()
         self.static = static
         self.group_shape = group_shape
+        self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
+
+        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -91,6 +94,33 @@ class QuantFP8(CustomOp):
             scale_ub=scale_ub,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        use_aiter_quant = (
+            not self.is_group_quant
+            and self.use_aiter
+            and scale_ub is None
+            and x.is_contiguous()
+        )
+        use_aiter_per_tensor_quant = (
+            use_aiter_quant and self.group_shape == GroupShape.PER_TENSOR
+        )
+        use_aiter_per_token_quant = (
+            use_aiter_quant and self.group_shape == GroupShape.PER_TOKEN
+        )
+
+        if use_aiter_per_tensor_quant:
+            return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
+        if use_aiter_per_token_quant:
+            return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
+
+        # Fallback to CUDA implementation
+        return self.forward_cuda(x, scale, scale_ub)
 
     def forward_native(
         self,

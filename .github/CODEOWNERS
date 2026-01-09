@@ -15,6 +15,7 @@
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
+/vllm/tool_parsers @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 /vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
@@ -152,7 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/pooling_params.py @noooop
-/vllm/model_executor/layers/pooler.py @noooop
+/vllm/model_executor/layers/pooler @noooop
 
 # Security guide and policies
 /docs/usage/security.md @russellb

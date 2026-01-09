@@ -38,7 +38,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
@@ -49,7 +49,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -144,15 +144,15 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 class KVConnectorBase_V1(ABC):
     """
     Base class for KV connectors.
-
-    Attributes:
-        prefer_cross_layer_blocks (bool): Indicates whether this connector
-            prefers KV blocks that hold KV data for all layers (for speeding
-            up KV data transfers).
-            Defaults to False.
     """
 
-    prefer_cross_layer_blocks: ClassVar[bool] = False
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        return False
 
     def __init__(
         self,
@@ -376,6 +376,14 @@ class KVConnectorBase_V1(ABC):
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """
         Get the KV connector stats collected during the last interval.
+        """
+        return None
+
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        This function should be called by the model runner every time after the
+        model execution and before cleanup.
         """
         return None
 
