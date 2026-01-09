@@ -19,6 +19,7 @@ from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
+from setuptools.command.develop import develop
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -141,6 +142,14 @@ def compile_grpc_protos():
 
 class BuildPyAndGenerateGrpc(build_py):
     """Build Python modules and generate gRPC stubs from proto files."""
+
+    def run(self):
+        compile_grpc_protos()
+        super().run()
+
+
+class DevelopAndGenerateGrpc(develop):
+    """Develop mode that also generates gRPC stubs from proto files."""
 
     def run(self):
         compile_grpc_protos()
@@ -950,13 +959,17 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {"build_py": BuildPyAndGenerateGrpc}
+    cmdclass = {
+        "build_py": BuildPyAndGenerateGrpc,
+        "develop": DevelopAndGenerateGrpc,
+    }
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
         "build_py": BuildPyAndGenerateGrpc,
+        "develop": DevelopAndGenerateGrpc,
     }
 
 setup(
