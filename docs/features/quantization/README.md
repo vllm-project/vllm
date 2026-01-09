@@ -75,9 +75,10 @@ vLLM supports registering custom, out-of-tree quantization methods using the `@r
 
 ### Registering a Custom Quantization Method
 
-To register a custom quantization method, create a class that inherits from `QuantizationConfig` and decorate it with `@register_quantization_config`:
+To register a custom quantization method, create a class that inherits from `QuantizationConfig` and decorate it with `@register_quantization_config`. The `get_quant_method` dispatches to the appropriate quantize method based on the layer type:
 
 ```python
+import torch
 from vllm.model_executor.layers.quantization import (
     register_quantization_config,
 )
@@ -85,6 +86,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 @register_quantization_config("my_quant")
 class MyQuantConfig(QuantizationConfig):
@@ -114,12 +117,16 @@ class MyQuantConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        # Return the quantization method for this layer
-        # Return None if the layer should not be quantized
-        ...
+        # Dispatch based on layer type
+        # NOTE: you only need to implement methods you care about
+        if isinstance(layer, LinearBase):
+            return MyQuantLinearMethod()
+        elif isinstance(layer, FusedMoE):
+            return MyQuantMoEMethod(layer.moe_config)
+        return None
 ```
 
-### Required Methods
+### Required QuantizationConfig Methods
 
 Your custom `QuantizationConfig` subclass must implement these abstract methods:
 
@@ -132,15 +139,21 @@ Your custom `QuantizationConfig` subclass must implement these abstract methods:
 | `from_config(config)` | Class method to create config from model's quantization config dict |
 | `get_quant_method(layer, prefix)` | Returns the quantization method for a given layer, or `None` to skip |
 
-### Implementing a Quantize Method
+### Implementing a Quantized Linear Method
 
-The `get_quant_method` should return an instance of a class that inherits from `QuantizeMethodBase`:
+For linear layers, return a `QuantizeMethodBase` subclass from `get_quant_method`. You can extend `UnquantizedLinearMethod` as a starting point:
 
 ```python
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 class MyQuantLinearMethod(UnquantizedLinearMethod):
     """Custom quantization method for linear layers."""
+
+    def create_weights(
+        self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
+    ):
+        # Create quantized weights for the layer
+        ...
 
     def apply(
         self,
@@ -152,41 +165,48 @@ class MyQuantLinearMethod(UnquantizedLinearMethod):
         ...
 ```
 
-### Supporting Mixture of Experts (MoE) Models
+### Implementing a Quantized MoE Method
 
-To support quantization for MoE models, your `get_quant_method` must also handle `FusedMoE` layers by returning a `FusedMoEMethodBase` subclass:
+For Mixture of Experts (MoE) models, return a `FusedMoEMethodBase` subclass from `get_quant_method`. You can use `UnquantizedFusedMoEMethod` to skip MoE quantization:
 
 ```python
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
-@register_quantization_config("my_quant")
-class MyQuantConfig(QuantizationConfig):
-    # ... other methods ...
+class MyQuantMoEMethod(FusedMoEMethodBase):
+    """Custom quantization method for MoE layers."""
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> QuantizeMethodBase | None:
-        if isinstance(layer, LinearBase):
-            return MyQuantLinearMethod()
-        elif isinstance(layer, FusedMoE):
-            # Return a FusedMoEMethodBase subclass for MoE layers
-            return MyQuantMoEMethod(layer.moe_config)
-            # Or return UnquantizedFusedMoEMethod to skip quantization:
-            # return UnquantizedFusedMoEMethod(layer.moe_config)
-        return None
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # Create quantized weights for the MoE layer
+        ...
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        router: "FusedMoERouter",
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        # Apply MoE computation with quantized weights
+        ...
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        # Return the MoE quantization configuration
+        ...
 ```
-
-A custom `FusedMoEMethodBase` subclass must implement:
-
-| Method | Description |
-|--------|-------------|
-| `create_weights(...)` | Create quantized weights for the MoE layer |
-| `apply(layer, router, x, router_logits)` | Apply the MoE computation with quantized weights |
-| `get_fused_moe_quant_config(layer)` | Return the MoE quantization configuration |
 
 See existing implementations like `Fp8MoEMethod` in `vllm/model_executor/layers/quantization/fp8.py` for reference.
 
