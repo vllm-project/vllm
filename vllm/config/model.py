@@ -1546,8 +1546,8 @@ class ModelConfig:
     @property
     def attn_type(self) -> AttnTypeStr:
         if self.pooler_config is not None:
-            pooling_type = self._model_info.default_pooling_type.lower()
-            if pooling_type == "cls":
+            seq_pooling_type = self._model_info.default_seq_pooling_type
+            if seq_pooling_type == "CLS":
                 return "encoder_only"
             else:
                 is_causal = getattr(self.hf_config, "is_causal", True)
