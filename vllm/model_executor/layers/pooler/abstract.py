@@ -6,10 +6,11 @@ from collections.abc import Set
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
+
+from .common import PoolingParamsUpdate
 
 
 class Pooler(nn.Module, ABC):
