@@ -88,6 +88,10 @@ class PoolerConfig:
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
 
+    def get_pooling_type(self) -> PoolingTypeStr:
+        assert self.pooling_type is not None, "Should be resolved by ModelConfig"
+        return self.pooling_type
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
