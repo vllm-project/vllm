@@ -78,6 +78,7 @@ class JambaMoE(nn.Module):
                 bias=False,
                 quant_config=None,
                 params_dtype=params_dtype,
+                prefix=f"{prefix}.router",
             )
 
         self.experts = FusedMoE(
@@ -377,6 +378,7 @@ class JambaModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

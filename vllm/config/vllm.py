@@ -1264,12 +1264,6 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def recalculate_max_model_len(self, max_model_len: int):
-        # Can only be called in try_verify_and_update_config
-        model_config = self.model_config
-        max_model_len = model_config.get_and_verify_max_len(max_model_len)
-        self.model_config.max_model_len = max_model_len
-
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -1447,11 +1441,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        logger.warning("Current vLLM config is not set.")
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 
