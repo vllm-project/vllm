@@ -406,6 +406,8 @@ th {
 | `InternLMForCausalLM` | InternLM | `internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
+| `IQuestCoderForCausalLM` | IQuestCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | | |
+| `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
 | `JAISLMHeadModel` | Jais | `inceptionai/jais-13b`, `inceptionai/jais-13b-chat`, `inceptionai/jais-30b-v3`, `inceptionai/jais-30b-chat-v3`, etc. | | ✅︎ |
 | `Jais2ForCausalLM` | Jais2 | `inceptionai/Jais-2-8B-Chat`, `inceptionai/Jais-2-70B-Chat`, etc. | | ✅︎ |
 | `JambaForCausalLM` | Jamba | `ai21labs/AI21-Jamba-1.5-Large`, `ai21labs/AI21-Jamba-1.5-Mini`, `ai21labs/Jamba-v0.1`, etc. | ✅︎ | ✅︎ |
@@ -640,29 +642,7 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
     For hybrid-only models such as Llama-4, Step3 and Mistral-3, a text-only mode can be enabled by setting all supported multimodal modalities to 0 (e.g, `--limit-mm-per-prompt '{"image":0}`) so that their multimodal modules will not be loaded to free up more GPU memory for KV cache.
 
 !!! note
-    vLLM currently only supports dynamic LoRA adapters on the language backbone of multimodal models.
-    If you wish to use a model with LoRA in the multi-modal encoder,
-    please merge the weights into the base model first before running it in vLLM like a regular model.
-
-    ```python
-    from peft import PeftConfig, PeftModel
-    from transformers import AutoModelForImageTextToText, AutoProcessor
-
-    def merge_and_save(model_id: str, output_dir: str):
-        base_model = AutoModelForImageTextToText.from_pretrained(model_id)
-        lora_model = PeftModel.from_pretrained(
-            base_model,
-            model_id,
-            config=PeftConfig.from_pretrained(model_id),
-        )
-        model = lora_model.merge_and_unload().to(dtype=base_model.dtype)
-        model._hf_peft_config_loaded = False  # Needed to save the merged model
-
-        processor = AutoProcessor.from_pretrained(model_id)
-
-        model.save_pretrained(output_dir)
-        processor.save_pretrained(output_dir)
-    ```
+    vLLM currently supports adding LoRA adapters to the language backbone for most multimodal models. Additionally, vLLM now experimentally supports adding LoRA to the tower and connector modules for some multimodal models. See [this page](../features/lora.md).
 
 ### Generative Models
 
