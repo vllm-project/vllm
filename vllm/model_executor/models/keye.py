@@ -339,14 +339,10 @@ def apply_rotary_pos_emb_flashatt(
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    apply_rotary_emb: ApplyRotaryEmb,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-
-    apply_rotary_emb = ApplyRotaryEmb(
-        enforce_enable=True,
-        enable_fp32_compute=True,
-    )
 
     q_embed = apply_rotary_emb(q, cos, sin)
     k_embed = apply_rotary_emb(k, cos, sin)
@@ -404,9 +400,15 @@ class KeyeSiglipAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
+            scale=self.scale,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
             multimodal_config=multimodal_config,
+        )
+
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
         )
 
     def forward(
@@ -447,7 +449,7 @@ class KeyeSiglipAttention(nn.Module):
                 self.num_kv_heads,
                 self.head_dim,
             )
-            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin)
+            q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin, self.apply_rotary_emb)
             v = v.view(
                 *v.shape[:-1],
                 self.num_kv_heads,
@@ -511,6 +513,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
