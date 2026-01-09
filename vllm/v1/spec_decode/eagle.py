@@ -251,6 +251,11 @@ class EagleProposer:
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
+        # Convert M-RoPE positions to 1D if draft model is text-only
+        if not self.uses_mrope and target_positions.dim() == 2:
+            # For text inputs, all M-RoPE dimensions are identical
+            target_positions = target_positions[0]
+
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(

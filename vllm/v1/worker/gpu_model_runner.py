@@ -3751,12 +3751,6 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            # Convert M-RoPE positions to 1D if draft model is text-only
-            if not self.drafter.uses_mrope:
-                assert target_positions.dim() == 2
-                # For text inputs, all M-RoPE dimensions are identical
-                target_positions = target_positions[0]
-
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -4447,12 +4441,11 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-        
+       
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
-
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
