@@ -98,6 +98,8 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
+        if obj is None:
+            return
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
