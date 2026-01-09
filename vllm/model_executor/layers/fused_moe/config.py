@@ -450,11 +450,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
-<<<<<<< HEAD
-=======
-        is_act_and_mul: bool = True,
         g1_scale_c: torch.Tensor | None = None,
->>>>>>> 049b142ed (add Flashinfer TRTLLMGEN MOE to MK)
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -514,11 +510,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
-<<<<<<< HEAD
-=======
-            is_act_and_mul=is_act_and_mul,
             _g1_scale_c=g1_scale_c,
->>>>>>> 049b142ed (add Flashinfer TRTLLMGEN MOE to MK)
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant

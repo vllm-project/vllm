@@ -1362,7 +1362,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
             # Use TRTLLM FP4 Modular Kernel only when all2all_backend
             # is not allgather_reducescatter
-            if self.moe.moe_parallel_config.all2all_backend != "allgather_reducescatter":
+            if (
+                self.moe.moe_parallel_config.all2all_backend
+                != "allgather_reducescatter"
+            ):
                 prepare_finalize = build_flashinfer_fp4_trtllm_moe_prepare_finalize(
                     self.moe
                 )
@@ -1592,11 +1595,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
         import flashinfer
 
-        assert self.moe_quant_config is not None
-        a1_gscale = self.moe_quant_config.a1_gscale
         hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
             hidden_states,
-            a1_gscale,
+            layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
@@ -1608,7 +1609,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # TRT-LLM modular kernel path needs special handling
         if (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            and self.moe.moe_parallel_config.all2all_backend != "allgather_reducescatter"
+            and self.moe.moe_parallel_config.all2all_backend
+            != "allgather_reducescatter"
         ):
             # For TRT-LLM modular kernel, build config with precomputed scales
             return nvfp4_moe_quant_config(
@@ -1620,7 +1622,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a2_gscale=layer.a2_gscale,
                 g1_scale_c=getattr(layer, "g1_scale_c", None),
             )
-        
+
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
