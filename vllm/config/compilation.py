@@ -427,8 +427,9 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` on selected platforms.
-    Disabled by default until more models are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` on selected platforms. It may also work
+    for models loaded with the Transformers modeling backend if the encoder is
+    compilable. Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None

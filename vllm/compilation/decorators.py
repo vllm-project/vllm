@@ -275,20 +275,32 @@ def _support_torch_compile(
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
     def __init__(
-        self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
+        self, *args, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
     ):
         if vllm_config is None:
             vllm_config = get_current_vllm_config()
 
-        # NOTE: to support multimodal models (such as encoder),
-        # we may not have vllm_config so we may need to patch
-        # it
         sig = inspect.signature(old_init)
+        # Check that any positional arguments match the old_init method signature
+        annotations = [p.annotation for p in sig.parameters.values()]
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
+            if not isinstance(arg, annotation):
+                init = f"'{type(self).__name__}.__init__'"
+                arg_type = f"'{type(arg).__name__}'"
+                raise TypeError(
+                    f"{init} received a positional argument of type {arg_type}, "
+                    "but no parameter of that type was found in the method signature. "
+                    f"Please either annotate {init} or pass it as a keyword argument."
+                )
+        # NOTE: to support multimodal models (such as encoder),
+        # we may not have vllm_config so we may need to patch it
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
             kwargs["prefix"] = prefix
-        old_init(self, **kwargs)
+        old_init(self, *args, **kwargs)
 
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config

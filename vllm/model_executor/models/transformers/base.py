@@ -16,7 +16,8 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-from collections.abc import Iterable
+import sys
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -30,6 +31,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -44,6 +46,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.utils import (
+    can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -172,14 +175,20 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Set correct attn and init on "meta" to delay allocating GPU tensors
+        # Set correct attn
         self.text_config._attn_implementation = "vllm"
+
+        from_config_kwargs = dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+        # Decorate the language model class to support torch compile
+        decoder_cls = self._get_decoder_cls(**from_config_kwargs)
+        self._decorate_for_torch_compile(cls=decoder_cls)
+        # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
-            self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
@@ -212,6 +221,57 @@ class Base(
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.text_config.hidden_size
         )
+
+    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
+        """
+        Get the decoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The decoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        decoder_cls = type(model.get_decoder())
+        del model
+        return decoder_cls
+
+    def _decorate_for_torch_compile(
+        self,
+        cls: type[PreTrainedModel],
+        dynamic_arg_dims: dict[str, int] | None = None,
+        enable_if: Callable[["VllmConfig"], bool] | None = None,
+    ):
+        """
+        Decorate `cls` to indicate to vLLM that it supports torch compile.
+
+        Args:
+            cls: The PreTrainedModel class to decorate.
+            dynamic_arg_dims: A mapping from argument name to the dunamic dimensions
+                of the argument. If None, default dynamic arg dims will be used. See
+                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                for more details.
+        """
+        logger.debug("Decorating `%s` for torch compile", cls.__name__)
+        if dynamic_arg_dims is None:
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims = dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=1,  # shape: [1, seq_len]
+            )
+        if enable_if is None:
+            enable_if = can_enable_torch_compile
+
+        # Decorate the cls for torch compile
+        @support_torch_compile(dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if)
+        class SupportTorchCompileWrapper(cls): ...
+
+        # Patch the class in its module
+        module = sys.modules[cls.__module__]
+        setattr(module, cls.__name__, SupportTorchCompileWrapper)
 
     def pipeline_parallel(self):
         """
@@ -434,11 +494,6 @@ class Base(
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        if input_ids is not None:
-            input_ids = input_ids[None, ...]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[None, ...]
-
         # If the model scales embeddings inside the input embedding layer we must
         # ensure they are scaled here since VocabParallelEmbedding will not do it
         if (
@@ -449,22 +504,29 @@ class Base(
             inputs_embeds = self.embed_input_ids(input_ids)
             input_ids = None
 
-        if self.model_config.uses_mrope:
-            position_ids = positions[:, None]
-        else:
-            position_ids = positions[None, ...]
+        # Add batch dimension before entering Transformers model
+        if input_ids is not None and input_ids.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            input_ids = input_ids[None, ...]
+        if inputs_embeds is not None and inputs_embeds.ndim == 2:
+            # [seq_len, hidden_size] -> [1, seq_len, hidden_size]
+            inputs_embeds = inputs_embeds[None, ...]
+        if positions.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            positions = positions[None, ...]
 
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
-            position_ids=position_ids,
+            position_ids=positions,
             attention_instances=self.attention_instances,
             return_dict=False,
             **self._output_aux_hidden_states_kwargs,
             **kwargs,
         )
-        # We must remove the batch dimension from these outputs
+
+        # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
         if self._output_aux_hidden_states_kwargs:
             aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
