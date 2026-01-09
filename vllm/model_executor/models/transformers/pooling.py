@@ -22,7 +22,8 @@ import torch
 from transformers import AutoModelForSequenceClassification
 
 from vllm.config.utils import getattr_iter
-from vllm.model_executor.layers.pooler import CLSPool, DispatchPooler
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import CLSPool
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
