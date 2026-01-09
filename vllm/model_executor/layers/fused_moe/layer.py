@@ -710,7 +710,7 @@ class FusedMoE(CustomOp):
         return None
 
     @property
-    def get_layer_id(self):
+    def layer_id(self):
         return self.layer_id
 
     @property
