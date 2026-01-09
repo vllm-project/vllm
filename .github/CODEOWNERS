@@ -153,7 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/pooling_params.py @noooop
-/vllm/model_executor/layers/pooler.py @noooop
+/vllm/model_executor/layers/pooler @noooop
 
 # Security guide and policies
 /docs/usage/security.md @russellb
