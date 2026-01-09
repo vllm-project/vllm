@@ -146,7 +146,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             bias=bias,
         )
 
-        output = torch.narrow(output, 0, 0, output_shape[0])
+        output = torch.narrow(output, 0, 0, A.shape[0])
         output = output.view(*output_shape)
         return output
 
@@ -208,8 +208,8 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         if type(output) is tuple and len(output) == 2:
             output = output[0]
         # Unpad (undo num_token_padding)
-        output = torch.narrow(output, 0, 0, output_shape[0])
-        x_scale = torch.narrow(As, 0, 0, output_shape[0])
+        output = torch.narrow(output, 0, 0, A.shape[0])
+        x_scale = torch.narrow(As, 0, 0, A.shape[0])
 
         # DQ
         # C = sw * sx * (X * W) + bias

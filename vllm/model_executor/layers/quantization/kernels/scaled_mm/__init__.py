@@ -209,7 +209,7 @@ def init_int8_linear_kernel(
 
     logger.info_once(
         "Selected %s for %s",
-        kernel_type.__class__.__name__,
+        kernel_type.__name__,
         module_name,
         scope="global",
     )

@@ -25,7 +25,7 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires FlashInfer to be installed."
 
         if compute_capability is not None and compute_capability < 100:
-            return False, "requires compute capability 89 and above."
+            return False, "requires compute capability 100 and above."
 
         return True, None
 
