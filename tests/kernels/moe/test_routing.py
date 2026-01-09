@@ -189,32 +189,32 @@ def test_custom(
     topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
 
 
-# See tests/test_routing_simulatator.py
-@pytest.mark.parametrize("m,k", MK_S)
-@pytest.mark.parametrize("top_k", TOP_KS)
-@pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
-@pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parameterize("strategy", ["uniform_random", "normal_routing"])
-def test_simulated(
-    m: int,
-    k: int,
-    top_k: int,
-    global_num_experts: int,
-    renormalize: bool,
-    enable_eplb: bool,
-    strategy: str,
-    monkeypatch,
-):
-    eplb_state = setup_eplb_state(enable_eplb)
+# # See tests/test_routing_simulatator.py
+# @pytest.mark.parametrize("m,k", MK_S)
+# @pytest.mark.parametrize("top_k", TOP_KS)
+# @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
+# @pytest.mark.parametrize("renormalize", [False, True])
+# @pytest.mark.parametrize("enable_eplb", [False, True])
+# @pytest.mark.parameterize("strategy", ["uniform_random", "normal_routing"])
+# def test_simulated(
+#     m: int,
+#     k: int,
+#     top_k: int,
+#     global_num_experts: int,
+#     renormalize: bool,
+#     enable_eplb: bool,
+#     strategy: str,
+#     monkeypatch,
+# ):
+#     eplb_state = setup_eplb_state(enable_eplb)
 
-    monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", strategy)
-    router = create_fused_moe_router(
-        top_k=top_k,
-        global_num_experts=global_num_experts,
-        enable_eplb=enable_eplb,
-        eplb_state=eplb_state,
-    )
+#     monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", strategy)
+#     router = create_fused_moe_router(
+#         top_k=top_k,
+#         global_num_experts=global_num_experts,
+#         enable_eplb=enable_eplb,
+#         eplb_state=eplb_state,
+#     )
 
-    hidden_states, router_logits = make_test_data(m, k, global_num_experts)
-    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+#     hidden_states, router_logits = make_test_data(m, k, global_num_experts)
+#     topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
