@@ -47,7 +47,7 @@ Deploy the following yaml file `lws.yaml`
                         sleep 0.5
                     done
                     echo "[$(date)] Ray head ready!"
-                    exec vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2
+                    exec vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
