@@ -86,27 +86,36 @@ class PiecewiseBackend:
         self.to_be_compiled_ranges: set[Range] = set(self.compile_ranges)
 
         # We only keep compilation management inside this class directly.
-        for size in self.compile_sizes:
-            range = Range(start=size, end=size)
-            if range not in self.compile_ranges:
-                self.range_entries[range] = RangeEntry(
-                    compile_range=range,
-                )
-                self.to_be_compiled_ranges.add(range)
+        if self.compile_sizes is not None:
+            for size in self.compile_sizes:
+                if isinstance(size, str):
+                    assert size == "cudagraph_capture_sizes"
+                    raise NotImplementedError(
+                        "cudagraph_capture_sizes not supported in compile_sizes."
+                        "This should be handled in `post_init_cudagraph_sizes`."
+                    )
+                else:
+                    assert isinstance(size, int)
+                    range = Range(start=size, end=size)
+                    if range not in self.compile_ranges:
+                        self.range_entries[range] = RangeEntry(
+                            compile_range=range,
+                        )
+                        self.to_be_compiled_ranges.add(range)
 
         for range in self.compile_ranges:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
 
-    def check_for_ending_compilation(self):
+    def check_for_ending_compilation(self) -> None:
         if self.is_last_graph and not self.to_be_compiled_ranges:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
-    def _fakify_args(self, args: list[Any]) -> list[Any]:
+    def _fakify_args(self, args: tuple[Any, ...]) -> list[Any]:
         # We need to pass fake example_inputs, otherwise torch.compile
         # will fakify the example_inputs potentially causing some non dynamic
         # dimension to be be duck shaped to other existing shapes that have hints
@@ -127,7 +136,9 @@ class PiecewiseBackend:
         assert len(fake_example_inputs) == len(args)
         return fake_example_inputs
 
-    def _maybe_compile_for_range_entry(self, range_entry: RangeEntry, args) -> Any:
+    def _maybe_compile_for_range_entry(
+        self, range_entry: RangeEntry, args: tuple[Any, ...]
+    ) -> Any:
         if not range_entry.compiled:
             range_entry.compiled = True
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
@@ -136,14 +147,14 @@ class PiecewiseBackend:
             # fakify for range, real args for concrete size.
             # For concrete size, we clear the shape env in
             # compiler_manager.compile() so no need to fakify.
-            args = (
+            args_list = (
                 self._fakify_args(args)
                 if not range_entry.compile_range.is_single_size()
-                else args
+                else list(args)
             )
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
-                args,
+                args_list,
                 self.vllm_backend.inductor_config,
                 self.compilation_config,
                 compile_range=range_entry.compile_range,
@@ -153,10 +164,13 @@ class PiecewiseBackend:
 
             self.check_for_ending_compilation()
 
-    def _find_range_for_shape(self, runtime_shape: int) -> Range | None:
+    def _find_range_for_shape(self, runtime_shape: int) -> RangeEntry | None:
         # First we try to find the range entry for the concrete compile size
         # If not found, we search for the range entry
         # that contains the runtime shape.
+        if self.compile_sizes is None:
+            return None
+
         if runtime_shape in self.compile_sizes:
             return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
         else:
@@ -165,7 +179,7 @@ class PiecewiseBackend:
                     return self.range_entries[range]
         return None
 
-    def __call__(self, *args) -> Any:
+    def __call__(self, *args: Any) -> Any:
         runtime_shape = args[self.sym_shape_indices[0]]
         range_entry = self._find_range_for_shape(runtime_shape)
 

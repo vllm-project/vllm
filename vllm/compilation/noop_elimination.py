@@ -65,7 +65,7 @@ class NoOpEliminationPass(VllmInductorPass):
     """
 
     @VllmInductorPass.time_and_log
-    def __call__(self, graph: torch.fx.Graph):
+    def __call__(self, graph: torch.fx.Graph) -> None:
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
@@ -117,7 +117,7 @@ class NoOpEliminationPass(VllmInductorPass):
         2. The dimensions both correspond to the same SymInt
         """
         # Case 1
-        return statically_known_true(dim == i_dim)
+        return statically_known_true(dim == i_dim)  # type: ignore[no-any-return]
 
     def all_dims_equivalent(
         self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]
