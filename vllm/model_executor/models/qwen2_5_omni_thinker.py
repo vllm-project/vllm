@@ -226,6 +226,10 @@ class Qwen2_5OmniThinkerProcessingInfo(
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Qwen2.5 Omni models (mono)."""
+        return 1
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -310,6 +314,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.info.get_hf_config().vision_config.spatial_merge_size,
             target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
         )
 
     def _call_hf_processor(
