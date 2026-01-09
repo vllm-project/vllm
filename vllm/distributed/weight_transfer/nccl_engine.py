@@ -4,8 +4,12 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -72,7 +76,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             parallel_config: The configuration for the parallel setup
         """
         super().__init__(config, parallel_config)
-        self.model_update_group = None
+        self.model_update_group: PyNcclCommunicator | None = None
 
     def init_transfer(self, init_info: NCCLInitInfo) -> None:
         """
