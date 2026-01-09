@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
+from typing import Annotated, Literal, TypeAlias
 
 import numpy as np
 import regex as re
 import torch
 from einops import rearrange
 from PIL import Image
-from timm.layers import LayerNorm, LayerNorm2d
+from timm.layers import LayerNorm2d
 from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.models.regnet import RegStage
 from torch import nn
@@ -35,13 +36,37 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
-from .llama import LlamaForCausalLM
 from .qwen2_vl import Qwen2VisionTransformer
-from .utils import AutoWeightsLoader, _merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+class KananaVImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over all images in the batch
+        - cps: Number of channels * patch_size * patch_size
+        - ni: Number of images
+    """
+
+    type: Literal["pixel_values"]
+
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", "cps"),
+    ]
+
+    vision_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3),
+    ]
+
+
+KananaVImageInputs: TypeAlias = KananaVImagePixelInputs
 
 
 def build_pos_embeds(
@@ -57,30 +82,6 @@ def build_pos_embeds(
         pos_emb = None
 
     return pos_emb
-
-
-def build_eos_tokens(
-    config: Qwen2VLVisionConfig,
-    output_hidden_size: int,
-) -> nn.Parameter | None:
-    """Build extra EOS / \"think\" tokens optionally appended after vision tokens."""
-    num_eos_tokens = config.num_eos_tokens
-    if num_eos_tokens:
-        eos_tokens = nn.Parameter(torch.randn(1, num_eos_tokens, output_hidden_size))
-        nn.init.trunc_normal_(eos_tokens, mean=0.0, std=config.initializer_range)
-    else:
-        eos_tokens = None
-
-    return eos_tokens
-
-
-def build_prenorm(config: Qwen2VLVisionConfig) -> LayerNorm | None:
-    """Optionally build a LayerNorm applied before the projector."""
-    if getattr(config, "prenorm", False):
-        prenorm = LayerNorm(config.encoder_hidden_size)
-    else:
-        prenorm = None
-    return prenorm
 
 
 def build_mlp(
@@ -137,11 +138,9 @@ class DynamicCAbstractor(nn.Module):
         if num_input_tokens == -1:
             num_input_tokens = config.pos_emb_size
         self.num_input_tokens = num_input_tokens
-        self.eos_tokens = build_eos_tokens(config, config.output_hidden_size)
         self.pos_emb = build_pos_embeds(
             config, num_input_tokens, config.encoder_hidden_size
         )
-        self.prenorm = build_prenorm(config)
         self.build_net()
 
     def _load_from_state_dict(self, state_dict, *args, **kwargs) -> None:
@@ -218,9 +217,6 @@ class DynamicCAbstractor(nn.Module):
             )
             # remove temporal dim
             reshaped_visual_embeds = reshaped_visual_embeds[:, 0]
-
-            if self.prenorm is not None:
-                reshaped_visual_embeds = self.prenorm(reshaped_visual_embeds)
 
             if self.pos_emb is not None:
                 # interpolate pos emb and add to visual embeds
@@ -593,24 +589,107 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         config = vllm_config.model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.vision_model = CustomQwen2VLVE._from_config(config.vision_config)
         self.abstractor = DynamicCAbstractor(
             config.projector_config, num_input_tokens=self.vision_model.get_num_tokens()
         )
-        self.text_config = config.text_config
-        language_model_config = vllm_config.with_hf_config(hf_config=self.text_config)
-        language_model_config.quant_config = quant_config
-        if self.text_config.architectures[0] == "LlamaForCausalLM":
-            self.language_model = LlamaForCausalLM(
-                vllm_config=language_model_config, prefix="model"
-            )
-        else:
-            raise NotImplementedError("Not supported language model architecture")
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "model"),
+            architectures=["LlamaForCausalLM"],
+        )
 
-        self.media_token_id = self.text_config.eos_token_id + 1
+        self.media_token_id = config.text_config.eos_token_id + 1
         self.separator_token_id = 198
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> KananaVImageInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        vision_grid_thw = kwargs.pop("vision_grid_thw", None)
+
+        if pixel_values is None:
+            return None
+
+        # Normalize pixel_values to 2D tensor (num_patches, channels*patch*patch)
+        if isinstance(pixel_values, torch.Tensor):
+            if pixel_values.ndim == 2:
+                pass  # Already in expected shape
+            elif pixel_values.ndim == 3:
+                pixel_values = pixel_values.flatten(0, 1)
+            else:
+                raise ValueError(
+                    f"pixel_values should be 2D or batched 3D tensor. "
+                    f"Got ndim: {pixel_values.ndim} "
+                    f"(shape={pixel_values.shape})"
+                )
+        else:
+            pixel_values = torch.concat(pixel_values)
+
+        # Normalize vision_grid_thw to 2D tensor (num_images, 3)
+        if vision_grid_thw.ndim == 3:
+            vision_grid_thw = vision_grid_thw.flatten(0, 1)
+
+        return KananaVImagePixelInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+            vision_grid_thw=vision_grid_thw,
+        )
+
+    def _process_image_input(self, image_input: KananaVImageInputs) -> torch.Tensor:
+        """Compute multimodal embeddings for image inputs.
+
+        This expands media tokens into grids of visual tokens with row and
+        global/local separator tokens, then replaces the media-token
+        embeddings with projected visual features.
+        """
+        pixel_values = image_input["pixel_values"]
+        vision_grid_thw = image_input["vision_grid_thw"]
+
+        image_metas = {"vision_grid_thw": vision_grid_thw}
+        visual_embeds = self.forward_and_project_vision(pixel_values, image_metas)
+
+        merge_size = self.abstractor.merge_size
+        batch_size = vision_grid_thw.size(0)
+        multi_modal_embeddings: tuple[torch.Tensor, ...] = ()
+        sample_index = 0
+        sep_embed = self._embed_text_input_ids(
+            torch.tensor([self.separator_token_id]).to(visual_embeds.device),
+            self.language_model.embed_input_ids,
+            is_multimodal=None,
+            handle_oov_mm_token=False,
+        )[0]
+        sep_embed = torch.unsqueeze(torch.unsqueeze(sep_embed, 0), 1)
+        for i in range(batch_size):
+            t, h, w = (
+                vision_grid_thw[i][0],
+                vision_grid_thw[i][1] // merge_size,
+                vision_grid_thw[i][2] // merge_size,
+            )
+            visual_embed = visual_embeds[sample_index : sample_index + t * h * w].view(
+                t, h, w, -1
+            )
+            sep_embeds = sep_embed.expand(t, h, 1, -1)
+            multi_modal_embeddings += (
+                torch.cat([sep_embeds, visual_embed], dim=2).view(t * h * (w + 1), -1),
+            )
+            sample_index += t * h * w
+        return multi_modal_embeddings
+
+    def _get_visual_feature_at(
+        self,
+        v_output: Sequence[torch.Tensor],
+        layer_index: int | Sequence[int],
+    ) -> torch.Tensor:
+        if isinstance(layer_index, list):
+            visual_features = torch.stack(v_output, dim=1)[
+                :, layer_index
+            ]  # [B, n_scales, L, dim]
+        else:
+            visual_features = v_output[layer_index]  # [B, L, dim]
+        return visual_features
 
     def forward_vision(
         self,
@@ -654,95 +733,15 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal):
         visual_embeds = self.forward_projector(visual_features, image_metas=image_metas)
         return visual_embeds
 
-    def _get_visual_feature_at(
-        self,
-        v_output: Sequence[torch.Tensor],
-        layer_index: int | Sequence[int],
-    ) -> torch.Tensor:
-        if isinstance(layer_index, list):
-            visual_features = torch.stack(v_output, dim=1)[
-                :, layer_index
-            ]  # [B, n_scales, L, dim]
-        else:
-            visual_features = v_output[layer_index]  # [B, L, dim]
-        return visual_features
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.language_model.embed_input_ids,
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
-        )
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return []
 
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        return _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
-
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
-        """Compute multimodal embeddings for image inputs.
-
-        This expands media tokens into grids of visual tokens with row and
-        global/local separator tokens, then replaces the media-token
-        embeddings with projected visual features.
-        """
-        assert kwargs["pixel_values"] is not None
-        pixel_values = kwargs["pixel_values"]
-        if isinstance(pixel_values, torch.Tensor):
-            if pixel_values.ndim == 2:
-                kwargs["pixel_values"] = pixel_values
-            elif pixel_values.ndim == 3:
-                kwargs["pixel_values"] = pixel_values.flatten(0, 1)
-            else:
-                raise ValueError(
-                    f"pixel_values should be 2D or batched 3D tensor. "
-                    f"Got ndim: {pixel_values.ndim} "
-                    f"(shape={pixel_values.shape})"
-                )
-        else:
-            kwargs["pixel_values"] = torch.concat(pixel_values)
-        if kwargs["vision_grid_thw"].ndim == 3:
-            kwargs["vision_grid_thw"] = kwargs["vision_grid_thw"].flatten(0, 1)
-        visual_embeds = self.forward_and_project_vision(kwargs["pixel_values"], kwargs)
-
-        merge_size = self.abstractor.merge_size
-        batch_size = kwargs["vision_grid_thw"].size(0)
-        multi_modal_embeddings = ()
-        sample_index = 0
-        sep_embed = self._embed_text_input_ids(
-            torch.tensor([self.separator_token_id]).to(visual_embeds.device),
-            self.language_model.embed_input_ids,
-            is_multimodal=None,
-            handle_oov_mm_token=False,
-        )[0]
-        sep_embed = torch.unsqueeze(torch.unsqueeze(sep_embed, 0), 1)
-        for i in range(batch_size):
-            t, h, w = (
-                kwargs["vision_grid_thw"][i][0],
-                kwargs["vision_grid_thw"][i][1] // merge_size,
-                kwargs["vision_grid_thw"][i][2] // merge_size,
-            )
-            visual_embed = visual_embeds[sample_index : sample_index + t * h * w].view(
-                t, h, w, -1
-            )
-            sep_embeds = sep_embed.expand(t, h, 1, -1)
-            multi_modal_embeddings += (
-                torch.cat([sep_embeds, visual_embed], dim=2).view(t * h * (w + 1), -1),
-            )
-            sample_index += t * h * w
-        return multi_modal_embeddings
+        return self._process_image_input(image_input)
 
     def forward(
         self,
