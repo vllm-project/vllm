@@ -118,14 +118,14 @@ class PoolerConfig:
 
             if pooling_type in ("CLS", "LAST", "MEAN"):
                 logger.debug(
-                    "Resolved `pooling_type=%s` to `seq_pooling_type=%s`.",
+                    "Resolved `pooling_type=%r` to `seq_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
                 self.seq_pooling_type = pooling_type
             elif pooling_type in ("ALL", "STEP"):
                 logger.debug(
-                    "Resolved `pooling_type=%s` to `tok_pooling_type=%s`.",
+                    "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
