@@ -487,6 +487,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
            &get_cutlass_moe_mm_problem_sizes);
 
+  // compute per-expert problem sizes from expert_first_token_offset
+  // produced by vLLM's moe_permute kernel
+  ops.def(
+      "get_cutlass_moe_mm_problem_sizes_from_expert_offsets("
+      "    Tensor expert_first_token_offset, "
+      "    Tensor! problem_sizes1, "
+      "    Tensor! problem_sizes2, "
+      "    int n, int k, bool swap_ab) -> ()");
+  ops.impl("get_cutlass_moe_mm_problem_sizes_from_expert_offsets", torch::kCUDA,
+           &get_cutlass_moe_mm_problem_sizes_from_expert_offsets);
+
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
   // as an input, and computes expert_offsets (token start indices of each
