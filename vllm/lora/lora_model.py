@@ -7,13 +7,14 @@ import safetensors
 import torch
 
 from vllm.logger import init_logger
-from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.lora.lora_weights import LoRALayerWeights, SharedMoELoRAWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
     is_base_embeddding_weights,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
+    parse_shared_moe_lora_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
@@ -77,6 +78,61 @@ class LoRAModel:
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
+
+        # Check for compact shared MoE LoRA format
+        use_shared_moe_lora = getattr(peft_helper, 'use_shared_moe_lora', False)
+
+        if use_shared_moe_lora:
+            # Collect compact format weights
+            shared_moe_weights: dict[str, dict[str, torch.Tensor]] = {}
+            regular_tensors: dict[str, torch.Tensor] = {}
+
+            for tensor_name, tensor in tensors.items():
+                if is_base_embeddding_weights(tensor_name):
+                    continue
+
+                parsed = parse_shared_moe_lora_name(tensor_name)
+                if parsed is not None:
+                    module_name, weight_type, proj, is_lora_a = parsed
+
+                    if module_name not in shared_moe_weights:
+                        shared_moe_weights[module_name] = {}
+
+                    # Key like "shared_gate_proj_lora_a" or "per_expert_down_proj_lora_b"
+                    key = f"{weight_type}_{proj}_{'lora_a' if is_lora_a else 'lora_b'}"
+                    shared_moe_weights[module_name][key] = tensor.to(
+                        device=device, dtype=dtype
+                    )
+                else:
+                    regular_tensors[tensor_name] = tensor
+
+            # Build SharedMoELoRAWeights for each experts module
+            for module_name, weights in shared_moe_weights.items():
+                shared_lora = SharedMoELoRAWeights(
+                    module_name=module_name,
+                    rank=peft_helper.r,
+                    lora_alpha=peft_helper.lora_alpha,
+                    w1_lora_a_shared=weights["shared_gate_proj_lora_a"],
+                    w3_lora_a_shared=weights["shared_up_proj_lora_a"],
+                    w2_lora_b_shared=weights["shared_down_proj_lora_b"],
+                    w1_lora_b=weights["per_expert_gate_proj_lora_b"],
+                    w3_lora_b=weights["per_expert_up_proj_lora_b"],
+                    w2_lora_a=weights["per_expert_down_proj_lora_a"],
+                )
+                # Convert to packed format that set_lora() expects
+                packed = shared_lora.to_packed_format()
+                if pin_memory:
+                    for i in range(len(packed.lora_a)):
+                        if packed.lora_a[i] is not None:
+                            packed.lora_a[i] = packed.lora_a[i].pin_memory()
+                        if packed.lora_b[i] is not None:
+                            packed.lora_b[i] = packed.lora_b[i].pin_memory()
+                loras[module_name] = packed
+
+            # Process remaining regular tensors
+            tensors = regular_tensors
+
+        # Original logic for non-shared tensors
         for tensor_name, tensor in tensors.items():
             if is_base_embeddding_weights(tensor_name):
                 continue
@@ -156,6 +212,10 @@ class LoRAModel:
                 # Handle shared experts (e.g., shared_experts in DeepSeek/Kimi MoE).
                 # These are valid LoRA targets but use non-numeric expert paths.
                 if "shared_experts" in lora_module:
+                    continue
+                # Handle compact shared MoE LoRA format keys
+                # These use .shared. and .per_expert. instead of .{expert_id}.
+                if ".experts.shared." in lora_module or ".experts.per_expert." in lora_module:
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Case for expert lora weights

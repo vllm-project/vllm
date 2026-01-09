@@ -508,9 +508,17 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
-                lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
-                )
+                # Check if already packed (from compact shared MoE LoRA format)
+                existing = lora_model.loras.get(module_name)
+                if existing is not None and isinstance(
+                    existing, PackedLoRALayerWeights
+                ):
+                    # Already packed from compact format loading - skip re-packing
+                    pass
+                else:
+                    lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
+                        replacement_loras, module_name
+                    )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                     replacement_loras

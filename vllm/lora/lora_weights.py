@@ -225,3 +225,61 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+class SharedMoELoRAWeights:
+    """Pre-packed MoE LoRA weights with shared outer weights.
+
+    For w1 (gate) and w3 (up): lora_A is shared, lora_B is per-expert
+    For w2 (down): lora_A is per-expert, lora_B is shared
+
+    This class holds weights loaded from compact checkpoint format and
+    converts them to PackedLoRALayerWeights for use with set_lora().
+    """
+
+    def __init__(
+        self,
+        module_name: str,
+        rank: int,
+        lora_alpha: int,
+        # Shared weights (no expert dim): shape (rank, dim) or (dim, rank)
+        w1_lora_a_shared: torch.Tensor,  # (rank, hidden_size)
+        w3_lora_a_shared: torch.Tensor,  # (rank, hidden_size)
+        w2_lora_b_shared: torch.Tensor,  # (hidden_size, rank)
+        # Per-expert weights: shape (num_experts, ...)
+        w1_lora_b: torch.Tensor,  # (num_experts, intermediate_size, rank)
+        w3_lora_b: torch.Tensor,  # (num_experts, intermediate_size, rank)
+        w2_lora_a: torch.Tensor,  # (num_experts, rank, intermediate_size)
+    ) -> None:
+        self.module_name = module_name
+        self.rank = rank
+        self.lora_alpha = lora_alpha
+        self.w1_lora_a_shared = w1_lora_a_shared
+        self.w3_lora_a_shared = w3_lora_a_shared
+        self.w2_lora_b_shared = w2_lora_b_shared
+        self.w1_lora_b = w1_lora_b
+        self.w3_lora_b = w3_lora_b
+        self.w2_lora_a = w2_lora_a
+
+    @property
+    def scaling(self) -> float:
+        return self.lora_alpha / self.rank
+
+    def to_packed_format(self) -> "PackedLoRALayerWeights":
+        """Convert to PackedLoRALayerWeights format for set_lora().
+
+        Returns weights as lists [w1, w2, w3] where shared weights
+        have shape (rank, dim) instead of (num_experts, rank, dim).
+        The FusedMoEWithSharedOuterLoRA.set_lora() method handles
+        the expansion via stride=0.
+        """
+        # lora_a: [w1_a, w2_a, w3_a]
+        # lora_b: [w1_b, w2_b, w3_b]
+        # Shared weights keep their compact shape - set_lora() handles expansion
+        return PackedLoRALayerWeights(
+            self.module_name,
+            self.rank,
+            [self.lora_alpha, self.lora_alpha, self.lora_alpha],
+            [self.w1_lora_a_shared, self.w2_lora_a, self.w3_lora_a_shared],
+            [self.w1_lora_b, self.w2_lora_b_shared, self.w3_lora_b],
+        )

@@ -38,6 +38,8 @@ class PEFTHelper:
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
+    # Shared outer MoE LoRA - shares LoRA A for w1/w3 and LoRA B for w2 across experts
+    use_shared_moe_lora: bool = field(default=False)
 
     def _validate_features(self) -> list[str]:
         """

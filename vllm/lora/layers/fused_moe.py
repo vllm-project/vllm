@@ -503,6 +503,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # Handle compact shared MoE LoRA format where some weights are 2D (shared)
+        # Expand 2D shared weights to 3D by repeating across experts
+        def expand_shared_weight(tensor: torch.Tensor, name: str) -> torch.Tensor:
+            if tensor.ndim == 2:
+                # Shared weight (rank, dim) -> expand to (num_experts, rank, dim)
+                return tensor.unsqueeze(0).expand(num_experts, -1, -1).contiguous()
+            return tensor
+
+        w1_lora_a = expand_shared_weight(w1_lora_a, "w1_lora_a")
+        w3_lora_a = expand_shared_weight(w3_lora_a, "w3_lora_a")
+        w2_lora_b = expand_shared_weight(w2_lora_b, "w2_lora_b")
+
         assert (
             num_experts
             == w1_lora_a.shape[0]

@@ -179,6 +179,65 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
+def parse_shared_moe_lora_name(
+    name: str,
+) -> tuple[str, str, str, bool] | None:
+    """Parse compact shared MoE LoRA weight names.
+
+    Compact format keys:
+        - "base_model.model.{layer}.experts.shared.{proj}.lora_A.weight"
+        - "base_model.model.{layer}.experts.shared.{proj}.lora_B.weight"
+        - "base_model.model.{layer}.experts.per_expert.{proj}.lora_A.weight"
+        - "base_model.model.{layer}.experts.per_expert.{proj}.lora_B.weight"
+
+    Args:
+        name: The tensor name from the checkpoint.
+
+    Returns:
+        tuple(module_name, weight_type, proj, is_lora_a) or None if not compact format
+        - module_name: e.g., "model.layers.0.mlp.experts"
+        - weight_type: "shared" or "per_expert"
+        - proj: "gate_proj", "up_proj", or "down_proj"
+        - is_lora_a: True for lora_A, False for lora_B
+    """
+    if ".experts.shared." not in name and ".experts.per_expert." not in name:
+        return None
+
+    # Remove base_model.model. prefix
+    if name.startswith("base_model.model."):
+        name = name[len("base_model.model."):]
+
+    parts = name.split(".")
+
+    # Find "experts" position
+    try:
+        experts_idx = parts.index("experts")
+    except ValueError:
+        return None
+
+    # Next part should be "shared" or "per_expert"
+    if experts_idx + 1 >= len(parts):
+        return None
+
+    weight_type = parts[experts_idx + 1]
+    if weight_type not in ("shared", "per_expert"):
+        return None
+
+    # Parse lora_A/lora_B
+    if parts[-1] != "weight" or parts[-2] not in ("lora_A", "lora_B"):
+        return None
+
+    is_lora_a = parts[-2] == "lora_A"
+
+    # Module name is everything up to and including "experts"
+    module_name = ".".join(parts[:experts_idx + 1])
+
+    # proj is the part after shared/per_expert (e.g., "gate_proj", "up_proj", "down_proj")
+    proj = parts[experts_idx + 2]
+
+    return module_name, weight_type, proj, is_lora_a
+
+
 def is_base_embeddding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
