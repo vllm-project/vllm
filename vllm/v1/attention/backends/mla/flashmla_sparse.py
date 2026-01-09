@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl, get_mla_dims
+from vllm.v1.attention.backends.mla.common import MLACommonImpl, get_mla_dims
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -685,7 +685,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
-class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -943,6 +943,43 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         )[0]
         output = output[:, : self.num_heads, :]
         return output
+
+    def _forward_fp8_kv(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> torch.Tensor:
+        assert attn_metadata.fp8_extra_metadata is not None
+        extra_metadata = attn_metadata.fp8_extra_metadata
+        assert isinstance(extra_metadata, FlashMLASparseMetadata.FP8KernelMetadata)
+
+        _attn_out, _ = flash_mla_with_kvcache(
+            q=q.unsqueeze(0),  # unsqueeze to add batch_dim
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            block_table=extra_metadata.dummy_block_table,
+            head_dim_v=512,
+            cache_seqlens=extra_metadata.cache_lens,
+            tile_scheduler_metadata=extra_metadata.scheduler_metadata,
+            num_splits=extra_metadata.num_splits,
+            is_fp8_kvcache=True,
+            indices=topk_indices.unsqueeze(0),  # unsqueeze to add batch_dim
+            softmax_scale=self.softmax_scale,
+        )
+
+        return _attn_out
+
+    def _forward_decode(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError(
+            "FlashMLASparseImpl overrides forward() and does not use _forward_decode()"
+        )
 
     def forward(
         self,

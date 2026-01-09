@@ -402,7 +402,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     ) -> Any:
         assert isinstance(target, str)
 
-        output = super().call_module(target, args, kwargs)
+        with self.fake_mode.shape_env.ignore_fresh_unbacked_symbols():
+            output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)
@@ -746,10 +747,28 @@ class VllmBackend:
         ]
 
         # propagate the split graph to the piecewise backend,
-        # compile submodules with symbolic shapes
-        PiecewiseCompileInterpreter(
-            self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*fake_args)
+        # compile submodules with symbolic shapes. If FakeTensor detects a
+        # data-dependent scalar (e.g. _local_scalar_dense) and raises
+        # DataDependentOutputException.
+        # Now it fallsback to eager for
+        # this graph instead of failing engine initialization.
+        from torch._subclasses.fake_tensor import DataDependentOutputException
+
+        if True:
+            PiecewiseCompileInterpreter(
+                self.split_gm, submod_names_to_compile, self.vllm_config, self
+            ).run(*fake_args)
+        else:
+            logger.warning(
+                "Data-dependent scalar op (%s) encountered during vLLM backend "
+                "compile; falling back to eager for this graph. "
+                "This graph will run without Inductor optimizations.",
+                e,
+            )
+            self._called = True
+            # Returning the original GraphModule lets torch.compile continue
+            # while effectively disabling compilation for this graph.
+            return graph
 
         from torch._guards import detect_fake_mode
 

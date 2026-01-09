@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.common import MLACommonPrefillMetadata
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
@@ -404,6 +405,13 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+    W_K: torch.Tensor | None = None
+    W_K_scale: torch.Tensor | None = None
+    W_V: torch.Tensor | None = None
+    W_V_scale: torch.Tensor | None = None
+    W_UV: torch.Tensor | None = None
+    W_UK_T: torch.Tensor | None = None
+
     @abstractmethod
     def __init__(
         self,
@@ -426,6 +434,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
+        use_sparse: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -442,6 +451,34 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _run_prefill_new_tokens(
+        self,
+        prefill: "MLACommonPrefillMetadata",
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run prefill attention for new tokens (causal).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _run_prefill_context_chunk(
+        self,
+        prefill: "MLACommonPrefillMetadata",
+        chunk_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run prefill attention for a context chunk (non-causal).
+        """
         raise NotImplementedError
 
 
