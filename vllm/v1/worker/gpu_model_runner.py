@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import functools
 import gc
 import itertools
@@ -251,6 +252,26 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
         return output
+
+
+class ForceAttention(enum.Enum):
+    """
+    This enum determines whether we want to force attention execution during
+    a dummy run of the model by constructing attention metadata. This is
+    necessary because we want the kvcache op to be included in cudagraphs, but
+    some backends do not always support building attention metadata for
+    a capture run.
+    This restriction can be removed when we remove
+    the build_for_cudagraph_capture method:
+    https://github.com/vllm-project/vllm/issues/22945
+    """
+
+    ALL = enum.auto()
+    """Construct attention metadata for all layers."""
+    SEPARATE_KV_UPDATE_ONLY = enum.auto()
+    """Construct attention metadata for split attention and kvcache update layers."""
+    NONE = enum.auto()
+    """Do not construct attention metadata for any layers"""
 
 
 class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
@@ -1564,12 +1585,15 @@ class GPUModelRunner(
         max_query_len: int,
         num_tokens_padded: int | None = None,
         num_reqs_padded: int | None = None,
+        force_attention: ForceAttention = ForceAttention.NONE,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        slot_mappings: dict[int, torch.Tensor] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1603,7 +1627,7 @@ class GPUModelRunner(
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_block_table_and_slot_mapping(kv_cache_gid: int):
+        def _get_block_table(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
@@ -1612,24 +1636,16 @@ class GPUModelRunner(
                     dtype=torch.int32,
                     device=self.device,
                 )
-                slot_mapping = torch.zeros(
-                    (num_tokens_padded,),
-                    dtype=torch.int64,
-                    device=self.device,
-                )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
-                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
             blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+            return blk_table_tensor
 
-            return blk_table_tensor, slot_mapping
-
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        assert slot_mappings is not None
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -1642,9 +1658,9 @@ class GPUModelRunner(
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
-            block_table_tensor=block_table_gid_0,
-            slot_mapping=slot_mapping_gid_0,
+            slot_mapping=slot_mappings[0],
             causal=True,
+            block_table_tensor=_get_block_table(0),
         )
 
         if self.dcp_world_size > 1:
@@ -1681,9 +1697,21 @@ class GPUModelRunner(
             kv_cache_gid: int,
             attn_gid: int,
             common_attn_metadata: CommonAttentionMetadata,
+            force_attention: ForceAttention,
+            cudagraph_runtime_mode: CUDAGraphMode,
             ubid: int | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
+            # Only capture attention for backends that split KV Cache
+            # update and attention op, unless cudagraph_runtime_mode is
+            # FULL.
+            if (
+                force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                and cudagraph_runtime_mode != CUDAGraphMode.FULL
+                and attn_group.backend.forward_includes_kv_cache
+            ):
+                return
+
             builder = attn_group.get_metadata_builder(ubid or 0)
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -1752,9 +1780,8 @@ class GPUModelRunner(
                 num_reqs_padded,
             )
             if kv_cache_gid > 0:
-                cm.block_table_tensor, cm.slot_mapping = (
-                    _get_block_table_and_slot_mapping(kv_cache_gid)
-                )
+                cm.block_table_tensor = _get_block_table(kv_cache_gid)
+                cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
@@ -1766,10 +1793,23 @@ class GPUModelRunner(
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
                     for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
-                        _build_attn_group_metadata(kv_cache_gid, attn_gid, _cm, ubid)
+                        _build_attn_group_metadata(
+                            kv_cache_gid,
+                            attn_gid,
+                            _cm,
+                            force_attention,
+                            cudagraph_runtime_mode,
+                            ubid,
+                        )
 
                 else:
-                    _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
+                    _build_attn_group_metadata(
+                        kv_cache_gid,
+                        attn_gid,
+                        cm,
+                        force_attention,
+                        cudagraph_runtime_mode,
+                    )
 
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
@@ -3100,6 +3140,46 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
+    def _get_slot_mappings(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_tokens_unpadded: int,
+    ) -> dict[int, torch.Tensor] | None:
+        if (
+            hasattr(self, "kv_cache_config")
+            and self.kv_cache_config is not None
+            and len(self.kv_cache_config.kv_cache_groups) > 0
+        ):
+
+            def _get_slot_mapping(kv_cache_gid: int):
+                assert num_reqs_padded is not None and num_tokens_padded is not None
+                kv_cache_spec = self.kv_cache_config.kv_cache_groups[
+                    kv_cache_gid
+                ].kv_cache_spec
+                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                    slot_mapping = torch.zeros(
+                        (num_tokens_padded,),
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                else:
+                    blk_table = self.input_batch.block_table[kv_cache_gid]
+                    slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
+
+                # Fill unused with -1. Needed for reshape_and_cache in full cuda
+                # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
+                slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+
+                return slot_mapping
+
+            cache_ids = list(
+                set([id for id, _ in enumerate(self.kv_cache_config.kv_cache_groups)])
+            )
+            return {cache_id: _get_slot_mapping(cache_id) for cache_id in cache_ids}
+
+        return None
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3217,10 +3297,24 @@ class GPUModelRunner(
                 ubatch_slices_padded,
             )
 
-            pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
+
+            pad_attn = has_separate_kv_update or cudagraph_mode == CUDAGraphMode.FULL
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+            slot_mappings = self._get_slot_mappings(
+                num_tokens_padded=num_tokens_padded
+                if pad_attn
+                else num_tokens_unpadded,
+                num_reqs_padded=num_reqs_padded if pad_attn else num_reqs,
+                num_tokens_unpadded=num_tokens_unpadded,
+            )
 
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
@@ -3234,6 +3328,7 @@ class GPUModelRunner(
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    slot_mappings=slot_mappings,
                 )
             )
 
@@ -4196,7 +4291,7 @@ class GPUModelRunner(
         self,
         num_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
-        force_attention: bool = False,
+        force_attention: ForceAttention = ForceAttention.NONE,
         uniform_decode: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
@@ -4339,9 +4434,23 @@ class GPUModelRunner(
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        slot_mappings = self._get_slot_mappings(
+            num_tokens_padded=num_tokens,
+            num_reqs_padded=num_reqs_padded,
+            num_tokens_unpadded=num_tokens_unpadded,
+        )
+
+        # We always capture attention if cudagraph_runtime_mode is FULL.
+        # Otherwise, if force_attention is not ALL, we capture attention
+        # for all backends. If it's SEPARATE_KV_UPDATE_ONLY, we capture
+        # attention only for backends that split KV Cache update and
+        # attention op.
+        # TODO get rid of build_for_cudagraph_capture
+        # https://github.com/vllm-project/vllm/issues/22945
+        if (
+            force_attention != ForceAttention.NONE
+            or cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
             if create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
                 # shorter sequence lengths to run faster.
@@ -4357,13 +4466,19 @@ class GPUModelRunner(
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+            pad_attn = (
+                force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                or cudagraph_runtime_mode == CUDAGraphMode.FULL
+            )
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
+                force_attention=force_attention,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                slot_mappings=slot_mappings,
             )
 
         with self.maybe_dummy_run_with_lora(
@@ -4876,17 +4991,42 @@ class GPUModelRunner(
                 )
             )
 
+            # Force attention for all cudagraph modes when the backend forward
+            # op doesn't include KV cache update. This is required
+            # for KV cache update to be captured correctly in cases where
+            # the KV cache update and attention are two separate custom ops.
+            # Keep in mind that when we use `FULL` cudagraph mode, we capture
+            # all attention regardless of the `force_attention_*` variables.
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
+            force_attention_dummy = (
+                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                if has_separate_kv_update
+                else ForceAttention.NONE
+            )
+            force_attention_warmup = (
+                ForceAttention.ALL
+                if (cudagraph_runtime_mode == CUDAGraphMode.FULL)
+                else (
+                    ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    if (
+                        has_separate_kv_update
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
+                    else ForceAttention.NONE
+                )
+            )
+
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                # This is independent from how we want to warm up the attention.
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
+                    force_attention=force_attention_warmup,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
@@ -4896,6 +5036,7 @@ class GPUModelRunner(
             self._dummy_run(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                force_attention=force_attention_dummy,
                 uniform_decode=uniform_decode,
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
