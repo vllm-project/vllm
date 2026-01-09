@@ -76,6 +76,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleList(
             ExaoneMoeDecoderLayer(
                 vllm_config.model_config.hf_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
                 mtp_layer=True,
             )
@@ -194,15 +195,6 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
 @support_torch_compile
 class ExaoneMoeMTP(nn.Module, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["up_proj", "down_proj"],
-    }
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
