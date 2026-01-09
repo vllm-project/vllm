@@ -28,7 +28,6 @@ from vllm.model_executor.layers.pooler.seqwise import (
     SequencePoolerHeadOutput,
     SequencePoolerOutput,
     SequencePoolingMethodOutput,
-    SimplePooler,
 )
 from vllm.model_executor.layers.pooler.tokwise import (
     pooler_for_token_classify,
@@ -92,7 +91,7 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(SimplePooler):
+class BertPooler(SequencePooler):
     def __init__(self, config: BertConfig):
         super().__init__(
             pooling=CLSPool(),

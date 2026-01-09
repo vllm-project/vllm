@@ -21,7 +21,6 @@ from .poolers import (
     SequencePoolerOutput,
     SequencePoolingFn,
     SequencePoolingHeadFn,
-    SimplePooler,
     pooler_for_classify,
     pooler_for_embed,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "SequencePoolingFn",
     "SequencePoolingHeadFn",
     "SequencePoolerOutput",
-    "SimplePooler",
     "pooler_for_classify",
     "pooler_for_embed",
 ]

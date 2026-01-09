@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from abc import abstractmethod
 from collections.abc import Callable, Set
 from typing import TypeAlias
 
@@ -38,21 +37,12 @@ SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
 class SequencePooler(Pooler):
-    @abstractmethod
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> SequencePoolerOutput:
-        raise NotImplementedError
-
-
-class SimplePooler(SequencePooler):
-    """A layer that pools specific information from hidden states.
+    """
+    A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
-    2. Normalizes output if specified.
+    2. Postprocesses the output based on pooling head.
     3. Returns structured results as `PoolerOutput`.
     """
 
@@ -98,7 +88,7 @@ def pooler_for_embed(pooler_config: PoolerConfig):
     pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
     head = EmbeddingPoolerHead()
 
-    return SimplePooler(pooling=pooling, head=head)
+    return SequencePooler(pooling=pooling, head=head)
 
 
 def pooler_for_classify(
@@ -113,4 +103,4 @@ def pooler_for_classify(
 
     head = ClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
-    return SimplePooler(pooling=pooling, head=head)
+    return SequencePooler(pooling=pooling, head=head)

@@ -13,10 +13,10 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise import (
+    SequencePooler,
     SequencePoolerHeadOutput,
     SequencePoolingMethod,
     SequencePoolingMethodOutput,
-    SimplePooler,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.models.llama import LlamaForCausalLM
@@ -176,7 +176,7 @@ class GritLMMeanPool(SequencePoolingMethod):
         return pooled_data
 
 
-class GritLMPooler(SimplePooler):
+class GritLMPooler(SequencePooler):
     def __init__(self, model_config: ModelConfig):
         super().__init__(
             pooling=GritLMMeanPool(model_config),

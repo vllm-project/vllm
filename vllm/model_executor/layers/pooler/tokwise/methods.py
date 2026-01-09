@@ -79,3 +79,35 @@ class AllPool(TokenPoolingMethod):
                 output_list.append(None)
 
         return output_list
+
+
+class StepPool(AllPool):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> list[TokenPoolingMethodOutputItem]:
+        pooled_data_lst = super().forward(hidden_states, pooling_metadata)
+        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
+        pooling_params = pooling_metadata.pooling_params
+
+        pooled_data = list[torch.Tensor | None]()
+        for data, token_id, pooling_param in zip(
+            pooled_data_lst, prompt_token_ids, pooling_params
+        ):
+            # for unfinished chunked prefill
+            if data is None:
+                pass
+            else:
+                step_tag_id = pooling_param.step_tag_id
+                returned_token_ids = pooling_param.returned_token_ids
+
+                if returned_token_ids is not None and len(returned_token_ids) > 0:
+                    data = data[:, returned_token_ids]
+
+                if step_tag_id is not None:
+                    data = data[token_id == step_tag_id]
+
+            pooled_data.append(data)
+
+        return pooled_data

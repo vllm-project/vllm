@@ -14,9 +14,9 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.seqwise import (
+    SequencePooler,
     SequencePoolerHeadOutput,
     SequencePoolingMethodOutput,
-    SimplePooler,
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
@@ -279,7 +279,7 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(SimplePooler):
+class ModernBertPooler(SequencePooler):
     def __init__(self, config: ModernBertConfig):
         super().__init__(
             pooling=get_seq_pooling_method(config.classifier_pooling.upper()),
