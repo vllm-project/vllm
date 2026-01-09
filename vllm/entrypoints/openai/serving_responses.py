@@ -986,9 +986,23 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
+    def _extract_system_message_from_request(self, request) -> str | None:
+        system_msg = None
+        if not isinstance(request.input, str):
+            for response_msg in request.input:
+                if (
+                    isinstance(response_msg, dict)
+                    and response_msg.get("role") == "system"
+                ):
+                    system_msg = response_msg.get("content")
+                    break
+        return system_msg
+
     def _construct_harmony_system_input_message(
         self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
     ) -> OpenAIHarmonyMessage:
+        model_identity = self._extract_system_message_from_request(request)
+
         reasoning_effort = request.reasoning.effort if request.reasoning else None
 
         # Extract allowed_tools from MCP tool requests
@@ -1025,6 +1039,7 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         sys_msg = get_system_message(
+            model_identity=model_identity,
             reasoning_effort=reasoning_effort,
             browser_description=browser_description,
             python_description=python_description,
@@ -1091,7 +1106,10 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 prev_outputs = []
             for response_msg in request.input:
-                messages.append(parse_response_input(response_msg, prev_outputs))
+                new_msg = parse_response_input(response_msg, prev_outputs)
+                if new_msg.author.role != "system":
+                    messages.append(new_msg)
+
                 # User passes in a tool call request and its output. We need
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when
