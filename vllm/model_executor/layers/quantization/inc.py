@@ -291,7 +291,7 @@ class INCConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe)
+                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             config = {
