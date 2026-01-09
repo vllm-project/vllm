@@ -178,7 +178,7 @@ def get_timing_stats_from_engine_client(
             encoder_stats_results = engine_client.collective_rpc(
                 "get_encoder_timing_stats"
             )
-            if encoder_stats_results and len(encoder_stats_results) > 0:
+            if encoder_stats_results:
                 for worker_stats in encoder_stats_results:
                     if not worker_stats:
                         continue
