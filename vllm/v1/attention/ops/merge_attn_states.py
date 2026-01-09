@@ -40,7 +40,7 @@ def merge_attn_states(
             output, prefix_output, prefix_lse, suffix_output, suffix_lse, output_lse
         )
     else:
-        from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+        from vllm.v1.attention.ops.triton_merge_attn_states import merge_attn_states
 
         return merge_attn_states(
             output, prefix_output, prefix_lse, suffix_output, suffix_lse, output_lse

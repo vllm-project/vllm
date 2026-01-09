@@ -4,8 +4,8 @@
 
 from abc import ABC, abstractmethod
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
 from vllm.config import VllmConfig
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 

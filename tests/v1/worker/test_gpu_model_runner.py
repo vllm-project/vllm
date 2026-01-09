@@ -5,8 +5,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention.backends.abstract import MultipleOf
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import Attention
 from vllm.config import (
     AttentionConfig,
@@ -27,6 +25,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (

@@ -3,8 +3,8 @@
 
 import pytest
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MultiModalConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def test_mm_encoder_attn_backend_str_conversion():

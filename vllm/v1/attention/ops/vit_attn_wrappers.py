@@ -35,7 +35,7 @@ def flash_attn_maxseqlen_wrapper(
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+        from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version

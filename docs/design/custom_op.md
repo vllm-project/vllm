@@ -60,7 +60,7 @@ For example:
 **1. Attention:**
 
 ```python
---8<-- "vllm/attention/layers/mm_encoder_attention.py:mm_encoder_attn"
+--8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
 
 --8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
 ```
