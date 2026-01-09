@@ -493,6 +493,7 @@ class AsyncLLM(EngineClient):
         log_stats = self.log_stats
         logger_manager = self.logger_manager
         input_processor = self.input_processor
+        chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
             try:
@@ -508,14 +509,16 @@ class AsyncLLM(EngineClient):
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
-                    chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
                     engine_core_outputs = outputs.outputs
                     for start in range(0, num_outputs, chunk_size):
-                        end = start + chunk_size
-                        outputs_slice = engine_core_outputs[start:end]
+                        end = min(start + chunk_size, num_outputs)
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            engine_core_outputs,
+                            outputs.timestamp,
+                            iteration_stats,
+                            start_idx=start,
+                            end_idx=end,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
