@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm._bc_linter import bc_linter_include
@@ -150,6 +151,20 @@ class CachedRequestData:
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
+
+    @cached_property
+    def _req_id_to_num_output_tokens(self) -> dict[str, int]:
+        """Cache mapping of req_id to num_output_tokens for O(1) lookup.
+
+        This cached property is safe because CachedRequestData instances
+        are created fresh each scheduling iteration and not mutated during
+        computation of iteration details.
+        """
+        return dict(zip(self.req_ids, self.num_output_tokens))
+
+    def is_context_phase(self, req_id: str) -> bool:
+        num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
+        return num_output_tokens is not None and num_output_tokens == 0
 
     @classmethod
     def make_empty(cls) -> "CachedRequestData":

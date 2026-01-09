@@ -12,7 +12,6 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
@@ -50,6 +49,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -191,6 +191,8 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    allow_deprecated_quantization: bool = False
+    """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -939,6 +941,21 @@ class ModelConfig:
             from vllm.platforms import current_platform
 
             current_platform.verify_quantization(self.quantization)
+
+        if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
+            if self.allow_deprecated_quantization:
+                logger.warning(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM.",
+                    self.quantization,
+                )
+            else:
+                raise ValueError(
+                    "The quantization method %s is deprecated "
+                    "and will be removed in future versions of vLLM. To bypass, "
+                    "set `--allow-deprecated-quantization`.",
+                    self.quantization,
+                )
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
