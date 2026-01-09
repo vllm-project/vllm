@@ -242,7 +242,7 @@ class InternS1ProMoeAttention(nn.Module):
         return output
 
 
-class Qwen3MoeMLP(nn.Module):
+class InternS1ProMoeMLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -281,7 +281,7 @@ class Qwen3MoeMLP(nn.Module):
         return x
 
 
-class Qwen3MoeSparseMoeBlock(nn.Module):
+class InternS1ProMoeSparseMoeBlock(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -393,7 +393,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
-            "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
+            "InternS1ProMoeSparseMoeBlock only supports 1D or 2D inputs"
         )
         is_input_1d = hidden_states.dim() == 1
         num_tokens, hidden_dim = hidden_states.shape
@@ -447,11 +447,11 @@ class InternS1ProMoeDecoderLayer(nn.Module):
         if (layer_idx not in mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3MoeSparseMoeBlock(
+            self.mlp = InternS1ProMoeSparseMoeBlock(
                 vllm_config=vllm_config, prefix=f"{prefix}.mlp"
             )
         else:
-            self.mlp = Qwen3MoeMLP(
+            self.mlp = InternS1ProMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -614,6 +614,7 @@ class InternS1ProMoeLLMModel(nn.Module):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -849,7 +850,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.language_model.model.layers:
-            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+            if isinstance(layer.mlp, InternS1ProMoeSparseMoeBlock):
                 moe = layer.mlp
                 moe.n_local_physical_experts = num_local_physical_experts
                 moe.n_physical_experts = num_physical_experts
@@ -862,12 +863,14 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
         self.moe_layers = []
         example_moe = None
         for layer in self.language_model.model.layers:
-            if hasattr(layer, "mlp") and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+            if hasattr(layer, "mlp") and isinstance(
+                layer.mlp, InternS1ProMoeSparseMoeBlock
+            ):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError("No Qwen3Moe layer found in the language_model.")
+            raise RuntimeError("No InternS1ProMoe layer found in the language_model.")
 
         # Set MoE hyperparameters
         self.num_moe_layers = len(self.moe_layers)
