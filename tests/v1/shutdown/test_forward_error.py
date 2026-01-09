@@ -41,11 +41,33 @@ def evil_forward(self, *args, **kwargs):
     return self.model(*args, **kwargs)
 
 
+@pytest.fixture
+def rocm_evil_forward(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses call evil_forward."""
+    if not current_platform.is_rocm():
+        return
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from vllm.distributed import get_tensor_model_parallel_rank",
+                "from vllm.model_executor.models.llama import LlamaForCausalLM",
+                inspect.getsource(evil_forward),
+                "LlamaForCausalLM.forward = evil_forward",
+                "",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(
-    monkeypatch, tmp_path, tensor_parallel_size: int, model: str
+    monkeypatch, rocm_evil_forward, tensor_parallel_size: int, model: str
 ) -> None:
     """Test that AsyncLLM propagates a forward pass error and frees memory.
 
@@ -53,17 +75,6 @@ async def test_async_llm_model_error(
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
-
-    if current_platform.is_rocm():
-        # ROCm uses spawn instead of fork.
-        sc = tmp_path / "sitecustomize.py"
-        sc.write_text(f"""
-from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.model_executor.models.llama import LlamaForCausalLM
-{inspect.getsource(evil_forward)}
-LlamaForCausalLM.forward = evil_forward
-""")
-        monkeypatch.setenv("PYTHONPATH", f"{tmp_path}:{os.getenv('PYTHONPATH', '')}")
 
     # Monkeypatch an error in the model.
     monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
@@ -118,7 +129,11 @@ LlamaForCausalLM.forward = evil_forward
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(
-    monkeypatch, tensor_parallel_size: int, enable_multiprocessing: bool, model: str
+    monkeypatch,
+    rocm_evil_forward,
+    tensor_parallel_size: int,
+    enable_multiprocessing: bool,
+    model: str,
 ) -> None:
     """Test that LLM propagates a forward pass error and frees memory.
     TODO(andy) - LLM without multiprocessing; LLM with multiprocessing
