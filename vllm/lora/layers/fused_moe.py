@@ -569,9 +569,17 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
+        if not isinstance(source_layer, FusedMoE):
+            return False
+        if len(packed_modules_list) != 2:
+            return False
 
-        # source_layer is FusedMoE or SharedFusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
+        # Defer to FusedMoEWithSharedOuterLoRA if shared outer LoRA is requested
+        if model_config is not None:
+            if getattr(model_config, "use_shared_moe_lora", False):
+                return False
+
+        return True
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
@@ -745,3 +753,361 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is FusedMoE or SharedFusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
+
+
+class FusedMoEWithSharedOuterLoRA(FusedMoEWithLoRA):
+    """
+    FusedMoE LoRA layer with shared "outer" weights across experts.
+
+    This class implements a parameter-efficient LoRA pattern for MoE layers:
+    - w13 (gate/up projections): LoRA A is shared across all experts
+    - w2 (down projection): LoRA B is shared across all experts
+
+    Weight shapes:
+    - w13_lora_a: storage (max_loras, 1, rank, hidden),
+                  expanded (max_loras, num_experts, rank, hidden) with stride=0
+    - w13_lora_b: (max_loras, num_experts, intermediate, rank) - per expert
+    - w2_lora_a: (max_loras, num_experts, rank, intermediate) - per expert
+    - w2_lora_b: storage (max_loras, 1, hidden, rank),
+                 expanded (max_loras, num_experts, hidden, rank) with stride=0
+
+    The sharing is implemented via expand() which creates a view with stride=0
+    for the expert dimension. The Triton kernel automatically handles this
+    because it uses tensor.stride(1) to index into the expert dimension.
+    """
+
+    def __init__(self, base_layer: FusedMoE) -> None:
+        # Call grandparent __init__ to avoid FusedMoEWithLoRA's initialization
+        BaseLayerWithLoRA.__init__(self)
+        self.base_layer = base_layer
+
+        assert not self.base_layer.use_ep, (
+            "EP support for Fused MoE LoRA is not implemented yet."
+        )
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.device = _get_lora_device(base_layer)
+        self._w13_slices = 2
+        self._inject_lora_into_fused_moe()
+
+    def _create_lora_a_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+    ):
+        num_experts = self.base_layer.local_num_experts
+        rank = (
+            lora_config.max_lora_rank
+            if not self.fully_sharded
+            else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+
+        # w13 LoRA A is SHARED across experts
+        # Storage has expert_dim=1, expanded view has expert_dim=num_experts
+        self._w13_lora_a_storage: tuple[torch.Tensor, ...] = tuple(
+            torch.zeros(
+                (max_loras, 1, rank, self.base_layer.hidden_size),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for _ in range(self._w13_slices)
+        )
+
+        # Create expanded views with stride=0 for expert dim
+        self.w13_lora_a_stacked: tuple[torch.Tensor, ...] = tuple(
+            storage.expand(max_loras, num_experts, rank, self.base_layer.hidden_size)
+            for storage in self._w13_lora_a_storage
+        )
+
+        # w2 LoRA A is per-expert (same as base class)
+        self.w2_lora_a_stacked: tuple[torch.Tensor, ...] = (
+            torch.zeros(
+                (
+                    max_loras,
+                    num_experts,
+                    lora_config.max_lora_rank,
+                    self.base_layer.intermediate_size_per_partition,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
+
+    def _create_lora_b_weights(self, max_loras: int, lora_config: LoRAConfig):
+        num_experts = self.base_layer.local_num_experts
+
+        # w13 LoRA B is per-expert (same as base class)
+        self.w13_lora_b_stacked: tuple[torch.Tensor, ...] = tuple(
+            torch.zeros(
+                (
+                    max_loras,
+                    num_experts,
+                    self.base_layer.intermediate_size_per_partition,
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for _ in range(self._w13_slices)
+        )
+
+        # w2 LoRA B is SHARED across experts
+        # Storage has expert_dim=1, expanded view has expert_dim=num_experts
+        hidden_size = (
+            self.base_layer.hidden_size
+            if not self.fully_sharded
+            else divide(self.base_layer.hidden_size, self.tp_size)
+        )
+        self._w2_lora_b_storage: tuple[torch.Tensor, ...] = (
+            torch.zeros(
+                (max_loras, 1, hidden_size, lora_config.max_lora_rank),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
+
+        # Create expanded view with stride=0 for expert dim
+        self.w2_lora_b_stacked: tuple[torch.Tensor, ...] = tuple(
+            storage.expand(
+                max_loras, num_experts, hidden_size, lora_config.max_lora_rank
+            )
+            for storage in self._w2_lora_b_storage
+        )
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PretrainedConfig | None = None,
+    ) -> None:
+        """Initializes lora matrices with shared outer weights pattern."""
+        self.max_loras = lora_config.max_loras
+        self.fully_sharded = lora_config.fully_sharded_loras
+
+        self.adapter_enabled = torch.tensor(
+            [0] * (max_loras + 1), dtype=torch.int, device=self.device
+        )
+
+        self._create_lora_a_weights(max_loras, lora_config)
+        self._create_lora_b_weights(max_loras, lora_config)
+
+        # Create dummy stacked lists for compatibility with base class
+        # (used by create_dummy_lora_model)
+        self.lora_a_stacked = []
+        self.lora_b_stacked = []
+        for lora_id in range(max_loras):
+            for experts_id in range(self.base_layer.local_num_experts):
+                self.lora_a_stacked.append(
+                    self.w13_lora_a_stacked[0][lora_id][experts_id]
+                )
+                self.lora_a_stacked.append(
+                    self.w2_lora_a_stacked[0][lora_id][experts_id]
+                )
+
+                self.lora_b_stacked.append(
+                    self.w13_lora_b_stacked[0][lora_id][experts_id]
+                )
+                self.lora_b_stacked.append(
+                    self.w2_lora_b_stacked[0][lora_id][experts_id]
+                )
+
+                self.lora_a_stacked.append(
+                    self.w13_lora_a_stacked[1][lora_id][experts_id]
+                )
+                self.lora_b_stacked.append(
+                    self.w13_lora_b_stacked[1][lora_id][experts_id]
+                )
+
+    def _slice_w13_a_shared(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
+        """Slice shared w13 LoRA A (shape: rank, hidden - no expert dim)."""
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w13_lora_a
+
+        # w13_lora_a shape (rank, hidden) - no expert dim
+        current_lora_rank = w13_lora_a.shape[0]
+        assert current_lora_rank % self.tp_size == 0
+        sliced_rank = current_lora_rank // self.tp_size
+        start_idx = self.tp_rank * sliced_rank
+        end_idx = (self.tp_rank + 1) * sliced_rank
+        return w13_lora_a[start_idx:end_idx, :]
+
+    def _slice_w2_b_shared(self, w2_lora_b: torch.Tensor) -> torch.Tensor:
+        """Slice shared w2 LoRA B (shape: hidden, rank - no expert dim)."""
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w2_lora_b
+
+        # w2_lora_b shape (hidden, rank) - no expert dim
+        current_lora_size = w2_lora_b.shape[0]
+        sliced_size = current_lora_size // self.tp_size
+        start_idx = self.tp_rank * sliced_size
+        end_idx = (self.tp_rank + 1) * sliced_size
+        return w2_lora_b[start_idx:end_idx, :]
+
+    def reset_lora(self, index: int):
+        """Resets the lora weights at index back to 0."""
+        # Reset shared w13 LoRA A (write to storage)
+        for pos in range(self._w13_slices):
+            self._w13_lora_a_storage[pos][index] = 0
+            self.w13_lora_b_stacked[pos][index] = 0
+
+        # Reset per-expert w2 LoRA A and shared w2 LoRA B
+        self.w2_lora_a_stacked[0][index] = 0
+        self._w2_lora_b_storage[0][index] = 0
+        self.adapter_enabled[index] = 0
+
+    def _extract_shared_weight(
+        self, tensor: torch.Tensor, expected_ndim: int, name: str
+    ) -> torch.Tensor:
+        """
+        Extract shared weight from tensor, handling both compressed and
+        non-compressed formats.
+
+        Accepts:
+        1. Already compressed: (1, ...) -> squeeze to (...)
+        2. Non-compressed but shared: (num_experts, ...) where ALL experts
+           are identical -> take first slice
+        3. No expert dim: (...) -> return as-is
+
+        Rejects:
+        - (num_experts, ...) where experts have different values
+
+        Args:
+            tensor: Input tensor in one of the accepted formats
+            expected_ndim: Expected number of dimensions without expert dim
+            name: Weight name for error messages
+
+        Returns:
+            Tensor without expert dimension, shape (...)
+        """
+        if tensor.ndim == expected_ndim:
+            # No expert dim present, return as-is
+            return tensor
+
+        if tensor.ndim == expected_ndim + 1:
+            num_experts = tensor.shape[0]
+
+            if num_experts == 1:
+                # Already compressed format (1, ...) -> squeeze
+                return tensor.squeeze(0)
+
+            # Check if all experts have identical values
+            # Compare each expert slice to the first one
+            first_expert = tensor[0:1]  # Keep dim for broadcasting
+            all_identical = torch.all(tensor == first_expert).item()
+
+            if all_identical:
+                # All experts identical -> this is a shared weight, take first
+                return tensor[0]
+            else:
+                raise ValueError(
+                    f"Shared weight {name} has expert dim size {num_experts} "
+                    f"but experts have DIFFERENT values. Shape: {tensor.shape}. "
+                    f"For shared outer LoRA, this weight must be identical "
+                    f"across all experts."
+                )
+
+        raise ValueError(
+            f"Unexpected shape for {name}: {tensor.shape}, "
+            f"expected {expected_ndim} dims (no expert) or "
+            f"{expected_ndim + 1} dims (with expert)"
+        )
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        """
+        Overwrites lora tensors at index.
+
+        Expects weights from pack_moe():
+        - lora_a = [w1_lora_a, w2_lora_a, w3_lora_a]
+        - lora_b = [w1_lora_b, w2_lora_b, w3_lora_b]
+
+        For shared weights (w1_lora_a, w3_lora_a, w2_lora_b):
+        - Shape should be (1, rank, dim) or (rank, dim)
+        - Expert dim of 1 indicates weight was trained as shared
+
+        For per-expert weights (w1_lora_b, w2_lora_a, w3_lora_b):
+        - Shape should be (num_experts, dim, rank)
+        """
+        assert isinstance(lora_a, list)
+        assert isinstance(lora_b, list)
+
+        self.reset_lora(index)
+        self.adapter_enabled[index] = 1
+
+        w1_lora_a, w2_lora_a, w3_lora_a = lora_a
+        w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # Extract shared weights - accepts (1, ...), (num_experts, ...) if identical, or (...)
+        # w1 and w3 LoRA A should be (rank, hidden) after extraction
+        w1_lora_a = self._extract_shared_weight(w1_lora_a, 2, "w1_lora_a")
+        w3_lora_a = self._extract_shared_weight(w3_lora_a, 2, "w3_lora_a")
+        # w2 LoRA B should be (hidden, rank) after extraction
+        w2_lora_b = self._extract_shared_weight(w2_lora_b, 2, "w2_lora_b")
+
+        # Slice shared weights (no expert dim)
+        sliced_w1_lora_a = self._slice_w13_a_shared(w1_lora_a)
+        sliced_w3_lora_a = self._slice_w13_a_shared(w3_lora_a)
+        sliced_w2_lora_b = self._slice_w2_b_shared(w2_lora_b)
+
+        # Slice per-expert weights (using base class methods)
+        sliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
+        sliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
+        sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
+
+        # Store shared w13 LoRA A (write to storage, shape: rank, hidden)
+        self._w13_lora_a_storage[0][
+            index, 0, : sliced_w1_lora_a.shape[0], : sliced_w1_lora_a.shape[1]
+        ].copy_(sliced_w1_lora_a, non_blocking=True)
+
+        self._w13_lora_a_storage[1][
+            index, 0, : sliced_w3_lora_a.shape[0], : sliced_w3_lora_a.shape[1]
+        ].copy_(sliced_w3_lora_a, non_blocking=True)
+
+        # Store per-expert w13 LoRA B (shape: num_experts, intermediate, rank)
+        self.w13_lora_b_stacked[0][
+            index, :, : sliced_w1_lora_b.shape[1], : sliced_w1_lora_b.shape[2]
+        ].copy_(sliced_w1_lora_b, non_blocking=True)
+
+        self.w13_lora_b_stacked[1][
+            index, :, : sliced_w3_lora_b.shape[1], : sliced_w3_lora_b.shape[2]
+        ].copy_(sliced_w3_lora_b, non_blocking=True)
+
+        # Store per-expert w2 LoRA A (shape: num_experts, rank, intermediate)
+        self.w2_lora_a_stacked[0][
+            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+        ].copy_(sliced_w2_lora_a, non_blocking=True)
+
+        # Store shared w2 LoRA B (write to storage, shape: hidden, rank)
+        self._w2_lora_b_storage[0][
+            index, 0, : sliced_w2_lora_b.shape[0], : sliced_w2_lora_b.shape[1]
+        ].copy_(sliced_w2_lora_b, non_blocking=True)
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: PretrainedConfig | None = None,
+    ) -> bool:
+        """
+        Returns True if the layer can be replaced by this LoRA layer.
+
+        This layer is selected when the model config specifies shared MoE LoRA
+        via the `use_shared_moe_lora` attribute.
+        """
+        if not isinstance(source_layer, FusedMoE):
+            return False
+        if len(packed_modules_list) != 2:
+            return False
+
+        # Check if shared outer LoRA is requested via model config
+        if model_config is not None:
+            if getattr(model_config, "use_shared_moe_lora", False):
+                return True
+
+        return False

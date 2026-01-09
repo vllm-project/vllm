@@ -441,7 +441,10 @@ class LoRAModelManager:
                         "cpu",
                     )
                     subloras.append(lora)
-                if module.__class__.__name__ == "FusedMoEWithLoRA":
+                if module.__class__.__name__ in (
+                    "FusedMoEWithLoRA",
+                    "FusedMoEWithSharedOuterLoRA",
+                ):
                     lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
