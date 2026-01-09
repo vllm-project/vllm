@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
@@ -12,7 +12,10 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 SequencePoolingType = Literal["CLS", "LAST", "MEAN"]
+SEQ_POOLING_TYPES: tuple[SequencePoolingType, ...] = get_args(SequencePoolingType)
+
 TokenPoolingType = Literal["ALL", "STEP"]
+TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
 
 @config
@@ -116,14 +119,14 @@ class PoolerConfig:
                     "Cannot set both `pooling_type` and `tok_pooling_type`"
                 )
 
-            if pooling_type in ("CLS", "LAST", "MEAN"):
+            if pooling_type in SEQ_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `seq_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
                 self.seq_pooling_type = pooling_type
-            elif pooling_type in ("ALL", "STEP"):
+            elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
