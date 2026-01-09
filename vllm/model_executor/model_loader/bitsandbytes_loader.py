@@ -380,65 +380,26 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             if is_3d_moe_target:
                 # Handle 3D fused MoE weights (e.g., Qwen3-VL-MoE)
-                # Checkpoint shape:
-                #   gate_up_proj: [num_experts, intermediate_size*2, hidden_size]
-                #   down_proj: [num_experts, hidden_size, intermediate_size]
-                # But checkpoint has transposed layout:
-                #   gate_up_proj: [128, 2048, 1536] = [n_exp, out_dim*2, in_dim]
-                #   down_proj: [128, 768, 2048] = [n_exp, out_dim, in_dim]
-                #
+                # Checkpoint: [n_experts, dim1, dim2], transposed to match FusedMoE
                 # FusedMoE expects:
                 #   w13_weight: [num_experts, intermediate_size*2, hidden_size]
                 #   w2_weight: [num_experts, hidden_size, intermediate_size]
-                #
-                # First transpose: [n_exp, dim1, dim2] -> [n_exp, dim2, dim1]
-
                 num_experts = weight_tensor.shape[0]
 
-                # Transpose to match FusedMoE expected layout
-                # This mirrors what qwen3_vl_moe.py does: loaded_weight.transpose(-1, -2)
+                # Transpose to match FusedMoE layout: [n_exp, out, in]
                 weight_tensor = weight_tensor.transpose(-1, -2).contiguous()
 
-                is_gate_up = "gate_up_proj" in mapped_weight_name
-
-                # For gate_up_proj, we need to split into w1 (gate) and w3 (up)
-                # After transpose: [128, 1536, 2048] for gate_up (1536 = hidden_size, 2048 = intermediate_size*2)
-                # Wait, that's still reversed. Let me recalculate.
-                #
-                # Checkpoint gate_up_proj: [128, 2048, 1536]
-                # After transpose: [128, 1536, 2048]
-                #
-                # FusedMoE w13_weight expects_shape: (num_experts, intermediate_size*2, hidden_size)
-                # With intermediate_size=768, hidden_size=2048:
-                #   expected = [128, 1536, 2048] ✓
-                #
-                # Actually the transposed shape [128, 1536, 2048] matches the expected shape!
-
-                # For 3D MoE weights, we need to quantize each expert separately
-                # and store their quant states
+                # Quantize each expert separately and store their quant states
                 quantized_experts = []
                 quant_states_list = []
 
-                # Determine sharding:
-                # gate_up (column parallel): shard on output dim (dim 0 of expert slice)
-                # down (row parallel): shard on input dim (dim -1 of expert slice)
+                # TP sharding: gate_up (column) shards dim 0, down (row) shards dim -1
                 is_down_proj = "down_proj" in mapped_weight_name
 
                 for expert_id in range(num_experts):
                     expert_weight = weight_tensor[expert_id]
-                    # After transpose:
-                    # gate_up expert: [1536, 2048] = [hidden_size, intermediate_size*2]
-                    # down expert: [2048, 768] = [intermediate_size, hidden_size]
-                    #
-                    # Hmm wait, FusedMoE weight layout is [intermediate_size, hidden_size]
-                    # See layer.py line 557-561:
-                    #   experts_shape: (num_experts, intermediate_size * 2, hidden_size)
-                    # The first dim (after num_experts) is the output dim (intermediate)
-                    #
-                    # For gate_up (column parallel): output shard on dim 0
-                    # For down (row parallel): input shard on dim -1
 
-                    # Apply TP sharding per expert if needed
+                    # Apply TP sharding per expert
                     if is_down_proj:
                         # down_proj is row parallel, shard input (dim -1)
                         total_size = expert_weight.size(-1)
@@ -605,16 +566,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     # Add these to target modules for proper quantization.
                     fused_3d_weight_names = ["gate_up_proj", "down_proj"]
                     for weight_name in fused_3d_weight_names:
-                        # module name is like "model.language_model.layers.0.mlp.experts"
-                        # We need to add "model.language_model.layers.0.mlp.experts.gate_up_proj"
+                        # Append fused weight name to target modules
                         rep_name = f"{name}.{weight_name}"
                         self.target_modules.append(rep_name)
                 else:
                     for exp in self.expert_params_mapping:
                         weight_name = exp[1]
-                        rep_name = name.replace("experts", "") + weight_name.removesuffix(
-                            "."
-                        )
+                        base = name.replace("experts", "")
+                        rep_name = base + weight_name.removesuffix(".")
                         self.target_modules.append(rep_name)
 
 
@@ -645,7 +604,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 self.column_sharded_weights_modules.append(name)
             elif isinstance(module, FusedMoE):
                 if self.is_3d_moe_weight:
-                    # For fused 3D MoE weights, down_proj is row parallel (column sharded)
+                    # For 3D MoE, down_proj is row parallel (column sharded)
                     rep_name = f"{name}.down_proj"
                     self.column_sharded_weights_modules.append(rep_name)
                 else:
@@ -870,8 +829,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if gate_up_key not in quant_states_dict:
                 continue
 
+            if down_key not in quant_states_dict:
+                logger.warning(
+                    "Missing down_proj quant state for %s, skipping fusion", name
+                )
+                continue
+
             gate_up_states = quant_states_dict[gate_up_key]  # list of QuantState
             down_states = quant_states_dict[down_key]  # list of QuantState
+
 
             # Dequantize nested states
             for qs in gate_up_states:
