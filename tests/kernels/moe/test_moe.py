@@ -60,6 +60,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 NUM_EXPERTS = [8, 64, 192]
@@ -234,7 +235,7 @@ def test_fused_moe(
     monkeypatch,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
@@ -467,7 +468,12 @@ def test_fused_moe_wn16(
 )
 @torch.inference_mode()
 def test_mixtral_moe(
-    dist_init, dtype: torch.dtype, padding: bool, use_rocm_aiter: bool, monkeypatch
+    default_vllm_config,
+    dist_init,
+    dtype: torch.dtype,
+    padding: bool,
+    use_rocm_aiter: bool,
+    monkeypatch,
 ):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""

@@ -69,6 +69,10 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+    log_balancedness_interval: int = 1
+    """
+    Interval for logging the balancedness.
+    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
@@ -76,6 +80,14 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    @model_validator(mode="after")
+    def _validate_eplb_config(self) -> Self:
+        if self.use_async and self.policy != "default":
+            raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.log_balancedness and self.log_balancedness_interval <= 0:
+            raise ValueError("log_balancedness_interval must be greater than 0.")
+        return self
 
 
 @config
@@ -119,6 +131,8 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    is_moe_model: bool | None = None
+    """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -254,6 +268,10 @@ class ParallelConfig:
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
+
+    data_parallel_index: int = Field(init=False)
+    """Equal to the data parallel rank but not used for torch process groups
+    and not overridden for dense models."""
 
     _api_process_count: int = Field(default=1, gt=0)
     """
@@ -466,6 +484,7 @@ class ParallelConfig:
             "data_parallel_rank",
             "data_parallel_rank_local",
             "data_parallel_size_local",
+            "data_parallel_index",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
@@ -545,6 +564,14 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_size > 1 and self.is_moe_model is False:
+                raise ValueError(
+                    "Offline data parallel mode is not supported/useful"
+                    " for dense models."
+                )
+
+        self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

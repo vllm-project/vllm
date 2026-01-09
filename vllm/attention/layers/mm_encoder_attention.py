@@ -133,6 +133,7 @@ class MMEncoderAttention(CustomOp):
             q=query,
             k=key,
             v=value,
+            scale=self.scale,
             cu_seqlens=cu_seqlens,
         )
         if is_reshaped:
@@ -167,6 +168,7 @@ class MMEncoderAttention(CustomOp):
             q=query,
             k=key,
             v=value,
+            scale=self.scale,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             batch_size=bsz,
@@ -227,28 +229,3 @@ class MMEncoderAttention(CustomOp):
             "XPU only supports FLASH_ATTN for vision attention."
         )
         return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
-
-    def forward_tpu(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
-    ) -> torch.Tensor:
-        assert self.attn_backend == AttentionBackendEnum.PALLAS, (
-            f"MMEncoderAttention on TPU only supports PALLAS backend, "
-            f"but got {self.attn_backend}."
-        )
-        if cu_seqlens is None:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            from torch_xla.experimental.custom_kernel import flash_attention
-
-            out = flash_attention(query, key, value, sm_scale=self.scale)
-            out = out.transpose(1, 2)
-            return out
-        logger.warning_once(
-            "PALLAS backend with cu_seqlens is not supported for ViT yet. ",
-            "Falling back to SDPA implementation.",
-        )
-        return self._forward_sdpa(query, key, value, cu_seqlens)

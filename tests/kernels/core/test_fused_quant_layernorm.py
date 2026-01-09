@@ -147,6 +147,7 @@ def ops_impl(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_rms_norm(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,

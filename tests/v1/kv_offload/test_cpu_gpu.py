@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
@@ -49,6 +50,7 @@ NUM_MAPPINGS = [3]
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_transfer(
+    default_vllm_config,
     gpu_to_cpu: bool,
     num_mappings: int,
     head_size: int,
@@ -62,7 +64,7 @@ def test_transfer(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     # create per-layer GPU KV caches based on available attn_backends
     attn_backends_list = BACKENDS_TO_TEST
