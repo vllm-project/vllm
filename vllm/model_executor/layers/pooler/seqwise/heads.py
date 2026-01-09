@@ -146,7 +146,6 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data -= self.logit_bias
 
         flags = [p.use_activation for p in pooling_params]
-
         if len(set(flags)) == 1:
             scores = self.act_fn(pooled_data) if flags[0] else pooled_data
         else:
