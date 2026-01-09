@@ -432,11 +432,11 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
-        extra_args = dict(
-            parallel_tool_calls=self.parallel_tool_calls,
-        )
+        extra_args = {}
         if self.reasoning is not None and self.reasoning.effort is not None:
             extra_args.update(reasoning_effort=self.reasoning.effort)
+        if self.parallel_tool_calls is not None:
+            extra_args.update(parallel_tool_calls=self.parallel_tool_calls)
 
         # TODO: add more parameters
         return SamplingParams.from_optional(
@@ -825,7 +825,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         if self.reasoning_effort is not None:
             extra_args["reasoning_effort"] = self.reasoning_effort
-        extra_args["parallel_tool_calls"] = self.parallel_tool_calls
+        if self.parallel_tool_calls is not None:
+            extra_args["parallel_tool_calls"] = self.parallel_tool_calls
 
         return SamplingParams.from_optional(
             n=self.n,
