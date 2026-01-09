@@ -1811,7 +1811,7 @@ class OpenAIServingResponses(OpenAIServing):
                 content_index=state.current_content_index,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
                 # TODO, use logprobs from ctx.last_request_output
                 logprobs=[],
             )
@@ -1861,7 +1861,7 @@ class OpenAIServingResponses(OpenAIServing):
                 item_id=state.current_item_id,
                 output_index=state.current_output_index,
                 content_index=state.current_content_index,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
                 sequence_number=-1,
             )
         )
@@ -1908,7 +1908,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
             )
         )
         return events
@@ -1952,7 +1952,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
             )
         )
         return events
@@ -1999,7 +1999,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
             )
         )
         return events
@@ -2010,7 +2010,7 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events for content delta streaming based on channel type."""
-        if not ctx.parser.last_content_delta:
+        if not ctx.last_content_delta:
             return []
 
         if (
@@ -2364,7 +2364,7 @@ class OpenAIServingResponses(OpenAIServing):
         events.append(
             ResponseFunctionCallArgumentsDeltaEvent(
                 item_id=state.current_item_id,
-                delta=ctx.parser.last_content_delta,
+                delta=ctx.last_content_delta,
                 output_index=state.current_output_index,
                 sequence_number=-1,
                 type="response.function_call_arguments.delta",
