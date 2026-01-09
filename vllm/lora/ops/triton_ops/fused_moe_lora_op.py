@@ -238,6 +238,7 @@ def _fused_moe_lora_shrink(
     num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    specialize_active_lora: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
@@ -259,7 +260,7 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        num_active_loras,
+        num_active_loras if specialize_active_lora else lora_a_stacked[0].shape[0],
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -335,6 +336,7 @@ def _fused_moe_lora_expand(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
+    specialize_active_lora: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -361,7 +363,7 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        num_active_loras,
+        num_active_loras if specialize_active_lora else lora_b_stacked[0].shape[0],
     )
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
@@ -438,6 +440,7 @@ def _fused_moe_lora(
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
+    specialize_active_lora: bool = False,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert (
@@ -507,6 +510,7 @@ def _fused_moe_lora(
         num_active_loras,
         mul_routed_weight,
         use_gdc=use_gdc,
+        specialize_active_lora=specialize_active_lora,
     )
 
     if fully_sharded:
@@ -556,6 +560,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
+        specialize_active_lora=specialize_active_lora,
     )
 
 
@@ -588,6 +593,9 @@ def _fused_moe_lora_fake(
     expand_num_stages: int,
     expand_split_k: int,
     mul_routed_weight: bool = False,
+    fully_sharded: bool = False,
+    offset: int = 0,
+    specialize_active_lora: bool = False,
 ) -> None:
     return
 
@@ -621,6 +629,7 @@ def _fused_moe_lora_shrink_fake(
     num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
+    specialize_active_lora: bool = False,
 ) -> None:
     return
 
@@ -628,6 +637,7 @@ def _fused_moe_lora_shrink_fake(
 def _fused_moe_lora_expand_fake(
     output: torch.Tensor,
     a_intermediate_cache1: torch.Tensor,
+    b_intermediate_cache1: torch.Tensor,
     lora_b_stacked: list[torch.Tensor],
     topk_weights: torch.Tensor,
     sorted_token_ids: torch.Tensor,
@@ -655,7 +665,9 @@ def _fused_moe_lora_expand_fake(
     split_k: int,
     num_active_loras: int,
     mul_routed_weight: bool = False,
+    offset: int = 0,
     use_gdc: bool = False,
+    specialize_active_lora: bool = False,
 ) -> None:
     return
 
