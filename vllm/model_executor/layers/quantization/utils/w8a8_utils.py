@@ -500,11 +500,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    # If weight is already in torch.float8_e4m3fnuz format,
-    # do nothing
-    if weight.dtype == torch.float8_e4m3fnuz:
-        return weight, weight_scale, input_scale
-
+    assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.
     # https://onnx.ai/onnx/technical/float8.html

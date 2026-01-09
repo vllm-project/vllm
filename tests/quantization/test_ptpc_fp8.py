@@ -33,6 +33,7 @@ def test_ptpc_fp8_rocm(vllm_runner, dtype: str, kv_cache_dtype: str) -> None:
         quantization="ptpc_fp8",
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        allow_deprecated_quantization=True,
     )
 
     with llm:

@@ -103,8 +103,6 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-
         assert layer.weight.data.dtype not in (torch.float16, torch.float32), (
             "Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support "
             f"output dtype of bfloat16. {layer.weight.data.dtype} is specified."

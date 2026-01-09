@@ -271,6 +271,10 @@ def test_scaled_fp8_quant(dtype) -> None:
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="FP8 e4m3fn weight reloading is not supported on e4m3fnuz platforms",
+)
 @pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
