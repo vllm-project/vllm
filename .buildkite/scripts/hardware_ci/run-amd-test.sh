@@ -224,7 +224,6 @@ if [[ $commands == *"--shard-id="* ]]; then
     echo "All shards reported no tests collected. Failing the build."
     exit 1
   fi
-  done
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
