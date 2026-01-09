@@ -14,8 +14,10 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -200,7 +202,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
         elif isinstance(layer, FusedMoE):
-            quant_method = self.FusedMoEMethodCls(quant_config=self, layer=layer)
+            quant_method = self.FusedMoEMethodCls(
+                quant_config=self, moe_config=layer.moe_config
+            )
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
@@ -720,14 +724,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: ModelOptFp8Config,
-        layer: FusedMoE,
+        moe_config: FusedMoEConfig,
     ) -> None:
-        super().__init__(layer.moe_config)
+        super().__init__(moe_config)
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
         self.fp8_backend = select_fp8_moe_backend(
             block_quant=False,
-            tp_size=layer.moe_parallel_config.tp_size,
+            tp_size=moe_config.moe_parallel_config.tp_size,
             with_lora_support=self.moe.is_lora_enabled,
         )
         self.kernel: mk.FusedMoEModularKernel | None = None
@@ -935,6 +939,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -961,7 +966,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
-        topk_weights, topk_ids = layer.select_experts(
+        # Expert selection
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1325,9 +1331,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
-        layer: FusedMoE,
+        moe_config: FusedMoEConfig,
     ) -> None:
-        super().__init__(layer.moe_config)
+        super().__init__(moe_config)
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
         # TODO: move this type of check into the oracle.
@@ -1597,6 +1603,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -1621,7 +1628,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             x_routing, _ = x
         else:
             x_routing = x
-        topk_weights, topk_ids = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x_routing,
             router_logits=router_logits,
         )
