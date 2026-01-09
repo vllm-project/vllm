@@ -502,16 +502,18 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N)[gather_indx.dst_indx],
         )
 
         # matmul_ogs grouped reduction fuse sum across multiple experts:
-        # y[dst_ind // n_expts_act, :] += x[src_ind, :]
+        # y[dst_indx // n_expts_act, :] += x
         # Need to set n_expts_act to 1 to unfuse moe_sum
         routing_data.n_expts_act = 1
 
         matmul_ogs(
-            intermediate_cache2,
+            intermediate_cache2[gather_indx.src_indx],
             w2,
             self.quant_config.w2_bias,
             routing_data,

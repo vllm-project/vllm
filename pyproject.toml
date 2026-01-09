@@ -167,6 +167,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 [tool.typos.default.extend-words]
 iy = "iy"
 tendencias = "tendencias"
+indx = "indx"
 # intel cpu features
 tme = "tme"
 dout = "dout"
