@@ -422,3 +422,5 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ETCD_REPO: ${ETCD_REPO}" >> /app/versions.txt \
     && echo "UCX_BRANCH: ${UCX_BRANCH}" >> /app/versions.txt \
     && echo "UCX_REPO: ${UCX_REPO}" >> /app/versions.txt
+
+# just to trigger build
