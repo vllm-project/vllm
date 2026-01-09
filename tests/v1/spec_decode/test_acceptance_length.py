@@ -202,63 +202,63 @@ def test_eagle3_acceptance_length(
         max_model_len=DEFAULT_MAX_MODEL_LEN,
     )
 
-    # Load MT-Bench prompts
-    tokenizer = llm.get_tokenizer()
-    prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
+    try:
+        # Load MT-Bench prompts
+        tokenizer = llm.get_tokenizer()
+        prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
 
-    # Run inference
-    sampling_params = SamplingParams(
-        temperature=0,
-        max_tokens=DEFAULT_OUTPUT_LEN,
-    )
-    llm.generate(
-        [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
-        sampling_params=sampling_params,
-    )
+        # Run inference
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=DEFAULT_OUTPUT_LEN,
+        )
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+            sampling_params=sampling_params,
+        )
 
-    # Extract and validate metrics
-    metrics = llm.get_metrics()
-    results = extract_acceptance_metrics(metrics, num_spec_tokens)
+        # Extract and validate metrics
+        metrics = llm.get_metrics()
+        results = extract_acceptance_metrics(metrics, num_spec_tokens)
 
-    actual_acceptance_length = results["acceptance_length"]
-    expected = model_config.expected_acceptance_length
-    actual_per_pos = results["acceptance_lengths_per_pos"]
-    expected_per_pos = model_config.expected_acceptance_lengths_per_pos
+        actual_acceptance_length = results["acceptance_length"]
+        expected = model_config.expected_acceptance_length
+        actual_per_pos = results["acceptance_lengths_per_pos"]
+        expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
-    # Calculate relative error for mean acceptance length
-    rel_error = abs(actual_acceptance_length - expected) / expected
+        # Calculate relative error for mean acceptance length
+        rel_error = abs(actual_acceptance_length - expected) / expected
 
-    # Assert mean acceptance length within tolerance
-    assert rel_error <= DEFAULT_RTOL, (
-        f"Acceptance length regression detected for {model_config.id}!\n"
-        f"  Expected: {expected:.3f}\n"
-        f"  Actual:   {actual_acceptance_length:.3f}\n"
-        f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
-        f"  Drafts: {results['num_drafts']}, "
-        f"Accepted tokens: {results['num_accepted_tokens']}"
-    )
+        # Assert mean acceptance length within tolerance
+        assert rel_error <= DEFAULT_RTOL, (
+            f"Acceptance length regression detected for {model_config.id}!\n"
+            f"  Expected: {expected:.3f}\n"
+            f"  Actual:   {actual_acceptance_length:.3f}\n"
+            f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
+            f"  Drafts: {results['num_drafts']}, "
+            f"Accepted tokens: {results['num_accepted_tokens']}"
+        )
 
-    # Assert per-position acceptance lengths within tolerance (if expected values set)
-    if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
-        for pos, (actual, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
-            if exp > 0:
-                pos_rel_error = abs(actual - exp) / exp
-                assert pos_rel_error <= DEFAULT_RTOL, (
-                    f"Per-position acceptance length regression at pos {pos} "
-                    f"for {model_config.id}!\n"
-                    f"  Expected: {exp:.3f}\n"
-                    f"  Actual:   {actual:.3f}\n"
-                    f"  Relative error: {pos_rel_error:.2%} "
-                    f"(tolerance: {DEFAULT_RTOL:.2%})"
-                )
+        # Assert per-position acceptance lengths within tolerance
+        if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+            for pos, (actual, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
+                if exp > 0:
+                    pos_rel_error = abs(actual - exp) / exp
+                    assert pos_rel_error <= DEFAULT_RTOL, (
+                        f"Per-position acceptance length regression at pos {pos} "
+                        f"for {model_config.id}!\n"
+                        f"  Expected: {exp:.3f}\n"
+                        f"  Actual:   {actual:.3f}\n"
+                        f"  Relative error: {pos_rel_error:.2%} "
+                        f"(tolerance: {DEFAULT_RTOL:.2%})"
+                    )
 
-    print(
-        f"\n{model_config.id}: acceptance_length={actual_acceptance_length:.3f} "
-        f"(expected={expected:.3f}, rel_error={rel_error:.2%})"
-    )
-    print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
-    if expected_per_pos:
-        print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
-
-    # Cleanup
-    del llm
+        print(
+            f"\n{model_config.id}: acceptance_length={actual_acceptance_length:.3f} "
+            f"(expected={expected:.3f}, rel_error={rel_error:.2%})"
+        )
+        print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
+        if expected_per_pos:
+            print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
+    finally:
+        del llm
