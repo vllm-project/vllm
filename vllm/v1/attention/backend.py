@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
+import numpy as np
 import torch
+from typing_extensions import deprecated
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
