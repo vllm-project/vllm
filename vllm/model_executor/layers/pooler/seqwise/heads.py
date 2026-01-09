@@ -11,22 +11,22 @@ from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .methods import BatchPoolingMethodOutput
+from .methods import SequencePoolingMethodOutput
 
-BatchPoolerHeadOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+SequencePoolerHeadOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
-class BatchPoolerHead(nn.Module, ABC):
+class SequencePoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,
-        pooled_data: BatchPoolingMethodOutput,
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerHeadOutput:
+    ) -> SequencePoolerHeadOutput:
         raise NotImplementedError
 
 
-class EmbeddingPoolerHead(BatchPoolerHead):
+class EmbeddingPoolerHead(SequencePoolerHead):
     def __init__(self) -> None:
         super().__init__()
 
@@ -41,9 +41,9 @@ class EmbeddingPoolerHead(BatchPoolerHead):
 
     def forward(
         self,
-        pooled_data: BatchPoolingMethodOutput,
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerHeadOutput:
+    ) -> SequencePoolerHeadOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]

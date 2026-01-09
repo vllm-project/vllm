@@ -12,10 +12,10 @@ from vllm.model_executor.layers.pooler.common import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-RequestPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
+TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
 
 
-class RequestPoolingMethod(nn.Module, ABC):
+class TokenPoolingMethod(nn.Module, ABC):
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
         raise NotImplementedError
@@ -28,11 +28,11 @@ class RequestPoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[RequestPoolingMethodOutputItem]:
+    ) -> list[TokenPoolingMethodOutputItem]:
         raise NotImplementedError
 
 
-class AllPool(RequestPoolingMethod):
+class AllPool(TokenPoolingMethod):
     def __init__(self):
         super().__init__()
 
@@ -48,7 +48,7 @@ class AllPool(RequestPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[RequestPoolingMethodOutputItem]:
+    ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         hidden_states_all = hidden_states.split(
             pooling_cursor.num_scheduled_tokens_cpu.tolist()
@@ -66,7 +66,7 @@ class AllPool(RequestPoolingMethod):
             p.hidden_states_cache.append(hs_chunk)
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
-        output_list = list[RequestPoolingMethodOutputItem]()
+        output_list = list[TokenPoolingMethodOutputItem]()
         for p, finished in zip(pooling_states, pooling_cursor.is_finished()):
             if finished:
                 hidden_states_cache = p.hidden_states_cache

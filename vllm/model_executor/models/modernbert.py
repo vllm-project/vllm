@@ -12,16 +12,14 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import (
-    DispatchPooler,
-    pooler_for_token_classify,
-)
-from vllm.model_executor.layers.pooler.batch import (
-    BatchPoolerHeadOutput,
-    BatchPoolingMethodOutput,
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.pooler.seqwise import (
+    SequencePoolerHeadOutput,
+    SequencePoolingMethodOutput,
     SimplePooler,
-    get_batch_pooling_method,
+    get_seq_pooling_method,
 )
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -284,7 +282,7 @@ class ModernBertModel(nn.Module):
 class ModernBertPooler(SimplePooler):
     def __init__(self, config: ModernBertConfig):
         super().__init__(
-            pooling=get_batch_pooling_method(config.classifier_pooling.upper()),
+            pooling=get_seq_pooling_method(config.classifier_pooling.upper()),
             head=self.head,
         )
 
@@ -298,9 +296,9 @@ class ModernBertPooler(SimplePooler):
 
     def head(
         self,
-        pooled_data: BatchPoolingMethodOutput,
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerHeadOutput:
+    ) -> SequencePoolerHeadOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
 

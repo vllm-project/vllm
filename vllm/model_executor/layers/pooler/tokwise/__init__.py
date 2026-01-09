@@ -1,33 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Poolers that apply the head to the hidden states one request at a time."""
+"""Poolers that produce an output for each token in the sequence."""
 
 from .heads import (
-    RequestPoolerHead,
-    RequestPoolerHeadOutput,
     TokenClassifierPoolerHead,
     TokenEmbeddingPoolerHead,
+    TokenPoolerHead,
+    TokenPoolerHeadOutput,
 )
-from .methods import AllPool, RequestPoolingMethod, RequestPoolingMethodOutputItem
+from .methods import AllPool, TokenPoolingMethod, TokenPoolingMethodOutputItem
 from .poolers import (
     AllPooler,
-    RequestPooler,
-    RequestPoolerOutput,
     StepPooler,
+    TokenPooler,
+    TokenPoolerOutput,
     pooler_for_token_classify,
     pooler_for_token_embed,
 )
 
 __all__ = [
-    "RequestPoolerHead",
-    "RequestPoolerHeadOutput",
+    "TokenPoolerHead",
+    "TokenPoolerHeadOutput",
     "TokenClassifierPoolerHead",
     "TokenEmbeddingPoolerHead",
-    "RequestPoolingMethod",
-    "RequestPoolingMethodOutputItem",
+    "TokenPoolingMethod",
+    "TokenPoolingMethodOutputItem",
     "AllPool",
-    "RequestPooler",
-    "RequestPoolerOutput",
+    "TokenPooler",
+    "TokenPoolerOutput",
     "AllPooler",
     "StepPooler",
     "pooler_for_token_classify",

@@ -16,36 +16,36 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import BatchPoolerHeadOutput, EmbeddingPoolerHead
+from .heads import EmbeddingPoolerHead, SequencePoolerHeadOutput
 from .methods import (
-    BatchPoolingMethod,
-    BatchPoolingMethodOutput,
-    get_batch_pooling_method,
+    SequencePoolingMethod,
+    SequencePoolingMethodOutput,
+    get_seq_pooling_method,
 )
 
-BatchPoolingFn: TypeAlias = Callable[
+SequencePoolingFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
-    BatchPoolerHeadOutput,
+    SequencePoolerHeadOutput,
 ]
-BatchPoolingHeadFn: TypeAlias = Callable[
-    [BatchPoolingMethodOutput, PoolingMetadata],
-    BatchPoolerHeadOutput,
+SequencePoolingHeadFn: TypeAlias = Callable[
+    [SequencePoolingMethodOutput, PoolingMetadata],
+    SequencePoolerHeadOutput,
 ]
 
-BatchPoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
+SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
-class BatchPooler(Pooler):
+class SequencePooler(Pooler):
     @abstractmethod
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerOutput:
+    ) -> SequencePoolerOutput:
         raise NotImplementedError
 
 
-class SimplePooler(BatchPooler):
+class SimplePooler(SequencePooler):
     """A layer that pools specific information from hidden states.
 
     This layer does the following:
@@ -56,8 +56,8 @@ class SimplePooler(BatchPooler):
 
     def __init__(
         self,
-        pooling: BatchPoolingMethod,
-        head: BatchPoolingHeadFn,
+        pooling: SequencePoolingMethod,
+        head: SequencePoolingHeadFn,
     ) -> None:
         super().__init__()
 
@@ -70,18 +70,18 @@ class SimplePooler(BatchPooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
-    # Returns subset of BatchPoolerOutput to satisfy BatchPoolingFn
+    # Returns subset of SequencePoolerOutput to satisfy SequencePoolingFn
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerHeadOutput:
+    ) -> SequencePoolerHeadOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
 
-class ClassifierPooler(BatchPooler):
+class ClassifierPooler(SequencePooler):
     """A pooling layer for classification tasks.
 
     This layer does the following:
@@ -92,7 +92,7 @@ class ClassifierPooler(BatchPooler):
 
     def __init__(
         self,
-        pooling: BatchPoolingFn,
+        pooling: SequencePoolingFn,
         classifier: ClassifierFn | None = None,
         act_fn: PoolerActivation | str | None = None,
     ) -> None:
@@ -116,7 +116,7 @@ class ClassifierPooler(BatchPooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> BatchPoolerOutput:
+    ) -> SequencePoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
@@ -146,7 +146,7 @@ class ClassifierPooler(BatchPooler):
 
 
 def pooler_for_embed(pooler_config: PoolerConfig):
-    pooling = get_batch_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
     head = EmbeddingPoolerHead()
 
     return SimplePooler(pooling=pooling, head=head)
@@ -155,11 +155,11 @@ def pooler_for_embed(pooler_config: PoolerConfig):
 def pooler_for_classify(
     pooler_config: PoolerConfig,
     *,
-    pooling: BatchPoolingFn | None = None,
+    pooling: SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
     if pooling is None:
-        pooling = get_batch_pooling_method(pooler_config.get_pooling_type())
+        pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
 
     return ClassifierPooler(pooling=pooling, classifier=classifier, act_fn=act_fn)

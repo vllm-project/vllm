@@ -16,22 +16,22 @@ from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 
-from .methods import RequestPoolingMethodOutputItem
+from .methods import TokenPoolingMethodOutputItem
 
-RequestPoolerHeadOutput: TypeAlias = torch.Tensor | None
+TokenPoolerHeadOutput: TypeAlias = torch.Tensor | None
 
 
-class RequestPoolerHead(nn.Module, ABC):
+class TokenPoolerHead(nn.Module, ABC):
     @abstractmethod
     def forward(
         self,
-        pooled_data: RequestPoolingMethodOutputItem,
+        pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> RequestPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutput:
         raise NotImplementedError
 
 
-class TokenEmbeddingPoolerHead(RequestPoolerHead):
+class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def __init__(self) -> None:
         super().__init__()
 
@@ -46,9 +46,9 @@ class TokenEmbeddingPoolerHead(RequestPoolerHead):
 
     def forward(
         self,
-        pooled_data: RequestPoolingMethodOutputItem,
+        pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> RequestPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutput:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
@@ -72,7 +72,7 @@ class TokenEmbeddingPoolerHead(RequestPoolerHead):
         return pooled_data
 
 
-class TokenClassifierPoolerHead(RequestPoolerHead):
+class TokenClassifierPoolerHead(TokenPoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
@@ -93,9 +93,9 @@ class TokenClassifierPoolerHead(RequestPoolerHead):
 
     def forward(
         self,
-        pooled_data: RequestPoolingMethodOutputItem,
+        pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
-    ) -> RequestPoolerHeadOutput:
+    ) -> TokenPoolerHeadOutput:
         # for unfinished chunked prefill
         if pooled_data is None:
             return None
