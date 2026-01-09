@@ -1,9 +1,12 @@
 #include <optional>
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include "stable/torch_utils.h"
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
@@ -121,29 +124,31 @@ __global__ void merge_attn_states_kernel(
 // The following macro is used to dispatch the conversion function based on
 // the output data type. The FN is a macro that calls a function with
 // template<typename scalar_t>.
-#define DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                      \
-  {                                                                     \
-    if (scalar_dtype == at::ScalarType::Float) {                        \
-      fn(float);                                                        \
-    } else if (scalar_dtype == at::ScalarType::Half) {                  \
-      fn(uint16_t);                                                     \
-    } else if (scalar_dtype == at::ScalarType::BFloat16) {              \
-      fn(__nv_bfloat16);                                                \
-    } else {                                                            \
-      TORCH_CHECK(false, "Unsupported data type of O: ", scalar_dtype); \
-    }                                                                   \
+#define DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                          \
+  {                                                                         \
+    if (scalar_dtype == torch::headeronly::ScalarType::Float) {             \
+      fn(float);                                                            \
+    } else if (scalar_dtype == torch::headeronly::ScalarType::Half) {       \
+      fn(uint16_t);                                                         \
+    } else if (scalar_dtype == torch::headeronly::ScalarType::BFloat16) {   \
+      fn(__nv_bfloat16);                                                    \
+    } else {                                                                \
+      STD_TORCH_CHECK(false, "Unsupported data type of O: ", scalar_dtype); \
+    }                                                                       \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)                     \
-  {                                                                         \
-    vllm::merge_attn_states_kernel<scalar_t, NUM_THREADS>                   \
-        <<<grid, block, 0, stream>>>(                                       \
-            reinterpret_cast<scalar_t*>(output.data_ptr()), output_lse_ptr, \
-            reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),          \
-            reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
-            reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
-            reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
-            num_heads, head_size, prefix_head_stride, output_head_stride);  \
+#define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)                        \
+  {                                                                            \
+    vllm::merge_attn_states_kernel<scalar_t, NUM_THREADS>                      \
+        <<<grid, block, 0, stream>>>(                                          \
+            reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),            \
+            output_lse_ptr,                                                    \
+            reinterpret_cast<const scalar_t*>(prefix_output.const_data_ptr()), \
+            reinterpret_cast<const float*>(prefix_lse.const_data_ptr()),       \
+            reinterpret_cast<const scalar_t*>(suffix_output.const_data_ptr()), \
+            reinterpret_cast<const float*>(suffix_lse.const_data_ptr()),       \
+            num_tokens, num_heads, head_size, prefix_head_stride,              \
+            output_head_stride);                                               \
   }
 
 /*@brief Merges the attention states from prefix and suffix
@@ -159,12 +164,12 @@ __global__ void merge_attn_states_kernel(
  * states.
  */
 template <typename scalar_t>
-void merge_attn_states_launcher(torch::Tensor& output,
-                                std::optional<torch::Tensor> output_lse,
-                                const torch::Tensor& prefix_output,
-                                const torch::Tensor& prefix_lse,
-                                const torch::Tensor& suffix_output,
-                                const torch::Tensor& suffix_lse) {
+void merge_attn_states_launcher(torch::stable::Tensor& output,
+                                std::optional<torch::stable::Tensor> output_lse,
+                                const torch::stable::Tensor& prefix_output,
+                                const torch::stable::Tensor& prefix_lse,
+                                const torch::stable::Tensor& suffix_output,
+                                const torch::stable::Tensor& suffix_lse) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
@@ -172,11 +177,11 @@ void merge_attn_states_launcher(torch::Tensor& output,
   const uint prefix_head_stride = prefix_output.stride(1);
   const uint output_head_stride = output.stride(1);
   const uint pack_size = 16 / sizeof(scalar_t);
-  TORCH_CHECK(head_size % pack_size == 0,
-              "headsize must be multiple of pack_size:", pack_size);
+  STD_TORCH_CHECK(head_size % pack_size == 0,
+                  "headsize must be multiple of pack_size:", pack_size);
   float* output_lse_ptr = nullptr;
   if (output_lse.has_value()) {
-    output_lse_ptr = output_lse.value().data_ptr<float>();
+    output_lse_ptr = output_lse.value().mutable_data_ptr<float>();
   }
   // Process one pack elements per thread. for float, the
   // pack_size is 4 for half/bf16, the pack_size is 8.
@@ -186,8 +191,9 @@ void merge_attn_states_launcher(torch::Tensor& output,
   dim3 block(NUM_THREADS);
   dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
 
-  const c10::cuda::OptionalCUDAGuard device_guard(prefix_output.device());
-  auto stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      prefix_output.get_device_index());
+  auto stream = get_current_cuda_stream(prefix_output.get_device_index());
 
   LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS);
 }
@@ -199,11 +205,12 @@ void merge_attn_states_launcher(torch::Tensor& output,
                                          suffix_lse);                       \
   }
 
-void merge_attn_states(torch::Tensor& output,
-                       std::optional<torch::Tensor> output_lse,
-                       const torch::Tensor& prefix_output,
-                       const torch::Tensor& prefix_lse,
-                       const torch::Tensor& suffix_output,
-                       const torch::Tensor& suffix_lse) {
-  DISPATCH_BY_SCALAR_DTYPE(output.dtype(), CALL_MERGE_ATTN_STATES_LAUNCHER);
+void merge_attn_states(torch::stable::Tensor& output,
+                       std::optional<torch::stable::Tensor> output_lse,
+                       const torch::stable::Tensor& prefix_output,
+                       const torch::stable::Tensor& prefix_lse,
+                       const torch::stable::Tensor& suffix_output,
+                       const torch::stable::Tensor& suffix_lse) {
+  DISPATCH_BY_SCALAR_DTYPE(output.scalar_type(),
+                           CALL_MERGE_ATTN_STATES_LAUNCHER);
 }

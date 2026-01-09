@@ -141,6 +141,49 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
       "Tensor! output_s, int group_size, float eps, float int8_min, "
       "float int8_max) -> ()");
 #endif
+
+  // Attention operations
+  // Compute the attention between an input query and the cached
+  // keys/values using PagedAttention.
+  m.def(
+      "paged_attention_v1(Tensor! out, Tensor query, Tensor key_cache, "
+      "Tensor value_cache, int num_kv_heads, float scale, "
+      "Tensor block_tables, Tensor seq_lens, int block_size, int max_seq_len, "
+      "Tensor? alibi_slopes, str kv_cache_dtype, Tensor k_scale, "
+      "Tensor v_scale, int tp_rank, int blocksparse_local_blocks, "
+      "int blocksparse_vert_stride, int blocksparse_block_size, "
+      "int blocksparse_head_sliding_step) -> ()");
+  // PagedAttention V2.
+  m.def(
+      "paged_attention_v2(Tensor! out, Tensor! exp_sums, Tensor! max_logits, "
+      "Tensor! tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, "
+      "int num_kv_heads, float scale, Tensor block_tables, Tensor seq_lens, "
+      "int block_size, int max_seq_len, Tensor? alibi_slopes, "
+      "str kv_cache_dtype, Tensor k_scale, Tensor v_scale, int tp_rank, "
+      "int blocksparse_local_blocks, int blocksparse_vert_stride, "
+      "int blocksparse_block_size, int blocksparse_head_sliding_step) -> ()");
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  m.def(
+      "merge_attn_states(Tensor! output, Tensor? output_lse, "
+      "Tensor prefix_output, Tensor prefix_lse, "
+      "Tensor suffix_output, Tensor suffix_lse) -> ()");
+#ifndef USE_ROCM
+  m.def(
+      "convert_vertical_slash_indexes(Tensor! block_count, "
+      "Tensor! block_offset, Tensor! column_count, Tensor! column_index, "
+      "Tensor q_seqlens, Tensor kv_seqlens, Tensor vertical_indexes, "
+      "Tensor slash_indexes, int context_size, int block_size_M, "
+      "int block_size_N, bool causal) -> ()");
+  m.def(
+      "convert_vertical_slash_indexes_mergehead(Tensor! block_count, "
+      "Tensor! block_offset, Tensor! column_count, Tensor! column_index, "
+      "Tensor q_seqlens, Tensor kv_seqlens, Tensor vertical_indexes, "
+      "Tensor slash_indexes, Tensor vertical_indices_count, "
+      "Tensor slash_indices_count, int context_size, int block_size_M, "
+      "int block_size_N, bool causal) -> ()");
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
@@ -208,6 +251,17 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("per_token_group_fp8_quant_packed",
          TORCH_BOX(&per_token_group_quant_8bit_packed));
   m.impl("per_token_group_quant_int8", TORCH_BOX(&per_token_group_quant_int8));
+#endif
+
+  // Attention operations
+  m.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
+  m.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
+  m.impl("merge_attn_states", TORCH_BOX(&merge_attn_states));
+#ifndef USE_ROCM
+  m.impl("convert_vertical_slash_indexes",
+         TORCH_BOX(&convert_vertical_slash_indexes));
+  m.impl("convert_vertical_slash_indexes_mergehead",
+         TORCH_BOX(&convert_vertical_slash_indexes_mergehead));
 #endif
 }
 

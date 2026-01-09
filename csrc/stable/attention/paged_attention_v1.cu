@@ -17,7 +17,15 @@
  * limitations under the License.
  */
 #include "attention_kernels.cuh"
-#include "../cuda_compat.h"
+#include "cuda_compat.h"
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include "stable/torch_utils.h"
+#include "stable/dispatch_utils.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -44,13 +52,15 @@ template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
           int NUM_THREADS = 128>
 void paged_attention_v1_launcher(
-    torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int tp_rank,
-    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    torch::stable::Tensor& out, torch::stable::Tensor& query,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    int num_kv_heads, float scale, torch::stable::Tensor& block_tables,
+    torch::stable::Tensor& seq_lens, int max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale,
+    const int tp_rank, const int blocksparse_local_blocks,
+    const int blocksparse_vert_stride, const int blocksparse_block_size,
+    const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -61,18 +71,22 @@ void paged_attention_v1_launcher(
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
-      alibi_slopes
-          ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
-          : nullptr;
+      alibi_slopes ? reinterpret_cast<const float*>(
+                         alibi_slopes.value().const_data_ptr())
+                   : nullptr;
 
-  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
-  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
-  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
-  const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
-  const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
+  T* out_ptr = reinterpret_cast<T*>(out.mutable_data_ptr());
+  T* query_ptr = reinterpret_cast<T*>(query.mutable_data_ptr());
+  CACHE_T* key_cache_ptr =
+      reinterpret_cast<CACHE_T*>(key_cache.mutable_data_ptr());
+  CACHE_T* value_cache_ptr =
+      reinterpret_cast<CACHE_T*>(value_cache.mutable_data_ptr());
+  int* block_tables_ptr = block_tables.mutable_data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.mutable_data_ptr<int>();
+  const float* k_scale_ptr =
+      reinterpret_cast<const float*>(k_scale.const_data_ptr());
+  const float* v_scale_ptr =
+      reinterpret_cast<const float*>(v_scale.const_data_ptr());
 
   const int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_seq_len =
@@ -85,8 +99,9 @@ void paged_attention_v1_launcher(
 
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      query.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(query.get_device_index());
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
@@ -119,7 +134,7 @@ void paged_attention_v1_launcher(
       LAUNCH_PAGED_ATTENTION_V1(256);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported head size: ", head_size);
+      STD_TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }
 }
@@ -141,43 +156,43 @@ void paged_attention_v1_launcher(
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
-#define CALL_V1_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_DTYPE)         \
-  switch (block_size) {                                           \
-    case 8:                                                       \
-      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 8, KV_DTYPE);         \
-      break;                                                      \
-    case 16:                                                      \
-      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 16, KV_DTYPE);        \
-      break;                                                      \
-    case 32:                                                      \
-      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 32, KV_DTYPE);        \
-      break;                                                      \
-    default:                                                      \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size); \
-      break;                                                      \
+#define CALL_V1_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_DTYPE)             \
+  switch (block_size) {                                               \
+    case 8:                                                           \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 8, KV_DTYPE);             \
+      break;                                                          \
+    case 16:                                                          \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 16, KV_DTYPE);            \
+      break;                                                          \
+    case 32:                                                          \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 32, KV_DTYPE);            \
+      break;                                                          \
+    default:                                                          \
+      STD_TORCH_CHECK(false, "Unsupported block size: ", block_size); \
+      break;                                                          \
   }
 
 void paged_attention_v1(
-    torch::Tensor& out,    // [num_seqs, num_heads, head_size]
-    torch::Tensor& query,  // [num_seqs, num_heads, head_size]
-    torch::Tensor&
+    torch::stable::Tensor& out,    // [num_seqs, num_heads, head_size]
+    torch::stable::Tensor& query,  // [num_seqs, num_heads, head_size]
+    torch::stable::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
-    torch::Tensor&
+    torch::stable::Tensor&
         value_cache,       // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads,  // [num_heads]
     double scale,
-    torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
-    torch::Tensor& seq_lens,      // [num_seqs]
+    torch::stable::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
+    torch::stable::Tensor& seq_lens,      // [num_seqs]
     int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int64_t tp_rank,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
 
-  DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
+  DISPATCH_BY_KV_CACHE_DTYPE(query.scalar_type(), kv_cache_dtype,
                              CALL_V1_LAUNCHER_BLOCK_SIZE)
 }
 

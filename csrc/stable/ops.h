@@ -159,3 +159,54 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 #endif
+
+// Attention kernels
+void paged_attention_v1(
+    torch::stable::Tensor& out, torch::stable::Tensor& query,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    int64_t num_kv_heads, double scale, torch::stable::Tensor& block_tables,
+    torch::stable::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, int64_t tp_rank,
+    int64_t blocksparse_local_blocks, int64_t blocksparse_vert_stride,
+    int64_t blocksparse_block_size, int64_t blocksparse_head_sliding_step);
+
+void paged_attention_v2(
+    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
+    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
+    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
+    int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, int64_t tp_rank,
+    int64_t blocksparse_local_blocks, int64_t blocksparse_vert_stride,
+    int64_t blocksparse_block_size, int64_t blocksparse_head_sliding_step);
+
+void merge_attn_states(torch::stable::Tensor& output,
+                       std::optional<torch::stable::Tensor> output_lse,
+                       const torch::stable::Tensor& prefix_output,
+                       const torch::stable::Tensor& prefix_lse,
+                       const torch::stable::Tensor& suffix_output,
+                       const torch::stable::Tensor& suffix_lse);
+
+#ifndef USE_ROCM
+void convert_vertical_slash_indexes(
+    torch::stable::Tensor& block_count, torch::stable::Tensor& block_offset,
+    torch::stable::Tensor& column_count, torch::stable::Tensor& column_index,
+    torch::stable::Tensor q_seqlens, torch::stable::Tensor kv_seqlens,
+    torch::stable::Tensor vertical_indexes, torch::stable::Tensor slash_indexes,
+    int64_t context_size, int64_t block_size_M, int64_t block_size_N,
+    bool causal);
+
+void convert_vertical_slash_indexes_mergehead(
+    torch::stable::Tensor& block_count, torch::stable::Tensor& block_offset,
+    torch::stable::Tensor& column_count, torch::stable::Tensor& column_index,
+    torch::stable::Tensor q_seqlens, torch::stable::Tensor kv_seqlens,
+    torch::stable::Tensor vertical_indexes, torch::stable::Tensor slash_indexes,
+    torch::stable::Tensor vertical_indices_count,
+    torch::stable::Tensor slash_indices_count, int64_t context_size,
+    int64_t block_size_M, int64_t block_size_N, bool causal);
+#endif

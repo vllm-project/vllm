@@ -1,6 +1,9 @@
 #pragma once
 
-#include "../../../../attention/attention_dtypes.h"
+#include "stable/attention/attention_dtypes.h"
+#include <torch/headeronly/util/Float8_e4m3fn.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 #include <assert.h>
 #include <float.h>
 #include <stdint.h>
@@ -8,6 +11,9 @@
 
 namespace vllm {
 #ifndef USE_ROCM
+
+// Use header-only Float8 type
+using Float8_e4m3fn = torch::headeronly::Float8_e4m3fn;
 
 namespace fp8 {
   #ifdef ENABLE_FP8
@@ -18,16 +24,15 @@ __inline__ __device__ Tout vec_conversion(
   return x;
 }
 
-// float -> c10::Float8_e4m3fn
+// float -> Float8_e4m3fn
 template <>
-__inline__ __device__ c10::Float8_e4m3fn
-vec_conversion<c10::Float8_e4m3fn, float>(
+__inline__ __device__ Float8_e4m3fn vec_conversion<Float8_e4m3fn, float>(
     const float& a, const __nv_fp8_interpretation_t fp8_type) {
     #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-  return static_cast<c10::Float8_e4m3fn>(a);
+  return static_cast<Float8_e4m3fn>(a);
     #else
-  return c10::Float8_e4m3fn(__nv_cvt_float_to_fp8(a, __NV_SATFINITE, fp8_type),
-                            c10::Float8_e4m3fn::from_bits());
+  return Float8_e4m3fn(__nv_cvt_float_to_fp8(a, __NV_SATFINITE, fp8_type),
+                       Float8_e4m3fn::from_bits());
     #endif
 }
 
@@ -542,54 +547,58 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   // the data type of the key and value cache. The FN is a macro that calls a
   // function with template<typename scalar_t, typename cache_t,
   // Fp8KVCacheDataType kv_dt>.
-  #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                  \
-    if (KV_DTYPE == "auto") {                                                  \
-      if (SRC_DTYPE == at::ScalarType::Float) {                                \
-        FN(float, float, vllm::Fp8KVCacheDataType::kAuto);                     \
-      } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
-        FN(uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);               \
-      } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(__nv_bfloat16, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);     \
-      } else {                                                                 \
-        TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
-      }                                                                        \
-    } else {                                                                   \
-      if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                       \
-        if (SRC_DTYPE == at::ScalarType::Float) {                              \
-          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);              \
-        } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
-          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);           \
-        } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
-          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);      \
-        } else {                                                               \
-          TORCH_CHECK(false,                                                   \
-                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
-        }                                                                      \
-      } else if (KV_DTYPE == "fp8_e5m2") {                                     \
-        if (SRC_DTYPE == at::ScalarType::Float) {                              \
-          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);              \
-        } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
-          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);           \
-        } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
-          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);      \
-        } else {                                                               \
-          TORCH_CHECK(false,                                                   \
-                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
-        }                                                                      \
-      } else if (KV_DTYPE == "fp8_ds_mla") {                                   \
-        if (SRC_DTYPE == at::ScalarType::Float) {                              \
-          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);              \
-        } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
-          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);           \
-        } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
-          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);      \
-        } else {                                                               \
-          TORCH_CHECK(false,                                                   \
-                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
-        }                                                                      \
-      } else {                                                                 \
-        TORCH_CHECK(false, "Unsupported data type of kv cache: ", KV_DTYPE);   \
-      }                                                                        \
+  // Uses header-only ScalarType and STD_TORCH_CHECK for stable ABI
+  // compatibility.
+  #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                 \
+    if (KV_DTYPE == "auto") {                                                 \
+      if (SRC_DTYPE == torch::headeronly::ScalarType::Float) {                \
+        FN(float, float, vllm::Fp8KVCacheDataType::kAuto);                    \
+      } else if (SRC_DTYPE == torch::headeronly::ScalarType::Half) {          \
+        FN(uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);              \
+      } else if (SRC_DTYPE == torch::headeronly::ScalarType::BFloat16) {      \
+        FN(__nv_bfloat16, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);    \
+      } else {                                                                \
+        STD_TORCH_CHECK(false,                                                \
+                        "Unsupported input type of kv cache: ", SRC_DTYPE);   \
+      }                                                                       \
+    } else {                                                                  \
+      if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                      \
+        if (SRC_DTYPE == torch::headeronly::ScalarType::Float) {              \
+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::Half) {        \
+          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);          \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::BFloat16) {    \
+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);     \
+        } else {                                                              \
+          STD_TORCH_CHECK(false,                                              \
+                          "Unsupported input type of kv cache: ", SRC_DTYPE); \
+        }                                                                     \
+      } else if (KV_DTYPE == "fp8_e5m2") {                                    \
+        if (SRC_DTYPE == torch::headeronly::ScalarType::Float) {              \
+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);             \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::Half) {        \
+          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);          \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::BFloat16) {    \
+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);     \
+        } else {                                                              \
+          STD_TORCH_CHECK(false,                                              \
+                          "Unsupported input type of kv cache: ", SRC_DTYPE); \
+        }                                                                     \
+      } else if (KV_DTYPE == "fp8_ds_mla") {                                  \
+        if (SRC_DTYPE == torch::headeronly::ScalarType::Float) {              \
+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::Half) {        \
+          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);          \
+        } else if (SRC_DTYPE == torch::headeronly::ScalarType::BFloat16) {    \
+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);     \
+        } else {                                                              \
+          STD_TORCH_CHECK(false,                                              \
+                          "Unsupported input type of kv cache: ", SRC_DTYPE); \
+        }                                                                     \
+      } else {                                                                \
+        STD_TORCH_CHECK(false,                                                \
+                        "Unsupported data type of kv cache: ", KV_DTYPE);     \
+      }                                                                       \
     }
 
 }  // namespace fp8

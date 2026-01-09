@@ -5,7 +5,7 @@
 
 #include <cuda.h>
 
-#include <torch/all.h>
+#include <torch/csrc/stable/tensor.h>
 
 __device__ int64_t save_blocks(int* block_offset, int64_t range_start,
                                int64_t range_end, int64_t block_size,
@@ -182,14 +182,14 @@ void convert_vertical_slash_indexes_64x64(
  * https://github.com/microsoft/MInference/blob/main/csrc/vertical_slash_index.cu.
  */
 void convert_vertical_slash_indexes(
-    torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
-    torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
-    torch::Tensor& column_count,     // [BATCH, N_HEADS, NUM_ROWS]
-    torch::Tensor& column_index,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
-    torch::Tensor q_seqlens,         // [BATCH, ]
-    torch::Tensor kv_seqlens,        // [BATCH, ]
-    torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
-    torch::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    torch::stable::Tensor& block_count,   // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& block_offset,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::stable::Tensor& column_count,  // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& column_index,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::stable::Tensor q_seqlens,      // [BATCH, ]
+    torch::stable::Tensor kv_seqlens,     // [BATCH, ]
+    torch::stable::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    torch::stable::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
     int64_t context_size, int64_t block_size_M, int64_t block_size_N,
     bool causal) {
   cudaSetDevice(q_seqlens.get_device());
@@ -201,12 +201,13 @@ void convert_vertical_slash_indexes(
   int num_rows = (context_size + block_size_M - 1) / block_size_M;
 
   convert_vertical_slash_indexes_64x64(
-      q_seqlens.data_ptr<int>(), kv_seqlens.data_ptr<int>(),
-      vertical_indexes.data_ptr<int>(), slash_indexes.data_ptr<int>(),
-      block_count.data_ptr<int>(), block_offset.data_ptr<int>(),
-      column_count.data_ptr<int>(), column_index.data_ptr<int>(), batch_size,
-      num_heads, num_rows, block_size_M, block_size_N, nnz_vertical, nnz_slash,
-      causal);
+      q_seqlens.const_data_ptr<int>(), kv_seqlens.const_data_ptr<int>(),
+      vertical_indexes.const_data_ptr<int>(),
+      slash_indexes.const_data_ptr<int>(), block_count.mutable_data_ptr<int>(),
+      block_offset.mutable_data_ptr<int>(),
+      column_count.mutable_data_ptr<int>(),
+      column_index.mutable_data_ptr<int>(), batch_size, num_heads, num_rows,
+      block_size_M, block_size_N, nnz_vertical, nnz_slash, causal);
 }
 
 __global__ void convert_vertical_slash_indexes_kernel_mergehead(
@@ -370,16 +371,16 @@ void convert_vertical_slash_indexes_64x64_mergehead(
  * pre-computed vertical and slash counts.
  */
 void convert_vertical_slash_indexes_mergehead(
-    torch::Tensor& block_count,            // [BATCH, N_HEADS, NUM_ROWS]
-    torch::Tensor& block_offset,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
-    torch::Tensor& column_count,           // [BATCH, N_HEADS, NUM_ROWS]
-    torch::Tensor& column_index,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
-    torch::Tensor q_seqlens,               // [BATCH, ]
-    torch::Tensor kv_seqlens,              // [BATCH, ]
-    torch::Tensor vertical_indexes,        // [BATCH, N_HEADS, NNZ_V]
-    torch::Tensor slash_indexes,           // [BATCH, N_HEADS, NNZ_S]
-    torch::Tensor vertical_indices_count,  // [N_HEADS, ]
-    torch::Tensor slash_indices_count,     // [N_HEADS, ]
+    torch::stable::Tensor& block_count,   // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& block_offset,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::stable::Tensor& column_count,  // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& column_index,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::stable::Tensor q_seqlens,      // [BATCH, ]
+    torch::stable::Tensor kv_seqlens,     // [BATCH, ]
+    torch::stable::Tensor vertical_indexes,        // [BATCH, N_HEADS, NNZ_V]
+    torch::stable::Tensor slash_indexes,           // [BATCH, N_HEADS, NNZ_S]
+    torch::stable::Tensor vertical_indices_count,  // [N_HEADS, ]
+    torch::stable::Tensor slash_indices_count,     // [N_HEADS, ]
     int64_t context_size, int64_t block_size_M, int64_t block_size_N,
     bool causal) {
   cudaSetDevice(q_seqlens.get_device());
@@ -391,11 +392,13 @@ void convert_vertical_slash_indexes_mergehead(
   int num_rows = (context_size + block_size_M - 1) / block_size_M;
 
   convert_vertical_slash_indexes_64x64_mergehead(
-      q_seqlens.data_ptr<int>(), kv_seqlens.data_ptr<int>(),
-      vertical_indexes.data_ptr<int>(), slash_indexes.data_ptr<int>(),
-      vertical_indices_count.data_ptr<int>(),
-      slash_indices_count.data_ptr<int>(), block_count.data_ptr<int>(),
-      block_offset.data_ptr<int>(), column_count.data_ptr<int>(),
-      column_index.data_ptr<int>(), batch_size, num_heads, num_rows,
+      q_seqlens.const_data_ptr<int>(), kv_seqlens.const_data_ptr<int>(),
+      vertical_indexes.const_data_ptr<int>(),
+      slash_indexes.const_data_ptr<int>(),
+      vertical_indices_count.mutable_data_ptr<int>(),
+      slash_indices_count.mutable_data_ptr<int>(),
+      block_count.mutable_data_ptr<int>(), block_offset.mutable_data_ptr<int>(),
+      column_count.mutable_data_ptr<int>(),
+      column_index.mutable_data_ptr<int>(), batch_size, num_heads, num_rows,
       block_size_M, block_size_N, nnz_vertical, nnz_slash, causal);
 }

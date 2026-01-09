@@ -18,7 +18,7 @@
  */
 #pragma once
 
-#include "../cuda_compat.h"
+#include "cuda_compat.h"
 #include "attention_dtypes.h"
 
 #include <float.h>
