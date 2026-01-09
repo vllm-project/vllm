@@ -19,9 +19,6 @@ from vllm.v1.attention.backends.utils import (
     make_lazy_sync_tensor_property,
     subclass_attention_backend,
 )
-from vllm.v1.attention.backends.utils import (
-    make_local_attention_virtual_batches,
-)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -97,10 +94,10 @@ def _compute_virtual_query_start_locs(
 @triton.jit
 def _compute_virtual_batches_attn_metadata_kernel(
     # Inputs
-    query_start_loc_ptr,  # [batch_size + 1]
-    seq_lens_ptr,  # [batch_size]
-    virtual_query_start_locs_ptr,  # [batch_size + 1] - cumsum of vb per request
-    block_table_ptr,  # [batch_size, max_blocks_per_seq]
+    query_start_loc_ptr,  # [bs + 1]
+    seq_lens_ptr,  # [bs]
+    virtual_query_start_locs_ptr,  # [bs + 1] - cumsum of vb per request
+    block_table_ptr,  # [bs, max_blocks_per_seq]
     # Outputs
     seqlens_k_ptr,  # [num_vb_ub] - virtual batch kv seqlens
     virtual_query_start_locs_out_ptr,  # [num_vb_ub + 1] - cumulative query seqlens
@@ -108,7 +105,7 @@ def _compute_virtual_batches_attn_metadata_kernel(
     batch_mapping_ptr,  # [num_vb_ub] - maps vb -> original batch
     block_indices_ptr,  # [num_vb_ub * pages_per_virtual_batch] - block indices
     # Sizes
-    batch_size,
+    bs,
     max_blocks_per_seq,
     # Constants
     ATTN_CHUNK_SIZE: tl.constexpr,
@@ -117,7 +114,7 @@ def _compute_virtual_batches_attn_metadata_kernel(
     MAX_VIRTUAL_BATCHES: tl.constexpr,  # Max virtual batches per request
 ):
     batch_idx = tl.program_id(0)
-    if batch_idx >= batch_size:
+    if batch_idx >= bs:
         return
 
     # Load batch boundaries and sequence data
@@ -283,7 +280,7 @@ def create_chunked_local_attention_backend(
             kv_cache_spec: AttentionSpec,
         ) -> AttentionCGSupport:
             # Support UNIFORM_BATCH for FULL CGs (decode with uniform q_len=1)
-            # Each request produces exactly 1 virtual batch, so num_vb = batch_size
+            # Each request produces exactly 1 virtual batch, so num_vb = bs
             return AttentionCGSupport.UNIFORM_BATCH
 
         def build(
@@ -292,17 +289,23 @@ def create_chunked_local_attention_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ):
-            batch_size = common_attn_metadata.num_reqs
             block_table = common_attn_metadata.block_table_tensor
             query_start_loc = common_attn_metadata.query_start_loc
             seq_lens = common_attn_metadata.seq_lens
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             chunk = attention_chunk_size
 
-            # Compute num_vb_ub from CPU data (no GPU sync)
-            # N query tokens can span at most: 1 + (N + chunk - 2) // chunk
-            q_seqlens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).numpy()
-            num_vb_per_req_ub = 1 + (q_seqlens_cpu + chunk - 2) // chunk
+            bs = common_attn_metadata.num_reqs
+
+            # Compute num_vb from CPU data (no GPU sync needed)
+            # N query tokens span at most: 1 + (N + chunk - 2) // chunk
+            # Padding requests (q_seqlen=0) produce 0 VBs
+            query_start_loc_np = query_start_loc_cpu.numpy()
+            q_seqlens_np = query_start_loc_np[1 : bs + 1] - query_start_loc_np[:bs]
+            # _ub stands for upper bound
+            num_vb_per_req_ub = (q_seqlens_np > 0) * (
+                1 + (q_seqlens_np + chunk - 2) // chunk
+            )
             num_vb_ub = int(num_vb_per_req_ub.sum())
             max_vb_per_req = max(1, int(num_vb_per_req_ub.max()))
 
@@ -319,8 +322,10 @@ def create_chunked_local_attention_backend(
             # calls (kernel uses masked writes, stale data may remain)
             self._virtual_batch_to_batch_mapping[:num_vb_ub].zero_()
             self._virtual_batch_block_indices[:num_vb_ub, :pages_per_vb].zero_()
+            # Kernel writes positions 1..num_vb_ub; ensure position 0 is 0
+            self._virtual_query_start_loc[0] = 0
 
-            _compute_virtual_batches_attn_metadata_kernel[(batch_size,)](
+            _compute_virtual_batches_attn_metadata_kernel[(bs,)](
                 query_start_loc,
                 seq_lens,
                 virtual_query_start_locs,
@@ -330,7 +335,7 @@ def create_chunked_local_attention_backend(
                 self._virtual_batches_block_table,
                 self._virtual_batch_to_batch_mapping,
                 self._virtual_batch_block_indices,
-                batch_size,
+                bs,
                 max_blocks_per_seq,
                 ATTN_CHUNK_SIZE=chunk,
                 BLOCK_SIZE=block_size,
@@ -341,6 +346,9 @@ def create_chunked_local_attention_backend(
             # Pad cu_virtual_seqlens_q for FULL CG (must be monotonic)
             total_tokens = int(query_start_loc_cpu[-1])
             self._virtual_query_start_loc[num_vb_ub + 1 :].fill_(total_tokens)
+
+            # Record event after kernel + padding for lazy D2H sync
+            kernel_done_event = current_stream().record_event()
 
             # Compute query_start_loc_cpu for virtual batches.
             # Uniform decode (max_q_len == 1): reuse input directly.
@@ -376,6 +384,8 @@ def create_chunked_local_attention_backend(
 
                 def _get_cpu(self):
                     if not cm._virtual_query_start_loc_cpu_copied:
+                        # Wait for kernel to complete before D2H copy
+                        kernel_done_event.synchronize()
                         virtual_query_start_loc_cpu.copy_(
                             self.query_start_loc[: num_vb_ub + 1]
                         )
