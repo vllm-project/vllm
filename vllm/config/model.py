@@ -1588,8 +1588,8 @@ class ModelConfig:
                     return True
                 else:
                     logger.debug(
-                        "Pooling models with %s/%s pooling do not "
-                        "support chunked prefill.",
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "do not support chunked prefill.",
                         pooler_config.seq_pooling_type,
                         pooler_config.tok_pooling_type,
                     )
@@ -1634,8 +1634,8 @@ class ModelConfig:
                     return True
                 else:
                     logger.debug(
-                        "Pooling models with %s/%s pooling does not "
-                        "support prefix caching.",
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "do not support prefix caching.",
                         pooler_config.seq_pooling_type,
                         pooler_config.tok_pooling_type,
                     )
