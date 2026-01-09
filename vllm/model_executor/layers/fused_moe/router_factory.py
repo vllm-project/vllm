@@ -20,23 +20,30 @@ from vllm.model_executor.layers.fused_moe.routing_simulator_router import (
     RoutingSimulatorRouter,
 )
 
+EMPTY_EPLB_STATE: EplbLayerState = EplbLayerState()
+
 
 def create_fused_moe_router(
+    # common parameters
     top_k: int,
     global_num_experts: int,
-    eplb_state: EplbLayerState,
     renormalize: bool = True,
+    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+    routing_method_type: RoutingMethodType | None = None,
+    # grouped topk parameters
     use_grouped_topk: bool = False,
     num_expert_group: int | None = None,
     topk_group: int | None = None,
-    custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
+    num_fused_shared_experts: int = 0,
+    # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    num_fused_shared_experts: int = 0,
+    # custom routing paramaters
+    custom_routing_function: Callable | None = None,
+    # eplb parameters
     enable_eplb: bool = False,
-    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-    routing_method_type: RoutingMethodType | None = None,
+    eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -50,22 +57,35 @@ def create_fused_moe_router(
     5. FusedTopKRouter - default fallback
 
     Args:
+        Common arguments
+        ----------------
         top_k: Number of experts to select per token
         global_num_experts: Total number of experts in the model
-        eplb_state: EPLB (Expert Parallelism Load Balancing) state
         renormalize: Whether to renormalize the routing weights
-        use_grouped_topk: Whether to use grouped top-k routing
-        num_expert_group: Number of expert groups (for grouped routing)
-        topk_group: Top-k within each group (for grouped routing)
-        custom_routing_function: Optional custom routing function
-        scoring_func: Scoring function to use ("softmax" or "sigmoid")
-        routed_scaling_factor: Scaling factor for routed weights
-        e_score_correction_bias: Optional bias correction for expert scores
-        num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
-        enable_eplb: Whether EPLB is enabled
         indices_type_getter: Function to get the desired indices dtype
         routing_method_type: Optional explicit routing method type
 
+        Grouped topk arguments
+        ----------------------
+        use_grouped_topk: Whether to use grouped top-k routing
+        num_expert_group: Number of expert groups (for grouped routing)
+        topk_group: Top-k within each group (for grouped routing)
+        scoring_func: Scoring function to use ("softmax" or "sigmoid")
+        num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
+
+        Grouped topk and fused topk bias arguments
+        ------------------------------------------
+        routed_scaling_factor: Scaling factor for routed weights
+        e_score_correction_bias: Optional bias correction for expert scores
+
+        Custom routing arguments
+        ------------------------
+        custom_routing_function: Optional custom routing function
+
+        EPLB arguments
+        --------------
+        enable_eplb: Whether EPLB is enabled
+        eplb_state: EPLB (Expert Parallelism Load Balancing) state
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
