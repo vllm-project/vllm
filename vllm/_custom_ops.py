@@ -1606,15 +1606,15 @@ def scaled_fp4_experts_quant(
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Quantize input tensor to FP4 and return quantized tensor and scale, for
+    Quantize input tensor to NVFP4 and return quantized tensor and scale, for
     packed MoE Inputs.
     Args:
-        input_tensor: The input tensor to be quantized to FP4
+        input_tensor: The input tensor to be quantized to NVFP4
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
     Outputs:
-        output: The quantized tensor in FP4
+        output: The quantized tensor in NVFP4
         output_scales: The blockscale tensor in FP8-E4M3
     """
     assert not current_platform.is_rocm()
@@ -1649,6 +1649,71 @@ def scaled_fp4_experts_quant(
         device=input_tensor.device,
     )
     torch.ops._C.scaled_fp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        input_global_scale,
+        expert_offsets,
+        blockscale_offsets,
+    )
+    output_scales = output_scales.view(torch.float8_e4m3fn)
+    return output, output_scales
+
+
+def silu_and_mul_scaled_fp4_experts_quant(
+    input_tensor: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused SiLU+Mul+NVFP4 quantization for MoE intermediate activations.
+
+    Args:
+        input_tensor: The input tensor with gate || up layout [m_topk, k*2]
+        input_global_scale: A per-expert scaling factor [n_experts]
+        expert_offsets: The expert offsets tensor [n_experts+1]
+        blockscale_offsets: The blockscale offsets tensor [n_experts+1]
+        topk: Number of top-k experts selected
+    Outputs:
+        output: The quantized tensor in NVFP4 [m_topk, k/2]
+        output_scales: The blockscale tensor in FP8-E4M3
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2, (
+        f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
+    )
+
+    # Control the maximum number of tokens per expert supported by the
+    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
+    # from running out of memory. This value can also be increased to support
+    # larger models.
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k_times_2 = input_tensor.shape
+    assert k_times_2 % 2 == 0, "input width must be even (gate || up layout)"
+    k = k_times_2 // 2
+
+    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
+        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
+        f"{MAX_TOKENS_PER_EXPERT})"
+        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
+    )
+    scales_k = k // 16
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    # output is uint8 and packed fp4 values
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.silu_and_mul_scaled_fp4_experts_quant(
         output,
         output_scales,
         input_tensor,
