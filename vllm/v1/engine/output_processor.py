@@ -692,6 +692,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
+            request_id=req_state.request_id,
             num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,

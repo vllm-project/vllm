@@ -407,6 +407,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
+        self.exemplars_enabled = vllm_config.observability_config.enable_exemplars
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
@@ -1131,40 +1132,60 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_request_success[finished_request.finish_reason][
                 engine_idx
             ].inc()
+            # Prepare exemplar with request_id for histograms (if enabled)
+            exemplar = None
+            if self.exemplars_enabled and finished_request.request_id:
+                request_id = finished_request.request_id
+                # OpenMetrics limits exemplar labels to 128 UTF-8 chars total.
+                # `prometheus-client` checks `len(key) + len(value)`.
+                # `len("request_id")` is 10, so `request_id` can be up to 118
+                # chars. Using 117 for safety.
+                REQUEST_ID_MAX_LEN = 117
+                if len(request_id) > REQUEST_ID_MAX_LEN:
+                    msg = (
+                        "Request ID %r is too long for Prometheus exemplar "
+                        "and will be truncated to %d characters.",
+                        request_id,
+                        REQUEST_ID_MAX_LEN,
+                    )
+                    logger.warning(msg)
+                    request_id = request_id[:REQUEST_ID_MAX_LEN]
+                exemplar = {"request_id": request_id}
+
             self.histogram_e2e_time_request[engine_idx].observe(
-                finished_request.e2e_latency
+                finished_request.e2e_latency, exemplar=exemplar
             )
             self.histogram_queue_time_request[engine_idx].observe(
-                finished_request.queued_time
+                finished_request.queued_time, exemplar=exemplar
             )
             self.histogram_prefill_time_request[engine_idx].observe(
-                finished_request.prefill_time
+                finished_request.prefill_time, exemplar=exemplar
             )
             self.histogram_inference_time_request[engine_idx].observe(
-                finished_request.inference_time
+                finished_request.inference_time, exemplar=exemplar
             )
             self.histogram_decode_time_request[engine_idx].observe(
-                finished_request.decode_time
+                finished_request.decode_time, exemplar=exemplar
             )
             # Calculate prefill KV compute (excludes cached tokens)
             prefill_kv_computed = finished_request.num_prompt_tokens - max(
                 finished_request.num_cached_tokens, 0
             )
             self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
+                prefill_kv_computed, exemplar=exemplar
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
-                finished_request.num_prompt_tokens
+                finished_request.num_prompt_tokens, exemplar=exemplar
             )
             self.histogram_num_generation_tokens_request[engine_idx].observe(
-                finished_request.num_generation_tokens
+                finished_request.num_generation_tokens, exemplar=exemplar
             )
             self.histogram_request_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
+                finished_request.mean_time_per_output_token, exemplar=exemplar
             )
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
-                    finished_request.max_tokens_param
+                    finished_request.max_tokens_param, exemplar=exemplar
                 )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
