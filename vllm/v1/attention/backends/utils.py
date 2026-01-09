@@ -32,6 +32,9 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    M,
 )
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
