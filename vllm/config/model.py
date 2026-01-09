@@ -1569,24 +1569,16 @@ class ModelConfig:
             # for pooling models
             if attn_type == "encoder_only":
                 logger.debug(
-                    "Pooling models with bidirectional attn do not support "
-                    "chunked prefill."
+                    "Pooling models with bidirectional attn "
+                    "do not support chunked prefill."
                 )
                 return False
 
             if attn_type == "decoder":
                 if (
-                    pooler_config.seq_pooling_type == "LAST"
-                    or pooler_config.tok_pooling_type == "ALL"
+                    pooler_config.seq_pooling_type in ("MEAN", "CLS")
+                    or pooler_config.tok_pooling_type == "STEP"
                 ):
-                    logger.debug(
-                        "Pooling models with causal attn and %s/%s pooling "
-                        "support chunked prefill.",
-                        pooler_config.seq_pooling_type,
-                        pooler_config.tok_pooling_type,
-                    )
-                    return True
-                else:
                     logger.debug(
                         "Pooling models with causal attn and %s/%s pooling "
                         "do not support chunked prefill.",
@@ -1594,6 +1586,14 @@ class ModelConfig:
                         pooler_config.tok_pooling_type,
                     )
                     return False
+                else:
+                    logger.debug(
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "support chunked prefill.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
+                    )
+                    return True
 
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
@@ -1615,24 +1615,16 @@ class ModelConfig:
             # for pooling models
             if attn_type == "encoder_only":
                 logger.debug(
-                    "Pooling models with bidirectional attn do not "
-                    "support prefix caching."
+                    "Pooling models with bidirectional attn "
+                    "do not support prefix caching."
                 )
                 return False
 
             if attn_type == "decoder":
                 if (
-                    pooler_config.seq_pooling_type == "LAST"
-                    or pooler_config.tok_pooling_type == "ALL"
+                    pooler_config.seq_pooling_type in ("MEAN", "CLS")
+                    or pooler_config.tok_pooling_type == "STEP"
                 ):
-                    logger.debug(
-                        "Pooling models with causal attn and %s/%s pooling "
-                        "support prefix caching.",
-                        pooler_config.seq_pooling_type,
-                        pooler_config.tok_pooling_type,
-                    )
-                    return True
-                else:
                     logger.debug(
                         "Pooling models with causal attn and %s/%s pooling "
                         "do not support prefix caching.",
@@ -1640,6 +1632,14 @@ class ModelConfig:
                         pooler_config.tok_pooling_type,
                     )
                     return False
+                else:
+                    logger.debug(
+                        "Pooling models with causal attn and %s/%s pooling "
+                        "support prefix caching.",
+                        pooler_config.seq_pooling_type,
+                        pooler_config.tok_pooling_type,
+                    )
+                    return True
 
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
