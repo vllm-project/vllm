@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashInfer MoE prepare and finalize implementations.
+
+This module contains unified implementations that handle both CUTLASS and TRT-LLM:
+- CUTLASS: uses nvfp4_block_scale_interleave for scale layout
+- TRT-LLM: uses linear scale layout (no interleaving)
+
+The difference is controlled by the `use_linear_scale_layout` parameter.
+"""
 
 import torch
 
@@ -24,22 +32,38 @@ def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
-class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
-    """Base class for FlashInfer MoE prepare and finalize operations."""
+# =============================================================================
+# Base Class
+# =============================================================================
+
+
+class FlashInferMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+    """Base class for FlashInfer MoE prepare and finalize operations.
+
+    Args:
+        use_dp: Whether to use data parallelism.
+        num_dispatchers: Number of dispatchers.
+        use_deepseek_fp8_block_scale: Toggle for DeepSeek-style FP8 block-scale
+            path where activations are not quantized here and weight block
+            scales are consumed by the kernel.
+        use_linear_scale_layout: If True, use linear scale layout (TRT-LLM).
+            If False, use interleaved scale layout (CUTLASS).
+    """
 
     def __init__(
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
+        use_linear_scale_layout: bool = False,
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
         self.local_tokens = None
-        # Toggle for DeepSeek-style FP8 block-scale path where activations are
-        # not quantized here and weight block scales are consumed by the kernel.
         self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
+        # TRT-LLM expects linear scale layout, CUTLASS expects interleaved
+        self.use_linear_scale_layout = use_linear_scale_layout
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -73,16 +97,30 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1.mul_(topk_weights.to(a1.dtype))
 
 
-class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
-    """FlashInfer implementation using AllToAll communication."""
+# =============================================================================
+# AllToAll Implementation
+# =============================================================================
+
+
+class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
+    """FlashInfer implementation using AllToAll communication.
+
+    Handles both CUTLASS and TRT-LLM backends via `use_linear_scale_layout`.
+    """
 
     def __init__(
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
+        use_linear_scale_layout: bool = False,
     ):
-        super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
+        super().__init__(
+            use_dp,
+            num_dispatchers,
+            use_deepseek_fp8_block_scale,
+            use_linear_scale_layout,
+        )
         self.alltoall_info = None
 
         # Initialize all2all_manager only for DP case
@@ -113,7 +151,8 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
                     quant_config.quant_dtype,
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
-                    is_fp4_scale_swizzled=not self.use_dp,
+                    # TRT-LLM: linear layout, CUTLASS: swizzled layout
+                    is_fp4_scale_swizzled=not self.use_linear_scale_layout,
                 )
             else:
                 a1q = a1
@@ -135,6 +174,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
                     num_experts,
                     quant_config,
                     use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
+                    use_linear_scale_layout=self.use_linear_scale_layout,
                 )
             )
 
@@ -162,14 +202,30 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         output.copy_(fused_expert_output)
 
 
-class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize):
+# =============================================================================
+# AllGather Implementation
+# =============================================================================
+
+
+class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferMoEPrepareAndFinalize):
+    """FlashInfer implementation using AllGather communication.
+
+    Handles both CUTLASS and TRT-LLM backends via `use_linear_scale_layout`.
+    """
+
     def __init__(
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
+        use_linear_scale_layout: bool = False,
     ):
-        super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
+        super().__init__(
+            use_dp,
+            num_dispatchers,
+            use_deepseek_fp8_block_scale,
+            use_linear_scale_layout,
+        )
 
     def prepare(
         self,
@@ -185,7 +241,14 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
         is_nvfp4 = quant_config.quant_dtype == "nvfp4"
-        if not self.use_dp and is_nvfp4:
+
+        # For non-DP nvfp4 with CUTLASS (interleaved), return unquantized
+        # (will be quantized later)
+        if not self.use_dp and is_nvfp4 and not self.use_linear_scale_layout:
+            return a1, None, None, topk_ids, topk_weights
+
+        # For non-DP nvfp4 with TRT-LLM (linear), also return unquantized
+        if not self.use_dp and is_nvfp4 and self.use_linear_scale_layout:
             return a1, None, None, topk_ids, topk_weights
 
         if not self.use_deepseek_fp8_block_scale:
@@ -195,7 +258,10 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
-                is_fp4_scale_swizzled=not self.use_dp,
+                # TRT-LLM: linear layout, CUTLASS: swizzled when not DP
+                is_fp4_scale_swizzled=(
+                    not self.use_dp and not self.use_linear_scale_layout
+                ),
             )
         else:
             # Block-scale path: pass activations through, omit per-token scales
@@ -223,7 +289,8 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 topk_weights, topk_ids, a1q = gathered
                 a1q_scale = None
 
-        if is_nvfp4 and a1q_scale is not None:
+        # Apply scale interleaving only for CUTLASS (not TRT-LLM)
+        if is_nvfp4 and a1q_scale is not None and not self.use_linear_scale_layout:
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
@@ -246,6 +313,11 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         output.copy_(fused_expert_output)
 
 
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+
 def flashinfer_alltoall_dispatch(
     all2all_manager: All2AllManagerBase,
     global_num_tokens_cpu: list[int],
@@ -257,7 +329,14 @@ def flashinfer_alltoall_dispatch(
     num_experts: int,
     quant_config: FusedMoEQuantConfig,
     use_deepseek_fp8_block_scale: bool = False,
+    use_linear_scale_layout: bool = False,
 ):
+    """Unified dispatch for AllToAll communication.
+
+    Args:
+        use_linear_scale_layout: If True, skip scale interleaving (TRT-LLM).
+            If False, apply nvfp4_block_scale_interleave (CUTLASS).
+    """
     from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
     assert all2all_manager.ensure_alltoall_workspace_initialized(), (
@@ -310,7 +389,8 @@ def flashinfer_alltoall_dispatch(
             ep_rank,
             ep_size,
         )
-        if quant_config.quant_dtype == "nvfp4":
+        # Apply scale interleaving only for CUTLASS (not TRT-LLM)
+        if quant_config.quant_dtype == "nvfp4" and not use_linear_scale_layout:
             x_sf = nvfp4_block_scale_interleave(x_sf)
     else:
         # Block-scale path: pass activations through without quantization
@@ -348,24 +428,60 @@ def flashinfer_alltoall_combine(
     )
 
 
-def create_flashinfer_prepare_finalize(
+# =============================================================================
+# Factory Functions
+# =============================================================================
+
+
+def create_flashinfer_cutlass_prepare_finalize(
     use_dp: bool,
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
-) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
-    """Factory function to create the appropriate FlashInfer implementation."""
+) -> FlashInferMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
+    """Factory function to create the appropriate FlashInfer CUTLASS implementation.
 
+    Uses interleaved scale layout (CUTLASS style).
+    """
     if use_dp:
         if enable_alltoallv:
             assert use_nvfp4
-            return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
+            return FlashInferAllToAllMoEPrepareAndFinalize(
+                use_dp, use_linear_scale_layout=False
+            )
         return FlashInferAllGatherMoEPrepareAndFinalize(
             use_dp=True,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+            use_linear_scale_layout=False,
         )
     else:
         # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization
         # in a single call with the MoE experts kernel.
         defer_input_quant = use_deepseek_fp8_block_scale or use_nvfp4
         return MoEPrepareAndFinalizeNoEP(defer_input_quant=defer_input_quant)
+
+
+def create_flashinfer_trtllm_prepare_finalize(
+    use_dp: bool,
+    enable_alltoallv: bool = False,
+    use_deepseek_fp8_block_scale: bool = False,
+) -> FlashInferMoEPrepareAndFinalize:
+    """Factory function to create the appropriate FlashInfer TRT-LLM implementation.
+
+    Uses linear scale layout (TRT-LLM style).
+
+    Args:
+        use_dp: Whether to use data parallelism.
+        enable_alltoallv: Whether to use AllToAllV communication.
+        use_deepseek_fp8_block_scale: Toggle for DeepSeek-style FP8 block-scale path.
+    """
+    if enable_alltoallv:
+        return FlashInferAllToAllMoEPrepareAndFinalize(
+            use_dp, use_linear_scale_layout=True
+        )
+    else:
+        return FlashInferAllGatherMoEPrepareAndFinalize(
+            use_dp,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+            use_linear_scale_layout=True,
+        )

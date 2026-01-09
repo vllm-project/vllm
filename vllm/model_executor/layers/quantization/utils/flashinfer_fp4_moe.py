@@ -14,17 +14,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_all2all_prepare_finalize import (  # noqa: E501
+    create_flashinfer_cutlass_prepare_finalize,
+    create_flashinfer_trtllm_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_prepare_finalize import (  # noqa: E501
-    create_flashinfer_trtllm_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
@@ -96,7 +94,7 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
     enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
+    return create_flashinfer_cutlass_prepare_finalize(
         use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
     )
 
