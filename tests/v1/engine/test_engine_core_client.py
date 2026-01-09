@@ -305,7 +305,8 @@ def subprocess_echo_patch(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
     )
 
 
@@ -328,7 +329,8 @@ def subprocess_echo_dc_patch(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
     )
 
 
@@ -351,7 +353,8 @@ def subprocess_echo_dc_dict_patch(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
     )
 
 
@@ -375,7 +378,8 @@ def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
     )
 
 
