@@ -190,20 +190,10 @@ class RocmPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         """Import ROCm-specific kernels."""
+        super().import_kernels()
+
         import contextlib
-        
-        # Import main C extension
-        try:
-            import vllm._C  # noqa: F401
-        except ImportError as e:
-            from vllm.logger import init_logger
-            logger = init_logger(__name__)
-            logger.warning("Failed to import from vllm._C: %r", e)
-        
-        # Import MOE C extension - ROCm supports MOE operations
-        with contextlib.suppress(ImportError):
-            import vllm._moe_C  # noqa: F401
-        
+
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
