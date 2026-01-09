@@ -98,6 +98,9 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
+        if obj is None:
+            yield key.encode("utf-8")
+            return
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
