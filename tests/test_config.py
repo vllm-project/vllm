@@ -566,100 +566,100 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support chunked prefill.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support chunked prefill.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
             True,
-            "Pooling models with causal attn and all pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support chunked prefill.",
+            "Encoder decoder models do not support chunked prefill.",  # noqa: E501
         ),
     ],
 )
@@ -685,100 +685,100 @@ def test_is_chunked_prefill_supported(
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support prefix caching.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support prefix caching.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
             True,
-            "Pooling models with causal attn and all pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support prefix caching.",
+            "Generative models support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             False,
-            "Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support prefix caching.",
+            "Encoder decoder models do not support prefix caching.",  # noqa: E501
         ),
     ],
 )
