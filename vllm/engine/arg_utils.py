@@ -578,6 +578,9 @@ class EngineArgs:
     )
     tokens_only: bool = False
 
+    weight_transfer_backend: str = "nccl"
+    """Backend for weight transfer during RL training. Options: nccl, ipc"""
+
     weight_transfer_config: WeightTransferConfig = field(
         default_factory=WeightTransferConfig
     )
@@ -592,6 +595,11 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        # Handle weight_transfer_backend CLI arg
+        if self.weight_transfer_backend is not None:
+            self.weight_transfer_config = WeightTransferConfig(
+                backend=self.weight_transfer_backend
+            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -1166,6 +1174,15 @@ class EngineArgs:
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
+        )
+        vllm_group.add_argument(
+            "--weight-transfer-backend",
+            type=str,
+            choices=["nccl", "ipc"],
+            default="nccl",
+            help="Backend for weight transfer during RL training. "
+            "Options: nccl (distributed), ipc (same-node shared memory)"
+            "Default: nccl when enabled.",
         )
 
         # Other arguments

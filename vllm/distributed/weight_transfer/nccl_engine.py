@@ -147,4 +147,5 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            self.model_update_group.destroy()
+            # Clean up the communicator by removing the reference
+            self.model_update_group = None

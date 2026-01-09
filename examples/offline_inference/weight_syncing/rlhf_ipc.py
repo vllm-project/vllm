@@ -118,10 +118,6 @@ class TrainModel:
 
 ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
 
-# Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
-# Learn more about Ray placement groups:
-# https://docs.ray.io/en/latest/placement-groups.html
-
 pg_colocate = placement_group([{"GPU": 1, "CPU": 0}])
 ray.get(pg_colocate.ready())
 
