@@ -82,7 +82,7 @@ class DummyLoRAModel(nn.Sequential, SupportsLoRA):
 
 
 @pytest.fixture
-def dummy_model() -> nn.Module:
+def dummy_model(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
         OrderedDict(
             [
@@ -115,7 +115,7 @@ def dummy_model() -> nn.Module:
 
 
 @pytest.fixture
-def dummy_model_gate_up() -> nn.Module:
+def dummy_model_gate_up(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
         OrderedDict(
             [

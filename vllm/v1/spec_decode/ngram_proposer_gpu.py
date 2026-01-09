@@ -378,7 +378,6 @@ class NgramProposerGPU:
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
-        spec_decode_unsupported_indices: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Propose draft tokens using GPU-accelerated n-gram matching.
@@ -394,8 +393,6 @@ class NgramProposerGPU:
             token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
             valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
             valid_sampled_tokens_count: Count of valid tokens per sequence
-            spec_decode_unsupported_indices: Indices of requests that don't
-                support speculative decoding
 
         Returns:
             draft_tokens: Proposed draft token IDs [batch_size, k]
@@ -432,9 +429,6 @@ class NgramProposerGPU:
         # Compute validity masks
         sampled_flags = valid_sampled_tokens_count > 0
         valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
-
-        if spec_decode_unsupported_indices:
-            valid_mask[spec_decode_unsupported_indices] = False
 
         with set_forward_context(None, self.vllm_config):
             combined_mask = (

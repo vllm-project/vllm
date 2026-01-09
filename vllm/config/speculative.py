@@ -644,6 +644,9 @@ class SpeculativeConfig:
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 
+    def use_ngram_gpu(self) -> bool:
+        return self.method == "ngram_gpu"
+
     def __repr__(self) -> str:
         method = self.method
         model = None if method in ("ngram", "suffix") else self.draft_model_config.model
