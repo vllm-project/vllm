@@ -24,7 +24,9 @@ class PoolerConfig:
     """
     The pooling method used for pooling.
 
-    DEPRECATED: Please use `seq_pooling_type` or `TokenPoolingType` instead.
+    If set, `seq_pooling_type` or `tok_pooling_type` are automatically populated
+    with this field. Alternatively, users can set `seq_pooling_type` and
+    `tok_pooling_type` explicitly.
     """
 
     seq_pooling_type: SequencePoolingType | None = None
@@ -102,6 +104,15 @@ class PoolerConfig:
         self.use_activation = get_use_activation(self)
 
         if pooling_type := self.pooling_type:
+            if self.seq_pooling_type is not None:
+                raise ValueError(
+                    "Cannot set both `pooling_type` and `seq_pooling_type`"
+                )
+            if self.tok_pooling_type is not None:
+                raise ValueError(
+                    "Cannot set both `pooling_type` and `tok_pooling_type`"
+                )
+
             if pooling_type in ("CLS", "LAST", "MEAN"):
                 logger.debug(
                     "Resolved `pooling_type=%s` to `seq_pooling_type=%s`.",
