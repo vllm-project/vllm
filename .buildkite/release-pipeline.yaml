@@ -328,6 +328,10 @@ steps:
             --tag rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER} \
             --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
             --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+            --build-arg USE_SCCACHE=1 \
+            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+            --build-arg SCCACHE_REGION_NAME=us-west-2 \
+            --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
             --load \
             .
 
@@ -338,6 +342,10 @@ steps:
             --target debs_wheel_release \
             --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
             --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
+            --build-arg USE_SCCACHE=1 \
+            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+            --build-arg SCCACHE_REGION_NAME=us-west-2 \
+            --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
             --load \
             .
 
@@ -470,6 +478,10 @@ steps:
           --build-arg ARG_PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
           --build-arg REMOTE_VLLM=0 \
           --build-arg GIT_REPO_CHECK=1 \
+          --build-arg USE_SCCACHE=1 \
+          --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+          --build-arg SCCACHE_REGION_NAME=us-west-2 \
+          --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
           .
 
         echo "Built vLLM wheel:"

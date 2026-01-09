@@ -3,6 +3,14 @@ ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 
+# Sccache configuration (only used in release pipeline)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
+
 FROM ${BASE_IMAGE} AS base
 
 ARG ARG_PYTORCH_ROCM_ARCH
@@ -28,6 +36,32 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Install sccache if USE_SCCACHE is enabled (for release builds)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_REGION_NAME
+ARG SCCACHE_S3_NO_CREDENTIALS
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && SCCACHE_ARCH="x86_64" \
+        && SCCACHE_VERSION="v0.8.1" \
+        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && chmod +x /usr/bin/sccache \
+        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+        && sccache --version; \
+    fi
+
+# Set sccache environment variables (will be empty if USE_SCCACHE is not set)
+ENV SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME}
+ENV SCCACHE_REGION=${SCCACHE_REGION_NAME}
+ENV SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS}
+ENV SCCACHE_IDLE_TIMEOUT=0
+
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
@@ -51,11 +85,18 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+ARG USE_SCCACHE
 # Build vLLM
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
-    && python3 setup.py clean --all  \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+    && python3 setup.py clean --all \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && sccache --show-stats; \
+       fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
@@ -149,11 +190,18 @@ RUN cd vllm \
     && python3 setup.py clean --all
 
 # Build wheel using pre-extracted version to avoid dirty state from modified requirements/rocm.txt
+ARG USE_SCCACHE
 RUN --mount=type=bind,source=.git,target=vllm/.git \
     cd vllm \
     && export SETUPTOOLS_SCM_PRETEND_VERSION=$(cat /tmp/vllm_version.txt) \
     && echo "Building wheel with version: ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && sccache --show-stats; \
+       fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
 FROM scratch AS export_vllm_wheel_release
 ARG COMMON_WORKDIR
