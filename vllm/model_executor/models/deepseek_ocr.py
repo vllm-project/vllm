@@ -438,19 +438,16 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        if pixel_values is not None:
-            base_size = self.vision_config.image_size
-            return DeepseekOCRImagePixelInputs(
-                type="pixel_values",
-                data=pixel_values,
-                images_crop=images_crop,
-                images_spatial_crop=images_spatial_crop,
-                resolve_bindings={
-                    "base_size": base_size,
-                },
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        base_size = self.vision_config.image_size
+        return DeepseekOCRImagePixelInputs(
+            type="pixel_values",
+            data=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+            resolve_bindings={
+                "base_size": base_size,
+            },
+        )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
         global_features_1 = self.sam_model(image_tensor)
