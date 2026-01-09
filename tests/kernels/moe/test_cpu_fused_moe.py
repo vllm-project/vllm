@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
-from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -23,11 +23,6 @@ ACT = ["silu", "swigluoai"]
 USE_BIAS = [True, False]
 ISA = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
 DTYPE = [torch.bfloat16]
-
-_CPU_MOE_ACT = {
-    "silu": SiluAndMul(),
-    "swigluoai": SwigluOAIAndMul(),
-}
 
 
 def ref_fused_moe(
@@ -106,6 +101,7 @@ def ref_fused_moe(
 @pytest.mark.parametrize("act", ACT)
 @pytest.mark.parametrize("isa", ISA)
 def test_cpu_fused_moe(
+    default_vllm_config,
     batch_size: int,
     expert_num: int,
     hidden_size: int,
