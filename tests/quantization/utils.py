@@ -10,6 +10,10 @@ def is_quant_method_supported(quant_method: str) -> bool:
     if not (current_platform.is_cuda() or current_platform.is_rocm()):
         return False
 
+    # RTN quantization is currently not supported on ROCm
+    if current_platform.is_rocm() and quant_method == "rtn":
+        return False
+
     capability = current_platform.get_device_capability()
     assert capability is not None
 
