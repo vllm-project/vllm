@@ -99,7 +99,8 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
-    def query_lens(self) -> torch.Tensor:
+    def naive_query_lens(self) -> torch.Tensor:
+        """Naive because it assumes that query ends where the next query starts."""
         return self.query_start_loc[1:] - self.query_start_loc[:-1]
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)

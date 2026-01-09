@@ -210,7 +210,9 @@ def compute_new_slot_mapping(
 ):
     batch_size, n_blocks_per_req = cad.block_table_tensor.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
-    req_indices = torch.repeat_interleave(req_indices, cad.query_lens() + 1)
+    req_indices = torch.repeat_interleave(
+        req_indices, cad.naive_query_lens() + 1, output_size=len(new_positions)
+    )
     block_table_indices = req_indices * n_blocks_per_req + new_positions // block_size
     block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
     block_offsets = new_positions % block_size
@@ -218,7 +220,7 @@ def compute_new_slot_mapping(
     # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-    # Mask out the positions ids that are invalid
+    # Mask out rejected tokens to prevent saves to the KV cache.
     new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
     return new_slot_mapping
 
@@ -234,6 +236,13 @@ def merge_toks_kernel(
     target_toks_size,
     rejected_tok_fill,
 ):
+    """
+    Merges the `target_toks_ptr` and the `next_toks_ptr` into a new tensor
+    called `out_ptr_merged_toks`. Rejected tokens are those after the
+    `query_end_locs_ptr` and before the next `query_start_locs_ptr`. Fills the
+    rejected tokens positions with the value `rejected_tok_fill`. Also fills a mask
+    of the rejected tokens in `out_ptr_is_rejected_tok`.
+    """
     pid = tl.program_id(0)
     start_loc = tl.load(query_start_locs_ptr + pid)
     is_last_program = pid == tl.num_programs(0) - 1

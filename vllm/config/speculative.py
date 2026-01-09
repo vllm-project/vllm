@@ -78,11 +78,6 @@ class SpeculativeConfig:
     """Users should pass "draft_tensor_parallel_size". This parameters is only 
     to reject it if passed."""
 
-    disable_logprobs: bool = True
-    """If set to True, token log probabilities are not returned during
-    speculative decoding. If set to False, token log probabilities are returned
-    according to the log probability settings in SamplingParams."""
-
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
     """Quantization method that was used to quantize the draft model weights.
@@ -660,16 +655,6 @@ class SpeculativeConfig:
                     f"Using models with different tokenizers can cause out-of-bounds "
                     f"errors during speculative decoding."
                 )
-
-    @property
-    def num_lookahead_slots(self) -> int:
-        """The number of additional slots the scheduler should allocate per
-        step, in addition to the slots allocated for each known token.
-
-        This is equal to the number of speculative tokens, as each speculative
-        token must be scored.
-        """
-        return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
