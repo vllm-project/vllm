@@ -15,9 +15,9 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
+    CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     subclass_attention_backend,
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (

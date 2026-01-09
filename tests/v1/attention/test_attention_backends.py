@@ -23,10 +23,9 @@ from vllm.utils.torch_utils import (
     is_torch_equal_or_newer,
     set_random_seed,
 )
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec

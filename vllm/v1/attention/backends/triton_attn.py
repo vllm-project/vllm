@@ -19,14 +19,12 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (

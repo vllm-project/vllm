@@ -8,11 +8,13 @@ from vllm.attention.layer import Attention
 from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import (
     make_local_attention_virtual_batches,
     subclass_attention_backend,
 )
