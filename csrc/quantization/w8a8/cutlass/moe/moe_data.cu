@@ -222,7 +222,7 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
   auto stream = at::cuda::getCurrentCUDAStream(
       expert_first_token_offset.device().index());
 
-  int const threads = 256;
+  int const threads = (num_experts < 256) ? num_experts : 256;
   int const blocks = (num_experts + threads - 1) / threads;
 
   auto const* offsets_ptr = expert_first_token_offset.data_ptr<int64_t>();

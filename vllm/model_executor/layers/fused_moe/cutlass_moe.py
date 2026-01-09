@@ -170,6 +170,7 @@ def run_cutlass_moe_fp8(
             expert_map,
             permuted_hidden_states=a1q_perm,
         )
+        # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
         swap_ab = a1q.size(0) <= 64
         ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
             expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, swap_ab
