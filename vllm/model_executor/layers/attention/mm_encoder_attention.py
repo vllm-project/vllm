@@ -4,23 +4,26 @@
 
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.ops.vit_attn_wrappers import (
-    vit_flash_attn_wrapper,
-    vit_torch_sdpa_wrapper,
-)
-from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.vit_attn_wrappers import (
+    vit_flash_attn_wrapper,
+    vit_torch_sdpa_wrapper,
+)
 
 logger = init_logger(__name__)
 
 
+# --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
     """Multi-headed attention without any cache, used for multimodal encoder."""
+
+    # --8<-- [end:mm_encoder_attn]
 
     def __init__(
         self,
