@@ -1411,6 +1411,8 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            gpu_memory_warning_threshold=self.gpu_memory_warning_threshold,
+            enable_gpu_memory_warning=self.enable_gpu_memory_warning,
         )
 
         ray_runtime_env = None
