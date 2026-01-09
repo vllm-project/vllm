@@ -586,7 +586,7 @@ class BertMLMHead(nn.Module):
         return logits
 
 
-class SPLADESparsePooler(SequencePooler):
+class SPLADESparsePooler(Pooler):
     """
     SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
@@ -608,6 +608,7 @@ class SPLADESparsePooler(SequencePooler):
         remove_cls_sep: bool = True,
     ):
         super().__init__()
+
         assert pooling in ("max", "sum")
         self.mlm_head = mlm_head
         self.cls_token_id = cls_token_id
