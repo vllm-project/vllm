@@ -41,6 +41,23 @@ QuantizationMethods = Literal[
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
+DEPRECATED_QUANTIZATION_METHODS = [
+    "deepspeedfp",
+    "tpu_int8",
+    "ptpc_fp8",
+    "fbgemm_fp8",
+    "fp_quant",
+    "bitblas",
+    "gptq_marlin_24",
+    "gptq_bitblas",
+    "hqq",
+    "experts_int8",
+    "ipex",
+    "auto-round",
+    "rtn",
+    "petit_nvfp4",
+]
+
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
 

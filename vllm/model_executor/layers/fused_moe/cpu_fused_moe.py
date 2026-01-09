@@ -13,10 +13,28 @@ from vllm.model_executor.layers.quantization.utils.layer_utils import replace_pa
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
-_CPU_MOE_ACT = {
-    "silu": SiluAndMul(),
-    "swigluoai": SwigluOAIAndMul(),
-}
+
+
+class _LazyActivationDict(dict):
+    """Lazily instantiate activation functions on first access.
+
+    Avoids triggering CustomOp.__init__() at module import time,
+    which would call get_current_vllm_config() before config is set.
+    """
+
+    _factories: dict[str, type[SiluAndMul] | type[SwigluOAIAndMul]] = {
+        "silu": SiluAndMul,
+        "swigluoai": SwigluOAIAndMul,
+    }
+
+    def __missing__(self, key: str) -> SiluAndMul | SwigluOAIAndMul:
+        if key not in self._factories:
+            raise KeyError(f"{key} is not a supported activation")
+        self[key] = self._factories[key]()
+        return self[key]
+
+
+_CPU_MOE_ACT = _LazyActivationDict()
 
 
 def grouped_topk(
@@ -212,7 +230,7 @@ class CPUFusedMOE:
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        assert activation in _CPU_MOE_ACT, f"{activation} is not supported."
+        assert activation in _CPU_MOE_ACT._factories, f"{activation} is not supported."
         assert not apply_router_weight_on_input
 
         topk_weights, topk_ids = select_experts(

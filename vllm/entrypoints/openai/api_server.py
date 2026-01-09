@@ -88,8 +88,10 @@ from vllm.entrypoints.utils import (
     log_non_default_args,
     process_chat_template,
     process_lora_modules,
+    sanitize_message,
     with_cancellation,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
@@ -902,7 +904,7 @@ def build_app(args: Namespace) -> FastAPI:
     async def http_exception_handler(_: Request, exc: HTTPException):
         err = ErrorResponse(
             error=ErrorInfo(
-                message=exc.detail,
+                message=sanitize_message(exc.detail),
                 type=HTTPStatus(exc.status_code).phrase,
                 code=exc.status_code,
             )
@@ -911,8 +913,6 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
-        from vllm.exceptions import VLLMValidationError
-
         param = None
         for error in exc.errors():
             if "ctx" in error and "error" in error["ctx"]:
@@ -931,7 +931,7 @@ def build_app(args: Namespace) -> FastAPI:
 
         err = ErrorResponse(
             error=ErrorInfo(
-                message=message,
+                message=sanitize_message(message),
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST,
                 param=param,
