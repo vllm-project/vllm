@@ -103,8 +103,11 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
 # Adapted from:
 # vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 # transformers.models.mamba.modeling_mamba.MambaMixer
-@CustomOp.register(name="plamo2_mamba_mixer")
+# --8<-- [start:plamo2_mamba_mixer]
+@CustomOp.register("plamo2_mamba_mixer")
 class Plamo2MambaMixer(MambaBase, CustomOp):
+    # --8<-- [end:plamo2_mamba_mixer]
+
     def __init__(self, vllm_config: VllmConfig, *, prefix: str = "", **kwargs) -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
