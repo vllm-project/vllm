@@ -104,6 +104,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y,
             *self.token_mapping_meta.meta_args(x.size(0)),
             scale,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_expand(
@@ -146,6 +147,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             *self.token_mapping_meta.meta_args(num_tokens),
             offset_start=offset_start,
             add_inputs=True,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
         y = y.view_as(y_org)
@@ -178,6 +180,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             *self.token_mapping_meta.meta_args(x.size(0)),
             offset_start=0,
             add_inputs=add_inputs,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_lora_linear(
@@ -428,4 +431,5 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+            self.lora_config.specialize_active_lora,
         )

@@ -57,8 +57,7 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
-        self.specialize_lora_count = False
-<<<<<<< HEAD
+        self.specialize_lora_count = self.vllm_config.lora_config.specialize_active_lora
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -93,7 +92,6 @@ class CudagraphDispatcher:
                             "values that won't be changed by cudagraph padding. "
                             "Use values from cudagraph_capture_sizes."
                         )
-=======
 
     def _get_lora_cases(self) -> list[tuple[bool, int]]:
         """
@@ -109,28 +107,11 @@ class CudagraphDispatcher:
         # Always include the no-LoRA case (for requests without adapters)
         cases: list[tuple[bool, int]] = [(False, 0)]
 
-        for n in range(1, lora_config.max_loras + 1):
-            cases.append((True, n))
-
-        return cases
->>>>>>> 109479b26 (Construting grid with num of active lora)
-
-    def _get_lora_cases(self) -> list[tuple[bool, int]]:
-        """
-        Returns list of (has_lora, num_active_loras) tuples for CUDA graph
-        capture. This is the single source of truth for LoRA capture cases.
-        """
-        lora_config = self.vllm_config.lora_config
-        if lora_config is None:
-            # No LoRA configured - single case with no LoRA
-            return [(False, 0)]
-
-        # LoRA is enabled - capture graphs for different active LoRA counts
-        # Always include the no-LoRA case (for requests without adapters)
-        cases: list[tuple[bool, int]] = [(False, 0)]
-
-        for n in range(1, lora_config.max_loras + 1):
-            cases.append((True, n))
+        if self.specialize_lora_count:
+            for n in range(1, lora_config.max_loras + 1):
+                # if n is power of 2 or n == lora_config.max_loras, adding it to cases
+                if (n & (n - 1)) == 0 or n == lora_config.max_loras:
+                    cases.append((True, n))
 
         return cases
 
