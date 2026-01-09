@@ -511,14 +511,11 @@ class AsyncLLM(EngineClient):
                     # event loop for too long.
                     engine_core_outputs = outputs.outputs
                     for start in range(0, num_outputs, chunk_size):
-                        end = min(start + chunk_size, num_outputs)
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            engine_core_outputs,
-                            outputs.timestamp,
-                            iteration_stats,
-                            start_idx=start,
-                            end_idx=end,
+                            outputs_slice, outputs.timestamp, iteration_stats
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
