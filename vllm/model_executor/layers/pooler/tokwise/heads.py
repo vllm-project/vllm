@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Set
 from typing import TypeAlias
 
 import torch
@@ -15,6 +16,7 @@ from vllm.model_executor.layers.pooler.activations import (
 from vllm.model_executor.layers.pooler.common import ClassifierFn
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 
 from .methods import TokenPoolingMethodOutputItem
 
@@ -22,6 +24,10 @@ TokenPoolerHeadOutput: TypeAlias = torch.Tensor | None
 
 
 class TokenPoolerHead(nn.Module, ABC):
+    @abstractmethod
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        raise NotImplementedError
+
     @abstractmethod
     def forward(
         self,
@@ -43,6 +49,9 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         self.head_dtype = model_config.head_dtype
 
         self.activation = PoolerNormalize()
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"token_embed"}
 
     def forward(
         self,
@@ -90,6 +99,9 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         self.act_fn = resolve_classifier_act_fn(
             model_config, static_num_labels=False, act_fn=act_fn
         )
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"token_classify"}
 
     def forward(
         self,

@@ -6,17 +6,19 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.config import PoolerConfig, get_current_vllm_config
-from vllm.model_executor.layers.pooler.activations import (
-    PoolerActivation,
-    resolve_classifier_act_fn,
-)
+from vllm.config import PoolerConfig
+from vllm.model_executor.layers.pooler.activations import PoolerActivation
 from vllm.model_executor.layers.pooler.common import ClassifierFn, PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..abstract import Pooler
-from .heads import EmbeddingPoolerHead, SequencePoolerHeadOutput
+from .heads import (
+    ClassifierPoolerHead,
+    EmbeddingPoolerHead,
+    SequencePoolerHead,
+    SequencePoolerHeadOutput,
+)
 from .methods import (
     SequencePoolingMethod,
     SequencePoolingMethodOutput,
@@ -56,8 +58,8 @@ class SimplePooler(SequencePooler):
 
     def __init__(
         self,
-        pooling: SequencePoolingMethod,
-        head: SequencePoolingHeadFn,
+        pooling: SequencePoolingMethod | SequencePoolingFn,
+        head: SequencePoolerHead | SequencePoolingHeadFn,
     ) -> None:
         super().__init__()
 
@@ -65,52 +67,22 @@ class SimplePooler(SequencePooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
+        tasks = set[PoolingTask]()
+
+        if isinstance(self.pooling, SequencePoolingMethod):
+            tasks = self.pooling.get_supported_tasks()
+        if isinstance(self.head, SequencePoolerHead):
+            tasks &= self.head.get_supported_tasks()
+
+        return tasks
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
+        updates = PoolingParamsUpdate()
 
-    # Returns subset of SequencePoolerOutput to satisfy SequencePoolingFn
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> SequencePoolerHeadOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
+        if isinstance(self.pooling, SequencePoolingMethod):
+            updates |= self.pooling.get_pooling_updates(task)
 
-
-class ClassifierPooler(SequencePooler):
-    """A pooling layer for classification tasks.
-
-    This layer does the following:
-    1. Applies a classification layer to the hidden states.
-    2. Optionally applies a pooler layer.
-    3. Applies an activation function to the output.
-    """
-
-    def __init__(
-        self,
-        pooling: SequencePoolingFn,
-        classifier: ClassifierFn | None = None,
-        act_fn: PoolerActivation | str | None = None,
-    ) -> None:
-        super().__init__()
-
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-
-        self.pooling = pooling
-        self.classifier = classifier
-        self.act_fn = resolve_classifier_act_fn(
-            model_config, static_num_labels=True, act_fn=act_fn
-        )
-        self.logit_bias: float | None = model_config.pooler_config.logit_bias
-        self.head_dtype = model_config.head_dtype
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"classify", "score"}
+        return updates
 
     def forward(
         self,
@@ -118,31 +90,8 @@ class ClassifierPooler(SequencePooler):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
-        # pooled_data shape: [batchsize, hidden_size]
-
-        pooled_data = pooled_data.to(self.head_dtype)
-
-        if self.classifier is not None:
-            pooled_data = self.classifier(pooled_data)
-        # pooled_data shape: [batchsize, num_labels]
-
-        if self.logit_bias is not None:
-            pooled_data -= self.logit_bias
-
-        pooling_params = pooling_metadata.pooling_params
-        flags = [p.use_activation for p in pooling_params]
-
-        if len(set(flags)) == 1:
-            scores = self.act_fn(pooled_data) if flags[0] else pooled_data
-        else:
-            scores = [
-                self.act_fn(vecs) if f else vecs for vecs, f in zip(pooled_data, flags)
-            ]
-
-        # scores shape: [batchsize, num_labels]
-        return scores
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return pooled_data
 
 
 def pooler_for_embed(pooler_config: PoolerConfig):
@@ -155,11 +104,13 @@ def pooler_for_embed(pooler_config: PoolerConfig):
 def pooler_for_classify(
     pooler_config: PoolerConfig,
     *,
-    pooling: SequencePoolingFn | None = None,
+    pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | str | None = None,
 ):
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
 
-    return ClassifierPooler(pooling=pooling, classifier=classifier, act_fn=act_fn)
+    head = ClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+
+    return SimplePooler(pooling=pooling, head=head)

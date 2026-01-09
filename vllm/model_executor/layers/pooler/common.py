@@ -15,6 +15,11 @@ class PoolingParamsUpdate:
     requires_token_ids: bool = False
     """Set this flag to enable `get_prompt_token_ids` for your pooler."""
 
+    def __or__(self, other: "PoolingParamsUpdate") -> "PoolingParamsUpdate":
+        return PoolingParamsUpdate(
+            requires_token_ids=self.requires_token_ids or other.requires_token_ids,
+        )
+
     def apply(self, params: PoolingParams) -> None:
         params.requires_token_ids = self.requires_token_ids
 

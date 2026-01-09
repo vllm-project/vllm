@@ -38,7 +38,9 @@ class AllPooler(TokenPooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify"}
+        tasks = self.pooling.get_supported_tasks()
+        tasks &= self.head.get_supported_tasks()
+        return tasks
 
     def forward(
         self,
@@ -58,6 +60,14 @@ class StepPooler(TokenPooler):
 
         self.pooling = AllPool()
         self.head = head
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        tasks = self.pooling.get_supported_tasks()
+        tasks &= self.head.get_supported_tasks()
+        return tasks
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
 
     def extract_states(
         self,
@@ -88,12 +98,6 @@ class StepPooler(TokenPooler):
             pooled_data.append(data)
 
         return pooled_data
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify"}
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
         self,

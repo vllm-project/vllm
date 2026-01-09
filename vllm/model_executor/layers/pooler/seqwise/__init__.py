@@ -3,6 +3,7 @@
 """Poolers that produce an output aggregating all tokens in the sequence."""
 
 from .heads import (
+    ClassifierPoolerHead,
     EmbeddingPoolerHead,
     SequencePoolerHead,
     SequencePoolerHeadOutput,
@@ -16,7 +17,6 @@ from .methods import (
     get_seq_pooling_method,
 )
 from .poolers import (
-    ClassifierPooler,
     SequencePooler,
     SequencePoolerOutput,
     SequencePoolingFn,
@@ -29,8 +29,8 @@ from .poolers import (
 __all__ = [
     "SequencePoolerHead",
     "SequencePoolerHeadOutput",
+    "ClassifierPoolerHead",
     "EmbeddingPoolerHead",
-    "SequencePoolerHead",
     "SequencePoolingMethod",
     "SequencePoolingMethodOutput",
     "CLSPool",
@@ -41,7 +41,6 @@ __all__ = [
     "SequencePoolingFn",
     "SequencePoolingHeadFn",
     "SequencePoolerOutput",
-    "ClassifierPooler",
     "SimplePooler",
     "pooler_for_classify",
     "pooler_for_embed",
