@@ -678,7 +678,7 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
   size_t const idx_bytes =
       static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
   size_t const internal_bytes = val_bytes_aligned + idx_bytes;
-  size_t const extra_bytes = 256 + static_cast<size_t>(n_group) * sizeof(T);
+  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(T);
   config.dynamicSmemBytes = internal_bytes + extra_bytes;
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
