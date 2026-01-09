@@ -378,7 +378,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import gemm_a8w8_blockscale
 
     return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
@@ -428,7 +428,7 @@ def _rocm_aiter_triton_gemm_afp4wfp4_impl(
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4
 
     return gemm_afp4wfp4(A, B, As, Bs.T, dtype=output_dtype)
 
@@ -452,7 +452,7 @@ def _rocm_aiter_triton_gemm_a16w8_blockscale_impl(
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter.ops.triton.gemm_a16w8_blockscale import gemm_a16w8_blockscale
+    from aiter.ops.triton.gemm.basic.gemm_a16w8_blockscale import gemm_a16w8_blockscale
 
     return gemm_a16w8_blockscale(A, B, Bs, dtype=output_dtype)
 
@@ -526,7 +526,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
@@ -564,7 +564,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
@@ -603,7 +603,7 @@ def _rocm_aiter_2rmsnorm_1fp8_group_quant_impl(
     variance_epsilon2: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, x2_out, _ = fused_rms_fp8_group_quant(
         x1,
@@ -710,8 +710,8 @@ def _rocm_aiter_triton_fused_shared_expert_fp8_impl(
     bias_shared: torch.Tensor,
     bias_moe_gate: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_gemm_a8w8_blockscale_a16w16 import fused_gemm_a8w8_blockscale_a16w16
-    from aiter.ops.triton.fused_fp8_quant import fused_reduce_act_mul_fp8_group_quant
+    from aiter.ops.triton.gemm.fused.fused_gemm_a8w8_blockscale_a16w16 import fused_gemm_a8w8_blockscale_a16w16
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_reduce_act_mul_fp8_group_quant
     
     shared_output, router_logits = fused_gemm_a8w8_blockscale_a16w16(hidden_states_shared, weight_gate_up, hidden_states_shared_scale, weight_scale_gate_up, hidden_states_moe_gate, weight_moe_gate, 
                                     bias_fp8=bias_shared, bias_bf16=bias_moe_gate, dtype=hidden_states_moe_gate.dtype, skip_reduce=True)
@@ -753,7 +753,7 @@ def _rocm_aiter_triton_fused_down_proj_mul_add_fp8_impl(
     routed_scaling_factor: float,
     final_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    from aiter.ops.triton.fused_gemm_a8w8_blockscale_mul_add import fused_gemm_a8w8_blockscale_mul_add
+    from aiter.ops.triton.gemm.fused.fused_gemm_a8w8_blockscale_mul_add import fused_gemm_a8w8_blockscale_mul_add
 
     out = fused_gemm_a8w8_blockscale_mul_add(hidden_states_shared, weight_down_proj, hidden_states_shared_scale, weight_scale_down_proj, routed_scaling_factor, final_hidden_states, fuse_type=1)
     return out
@@ -780,8 +780,8 @@ def _rocm_aiter_triton_fused_shared_expert_fp4_impl(
     bias_shared: torch.Tensor,
     bias_moe_gate: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_gemm_afp4wfp4_a16w16 import fused_gemm_afp4wfp4_a16w16
-    from aiter.ops.triton.fused_mxfp4_quant import fused_reduce_act_mul_and_mxfp4_quant
+    from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_a16w16 import fused_gemm_afp4wfp4_a16w16
+    from aiter.ops.triton.quant.fused_mxfp4_quant import fused_reduce_act_mul_and_mxfp4_quant
     
     shared_output, router_logits = fused_gemm_afp4wfp4_a16w16(hidden_states_shared, weight_gate_up, hidden_states_shared_scale, weight_scale_gate_up.T, hidden_states_moe_gate, weight_moe_gate, 
                                     is_fp4_preshuffled=False, bias_fp4=bias_shared, bias_bf16=bias_moe_gate, dtype=hidden_states_moe_gate.dtype, skip_reduce=True)
@@ -831,7 +831,7 @@ def _rocm_aiter_triton_fused_down_proj_mul_add_fp4_impl(
     routed_scaling_factor: float,
     final_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    from aiter.ops.triton.fused_gemm_afp4wfp4_mul_add import fused_gemm_afp4wfp4_mul_add
+    from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_mul_add import fused_gemm_afp4wfp4_mul_add
 
     out = fused_gemm_afp4wfp4_mul_add(hidden_states_shared, weight_down_proj, hidden_states_shared_scale, weight_scale_down_proj.T, routed_scaling_factor, final_hidden_states, fuse_type=1)
     return out
@@ -861,8 +861,8 @@ def _rocm_aiter_triton_qkv_a_proj_layernorm_fp8_impl(
     kv_lora_rank: int,
     qk_rope_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_reduce_rms_fp8_group_quant
-    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_reduce_rms_fp8_group_quant
+    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import gemm_a8w8_blockscale
     import aiter as rocm_aiter
     qkv_lora = gemm_a8w8_blockscale(hidden_states_quant, weight_qkv_a_proj, hidden_states_quant_scale, weight_scale_qkv_a_proj, skip_reduce=True)
     q_c, kv_c, k_pe = qkv_lora.split([q_lora_rank, kv_lora_rank, qk_rope_head_dim],
@@ -920,8 +920,8 @@ def _rocm_aiter_triton_qkv_a_proj_layernorm_fp4_impl(
     kv_lora_rank: int,
     qk_rope_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
-    from aiter.ops.triton.fused_mxfp4_quant import fused_reduce_rms_mxfp4_quant
+    from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.quant.fused_mxfp4_quant import fused_reduce_rms_mxfp4_quant
         
     qkv_lora = gemm_afp4wfp4(hidden_states_quant, weight_qkv_a_proj, hidden_states_quant_scale, weight_scale_qkv_a_proj.T, skip_reduce=True)
     q_c, kv_c, k_pe = qkv_lora.split([q_lora_rank, kv_lora_rank, qk_rope_head_dim],
@@ -1464,7 +1464,7 @@ class rocm_aiter_ops:
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+        from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
         if x_scales is None:
@@ -1490,7 +1490,7 @@ class rocm_aiter_ops:
         rotary_dim: int,
         is_neox_style: bool,
     ):
-        from aiter.ops.triton.rope import rope_cached_thd_positions_2c_fwd_inplace
+        from aiter.ops.triton.rope.rope import rope_cached_thd_positions_2c_fwd_inplace
 
         num_tokens = positions.numel()
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
@@ -1528,7 +1528,7 @@ class rocm_aiter_ops:
         y_scale: dict | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
-        from aiter.ops.triton.batched_gemm_a16wfp4 import (
+        from aiter.ops.triton.gemm.batched.batched_gemm_a16wfp4 import (
             batched_gemm_a16wfp4 as aiter_triton_fp4_bmm,
         )
 
@@ -1558,7 +1558,7 @@ class rocm_aiter_ops:
         config: dict | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
-        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
+        from aiter.ops.triton.gemm.batched.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
             batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
         )
 

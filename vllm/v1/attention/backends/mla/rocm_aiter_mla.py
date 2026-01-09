@@ -361,7 +361,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             if positions is not None:
                 # positions is not None entails that Q and K are not RoPE embedded yet, therefore, fused_qk_rope_cat_and_cache_mla is called
                 assert hasattr(self, "rotary_emb"), f"rotary_emb not found in {self}"
-                from aiter.ops.triton.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
+                from aiter.ops.triton.fusions.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
                 cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim = -1)
                 is_neox = self.rotary_emb.is_neox_style
                 q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -371,7 +371,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 if fp8_attention:
                     kv_cache_og_dtype = kv_cache.dtype
                     kv_cache = kv_cache.view(q_out_dtype)          
-                fused_output = fused_qk_rope_cat_and_cache_mla(
+                q, _, k_pe, mla_output_zeros = fused_qk_rope_cat_and_cache_mla(
                     q_nope,
                     q_pe,
                     k_c_normed.unsqueeze(1),
@@ -389,10 +389,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                     decode_q_pe_out = decode_q_cat[... , -self.qk_rope_head_dim:] if self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled else None,
                     k_pe_out=k_pe,
                 )
-                if num_decode_tokens > 0:
-                    q, _, k_pe, kv_cache, mla_output_zeros = fused_output
-                else:
-                    q, _, k_pe, kv_cache = fused_output
                 if fp8_attention:
                     kv_cache = kv_cache.view(kv_cache_og_dtype)
             else:
