@@ -4441,7 +4441,7 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-       
+      
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
