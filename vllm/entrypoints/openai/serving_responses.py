@@ -692,6 +692,10 @@ class OpenAIServingResponses(OpenAIServing):
             # TODO: Calculate usage.
             # assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
+
+            # Check finish reason from the parser
+            if context.parser.finish_reason == "length":
+                status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
             # Use final_output which has accumulated text/token_ids/logprobs
@@ -702,6 +706,10 @@ class OpenAIServingResponses(OpenAIServing):
 
             # finish_reason='error' indicates retryable internal error
             self._raise_if_error(final_output.finish_reason, request.request_id)
+
+            # Check if generation was stopped due to max_tokens
+            if final_output.finish_reason == "length":
+                status = "incomplete"
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
