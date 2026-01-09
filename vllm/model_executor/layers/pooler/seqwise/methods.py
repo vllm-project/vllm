@@ -90,4 +90,4 @@ def get_seq_pooling_method(pooling_type: PoolingTypeStr | str):
     if pooling_type == "MEAN":
         return MeanPool()
 
-    raise NotImplementedError(f"Unknown sequence pooling method: {pooling_type!r}")
+    raise NotImplementedError(f"Unknown sequence pooling type: {pooling_type!r}")

@@ -119,6 +119,6 @@ def get_tok_pooling_method(pooling_type: PoolingTypeStr | str):
     if pooling_type == "STEP":
         return StepPool()
 
-    # TODO: Separate seq and tok pooling methods so we don't need this fallback
+    # TODO: Separate seq and tok pooling types so we don't need this fallback
     return AllPool()
-    raise NotImplementedError(f"Unknown tokenwise pooling method: {pooling_type!r}")
+    raise NotImplementedError(f"Unknown tokenwise pooling type: {pooling_type!r}")
