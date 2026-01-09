@@ -68,3 +68,165 @@ th:not(:first-child) {
     This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
 
     For the most up-to-date information on hardware support and quantization methods, please refer to [vllm/model_executor/layers/quantization](../../../vllm/model_executor/layers/quantization) or consult with the vLLM development team.
+
+## Out-of-Tree Quantization Plugins
+
+vLLM supports registering custom, out-of-tree quantization methods using the `@register_quantization_config` decorator. This allows you to implement and use your own quantization schemes without modifying the vLLM codebase.
+
+### Registering a Custom Quantization Method
+
+To register a custom quantization method, create a class that inherits from `QuantizationConfig` and decorate it with `@register_quantization_config`:
+
+```python
+from vllm.model_executor.layers.quantization import (
+    register_quantization_config,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+
+@register_quantization_config("my_quant")
+class MyQuantConfig(QuantizationConfig):
+    """Custom quantization config."""
+
+    def get_name(self) -> str:
+        return "my_quant"
+
+    def get_supported_act_dtypes(self) -> list:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # Minimum GPU compute capability, -1 for no restriction
+        return -1
+
+    @staticmethod
+    def get_config_filenames() -> list[str]:
+        # Config files to search for in model directory
+        return []
+
+    @classmethod
+    def from_config(cls, config: dict) -> "MyQuantConfig":
+        # Create config from model's quantization config
+        return cls()
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
+        # Return the quantization method for this layer
+        # Return None if the layer should not be quantized
+        ...
+```
+
+### Required Methods
+
+Your custom `QuantizationConfig` subclass must implement these abstract methods:
+
+| Method | Description |
+|--------|-------------|
+| `get_name()` | Returns the name of the quantization method |
+| `get_supported_act_dtypes()` | Returns list of supported activation dtypes (e.g., `torch.float16`) |
+| `get_min_capability()` | Returns minimum GPU compute capability (e.g., 80 for Ampere, -1 for no restriction) |
+| `get_config_filenames()` | Returns list of config filenames to search for in model directory |
+| `from_config(config)` | Class method to create config from model's quantization config dict |
+| `get_quant_method(layer, prefix)` | Returns the quantization method for a given layer, or `None` to skip |
+
+### Implementing a Quantize Method
+
+The `get_quant_method` should return an instance of a class that inherits from `QuantizeMethodBase`:
+
+```python
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+
+class MyQuantLinearMethod(UnquantizedLinearMethod):
+    """Custom quantization method for linear layers."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Apply custom quantization logic here
+        ...
+```
+
+### Supporting Mixture of Experts (MoE) Models
+
+To support quantization for MoE models, your `get_quant_method` must also handle `FusedMoE` layers by returning a `FusedMoEMethodBase` subclass:
+
+```python
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+
+@register_quantization_config("my_quant")
+class MyQuantConfig(QuantizationConfig):
+    # ... other methods ...
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
+        if isinstance(layer, LinearBase):
+            return MyQuantLinearMethod()
+        elif isinstance(layer, FusedMoE):
+            # Return a FusedMoEMethodBase subclass for MoE layers
+            return MyQuantMoEMethod(layer.moe_config)
+            # Or return UnquantizedFusedMoEMethod to skip quantization:
+            # return UnquantizedFusedMoEMethod(layer.moe_config)
+        return None
+```
+
+A custom `FusedMoEMethodBase` subclass must implement:
+
+| Method | Description |
+|--------|-------------|
+| `create_weights(...)` | Create quantized weights for the MoE layer |
+| `apply(layer, router, x, router_logits)` | Apply the MoE computation with quantized weights |
+| `get_fused_moe_quant_config(layer)` | Return the MoE quantization configuration |
+
+See existing implementations like `Fp8MoEMethod` in `vllm/model_executor/layers/quantization/fp8.py` for reference.
+
+### Using the Plugin
+
+Once registered, you can use your custom quantization method with vLLM:
+
+```python
+# Register your quantization method (import the module containing your config)
+import my_quant_plugin
+
+from vllm import LLM
+
+# Use the custom quantization method
+llm = LLM(model="your-model", quantization="my_quant")
+```
+
+### Creating a Distributable Plugin
+
+To distribute your quantization method as a pip-installable package, use Python entry points:
+
+```python
+# setup.py
+from setuptools import setup
+
+setup(
+    name='vllm_my_quant',
+    version='0.1',
+    packages=['vllm_my_quant'],
+    entry_points={
+        'vllm.general_plugins': [
+            "register_my_quant = vllm_my_quant:register"
+        ]
+    }
+)
+
+# vllm_my_quant/__init__.py
+def register():
+    # Import to trigger the @register_quantization_config decorator
+    from vllm_my_quant.my_quant_config import MyQuantConfig
+```
+
+For more information on the plugin system, see the [Plugin System documentation](../../design/plugin_system.md).
