@@ -1693,11 +1693,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             from vllm.triton_utils import HAS_TRITON
 
             if HAS_TRITON:
-                from vllm.model_executor.layers.fused_moe import TritonExperts
+                from vllm.model_executor.layers.fused_moe import TritonWNA16Experts
 
                 layer.w13_weight = layer.w13_weight_packed
                 layer.w2_weight = layer.w2_weight_packed
-                return TritonExperts(quant_config=self.moe_quant_config)
+                return TritonWNA16Experts(quant_config=self.moe_quant_config)
             else:
                 raise NotImplementedError(
                     "TritonExperts requires Triton. "
