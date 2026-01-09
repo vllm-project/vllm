@@ -14,6 +14,8 @@ from transformers import AutoTokenizer
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 
+from vllm.platforms import current_platform
+
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
@@ -89,7 +91,7 @@ EAGER = [True, False]
 
 
 @pytest.mark.skipif(
-    not is_quant_method_supported("modelopt_fp4"),
+    not current_platform.has_device_capability(100),
     reason="modelopt_fp4 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
@@ -98,7 +100,7 @@ EAGER = [True, False]
     "backend",
     [
         "flashinfer-cudnn",
-        "flashinfer-trtllm",
+        "flashinfer-trtllm", # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer-cutlass",
     ],
 )
