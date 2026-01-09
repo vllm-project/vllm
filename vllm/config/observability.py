@@ -45,6 +45,10 @@ class ObservabilityConfig:
     Note that collecting detailed timing information for each request can be
     expensive."""
 
+    token_level_profiling: bool = False
+    """Enable token-level profiling to collect detailed timing information for each 
+    token to trace."""
+
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).
     Uses sampling to minimize overhead.
@@ -148,5 +152,9 @@ class ObservabilityConfig:
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+            )
+        if self.token_level_profiling and not self.otlp_traces_endpoint:
+            raise ValueError(
+                "token_level_profiling requires `--otlp-traces-endpoint` to be set."
             )
         return self

@@ -238,6 +238,9 @@ class SchedulerOutput:
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 
+    # Record the scheduling time point
+    scheduled_at: float = 0.0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
