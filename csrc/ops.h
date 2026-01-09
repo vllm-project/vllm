@@ -265,6 +265,11 @@ void get_cutlass_moe_mm_problem_sizes(
     const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets,
     std::optional<bool> force_swap_ab = std::nullopt);
 
+void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+    const torch::Tensor& expert_first_token_offset,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    const int64_t n, const int64_t k, const bool swap_ab);
+
 void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
                                   torch::Tensor& problem_sizes1,
                                   torch::Tensor& problem_sizes2,
