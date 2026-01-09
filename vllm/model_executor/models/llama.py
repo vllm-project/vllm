@@ -369,7 +369,9 @@ def llama_model_invariants(
         torch._check(positions.size()[0] == input_ids.size()[0])
 
 
-@support_torch_compile(shape_invariants=llama_model_invariants)
+@support_torch_compile(
+    mark_unbacked_dims={"input_ids": 0}, shape_invariants=llama_model_invariants
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
@@ -415,9 +417,6 @@ class LlamaModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # Need explicit mark here to avoid recompile from 0/1 spec
-        # since VocabEmbedding uses a different torch.compile decorator
-        torch._dynamo.decorators.mark_unbacked(input_ids, 0)
         return self.embed_tokens(input_ids)
 
     def forward(

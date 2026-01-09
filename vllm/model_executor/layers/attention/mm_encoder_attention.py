@@ -173,8 +173,8 @@ class MMEncoderAttention(CustomOp):
             v=value,
             batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
-            scale=self.scale,
             fa_version=self._fa_version,
+            scale=self.scale,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
