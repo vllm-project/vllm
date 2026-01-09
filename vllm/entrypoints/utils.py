@@ -8,6 +8,7 @@ import os
 from argparse import Namespace
 from typing import Any
 
+import regex as re
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
@@ -274,3 +275,8 @@ def process_lora_modules(
         else:
             lora_modules += default_mm_lora_paths
     return lora_modules
+
+
+def sanitize_message(message: str) -> str:
+    # Avoid leaking memory address from object reprs
+    return re.sub(r" at 0x[0-9a-f]+>", ">", message)

@@ -136,7 +136,7 @@ def create_and_prepopulate_kv_cache(
     slot_mapping = common_attn_metadata.slot_mapping
 
     # Create KV cache
-    kv_cache = torch.empty(
+    kv_cache = torch.zeros(
         2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
     kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
@@ -556,7 +556,7 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with causal attention."""
 
