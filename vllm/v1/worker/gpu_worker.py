@@ -50,7 +50,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -547,18 +547,29 @@ class Worker(WorkerBase):
 
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
-        # new/cached request numbers in each iteration
+        # context/generation request numbers in each iteration.
+        # A context request is a request that has not yet generated any tokens
         if not self.profiler:
             return nullcontext()
 
         self.profiler.step()
 
-        num_new = len(scheduler_output.scheduled_new_reqs)
-        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+        iteration_details = compute_iteration_details(scheduler_output)
 
-        return self.profiler.annotate_context_manager(
-            f"execute_new_{num_new}_cached_{num_cached}"
+        annotation = "".join(
+            [
+                "execute_context_",
+                str(iteration_details.num_ctx_requests),
+                "(",
+                str(iteration_details.num_ctx_tokens),
+                ")_generation_",
+                str(iteration_details.num_generation_requests),
+                "(",
+                str(iteration_details.num_generation_tokens),
+                ")",
+            ]
         )
+        return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
     def sample_tokens(
