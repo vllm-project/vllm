@@ -204,29 +204,4 @@ from vllm import LLM
 llm = LLM(model="your-model", quantization="my_quant")
 ```
 
-### Creating a Distributable Plugin
-
-To distribute your quantization method as a pip-installable package, use Python entry points:
-
-```python
-# setup.py
-from setuptools import setup
-
-setup(
-    name='vllm_my_quant',
-    version='0.1',
-    packages=['vllm_my_quant'],
-    entry_points={
-        'vllm.general_plugins': [
-            "register_my_quant = vllm_my_quant:register"
-        ]
-    }
-)
-
-# vllm_my_quant/__init__.py
-def register():
-    # Import to trigger the @register_quantization_config decorator
-    from vllm_my_quant.my_quant_config import MyQuantConfig
-```
-
 For more information on the plugin system, see the [Plugin System documentation](../../design/plugin_system.md).
