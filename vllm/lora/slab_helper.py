@@ -351,7 +351,7 @@ def build_target_matched_slab(
 
 def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name, scaling=1.0):
     """Extract lora_a and lora_b tensors from GPU slab for a module.
-    
+
     Args:
         gpu_slab: The GPU slab containing all weights
         metadata: Slab metadata with extraction map
@@ -369,11 +369,11 @@ def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name, scaling=1.0):
         _, a_offset, a_size, a_shape, b_offset, b_size, b_shape = extraction_info
         lora_a = gpu_slab[a_offset : a_offset + a_size].view(a_shape)
         lora_b = gpu_slab[b_offset : b_offset + b_size].view(b_shape)
-        
+
         # Apply scaling to lora_b if needed (slab path skips optimize())
         if scaling != 1.0:
             lora_b = lora_b * scaling
-        
+
         return lora_a, lora_b
 
     elif extraction_type in ("moe", "qkv"):
@@ -412,17 +412,17 @@ def process_slab_activation_loop(
     for module_name, module in modules_dict.items():
         # Get scaling from lora_model (slab path doesn't call optimize())
         module_lora = lora_model.loras.get(module_name)
-        scaling = 1.0
-        if module_lora and hasattr(module_lora, 'scaling'):
-            # For packed modules, scaling is a list; for single modules, it's a float
-            # Pass the full scaling value(s) to extract_tensors_from_gpu_slab
+        scaling: float | list[float] = 1.0
+        if module_lora and hasattr(module_lora, "scaling"):
+            # For packed modules, scaling is a list; for single modules, it's
+            # a float. Pass the full scaling value(s) to extract_tensors.
             if isinstance(module_lora.scaling, (list, tuple)):
                 # Packed module - pass full list of per-component scalings
-                scaling = [s if s else 1.0 for s in module_lora.scaling]
+                scaling = [float(s) if s else 1.0 for s in module_lora.scaling]
             else:
                 # Single module - pass single scaling value
-                scaling = module_lora.scaling if module_lora.scaling else 1.0
-        
+                scaling = float(module_lora.scaling) if module_lora.scaling else 1.0
+
         lora_a_gpu, lora_b_gpu = extract_tensors_from_gpu_slab(
             gpu_slab, metadata, module_name, scaling=scaling
         )
@@ -434,17 +434,24 @@ def process_slab_activation_loop(
 
         # Special case: MoE3D needs 2-item list format
         if isinstance(module, FusedMoE3DWithLoRA):
-            gate_up_scaling = 1.0
+            gate_up_scaling: float | list[float] = 1.0
             gate_up_lora = lora_model.loras.get(module_name + ".base_layer")
-            if gate_up_lora and hasattr(gate_up_lora, 'scaling'):
+            if gate_up_lora and hasattr(gate_up_lora, "scaling"):
                 # Pass the full scaling for gate_up as well
                 if isinstance(gate_up_lora.scaling, (list, tuple)):
-                    gate_up_scaling = [s if s else 1.0 for s in gate_up_lora.scaling]
+                    gate_up_scaling = [
+                        float(s) if s else 1.0 for s in gate_up_lora.scaling
+                    ]
                 else:
-                    gate_up_scaling = gate_up_lora.scaling if gate_up_lora.scaling else 1.0
-            
+                    gate_up_scaling = (
+                        float(gate_up_lora.scaling) if gate_up_lora.scaling else 1.0
+                    )
+
             gate_up_a, gate_up_b = extract_tensors_from_gpu_slab(
-                gpu_slab, metadata, module_name + ".base_layer", scaling=gate_up_scaling
+                gpu_slab,
+                metadata,
+                module_name + ".base_layer",
+                scaling=gate_up_scaling,
             )
             down_a, down_b = lora_a_gpu, lora_b_gpu
 
@@ -493,14 +500,14 @@ def get_cached_lora_model(cache_key):
 
 def clear_slab_cache_for_lora(lora_dir: str) -> None:
     """Clear slab cache entry for a specific LoRA directory.
-    
+
     Called when a LoRA is removed to free pinned CPU memory.
     """
     if not lora_dir:
         return
-    
+
     cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
-    
+
     with _CACHE_LOCK:
         if cache_key in _GLOBAL_SLAB_CACHE:
             # Explicitly free the slab tensor (pinned CPU memory)
@@ -512,14 +519,14 @@ def clear_slab_cache_for_lora(lora_dir: str) -> None:
 
 def clear_lora_model_cache_for_lora(lora_dir: str) -> None:
     """Clear LoRAModel cache entry for a specific LoRA directory.
-    
+
     Called when a LoRA is removed.
     """
     if not lora_dir:
         return
-    
+
     cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
-    
+
     with _LORA_MODEL_CACHE_LOCK:
         if cache_key in _GLOBAL_LORA_MODEL_CACHE:
             _GLOBAL_LORA_MODEL_CACHE.pop(cache_key, None)
@@ -594,11 +601,7 @@ def create_slab_optimized_lora_model(
     packed_modules: dict | None = None,
     packed_modules_mapping: dict | None = None,
 ):
-    """Create a LoRAModel with target-aware slab.
-    
-    Args:
-        embedding_padding_modules: Required list of module names to apply embedding padding.
-    """
+    """Create a LoRAModel with target-aware slab."""
     if get_ultra_fast_pool() is None:
         pool = UltraFastPinnedPool()
         set_global_pool(pool)
@@ -661,11 +664,6 @@ def create_slab_optimized_lora_model(
             if not has_replacement:
                 continue
 
-            # Ensure None values are explicit
-            for i in range(len(replacement_loras)):
-                if not replacement_loras[i]:
-                    replacement_loras[i] = None
-
             # Pack based on module type
             if module_name.endswith(".experts"):
                 packed_lora = PackedLoRALayerWeights.pack_moe(
@@ -673,17 +671,16 @@ def create_slab_optimized_lora_model(
                     module_name,
                 )
             else:
-                packed_lora = PackedLoRALayerWeights.pack(
-                    replacement_loras
-                )
+                packed_lora = PackedLoRALayerWeights.pack(replacement_loras)
+            # Type guard: packed_lora should not be None from pack methods
+            assert packed_lora is not None
             lora_model_instance.loras[module_name] = packed_lora
             # Remove individual projections
             for module in replaced_module:
                 lora_model_instance.loras.pop(module, None)
-            
+
             # for lora in lora_model_instance.loras.values():
             #     lora.optimize()
-
 
     else:
         logger.warning(
@@ -733,13 +730,17 @@ def create_slab_optimized_lora_model(
     if target_modules_dict:
         for module_name, module in target_modules_dict.items():
             if isinstance(module, FusedMoE3DWithLoRA):
-                module_lora = lora_model_instance.loras.get(module_name)
-                
+                moe_lora: LoRALayerWeights | None = lora_model_instance.loras.get(
+                    module_name
+                )
+
                 # Only process if lora_a is still a tensor (not already processed)
-                if module_lora and torch.is_tensor(module_lora.lora_a):
-                    gate_up_proj_lora = lora_model_instance.loras.get(module_name + ".base_layer")
-                    down_proj_lora = module_lora
-                    
+                if moe_lora and torch.is_tensor(moe_lora.lora_a):
+                    gate_up_proj_lora = lora_model_instance.loras.get(
+                        module_name + ".base_layer"
+                    )
+                    down_proj_lora = moe_lora
+
                     if gate_up_proj_lora and down_proj_lora:
                         num_experts = module.w13_lora_a_stacked[0].shape[1]
 
@@ -750,7 +751,7 @@ def create_slab_optimized_lora_model(
                         down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
                             num_experts, -1, down_proj_lora.lora_a.shape[-1]
                         )
-                        
+
                         # Reshape lora_b to (output_size, num_experts, rank)
                         gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
                             gate_up_proj_lora.lora_b.shape[0], -1, num_experts
@@ -758,7 +759,7 @@ def create_slab_optimized_lora_model(
                         down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
                             down_proj_lora.lora_b.shape[0], -1, num_experts
                         )
-                        
+
                         # Permute lora_b to (num_experts, output_size, rank)
                         gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
                             2, 0, 1
@@ -766,13 +767,13 @@ def create_slab_optimized_lora_model(
                         down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
                             2, 0, 1
                         ).contiguous()
-                        
+
                         # Convert to list format for MOE
-                        module_lora.lora_a = [
+                        moe_lora.lora_a = [
                             gate_up_proj_lora.lora_a,
                             down_proj_lora.lora_a,
                         ]
-                        module_lora.lora_b = [
+                        moe_lora.lora_b = [
                             gate_up_proj_lora.lora_b,
                             down_proj_lora.lora_b,
                         ]

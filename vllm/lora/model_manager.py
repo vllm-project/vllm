@@ -790,7 +790,7 @@ class LoRAModelManager:
         self.deactivate_adapter(adapter_id)
         if adapter_id not in self._registered_adapters:
             return False
-        
+
         # Clean up global slab caches for this adapter to free pinned memory
         adapter = self._registered_adapters.pop(adapter_id, None)
         if adapter and SLAB_OPTIMIZATION:
@@ -798,7 +798,7 @@ class LoRAModelManager:
             if lora_dir:
                 clear_slab_cache_for_lora(lora_dir)
                 clear_lora_model_cache_for_lora(lora_dir)
-        
+
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:

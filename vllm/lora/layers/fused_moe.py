@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.utils import divide
+from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -40,9 +41,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 
 from .utils import _get_lora_device
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: FusedMoE) -> None:
