@@ -193,7 +193,7 @@ class GritLMPooler(SequencePooler):
         return self.activation(pooled_data)
 
 
-@default_pooling_type("MEAN")
+@default_pooling_type(seq_pooling_type="MEAN")
 class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
