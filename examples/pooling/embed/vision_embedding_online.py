@@ -22,8 +22,8 @@ from PIL import Image
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
 
 def create_chat_embeddings(
     client: OpenAI,
@@ -169,7 +169,7 @@ def run_qwen3_vl(client: OpenAI, model: str):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "A cat and a dog"},
+                    {"type": "text", "text": text},
                 ],
             }
         ],
@@ -205,7 +205,7 @@ def run_qwen3_vl(client: OpenAI, model: str):
                     {"type": "image_url", "image_url": {"url": image_url}},
                     {
                         "type": "text",
-                        "text": f"{image_placeholder}\nRepresent the given image with the following question: What is in the image.",
+                        "text": f"{image_placeholder}\n{text}",
                     },
                 ],
             }

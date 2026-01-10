@@ -15,7 +15,8 @@ from dataclasses import asdict
 from vllm import LLM, EngineArgs
 from vllm.multimodal.utils import fetch_image
 
-image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
 mm_data = {"image": fetch_image(image_url)}
 
 
@@ -36,7 +37,7 @@ def run_qwen3_vl():
     llm = LLM(**asdict(engine_args))
 
     print("Text embedding output:")
-    outputs = llm.embed("A cat and a dog", use_tqdm=False)
+    outputs = llm.embed(text, use_tqdm=False)
     print_embeddings(outputs[0].outputs.embedding)
 
     print("Image embedding output:")
@@ -52,7 +53,7 @@ def run_qwen3_vl():
     print("Image+Text embedding output:")
     outputs = llm.embed(
         {
-            "prompt": f"{image_placeholder}\nRepresent the given image with the following question: What is in the image.",
+            "prompt": f"{image_placeholder}\n{text}",
             "multi_modal_data": mm_data,
         },
         use_tqdm=False,
