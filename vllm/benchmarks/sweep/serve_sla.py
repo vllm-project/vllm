@@ -8,8 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
-from scipy.interpolate import PchipInterpolator
-
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
@@ -22,6 +20,15 @@ try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    from scipy.interpolate import PchipInterpolator
+except ImportError:
+    PchipInterpolator = (
+        PlaceholderModule("scipy")
+        .placeholder_attr("interpolate")
+        .placeholder_attr("PlaceholderModule")
+    )
 
 
 def _get_sla_base_path(
@@ -124,6 +131,15 @@ class SLAHistory(dict[int, float]):
         self.min_value = min_value
         self.max_value = max_value
 
+    def get_xy(self) -> tuple[list[int], list[float]]:
+        xs = list[int]()
+        ys = list[float]()
+        for x, y in sorted(self.items()):
+            xs.append(x)
+            ys.append(y)
+
+        return xs, ys
+
     def get_max_passing(self) -> float:
         return max(
             (val for val, margin in self.items() if margin <= 0),
@@ -161,17 +177,11 @@ def solve_sla(
         elif len(history) == 1:
             val = sla_min_value
         else:
-            xs = list[int]()
-            ys = list[float]()
-            for x, y in sorted(history.items()):
-                xs.append(x)
-                ys.append(y)
-
-            spl = PchipInterpolator(xs, ys, extrapolate=False)
+            spl = PchipInterpolator(*history.get_xy(), extrapolate=False)
             spl_roots = spl.solve()
             if len(spl_roots) == 0:
                 # Fallback to binary search
-                val = (history.get_max_passing() + history.get_min_failing()) // 2
+                val = int((history.get_max_passing() + history.get_min_failing()) / 2)
             else:
                 val = int(spl_roots[0])
 
@@ -180,7 +190,6 @@ def solve_sla(
                 # that it is indeed the target value
                 val += 1
 
-        unclamped_val = val
         val = max(sla_min_value, min(val, sla_max_value))
         print(f"Testing {sla_variable}: {val} req/s")
 
@@ -213,9 +222,6 @@ def solve_sla(
             print(f"SLA criteria are met. ({margin=:.2f})")
         else:
             print(f"SLA criteria are not met. ({margin=:.2f})")
-
-        if unclamped_val != val:
-            break
 
     return sla_data, history
 
