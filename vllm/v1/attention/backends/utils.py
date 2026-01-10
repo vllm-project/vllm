@@ -8,6 +8,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    TypeVar,
     get_args,
 )
 
@@ -34,7 +35,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    M,
 )
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
@@ -546,6 +546,9 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
+
+
+M = TypeVar("M")
 
 
 def subclass_attention_backend(
