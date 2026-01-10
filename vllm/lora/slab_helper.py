@@ -491,6 +491,41 @@ def get_cached_lora_model(cache_key):
         return _GLOBAL_LORA_MODEL_CACHE.get(cache_key)
 
 
+def clear_slab_cache_for_lora(lora_dir: str) -> None:
+    """Clear slab cache entry for a specific LoRA directory.
+    
+    Called when a LoRA is removed to free pinned CPU memory.
+    """
+    if not lora_dir:
+        return
+    
+    cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
+    
+    with _CACHE_LOCK:
+        if cache_key in _GLOBAL_SLAB_CACHE:
+            # Explicitly free the slab tensor (pinned CPU memory)
+            slab_tensor, metadata = _GLOBAL_SLAB_CACHE.pop(cache_key)
+            del slab_tensor  # Free pinned memory
+            del metadata
+            logger.debug("[SLAB_CACHE] Freed slab cache for %s", lora_dir)
+
+
+def clear_lora_model_cache_for_lora(lora_dir: str) -> None:
+    """Clear LoRAModel cache entry for a specific LoRA directory.
+    
+    Called when a LoRA is removed.
+    """
+    if not lora_dir:
+        return
+    
+    cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
+    
+    with _LORA_MODEL_CACHE_LOCK:
+        if cache_key in _GLOBAL_LORA_MODEL_CACHE:
+            _GLOBAL_LORA_MODEL_CACHE.pop(cache_key, None)
+            logger.debug("[SLAB_CACHE] Freed LoRA model cache for %s", lora_dir)
+
+
 def _generate_slab_cache_key(lora_model, device, tp_rank=None, fully_sharded=False):
     """Generate cache key for LoRA slab - includes tp_rank when fully_sharded=True."""
     lora_dir = getattr(lora_model, "_lora_dir", None)
