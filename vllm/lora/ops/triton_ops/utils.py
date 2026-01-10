@@ -10,10 +10,10 @@ from typing import Any
 import torch
 
 from vllm import envs
-from vllm.utils.math_utils import next_power_of_2
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
