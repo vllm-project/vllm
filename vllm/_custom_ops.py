@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -3037,10 +3038,6 @@ def matmul_ada_mxf4_bf16_tn(
     return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
 
     @register_fake("_qutlass_C::fusedQuantizeMxQuest")
@@ -3074,8 +3071,8 @@ def fusedQuantizeMx(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 32
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
 
@@ -3118,8 +3115,8 @@ def fusedQuantizeNv(
     )
 
     rows, cols = a.numel() // a.size(-1), a.size(-1) // 16
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
     padded_cols = n_col_blocks * 4
     xh_e4m3 = torch.empty(

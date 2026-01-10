@@ -25,6 +25,7 @@ from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
     InternVisionPatchModel,
 )
+from vllm.model_executor.models.utils import find_closest_aspect_ratio
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (
@@ -119,30 +120,6 @@ def build_transform(input_size: int):
             T.Normalize(mean=MEAN, std=STD),
         ]
     )
-
-
-# adapted from https://huggingface.co/Skywork/Skywork-R1V-38B/
-def find_closest_aspect_ratio(
-    aspect_ratio: float,
-    target_ratios: list[tuple[int, int]],
-    *,
-    width: int,
-    height: int,
-    image_size: int,
-) -> tuple[int, int]:
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
 
 
 def resolve_skyworkr1v_min_max_num(

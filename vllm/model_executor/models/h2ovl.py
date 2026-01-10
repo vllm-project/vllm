@@ -15,6 +15,7 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.utils import find_closest_aspect_ratio
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems, MultiModalUUIDDict
 from vllm.multimodal.parse import (
@@ -41,7 +42,6 @@ from .internvl import (
     BaseInternVLProcessor,
     InternVLChatModel,
     build_transform,
-    find_closest_aspect_ratio,
     get_internvl_target_ratios,
 )
 
