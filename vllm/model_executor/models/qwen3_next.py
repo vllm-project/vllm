@@ -578,6 +578,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         state_indices_decode = None
         state_indices_prefill = None
         ssm_state_indices_decode = None
+        if num_decodes > 0:
+            pass
+            # __import__('fpdb').ForkedPdb().set_trace()
 
         # Extract the cache and destination block indices
         if prefix_caching_enabled:
@@ -756,37 +759,42 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             if prefix_caching_enabled:
                 assert state_indices_tensor_p is not None
                 assert block_idx_last_computed_token_p is not None
+                # TODO: this should not be chunk
                 # Get the cached block indices
-                chunk_state_indices = state_indices_tensor_p.gather(
+                block_state_indices = state_indices_tensor_p.gather(
                     1, block_idx_last_computed_token_p.unsqueeze(1)
                 ).squeeze(1)
             else:
-                chunk_state_indices = state_indices_prefill
-            assert chunk_state_indices is not None
+                block_state_indices = state_indices_prefill
+            assert block_state_indices is not None
 
+            # Copy the cached ssm state into the initial state
             initial_state = ssm_state.new_zeros(
-                (chunk_state_indices.shape[0], *ssm_state.shape[1:])
+                (block_state_indices.shape[0], *ssm_state.shape[1:])
             )
-            if chunk_state_indices.numel() > 0:
-                valid_chunk_slots = chunk_state_indices >= 0
-                valid_chunk_positions = torch.nonzero(
-                    valid_chunk_slots, as_tuple=False
+            if block_state_indices.numel() > 0:
+                # TODO: this >=0 is probably redundant since we use torch.nonzero
+                # valid_chunk_slots = block_state_indices >= 0
+                valid_block_positions = torch.nonzero(
+                    block_state_indices, as_tuple=False
                 ).squeeze(-1)
-                if valid_chunk_positions.numel() > 0:
-                    initial_state.index_copy_(
+                if valid_block_positions.numel() > 0:
+                    ssm_state_initials = ssm_state.index_select(
                         0,
-                        valid_chunk_positions,
-                        ssm_state.index_select(
-                            0,
-                            chunk_state_indices.index_select(
-                                0, valid_chunk_positions
-                            ).to(device=ssm_state.device, dtype=torch.long),
+                        block_state_indices.index_select(0, valid_block_positions).to(
+                            device=ssm_state.device, dtype=torch.long
                         ),
                     )
+                    initial_state.index_copy_(
+                        0,
+                        valid_block_positions,
+                        ssm_state_initials,
+                    )
+                    # __import__('fpdb').ForkedPdb().set_trace()
 
                 if has_initial_state is not None:
-                    chunk_has_initial_state = has_initial_state[:end_non_spec_prefill]
-                    initial_state[~chunk_has_initial_state, ...] = 0
+                    req_has_initial_state = has_initial_state[:end_non_spec_prefill]
+                    initial_state[~req_has_initial_state, ...] = 0
 
             assert query_non_spec is not None
             assert key_non_spec is not None
@@ -795,6 +803,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert beta_non_spec is not None
             assert non_spec_query_start_loc is not None
             cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
+            # The first initial state is the zero matrix,
+            # chunk_state_history contains the chunks_per_block (including the zero matrix initial state in the first slot in the first iteration)
+            # excluding the last recurrent state
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -813,20 +824,21 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 return_intermediate_states=prefix_caching_enabled,
             )
             # TODO: check if we can remove this data-dependent branching
-            if chunk_state_indices.numel() > 0:
+            if block_state_indices.numel() > 0:
                 assert state_indices_prefill is not None
                 valid_chunk_slots = state_indices_prefill >= 0
-                valid_chunk_positions = torch.nonzero(
+                valid_block_positions = torch.nonzero(
                     valid_chunk_slots, as_tuple=False
                 ).squeeze(-1)
-                if valid_chunk_positions.numel() > 0:
+                if valid_block_positions.numel() > 0:
                     dest_slots = state_indices_prefill.index_select(
-                        0, valid_chunk_positions
+                        0, valid_block_positions
                     ).to(device=ssm_state.device, dtype=torch.long)
+                    # __import__('fpdb').ForkedPdb().set_trace()
                     ssm_state.index_copy_(
                         0,
                         dest_slots,
-                        last_recurrent_state.index_select(0, valid_chunk_positions).to(
+                        last_recurrent_state.index_select(0, valid_block_positions).to(
                             ssm_state.dtype
                         ),
                     )
@@ -850,17 +862,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     if last_chunk_indices is not None and last_chunk_indices.numel() > 0
                     else 0
                 )
+                # TODO: are the decode chunks really in the befinning here? I think so but worth checking
                 decode_chunk_count = max(total_chunks - prefill_chunk_count, 0)
                 # Prefill chunks trail the decode chunks; skip the actual number of
                 # decode chunk completions so partial decodes (no chunk output) do
                 # not offset the history.
-                block_history_prefill = chunk_history[decode_chunk_count:]
-                if block_history_prefill.shape[0] > 0:
+                chunk_history_prefill = chunk_history[decode_chunk_count:]
+                if chunk_history_prefill.shape[0] > 0:
                     # The block history contains recurrent states per chunk; we
                     # replay it into the persistent cache blocks owned by each
                     # sequence so future steps can hit the prefix cache.
                     chunks_per_block = block_size // chunk_size
-                    last_chunk_indices = attn_metadata.last_chunk_indices_p
                     last_chunk_indices_long = last_chunk_indices.to(torch.long)
 
                     for seq_idx in range(num_prefills):
@@ -874,6 +886,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                         if n_blocks_to_fill <= 0:
                             continue
 
+                        # The last block was already written
                         cache_blocks = state_indices_tensor_p[
                             seq_idx, block_first:block_last
                         ].to(torch.long)
@@ -892,29 +905,33 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                         chunk_stop = (
                             first_aligned_chunk + n_blocks_to_fill * chunks_per_block
                         )
-                        cached_states = block_history_prefill[
+                        cached_states = chunk_history_prefill[
                             first_aligned_chunk:chunk_stop:chunks_per_block
                         ]
+                        # __import__('fpdb').ForkedPdb().set_trace()
                         ssm_state[cache_blocks] = cached_states
 
-                    final_slots = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                    valid_final = final_slots >= 0
-                    valid_final_positions = torch.nonzero(
-                        valid_final, as_tuple=False
-                    ).squeeze(-1)
-                    if valid_final_positions.numel() > 0:
-                        final_slot_ids = final_slots.index_select(
-                            0, valid_final_positions
-                        ).to(device=ssm_state.device, dtype=torch.long)
-                        final_states = block_history_prefill.index_select(
-                            0,
-                            last_chunk_indices_long.index_select(
-                                0, valid_final_positions
-                            ),
-                        )
-                        ssm_state.index_copy_(0, final_slot_ids, final_states)
+                    # TODO: I think we already wrote this above using last_recurrent_state
+                    # final_slots = state_indices_tensor_p.gather(
+                    #     1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                    # ).squeeze(1)
+                    # # TODO: Might be able to remove this >= 0
+                    # valid_final = final_slots >= 0
+                    # valid_final_positions = torch.nonzero(
+                    #     valid_final, as_tuple=False
+                    # ).squeeze(-1)
+                    # if valid_final_positions.numel() > 0:
+                    #     final_slot_ids = final_slots.index_select(
+                    #         0, valid_final_positions
+                    #     ).to(device=ssm_state.device, dtype=torch.long)
+                    #     # TODO: probably wrong to use the chunk historu to copy into the block-based ssm state
+                    #     final_states = chunk_history_prefill.index_select(
+                    #         0,
+                    #         last_chunk_indices_long.index_select(
+                    #             0, valid_final_positions
+                    #         ),
+                    #     )
+                    #     ssm_state.index_copy_(0, final_slot_ids, final_states)
 
         elif num_decodes > 0:
             assert state_indices_decode is not None
@@ -938,11 +955,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     initial_state=initial_state_decode,
                     inplace_final_state=False,
                     cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
-                    ssm_state_indices=state_indices_decode,
+                    # TODO: check if non_spec_state_indices_tensor like before works
+                    # or if we need None now that we gathered the initial states
+                    ssm_state_indices=None,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+
             # Store the final recurrent state
+            # TODO: check if it's fine that we override this BLOCK_SIEZ times,
+            # one time for each decode that gets written to the same block
+            # I would assume it's fine since non-full blocks are anyhow not cached for other requests
+            # so it's fine that the ssm state for a particular block is not "full"
             valid_decode_slots = state_indices_decode >= 0
             dest_slots = state_indices_decode.clamp(min=0).to(
                 device=ssm_state.device, dtype=torch.long
@@ -956,6 +980,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             last_recurrent_state = torch.where(
                 valid_decode_slots_broadcast, last_recurrent_state, prior_state
             )
+            # __import__('fpdb').ForkedPdb().set_trace()
             ssm_state.index_copy_(
                 0, dest_slots, last_recurrent_state.to(ssm_state.dtype)
             )
@@ -963,6 +988,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
+        if num_decodes:
+            print("DECODED OK")
+            pass
+            # __import__('fpdb').ForkedPdb().set_trace()
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
