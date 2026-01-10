@@ -433,6 +433,44 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
+    
+    #
+    # Various helpers for registering support for various features.
+    #
+
+    @abstractmethod
+    def supports_current_device(self) -> bool:
+        """
+        Whether the kernel supports the current device type
+        (compute cability and current platform).
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def supports_no_act_and_mul(self) -> bool:
+        """
+        Whether the kernel supports act_and_mul=False, i.e.
+        non-gated MoE models like Nemotron-Nano.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_act_fn(self, activation: str) -> bool:
+        """
+        Whether the kernel supports a particular act function.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_ep(self) -> bool:
+        """
+        Whether the kernel supports deployment in expert parallel.
+        """
+        raise NotImplementedError
 
     #
     # Various helpers for accessing quantization parameters from the
