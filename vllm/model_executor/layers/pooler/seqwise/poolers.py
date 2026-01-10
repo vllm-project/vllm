@@ -85,7 +85,7 @@ class SequencePooler(Pooler):
 
 
 def pooler_for_embed(pooler_config: PoolerConfig):
-    pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
     head = EmbeddingPoolerHead()
 
     return SequencePooler(pooling=pooling, head=head)
@@ -99,7 +99,7 @@ def pooler_for_classify(
     act_fn: PoolerActivation | str | None = None,
 ):
     if pooling is None:
-        pooling = get_seq_pooling_method(pooler_config.get_pooling_type())
+        pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
     head = ClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
