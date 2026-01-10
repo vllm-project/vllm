@@ -247,6 +247,15 @@ class CudaPlatformBase(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        if (
+            vllm_config.parallel_config.decode_context_parallel_size > 1
+            or vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ) and os.environ.get("NCCL_GRAPH_MIXING_SUPPORT", None) is None:
+            logger.info(
+                "For optimal performance with context parallel, "
+                "consider setting NCCL_GRAPH_MIXING_SUPPORT=0"
+            )
+
     @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
