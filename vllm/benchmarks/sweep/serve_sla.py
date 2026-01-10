@@ -155,6 +155,7 @@ def solve_sla(
     sla_data = list[dict[str, object]]()
     history = SLAHistory(min_value=sla_min_value, max_value=sla_max_value)
 
+    # NOTE: We don't use equality here to be more robust against noisy results
     while history.get_max_passing() + 1 < history.get_min_failing():
         if len(history) == 0:
             val = sla_max_value
