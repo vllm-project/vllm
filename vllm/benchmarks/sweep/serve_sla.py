@@ -188,8 +188,14 @@ def _estimate_sla_bounds(
         if val >= max_value:
             break
 
-    max_passing = max(val for val, margin in history.items() if margin <= 0)
-    min_failing = min(val for val, margin in history.items() if margin > 0)
+    max_passing = max(
+        (val for val, margin in history.items() if margin <= 0),
+        default=0,
+    )
+    min_failing = min(
+        (val for val, margin in history.items() if margin > 0),
+        default=max_value,
+    )
 
     return sla_data, (max_passing, min_failing), history
 
