@@ -257,7 +257,7 @@ def _find_sla_value(
             print("SLA criteria are not met.")
             right = val
 
-        if right - left <= 1:
+        if right - left <= 1 and left in history:
             break
 
     return sla_data, left, history
