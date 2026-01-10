@@ -30,6 +30,24 @@ logger = init_logger(__name__)
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
+def _sanitize_global_scale(name: str, scale: torch.Tensor) -> torch.Tensor:
+    scale = scale.to(torch.float32)
+    finite = torch.isfinite(scale) & (scale > 0)
+    if finite.all():
+        return scale
+    if finite.any():
+        fallback = scale[finite].max()
+    else:
+        fallback = torch.tensor(1.0, dtype=scale.dtype, device=scale.device)
+    logger.warning_once(
+        "Invalid %s detected (nan/inf/non-positive). Replacing with %s.",
+        name,
+        float(fallback.item()),
+    )
+    scale = torch.where(finite, scale, fallback)
+    return torch.clamp_min(scale, 1e-6)
+
+
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.backend = "none"
@@ -124,11 +142,17 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.register_parameter("input_global_scale", input_global_scale)
 
     def process_weights_after_loading(self, layer) -> None:
-        global_input_scale = layer.input_global_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(global_input_scale, requires_grad=False)
-
+        input_global_scale = _sanitize_global_scale(
+            "input_global_scale", layer.input_global_scale
+        )
+        weight_global_scale = _sanitize_global_scale(
+            "weight_global_scale", layer.weight_global_scale
+        )
+        layer.input_global_scale = Parameter(
+            input_global_scale.max().to(torch.float32), requires_grad=False
+        )
         layer.weight_global_scale = Parameter(
-            layer.weight_global_scale.max().to(torch.float32), requires_grad=False
+            weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
         if self.backend == "flashinfer-trtllm":
