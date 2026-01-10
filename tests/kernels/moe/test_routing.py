@@ -466,6 +466,7 @@ def test_custom(
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
 
 
+# TODO: is other test sufficient?
 # # See tests/test_routing_simulatator.py
 # @pytest.mark.parametrize("m,k", MK_S)
 # @pytest.mark.parametrize("top_k", TOP_KS)
