@@ -798,8 +798,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-                # TODO: rename to chunk_state_history
-                block_state_history,
+                chunk_state_history,
             ) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -831,20 +830,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             ssm_state.dtype
                         ),
                     )
-            if prefix_caching_enabled and (
-                block_state_history is not None
-                and block_state_history.numel() > 0
-                # TODO: check if these can be asserts instead
-                and block_idx_first_scheduled_token_p is not None
-                and block_idx_last_scheduled_token_p is not None
-                and state_indices_tensor_p is not None
-                and attn_metadata.last_chunk_indices_p is not None
-                and num_computed_tokens_p is not None
-                and chunk_size is not None
-                and block_size is not None
-            ):
-                block_history = block_state_history.to(ssm_state.dtype)
-                total_chunks = block_history.shape[0]
+            if prefix_caching_enabled:
+                # TODO: check that these can be asserts instead
+                assert chunk_state_history is not None
+                assert chunk_state_history.numel() > 0
+                assert block_idx_first_scheduled_token_p is not None
+                assert block_idx_last_scheduled_token_p is not None
+                assert state_indices_tensor_p is not None
+                assert attn_metadata.last_chunk_indices_p is not None
+                assert num_computed_tokens_p is not None
+                assert chunk_size is not None
+                assert block_size is not None
+
+                chunk_history = chunk_state_history.to(ssm_state.dtype)
+                total_chunks = chunk_history.shape[0]
                 last_chunk_indices = attn_metadata.last_chunk_indices_p
                 prefill_chunk_count = (
                     int(last_chunk_indices[-1].item()) + 1
@@ -855,12 +854,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 # Prefill chunks trail the decode chunks; skip the actual number of
                 # decode chunk completions so partial decodes (no chunk output) do
                 # not offset the history.
-                block_history_prefill = block_history[decode_chunk_count:]
+                block_history_prefill = chunk_history[decode_chunk_count:]
                 if block_history_prefill.shape[0] > 0:
                     # The block history contains recurrent states per chunk; we
                     # replay it into the persistent cache blocks owned by each
                     # sequence so future steps can hit the prefix cache.
-                    chunk_stride = block_size // chunk_size
+                    chunks_per_block = block_size // chunk_size
                     last_chunk_indices = attn_metadata.last_chunk_indices_p
                     last_chunk_indices_long = last_chunk_indices.to(torch.long)
 
@@ -884,17 +883,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             if seq_idx == 0
                             else int(last_chunk_indices[seq_idx - 1].item()) + 1
                         )
-                        first_aligned_chunk = first_chunk + chunk_stride - 1
+                        first_aligned_chunk = first_chunk + chunks_per_block - 1
                         num_unaligned_tokens = int(
                             num_computed_tokens_p[seq_idx].item() % block_size
                         )
                         if num_unaligned_tokens > 0:
                             first_aligned_chunk -= num_unaligned_tokens // chunk_size
                         chunk_stop = (
-                            first_aligned_chunk + n_blocks_to_fill * chunk_stride
+                            first_aligned_chunk + n_blocks_to_fill * chunks_per_block
                         )
                         cached_states = block_history_prefill[
-                            first_aligned_chunk:chunk_stop:chunk_stride
+                            first_aligned_chunk:chunk_stop:chunks_per_block
                         ]
                         ssm_state[cache_blocks] = cached_states
 

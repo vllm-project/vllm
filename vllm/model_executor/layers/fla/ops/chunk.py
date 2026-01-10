@@ -119,6 +119,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         intermediate_states = None
         if return_intermediate_states:
             assert h is not None
+            # TODO 1: explain this more concisely
+            # TODO 2: Can we use a rearrange here for clarity?
             # Convert intermediate states into "chunk-major" form
             # Equal-length batches keep their batch dimension; flatten it together
             # with the chunk axis so callers receive a contiguous chunk stream.
