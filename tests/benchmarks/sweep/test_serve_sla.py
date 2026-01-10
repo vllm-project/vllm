@@ -43,6 +43,7 @@ def _var2metric_linear():
     def wrapped(bench_comb):
         x = float(bench_comb["request_rate"])
         y = x
+
         return [{"request_throughput": y}]
 
     return wrapped
