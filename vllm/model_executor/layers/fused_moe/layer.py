@@ -273,6 +273,7 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+# --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
