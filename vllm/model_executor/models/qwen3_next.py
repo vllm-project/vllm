@@ -582,7 +582,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             pass
             # __import__('fpdb').ForkedPdb().set_trace()
 
-        # Extract the cache and destination block indices
+        # Extract the cache and destination block indices for decode and prefill
         if prefix_caching_enabled:
             assert state_indices_tensor_d is not None
             assert block_idx_last_computed_token_d is not None
@@ -594,19 +594,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             ssm_state_indices_decode = state_indices_tensor_d.gather(
                 1, block_idx_last_computed_token_d.unsqueeze(1)
             ).squeeze(1)
-        elif non_spec_state_indices_tensor is not None:
-            # Otherwise we get the previous state indices
-            state_indices_decode = non_spec_state_indices_tensor[:num_decodes]
-            # State is updated inplace, so should point to the same blocks
-            ssm_state_indices_decode = state_indices_decode
 
-        if prefix_caching_enabled:
+            # Prefill
             assert state_indices_tensor_p is not None
             assert block_idx_last_scheduled_token_p is not None
             state_indices_prefill = state_indices_tensor_p.gather(
                 1, block_idx_last_scheduled_token_p.unsqueeze(1)
             ).squeeze(1)
         elif non_spec_state_indices_tensor is not None:
+            # Otherwise we get the previous state indices
+            state_indices_decode = non_spec_state_indices_tensor[:num_decodes]
+            # State is updated inplace, so should point to the same blocks
+            ssm_state_indices_decode = state_indices_decode
+
+            # Prefill
             start_non_spec_prefill = num_decodes
             end_non_spec_prefill = start_non_spec_prefill + num_prefills
             state_indices_prefill = non_spec_state_indices_tensor[
@@ -689,15 +690,26 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
-            assert state_indices_decode is not None
+            if prefix_caching_enabled:
+                # When APC is enabled, pass the full block table so the kernel
+                # can index into it using block_idx_last_scheduled_token and
+                # initial_state_idx
+                assert state_indices_tensor_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                assert block_idx_last_computed_token_d is not None
+                conv_state_indices = state_indices_tensor_d
+            else:
+                assert non_spec_state_indices_tensor is not None
+                conv_state_indices = non_spec_state_indices_tensor[
+                    : attn_metadata.num_actual_tokens
+                ]
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                # TODO: if using state_indices_tensor_d, must be backwards compatible
-                conv_state_indices=state_indices_tensor_d,
+                conv_state_indices=conv_state_indices,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
                 validate_data=True,
@@ -932,12 +944,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             # Prepare the initial state for decoding
             valid_src_decode_slots = ssm_state_indices_decode >= 0
             ssm_state_indices_decode_clamped = ssm_state_indices_decode.clamp(min=0)
+            # TODO: make backwards compatible
             initial_state_decode = ssm_state.index_select(
                 0, ssm_state_indices_decode_clamped.to(torch.long)
             )
             initial_state_decode[~valid_src_decode_slots] = 0
 
-            # __import__('fpdb').ForkedPdb().set_trace()
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
                     q=query_non_spec,
@@ -946,16 +958,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     g=g_non_spec,
                     beta=beta_non_spec,
                     initial_state=initial_state_decode,
+                    # TODO: make backwards compatible
                     inplace_final_state=False,
                     cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
-                    # TODO: check if non_spec_state_indices_tensor like before works
-                    # or if we need None now that we gathered the initial states
+                    # TODO: check if we can pass in the full state indices here alonside last computed/scheduled
+                    # block idx so we can perform the write in the kernel.
                     ssm_state_indices=None,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
 
             # TODO: check that we should really use state_indices_decode here
+            # __import__('fpdb').ForkedPdb().set_trace()
 
             # Store the final recurrent state
             # TODO: check if it's fine that we override this BLOCK_SIEZ times,
