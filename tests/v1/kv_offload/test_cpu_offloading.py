@@ -15,10 +15,12 @@ from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
 CPU_BLOCK_SIZES = [48]
-ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
+ATTN_BACKENDS = []
 
 if current_platform.is_cuda():
-    ATTN_BACKENDS.append("FLASHINFER")
+    ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
+elif current_platform.is_rocm():
+    ATTN_BACKENDS = ["TRITON_ATTN"]
 
 
 class MockSubscriber:
