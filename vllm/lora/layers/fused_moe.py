@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     TritonExperts,
-    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
@@ -39,7 +38,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 
-from .utils import _get_lora_device
+from .utils import _get_lora_device, try_get_optimal_moe_lora_config
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -103,15 +102,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
         else:  # fall back to the default config
             get_config_func = functools.partial(
-                try_get_optimal_moe_config,
-                layer.w13_weight.size(),
-                layer.w2_weight.size(),
-                top_k,
-                config_dtype,
+                try_get_optimal_moe_lora_config,
+                w1_shape=layer.w13_weight.size(),
+                w2_shape=layer.w2_weight.size(),
+                rank=rank,
+                top_k=top_k,
+                dtype=config_dtype,
+                M=M,
                 block_shape=layer.quant_method.moe_quant_config.block_shape,
             )
-            shrink_config = get_config_func(M)
-            expand_config = get_config_func(M)
+            shrink_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_shrink"
+            )
+            expand_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_expand"
+            )
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config

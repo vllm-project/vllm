@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
@@ -223,14 +224,25 @@ def get_lora_op_configs(
     # The default config for fused_moe_lora ops
     elif op_type in [
         "fused_moe_lora_w13_shrink",
-        "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_shrink",
+    ]:
+        default = {
+            "block_m": 64,
+            "block_n": min(64, next_power_of_2(rank)),
+            "block_k": 32,
+            "num_warps": 4,
+            "num_stages": 3,
+            "group_size_m": 8,
+            "split_k": 1,
+        }
+    elif op_type in [
+        "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_expand",
     ]:
         default = {
             "block_m": 64,
             "block_n": 64,
-            "block_k": 32,
+            "block_k": max(16, min(32, next_power_of_2(rank))),
             "num_warps": 4,
             "num_stages": 3,
             "group_size_m": 8,
