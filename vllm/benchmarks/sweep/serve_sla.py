@@ -137,7 +137,6 @@ class SLAHistory(dict[int, float]):
         )
 
 
-# NOTE: The SLA variable is assumed to have positive correlation w.r.t. the margin
 def solve_sla(
     server: ServerProcess | None,
     bench_cmd: list[str],
