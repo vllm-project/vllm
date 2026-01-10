@@ -289,6 +289,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Grok1ModelForCausalLM": _HfExamplesInfo(
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
+    "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
@@ -304,6 +305,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
+    ),
+    "IQuestCoderForCausalLM": _HfExamplesInfo(
+        "IQuestLab/IQuest-Coder-V1-40B-Instruct", trust_remote_code=True
+    ),
+    "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
+        "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
@@ -701,6 +708,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
+        extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1", trust_remote_code=True
@@ -740,6 +748,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
+    ),
+    "Lfm2VlForConditionalGeneration": _HfExamplesInfo(
+        "LiquidAI/LFM2-VL-450M",
+        min_transformers_version="5.0.0",
     ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
