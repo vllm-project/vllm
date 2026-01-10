@@ -34,6 +34,7 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
     import aiter
 
+    from vllm.attention.ops.prefix_prefill import context_attention_fwd
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
@@ -927,7 +928,36 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for decodes
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
-                if self.sliding_window[0] != -1:
+
+                # Handle speculative decoding (query_len > 1)
+                # paged_attention_v1 only supports single-token queries,
+                # so we fall back to context_attention_fwd for multi-token
+                # decode which uses a Triton kernel that supports paged KV
+                # cache with arbitrary query lengths.
+                # See: https://github.com/vllm-project/vllm/issues/31625
+                if attn_metadata.decode_metadata.max_query_len > 1:
+                    context_attention_fwd(
+                        q=query[:num_decode_tokens],
+                        k=key[:num_decode_tokens],
+                        v=value[:num_decode_tokens],
+                        o=output[:num_decode_tokens],
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        k_cache=key_cache,
+                        v_cache=value_cache,
+                        b_loc=attn_metadata.block_table[:num_decodes],
+                        b_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
+                        b_seq_len=attn_metadata.seq_lens[:num_decodes],
+                        max_input_len=attn_metadata.decode_metadata.max_query_len,
+                        k_scale=layer._k_scale,
+                        v_scale=layer._v_scale,
+                        alibi_slopes=self.alibi_slopes,
+                        sliding_window=self.sliding_window[0]
+                        if self.sliding_window[0] > 0
+                        else None,
+                        sm_scale=self.scale,
+                    )
+                    return output
+                elif self.sliding_window[0] != -1:
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
                     )
@@ -956,42 +986,43 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         v_descale=layer._v_scale.expand(descale_shape),
                     )
                     return
-                assert attn_metadata.decode_metadata is not None
-                _, num_heads, head_size = query.shape
-                nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
-                num_seqs = attn_metadata.seq_lens.shape[0]
-                max_num_partitions = (
-                    attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
-                ) // _PARTITION_SIZE_ROCM
+                else:
+                    # Standard single-token decode using paged_attention_v1
+                    _, num_heads, head_size = query.shape
+                    nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
+                    num_seqs = attn_metadata.seq_lens.shape[0]
+                    max_num_partitions = (
+                        attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
+                    ) // _PARTITION_SIZE_ROCM
 
-                workspace_buffer = torch.empty(
-                    (num_seqs * num_heads * max_num_partitions * head_size)
-                    * nbytes_per_qo_elem
-                    + 2 * (num_seqs * num_heads * max_num_partitions) * 4,
-                    dtype=torch.uint8,
-                    device=output.device,
-                )
+                    workspace_buffer = torch.empty(
+                        (num_seqs * num_heads * max_num_partitions * head_size)
+                        * nbytes_per_qo_elem
+                        + 2 * (num_seqs * num_heads * max_num_partitions) * 4,
+                        dtype=torch.uint8,
+                        device=output.device,
+                    )
 
-                torch.ops.aiter.paged_attention_v1(
-                    output[:num_decode_tokens],
-                    workspace_buffer,
-                    query[:num_decode_tokens],
-                    key_cache,
-                    value_cache,
-                    self.scale,
-                    attn_metadata.block_table[:num_decodes],
-                    attn_metadata.query_start_loc[:num_decodes],
-                    attn_metadata.seq_lens[:num_decodes],
-                    attn_metadata.max_seq_len,
-                    self.alibi_slopes,
-                    self.kv_cache_dtype,
-                    "NHD",
-                    self.logits_soft_cap,
-                    layer._k_scale,
-                    layer._v_scale,
-                    None,
-                    _PARTITION_SIZE_ROCM,
-                )
+                    torch.ops.aiter.paged_attention_v1(
+                        output[:num_decode_tokens],
+                        workspace_buffer,
+                        query[:num_decode_tokens],
+                        key_cache,
+                        value_cache,
+                        self.scale,
+                        attn_metadata.block_table[:num_decodes],
+                        attn_metadata.query_start_loc[:num_decodes],
+                        attn_metadata.seq_lens[:num_decodes],
+                        attn_metadata.max_seq_len,
+                        self.alibi_slopes,
+                        self.kv_cache_dtype,
+                        "NHD",
+                        self.logits_soft_cap,
+                        layer._k_scale,
+                        layer._v_scale,
+                        None,
+                        _PARTITION_SIZE_ROCM,
+                    )
         else:
             raise NotImplementedError(
                 "Cascade attention is not implemented for ROCM AITER"
