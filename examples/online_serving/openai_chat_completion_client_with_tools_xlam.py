@@ -71,7 +71,13 @@ def calculate_expression(expression: str):
         tree = ast.parse(expression, mode="eval")
         result = safe_eval(tree)
         return f"The result of {expression} is {result}"
-    except (ValueError, SyntaxError) as e:
+    except (
+        ValueError,
+        SyntaxError,
+        RecursionError,
+        ZeroDivisionError,
+        OverflowError,
+    ) as e:
         return f"Could not calculate {expression}: {e}"
 
 
