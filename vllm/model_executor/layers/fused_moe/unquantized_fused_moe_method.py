@@ -209,7 +209,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                 use_prepack=True,
                 experts_start_id=ep_rank_start,
             )
-            # self.apply = self.apply_xpu
 
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
@@ -242,8 +241,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                     self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-
-            # self.apply = self.apply_cpu
 
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -285,8 +282,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                     TritonExperts(self.moe_quant_config),
                     shared_experts=None,
                 )
-
-            # self.apply = self.apply_cuda
 
     def apply(
         self,
