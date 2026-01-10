@@ -216,7 +216,7 @@ class RequestState:
 
         top_k = self.top_k.np[idx_mapping_np]
         no_top_k = np.all(top_k == self.vocab_size)
-        top_k = self.top_p.copy_to_gpu()[idx_mapping] if not no_top_k else None
+        top_k = self.top_k.copy_to_gpu()[idx_mapping] if not no_top_k else None
 
         min_p = self.min_p.np[idx_mapping_np]
         no_min_p = np.all(min_p == 0.0)
