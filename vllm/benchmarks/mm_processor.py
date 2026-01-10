@@ -22,6 +22,10 @@ from typing import Any
 
 import numpy as np
 
+from vllm.benchmarks.datasets import (
+    MultiModalConversationDataset,
+    VisionArenaDataset,
+)
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
 from vllm.multimodal.processing import (
@@ -112,8 +116,19 @@ def validate_args(args):
     if args.dataset_name == "hf" and not args.dataset_path:
         raise ValueError(
             "--dataset-path is required when using --dataset-name hf. "
-            "Specify a HuggingFace dataset like 'yale-nlp/MMVU'."
+            "For multimodal benchmarking, specify a dataset like "
+            "'lmarena-ai/VisionArena-Chat'."
         )
+    if args.dataset_name == "hf":
+        supported_mm_datasets = (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        )
+        if args.dataset_path not in supported_mm_datasets:
+            raise ValueError(
+                f"{args.dataset_path} is not a supported multimodal dataset. "
+                f"Supported multimodal datasets are: {sorted(supported_mm_datasets)}"
+            )
 
 
 def benchmark_multimodal_processor(
