@@ -172,7 +172,9 @@ def solve_sla(
             val = int(next(iter(spl_roots)))
 
             if val in history:
-                val += 1  # Cover both sides (floor and ceil) of the root
+                # Cover both sides (floor and ceil) of the root to be sure
+                # that it is indeed the target value
+                val += 1
 
         unclamped_val = val
         val = max(sla_min_value, min(val, sla_max_value))
