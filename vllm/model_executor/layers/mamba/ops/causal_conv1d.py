@@ -1155,7 +1155,12 @@ def causal_conv1d_update(
         if conv_state_indices is None:
             assert conv_state.size(0) >= batch
         else:
-            assert (batch,) == conv_state_indices.shape
+            if block_idx_last_scheduled_token is None:
+                assert (batch,) == conv_state_indices.shape
+            else:
+                # When APC is enabled the conv_state_indices must be 2D so it can be indexed by block_idx_*_token
+                assert conv_state_indices.dim() == 2
+                assert conv_state_indices.shape[0] == batch
 
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this

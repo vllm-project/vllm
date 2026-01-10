@@ -696,13 +696,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                # TODO: check if it suffices to pass in the decode states here rather
-                #   than all state. Previously this was
-                #   non_spec_state_indices_tensor[:m.num_actual_tokens]
-                # NOTE: should very likely be state_indices_tensor_d
-                conv_state_indices=state_indices_decode,
-                # TODO: check if we can use the full indices table, perhaps not
-                # conv_state_indices=conv_indices_decode,
+                # TODO: if using state_indices_tensor_d, must be backwards compatible
+                conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
                 validate_data=True,
@@ -773,10 +768,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 (block_state_indices.shape[0], *ssm_state.shape[1:])
             )
             if block_state_indices.numel() > 0:
-                # TODO: this >=0 is probably redundant since we use torch.nonzero
-                # valid_chunk_slots = block_state_indices >= 0
                 valid_block_positions = torch.nonzero(
-                    block_state_indices, as_tuple=False
+                    block_state_indices >= 0, as_tuple=False
                 ).squeeze(-1)
                 if valid_block_positions.numel() > 0:
                     ssm_state_initials = ssm_state.index_select(
@@ -826,9 +819,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             # TODO: check if we can remove this data-dependent branching
             if block_state_indices.numel() > 0:
                 assert state_indices_prefill is not None
-                valid_chunk_slots = state_indices_prefill >= 0
                 valid_block_positions = torch.nonzero(
-                    valid_chunk_slots, as_tuple=False
+                    state_indices_prefill >= 0, as_tuple=False
                 ).squeeze(-1)
                 if valid_block_positions.numel() > 0:
                     dest_slots = state_indices_prefill.index_select(
@@ -945,6 +937,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
             initial_state_decode[~valid_src_decode_slots] = 0
 
+            # __import__('fpdb').ForkedPdb().set_trace()
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
                     q=query_non_spec,
@@ -961,6 +954,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     use_qk_l2norm_in_kernel=True,
                 )
             )
+
+            # TODO: check that we should really use state_indices_decode here
 
             # Store the final recurrent state
             # TODO: check if it's fine that we override this BLOCK_SIEZ times,
@@ -980,7 +975,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             last_recurrent_state = torch.where(
                 valid_decode_slots_broadcast, last_recurrent_state, prior_state
             )
-            # __import__('fpdb').ForkedPdb().set_trace()
             ssm_state.index_copy_(
                 0, dest_slots, last_recurrent_state.to(ssm_state.dtype)
             )
@@ -988,10 +982,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
-        if num_decodes:
-            print("DECODED OK")
-            pass
-            # __import__('fpdb').ForkedPdb().set_trace()
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
