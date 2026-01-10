@@ -15,5 +15,3 @@ Llama-4-Scout-BF16-fi-cutlass.yaml
 Llama-4-Scout-BF16-triton.yaml
 Mixtral-8x7B-BF16-fi-cutlass.yaml
 Mixtral-8x7B-BF16-triton.yaml
-Qwen3-30B-A3B-BF16-fi-cutlass.yaml
-Qwen3-30B-A3B-BF16-triton.yaml
