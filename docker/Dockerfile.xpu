@@ -59,15 +59,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
 ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
+ARG VLLM_VERSION_OVERRIDE="0.0.0+src.build"
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=.git,target=.git \
     pip install --no-build-isolation .
 
 CMD ["/bin/bash"]
