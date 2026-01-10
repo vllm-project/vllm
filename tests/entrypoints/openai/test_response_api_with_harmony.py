@@ -821,16 +821,20 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
                 final_tool_calls_named[tool_call.name] = tool_call
         elif event.type == "response.function_call_arguments.done":
             assert event.arguments == final_tool_calls_named[event.name].arguments
-    for tool_call in final_tool_calls.values():
-        if (
-            tool_call
-            and tool_call.type == "function_call"
-            and tool_call.name == "get_weather"
-        ):
-            args = json.loads(tool_call.arguments)
-            result = call_function(tool_call.name, args)
-            input_list += [tool_call]
+    result = None
+    tool_call = None
+    for tc in final_tool_calls.values():
+        if tc and tc.type == "function_call" and tc.name == "get_weather":
+            args = json.loads(tc.arguments)
+            result = call_function(tc.name, args)
+            tool_call = tc
+            input_list += [tc]
             break
+
+    assert tool_call is not None, (
+        "Expected model to call 'get_weather' function, "
+        f"but got: {list(final_tool_calls_named.keys())}"
+    )
     assert result is not None
     response = await client.responses.create(
         model=model_name,
