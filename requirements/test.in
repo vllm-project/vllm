@@ -59,3 +59,7 @@ terratorch @ git+https://github.com/IBM/terratorch.git@1.1.rc3 # required for Pr
 gpt-oss >= 0.0.7; python_version > '3.11'
 
 perceptron # required for isaac test
+
+# OpenTelemetry tracing
+opentelemetry-sdk
+opentelemetry-exporter-otlp
