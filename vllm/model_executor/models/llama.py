@@ -370,7 +370,9 @@ def llama_model_invariants(
 
 
 @support_torch_compile(
-    mark_unbacked_dims={"input_ids": 0}, shape_invariants=llama_model_invariants
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    shape_invariants=llama_model_invariants
 )
 class LlamaModel(nn.Module):
     def __init__(
