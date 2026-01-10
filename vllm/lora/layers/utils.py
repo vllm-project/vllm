@@ -7,6 +7,9 @@ from enum import Enum
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.utils.math_utils import next_power_of_2
+
 
 class LoRAMappingType(Enum):
     LANGUAGE = 1
@@ -80,3 +83,33 @@ def _fully_sharded_can_replace(can_replace):
         )
 
     return dec
+
+
+def try_get_optimal_moe_lora_config(
+    op_type: str,
+    w1_shape: tuple[int, ...],
+    w2_shape: tuple[int, ...],
+    rank: int,
+    top_k: int,
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> dict[str, int | None]:
+    config = try_get_optimal_moe_config(
+        w1_shape, w2_shape, top_k, dtype, M, block_shape
+    ).copy()
+    if op_type in [
+        "fused_moe_lora_w13_shrink",
+        "fused_moe_lora_w2_shrink",
+    ]:
+        config["BLOCK_SIZE_N"] = min(
+            config.get("BLOCK_SIZE_N", 64), next_power_of_2(rank)
+        )
+    elif op_type in [
+        "fused_moe_lora_w13_expand",
+        "fused_moe_lora_w2_expand",
+    ]:
+        config["BLOCK_SIZE_K"] = max(
+            16, min(config.get("BLOCK_SIZE_K", 32), next_power_of_2(rank))
+        )
+    return config
