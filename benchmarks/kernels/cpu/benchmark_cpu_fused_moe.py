@@ -22,16 +22,17 @@ from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # Check if CPU MoE operations are available
-if not hasattr(torch.ops, "_C") or not hasattr(torch.ops._C, "prepack_moe_weight"):
+try:
+    from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+except (ImportError, AttributeError) as e:
     print("ERROR: CPU fused MoE operations are not available on this platform.")
     print("This benchmark requires x86 CPU with proper vLLM CPU extensions compiled.")
     print(
         "The cpu_fused_moe kernel is typically available on Linux x86_64 "
         "with AVX2/AVX512."
     )
+    print(f"Import error: {e}")
     sys.exit(1)
-
-from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 
 # ISA selection following test_cpu_fused_moe.py pattern
 ISA_CHOICES = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
