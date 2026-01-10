@@ -132,7 +132,7 @@ The algorithm for adjusting the SLA variable is as follows:
 1. Run the benchmark once with maximum possible QPS, and once with minimum possible QPS. For each run, calculate the distance of the SLA metrics from their targets, resulting in data points of QPS vs SLA distance.
 2. Perform spline interpolation between the data points to estimate the QPS that results in zero SLA distance.
 3. Run the benchmark with the estimated QPS and add the resulting data point to the history.
-4. Repeat Steps 2 and 3 until the estimated QPS is the same as that from the previous iteration.
+4. Repeat Steps 2 and 3 until the maximum QPS that passes SLA and the minimum QPS that fails SLA in the history are close enough to each other.
 
 !!! important
     SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
