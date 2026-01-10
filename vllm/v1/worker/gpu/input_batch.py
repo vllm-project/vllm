@@ -9,7 +9,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.buffer_utils import DoubleBufferTensor
 
 
 class InputBuffers:
@@ -21,29 +21,22 @@ class InputBuffers:
         vocab_size: int,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
-        self.pin_memory = pin_memory
 
-        self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
+        self.idx_mapping = DoubleBufferTensor(max_num_reqs, torch.int32, device)
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-        self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
+        self.query_start_loc = DoubleBufferTensor(max_num_reqs + 1, torch.int32, device)
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
-        self.cu_num_logits = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
+        self.cu_num_logits = DoubleBufferTensor(max_num_reqs + 1, torch.int32, device)
 
         # Structured outputs.
-        self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
-        self.grammar_bitmask = self._make_buffer(
-            max_num_reqs, cdiv(vocab_size, 32), dtype=torch.int32
-        )
-
-    def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(
-            *args, dtype=dtype, pin_memory=self.pin_memory, device=self.device
+        self.bitmask_indices = DoubleBufferTensor(max_num_reqs, torch.int32, device)
+        self.grammar_bitmask = DoubleBufferTensor(
+            (max_num_reqs, cdiv(vocab_size, 32)), torch.int32, device
         )
 
 

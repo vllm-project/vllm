@@ -12,7 +12,6 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -46,7 +45,6 @@ class EagleSpeculator:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.pin_memory = is_pin_memory_available()
         self.dtype = vllm_config.model_config.dtype
 
         self.input_buffers = InputBuffers(
@@ -56,7 +54,6 @@ class EagleSpeculator:
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=device,
-            pin_memory=self.pin_memory,
         )
         self.hidden_states = torch.zeros(
             self.max_num_tokens,

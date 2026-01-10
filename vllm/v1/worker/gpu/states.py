@@ -27,7 +27,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        pin_memory: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -35,7 +34,6 @@ class RequestState:
         self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
-        self.pin_memory = pin_memory
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}

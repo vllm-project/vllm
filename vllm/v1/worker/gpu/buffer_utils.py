@@ -6,7 +6,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 
 
@@ -189,3 +189,41 @@ def _apply_write_kernel(
         tl.store(
             output_ptr + row_idx * output_stride + start_idx + block, content, mask=mask
         )
+
+
+class DoubleBufferTensor:
+    def __init__(
+        self,
+        size: int | Sequence[int | torch.SymInt],
+        dtype: torch.dtype,
+        device: torch.device,
+        max_concurrency: int = 2,
+    ):
+        self.dtype = dtype
+        self.device = device
+        self.max_concurrency = max_concurrency
+
+        # Source of truth
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
+        self.np = self.cpu.numpy()
+
+        # CPU buffers for concurrency
+        if not is_pin_memory_available():
+            raise RuntimeError("Pin memory is not available")
+        self._bufs = [
+            torch.zeros_like(self.cpu, device="cpu", pin_memory=True)
+            for _ in range(max_concurrency)
+        ]
+        # Current buffer index
+        self._curr = 0
+
+        # Destination GPU tensor
+        self.gpu = torch.zeros_like(self.cpu, device=device)
+
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
+        self._curr = (self._curr + 1) % self.max_concurrency
+        buf = self._bufs[self._curr]
+        # CPU-to-CPU copy
+        buf[:n] = self.cpu[:n]
+        # CPU-to-GPU copy
+        return self.gpu[:n].copy_(buf[:n], non_blocking=True)

@@ -15,7 +15,6 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -24,7 +23,7 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
 )
-from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_barrier
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     get_kv_cache_spec,
@@ -81,7 +80,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.observability_config = vllm_config.observability_config
 
         self.device = device
-        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
@@ -123,7 +121,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -132,7 +129,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -590,14 +586,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Apply grammar bitmask to the logits in-place.
             # TODO(woosuk): Make compatible with spec decoding.
             assert input_batch.num_draft_tokens == 0
-            with async_barrier(self.structured_outputs_event):
-                apply_grammar_bitmask(
-                    logits,
-                    input_batch.req_ids,
-                    grammar_output.structured_output_request_ids,
-                    grammar_output.grammar_bitmask,
-                    self.input_buffers,
-                )
+            apply_grammar_bitmask(
+                logits,
+                input_batch.req_ids,
+                grammar_output.structured_output_request_ids,
+                grammar_output.grammar_bitmask,
+                self.input_buffers,
+            )
 
         # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(logits, sampling_metadata)
@@ -848,53 +843,49 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert intermediate_tensors is None
         if scheduler_output.total_num_scheduled_tokens == 0 and not dummy_run:
             # No need to run the model.
-            with async_barrier(self.input_prep_event):
-                self.update_states(scheduler_output)
-                return EMPTY_MODEL_RUNNER_OUTPUT
+            self.update_states(scheduler_output)
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # NOTE: Call this before the async barrier so CPU all-reduce and
-        # GPU execution can overlap.
         cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
             self.get_cudagraph_and_dp_padding(scheduler_output)
         )
-        with async_barrier(self.input_prep_event):
-            self.update_states(scheduler_output)
-            if num_tokens_after_padding == 0:
-                # All DP ranks have zero tokens to run.
-                return EMPTY_MODEL_RUNNER_OUTPUT
+        self.update_states(scheduler_output)
+        if num_tokens_after_padding == 0:
+            # All DP ranks have zero tokens to run.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
-            if not dummy_run:
-                # Common case.
-                # Prepare all the inputs and copy to the input buffers.
-                input_batch = self.prepare_inputs(
-                    scheduler_output,
-                    num_tokens_after_padding,
-                )
+        if not dummy_run:
+            # Common case.
+            # Prepare all the inputs and copy to the input buffers.
+            input_batch = self.prepare_inputs(
+                scheduler_output,
+                num_tokens_after_padding,
+            )
 
-                pos = input_batch.positions[input_batch.logits_indices]
-                sampling_metadata = self.req_states.make_sampling_metadata(
-                    input_batch.expanded_idx_mapping, input_batch.idx_mapping_np, pos
-                )
+            pos = input_batch.positions[input_batch.logits_indices]
+            sampling_metadata = self.req_states.make_sampling_metadata(
+                input_batch.expanded_idx_mapping, input_batch.idx_mapping_np, pos
+            )
 
-                if self.lora_config:
-                    # Activate LoRA adapters.
-                    lora_inputs = self.req_states.make_lora_inputs(
-                        input_batch.req_ids,
-                        input_batch.idx_mapping_np,
-                        input_batch.num_scheduled_tokens,
-                    )
-                    self._set_active_loras(*lora_inputs)
-            else:
-                # No actual tokens to run. A dummy run for DP.
-                num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
-                input_batch = InputBatch.make_dummy(
-                    num_reqs=num_reqs,
-                    num_tokens=num_tokens_after_padding,
-                    input_buffers=self.input_buffers,
-                    device=self.device,
+            if self.lora_config:
+                # Activate LoRA adapters.
+                lora_inputs = self.req_states.make_lora_inputs(
+                    input_batch.req_ids,
+                    input_batch.idx_mapping_np,
+                    input_batch.num_scheduled_tokens,
                 )
-                self.prepare_dummy_attn_metadata(input_batch)
-                sampling_metadata = None
+                self._set_active_loras(*lora_inputs)
+        else:
+            # No actual tokens to run. A dummy run for DP.
+            num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
+            input_batch = InputBatch.make_dummy(
+                num_reqs=num_reqs,
+                num_tokens=num_tokens_after_padding,
+                input_buffers=self.input_buffers,
+                device=self.device,
+            )
+            self.prepare_dummy_attn_metadata(input_batch)
+            sampling_metadata = None
 
         # Run model.
         if cudagraph_mode == CUDAGraphMode.FULL:
