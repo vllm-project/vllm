@@ -721,9 +721,10 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         output_items.extend(_parse_reasoning(message))
 
     elif message.channel == "commentary":
-        # Per Harmony format, commentary channel can contain preambles to calling
-        # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning(message))
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        # See: https://cookbook.openai.com/articles/openai-harmony
+        output_items.append(_parse_final_message(message))
 
     elif message.channel == "final":
         output_items.append(_parse_final_message(message))
@@ -786,7 +787,26 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 )
             ]
 
-    if parser.current_channel in ("commentary", "analysis"):
+    if parser.current_channel == "commentary":
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],
+            type="output_text",
+            logprobs=None,
+        )
+        return [
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="incomplete",
+                type="message",
+            )
+        ]
+
+    if parser.current_channel == "analysis":
         return [
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
