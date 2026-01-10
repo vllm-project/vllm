@@ -8,15 +8,15 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 

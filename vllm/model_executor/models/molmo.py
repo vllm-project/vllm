@@ -18,7 +18,6 @@ from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention.layer import Attention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -30,6 +29,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import MulAndSilu, QuickGELU, SiluAndMul
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,

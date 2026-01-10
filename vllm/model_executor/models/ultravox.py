@@ -133,6 +133,10 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Ultravox models (mono)."""
+        return 1
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -169,7 +173,10 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     def _call_hf_processor(
         self,

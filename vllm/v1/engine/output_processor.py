@@ -31,6 +31,9 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 
+# shared empty CPU tensor used as a placeholder pooling output
+EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
+
 
 class RequestOutputCollector:
     """
@@ -426,7 +429,7 @@ class OutputProcessor:
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
-                        pooling_output=torch.randn(0, device="cpu")
+                        pooling_output=EMPTY_CPU_TENSOR
                         if req_state.detokenizer is None
                         else None,
                         finish_reason=FinishReason.ABORT,

@@ -7,8 +7,8 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import AttentionLayer, MultipleOf
 from vllm.config import VllmConfig
+from vllm.v1.attention.backend import AttentionLayer, MultipleOf
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -236,7 +236,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             k=k,
             v=v,
             softmax_scale=softmax_scale,
-            return_softmax_lse=return_softmax_lse,
+            return_lse=return_softmax_lse,
             **kwargs,
         )
 

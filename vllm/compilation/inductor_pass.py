@@ -29,6 +29,9 @@ else:
         Torch25CustomGraphPass as CustomGraphPass,
     )
 
+# Re-export CustomGraphPass for external usage
+__all__ = ["CustomGraphPass"]
+
 _pass_context = None
 P = ParamSpec("P")
 R = TypeVar("R")

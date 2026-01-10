@@ -517,8 +517,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - pytest -v -s -m 'not skip_v1' samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
@@ -1106,8 +1105,8 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/attention/selector.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
@@ -1449,7 +1448,21 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    - VLLM_ATTENTION_BACKEND=ROCM_ATTN DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 ##### multi gpus test #####
 ##### A100 test #####

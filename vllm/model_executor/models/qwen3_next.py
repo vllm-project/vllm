@@ -10,7 +10,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -75,6 +74,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
@@ -145,7 +145,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self.shared_expert_gate = ReplicatedLinear(
+            config.hidden_size,
+            1,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.shared_expert_gate",
+        )
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(

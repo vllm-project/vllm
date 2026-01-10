@@ -6,12 +6,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
-from vllm.attention.ops.flashmla import (
-    flash_mla_with_kvcache,
-    get_mla_metadata,
-    is_flashmla_dense_supported,
-)
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -19,6 +13,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -31,6 +26,11 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
+)
+from vllm.v1.attention.ops.flashmla import (
+    flash_mla_with_kvcache,
+    get_mla_metadata,
+    is_flashmla_dense_supported,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -78,11 +78,11 @@ class FlashMLABackend(MLACommonBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_sparse:
-            from vllm.attention.ops.flashmla import is_flashmla_sparse_supported
+            from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 
             return is_flashmla_sparse_supported()[1]
         else:
-            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
             return is_flashmla_dense_supported()[1]
 

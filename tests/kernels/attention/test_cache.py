@@ -270,7 +270,7 @@ def test_reshape_and_cache_flash(
             v_scale,
         )
     elif implementation == "triton":
-        from vllm.attention.ops.triton_reshape_and_cache_flash import (
+        from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
             triton_reshape_and_cache_flash,
         )
 

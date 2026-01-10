@@ -4,14 +4,14 @@
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.ops.triton_reshape_and_cache_flash import (
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
-from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 
 if is_flash_attn_varlen_func_available():
-    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 

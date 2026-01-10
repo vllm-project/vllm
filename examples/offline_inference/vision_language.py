@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -867,6 +867,37 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "LiquidAI/LFM2-VL-450M"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
@@ -1849,6 +1880,7 @@ model_example_map = {
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "lightonocr": run_lightonocr,
+    "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
