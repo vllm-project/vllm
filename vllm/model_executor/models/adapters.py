@@ -450,7 +450,6 @@ def load_weights_using_from_2_way_softmax(
     loaded_weights.add("score.weight")
 
     lm_head_name = "lm_head.weight"
-    hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
     if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
         lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
     loaded_weights.discard(lm_head_name)
