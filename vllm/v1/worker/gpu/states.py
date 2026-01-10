@@ -181,9 +181,7 @@ class RequestState:
 
     def apply_staged_writes(self) -> None:
         self.prefill_len.copy_to_gpu()
-        self.prefill_token_ids.prepare()
         self.prefill_token_ids.apply_write()
-        self.num_computed_tokens.prepare()
         self.num_computed_tokens.apply_write()
 
         # TODO(woosuk): Optimize this.

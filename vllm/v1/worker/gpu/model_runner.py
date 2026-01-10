@@ -412,6 +412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
         self.req_states.apply_staged_writes()
+        self.block_tables.apply_staged_writes()
 
     def prepare_inputs(
         self,

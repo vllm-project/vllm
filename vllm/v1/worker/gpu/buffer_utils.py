@@ -142,7 +142,9 @@ class StagedWriteTensor:
         if n == 0:
             return
 
-        # Update the GPU buffer
+        # Prepare the buffers for staging writes
+        self.prepare()
+        # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
             self.gpu,
             self.gpu.stride(0),
