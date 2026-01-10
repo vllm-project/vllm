@@ -29,7 +29,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
-    update_config,
+    update_config, PoolerConfig, set_current_vllm_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -173,6 +173,7 @@ from .utils import (
     bind_kv_cache,
     sanity_check_mm_encoder_outputs,
 )
+from ...model_executor.layers.pooler import DispatchPooler, Pooler
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -896,8 +897,7 @@ class GPUModelRunner(
             else:
                 generator = None
 
-            if self.is_pooling_model:
-                assert pooling_params is not None
+            if pooling_params is not None:
                 task = pooling_params.task
                 assert task is not None, "You did not set `task` in the API"
 
@@ -2435,12 +2435,12 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def get_supported_generation_tasks(self) -> list[GenerationTask]:
+    def get_supported_generation_tasks(self) -> list[GenerationTask|PoolingTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
 
         if is_text_generation_model(model):
-            supported_tasks.append("generate")
+            supported_tasks.extend(["generate", "embed", "token_embed"])
 
         if supports_transcription(model):
             if model.supports_transcription_only:
@@ -3297,7 +3297,7 @@ class GPUModelRunner(
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
 
-                if self.is_pooling_model:
+                if len(self.input_batch.pooling_params) > 0:
                     # Return the pooling output.
                     return self._pool(
                         hidden_states,
@@ -3895,6 +3895,16 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+
+        if not self.is_pooling_model:
+            with set_current_vllm_config(self.vllm_config):
+                pooler_config = PoolerConfig(pooling_type="LAST")
+                self.model.pooler = DispatchPooler(
+                    {
+                        "token_embed": Pooler.for_token_embed(pooler_config),
+                        "embed": Pooler.for_embed(pooler_config),
+                    },
+                )
 
         if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
