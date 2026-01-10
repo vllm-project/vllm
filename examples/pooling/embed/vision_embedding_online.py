@@ -5,6 +5,7 @@
 
 Refer to each `run_*` function for the command to run the server for that model.
 """
+# ruff: noqa: E501
 
 import argparse
 import base64
@@ -40,6 +41,11 @@ def create_chat_embeddings(
         cast_to=CreateEmbeddingResponse,
         body={"messages": messages, "model": model, "encoding_format": encoding_format},
     )
+
+
+def print_embeddings(embeds):
+    embeds_trimmed = (str(embeds[:4])[:-1] + ", ...]") if len(embeds) > 4 else embeds
+    print(f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
 
 
 def run_clip(client: OpenAI, model: str):
@@ -145,6 +151,71 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
     print("Text embedding output:", response.data[0].embedding)
 
 
+def run_qwen3_vl(client: OpenAI, model: str):
+    """
+    Start the server using:
+
+    vllm serve Qwen/Qwen3-VL-Embedding-2B \
+        --runner pooling \
+        --max-model-len 8192
+    """
+
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+
+    print("Text embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "A cat and a dog"},
+                ],
+            }
+        ],
+        model=model,
+        encoding_format="float",
+    )
+    print_embeddings(response.data[0].embedding)
+
+    print("Image embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": f"{image_placeholder}"},
+                ],
+            }
+        ],
+        model=model,
+        encoding_format="float",
+    )
+    print_embeddings(response.data[0].embedding)
+
+    print("Image+Text embedding output:")
+    response = create_chat_embeddings(
+        client,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {
+                        "type": "text",
+                        "text": f"{image_placeholder}\nRepresent the given image with the following question: What is in the image.",
+                    },
+                ],
+            }
+        ],
+        model=model,
+        encoding_format="float",
+    )
+    print_embeddings(response.data[0].embedding)
+
+
 def run_siglip(client: OpenAI, model: str):
     """
     Start the server using:
@@ -213,7 +284,8 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Image embedding output:", response.data[0].embedding)
+    print("Image embedding output:")
+    print_embeddings(response.data[0].embedding)
 
     response = create_chat_embeddings(
         client,
@@ -233,7 +305,8 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Image+Text embedding output:", response.data[0].embedding)
+    print("Image+Text embedding output:")
+    print_embeddings(response.data[0].embedding)
 
     response = create_chat_embeddings(
         client,
@@ -249,11 +322,13 @@ def run_vlm2vec(client: OpenAI, model: str):
         encoding_format="float",
     )
 
-    print("Text embedding output:", response.data[0].embedding)
+    print("Text embedding output:")
+    print_embeddings(response.data[0].embedding)
 
 
 model_example_map = {
     "clip": run_clip,
+    "qwen3_vl": run_qwen3_vl,
     "dse_qwen2_vl": run_dse_qwen2_vl,
     "siglip": run_siglip,
     "vlm2vec": run_vlm2vec,
