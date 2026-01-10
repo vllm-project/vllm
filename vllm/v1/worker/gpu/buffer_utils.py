@@ -98,6 +98,8 @@ class StagedWriteTensor:
     def stage_write(self, index: int, start: int, x: list[int]) -> None:
         assert index >= 0
         assert start >= 0
+        if not x:
+            return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
         self._staged_write_contents.extend(x)
