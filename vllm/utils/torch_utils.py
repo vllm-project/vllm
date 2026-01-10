@@ -64,6 +64,36 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
+def is_strictly_contiguous(t: torch.Tensor) -> bool:
+    """
+    Check if tensor is contiguous AND has no degenerate strides.
+
+    A degenerate stride occurs when a dimension has size 1 but the stride
+    doesn't match the canonical contiguous layout. This can cause issues
+    in some CUDA kernels that rely on stride values for memory access.
+
+    For a C-contiguous tensor of shape (d0, d1, ..., dn), the expected
+    strides are: stride[i] = product(shape[i+1:]) for all i, with stride[-1]=1.
+
+    Example with torch.Size([16, 1, 8, 32]):
+        - Canonical strides: (256, 256, 32, 1)
+        - Degenerate strides: (256, 1, 32, 1)  # dim=1 has size=1, allowing
+                                                  # non-canonical stride in dim=0
+    """
+    if not t.is_contiguous():
+        return False
+
+    # Check that strides match canonical contiguous layout
+    shape = t.shape
+    strides = t.stride()
+    expected_stride = 1
+    for i in range(len(shape) - 1, -1, -1):
+        if strides[i] != expected_stride:
+            return False
+        expected_stride *= shape[i]
+    return True
+
+
 @contextlib.contextmanager
 def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
