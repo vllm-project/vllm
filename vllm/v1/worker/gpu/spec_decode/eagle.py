@@ -61,6 +61,11 @@ class EagleSpeculator:
             dtype=self.dtype,
             device=device,
         )
+        self.idx_mapping = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=device,
+        )
         self.temperature = torch.zeros(
             self.max_num_reqs,
             dtype=torch.float32,
@@ -149,8 +154,9 @@ class EagleSpeculator:
             # used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
-                self.temperature[:num_reqs],
-                self.seeds[:num_reqs],
+                self.idx_mapping[:num_reqs],
+                self.temperature,
+                self.seeds,
                 pos + 1,
                 apply_temperature=True,
             )
@@ -234,23 +240,27 @@ class EagleSpeculator:
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
-        cu_num_logits = input_batch.cu_num_logits[:num_reqs]
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        temperature = self.temperature[:num_reqs]
-        seeds = self.seeds[:num_reqs]
-        pos = self.input_buffers.positions[:num_reqs]
+        idx_mapping = self.idx_mapping[:num_reqs]
+        idx_mapping.copy_(input_batch.idx_mapping)
+        self.temperature.copy_(sampling_metadata.temperature)
+        self.seeds.copy_(sampling_metadata.seeds)
         # Gather the values and copy them to the pre-allocated buffers.
-        torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
-        torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
+        pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
         draft_tokens = gumbel_sample(
-            logits, temperature, seeds, pos + 1, apply_temperature=True
+            logits,
+            idx_mapping,
+            self.temperature,
+            self.seeds,
+            pos + 1,
+            apply_temperature=True,
         )
         if self.num_speculative_steps == 1:
             # Early exit.

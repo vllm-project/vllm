@@ -465,6 +465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
             expanded_idx_mapping = expand_idx_mapping(
                 idx_mapping,
+                total_num_logits,
                 cu_num_logits,
                 max_expand_len=self.num_speculative_steps + 1,
             )

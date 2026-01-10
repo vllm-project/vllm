@@ -496,11 +496,12 @@ def _expand_idx_mapping_kernel(
 
 def expand_idx_mapping(
     idx_mapping: torch.Tensor,
+    total_num_logits: int,
     cu_num_logits: torch.Tensor,
     max_expand_len: int,
 ) -> torch.Tensor:
     num_reqs = idx_mapping.shape[0]
-    expanded_idx_mapping = idx_mapping.new_empty(max_expand_len)
+    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,
