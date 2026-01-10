@@ -20,12 +20,13 @@ from vllm.utils.func_utils import supports_kw
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import PoolingTypeStr
+    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
     from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any
-    PoolingTypeStr = Any
+    SequencePoolingType = Any
+    TokenPoolingType = Any
     AttnTypeStr = Any
 
 logger = init_logger(__name__)
@@ -155,9 +156,19 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    default_pooling_type: ClassVar[PoolingTypeStr] = "LAST"
+    default_seq_pooling_type: ClassVar[SequencePoolingType] = "LAST"
     """
-    Indicates the [vllm.config.pooler.PoolerConfig.pooling_type][]
+    Indicates the [vllm.config.pooler.PoolerConfig.seq_pooling_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    default_tok_pooling_type: ClassVar[TokenPoolingType] = "ALL"
+    """
+    Indicates the [vllm.config.pooler.PoolerConfig.tok_pooling_type][]
     to use by default.
 
     You can use the
@@ -200,18 +211,31 @@ def is_pooling_model(
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def default_pooling_type(pooling_type: PoolingTypeStr):
-    """Decorator to set `VllmModelForPooling.default_pooling_type`."""
+def default_pooling_type(
+    *,
+    seq_pooling_type: SequencePoolingType = "LAST",
+    tok_pooling_type: TokenPoolingType = "ALL",
+):
+    """Decorator to set `VllmModelForPooling.default_*_pooling_type`."""
 
     def func(model: _T) -> _T:
-        model.default_pooling_type = pooling_type  # type: ignore
+        model.default_seq_pooling_type = seq_pooling_type  # type: ignore
+        model.default_tok_pooling_type = tok_pooling_type  # type: ignore
         return model
 
     return func
 
 
-def get_default_pooling_type(model: type[object] | object) -> PoolingTypeStr:
-    return getattr(model, "default_pooling_type", "LAST")
+def get_default_seq_pooling_type(
+    model: type[object] | object,
+) -> SequencePoolingType:
+    return getattr(model, "default_seq_pooling_type", "LAST")
+
+
+def get_default_tok_pooling_type(
+    model: type[object] | object,
+) -> TokenPoolingType:
+    return getattr(model, "default_tok_pooling_type", "ALL")
 
 
 def attn_type(attn_type: AttnTypeStr):
