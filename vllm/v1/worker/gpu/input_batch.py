@@ -56,6 +56,8 @@ class InputBatch:
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
     idx_mapping_np: np.ndarray
+    # Identical to idx_mapping except for spec decoding.
+    expanded_idx_mapping: torch.Tensor
 
     # [num_reqs]
     # batch_idx -> num_scheduled_tokens
@@ -97,6 +99,7 @@ class InputBatch:
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        expanded_idx_mapping = idx_mapping
         num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
@@ -126,6 +129,7 @@ class InputBatch:
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
@@ -477,3 +481,37 @@ def post_update(
         query_start_loc,
         num_warps=1,
     )
+
+
+@triton.jit
+def _expand_idx_mapping_kernel(
+    idx_mapping_ptr,
+    expanded_idx_mapping_ptr,
+    cu_num_logits_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_tokens = end_idx - start_idx
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < num_tokens
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    tl.store(expanded_idx_mapping_ptr + start_idx + block, req_state_idx, mask=mask)
+
+
+def expand_idx_mapping(
+    idx_mapping: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    max_expand_len: int,
+) -> torch.Tensor:
+    num_reqs = idx_mapping.shape[0]
+    expanded_idx_mapping = idx_mapping.new_empty(max_expand_len)
+    _expand_idx_mapping_kernel[(num_reqs,)](
+        idx_mapping,
+        expanded_idx_mapping,
+        cu_num_logits,
+        BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
+    )
+    return expanded_idx_mapping

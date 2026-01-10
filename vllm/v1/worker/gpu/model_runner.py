@@ -41,6 +41,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
     get_num_sampled_and_rejected,
     post_update,
     prepare_pos_seq_lens,
@@ -49,7 +50,6 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.sample.logprob import compute_prompt_logprobs
 from vllm.v1.worker.gpu.sample.metadata import (
     SamplingMetadata,
-    expand_sampling_metadata,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -400,8 +400,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
-        if scheduler_output.scheduled_new_reqs:
-            self.req_states.prefill_len.copy_to_gpu()
 
         # Add new blocks for the existing requests.
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -412,6 +410,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+
+        self.req_states.apply_staged_writes()
 
     def prepare_inputs(
         self,
@@ -448,6 +448,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
+            expanded_idx_mapping = idx_mapping
         else:
             draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
@@ -465,6 +466,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 out=self.input_buffers.cu_num_logits.np[1 : num_reqs + 1],
             )
             cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
+            expanded_idx_mapping = expand_idx_mapping(
+                idx_mapping,
+                cu_num_logits,
+                max_expand_len=self.num_speculative_steps + 1,
+            )
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
@@ -490,14 +496,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu,
             self.req_states.prefill_token_ids.gpu,
             self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens,
+            self.req_states.num_computed_tokens.gpu,
         )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
             idx_mapping,
             query_start_loc_gpu,
-            self.req_states.num_computed_tokens,
+            self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
@@ -525,7 +531,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get num_computed_tokens.
         # HACK(woosuk): Here, we use num_computed_tokens on GPU instead of
         # num_computed_tokens_cpu. This works for most cases.
-        num_computed_tokens = self.req_states.num_computed_tokens[idx_mapping]
+        num_computed_tokens = self.req_states.num_computed_tokens.gpu[idx_mapping]
         # HACK(woosuk): Only GPU has the exact seq_lens because at this point
         # CPU does not know how many draft tokens are accepted/rejected in the
         # previous step. Therefore, we use max_model_len to be safe.
@@ -554,6 +560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
@@ -657,7 +664,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Handle chunked prompts.
         pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
         is_prompt_chunked = pos_after_step < prompt_lens
-        prefill_token_ids = self.req_states.prefill_token_ids.np
+        prefill_token_ids = self.req_states.prefill_token_ids.gpu
         query_start_loc = self.input_buffers.query_start_loc.np
         for i, req_id in enumerate(input_batch.req_ids):
             if not needs_prompt_logprobs[i]:
@@ -666,10 +673,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
             # The prompt is chunked. Get the next prompt token.
             req_idx = input_batch.idx_mapping_np[i]
-            next_prompt_token = int(prefill_token_ids[req_idx, pos_after_step[i]])
             idx = int(query_start_loc[i + 1] - 1)
-            # Set the next prompt token.
-            # NOTE(woosuk): This triggers a GPU operation.
+            # NOTE(woosuk): This triggers two GPU operations.
+            next_prompt_token = prefill_token_ids[req_idx, pos_after_step[i]]
             token_ids[idx] = next_prompt_token
 
         # NOTE(woosuk): We mask out logprobs for negative tokens.
@@ -730,7 +736,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Update the number of computed tokens.
         post_update(
             input_batch.idx_mapping,
-            self.req_states.num_computed_tokens,
+            self.req_states.num_computed_tokens.gpu,
             self.req_states.last_sampled_tokens,
             self.req_states.output_bin_counts,
             sampled_tokens,
@@ -864,18 +870,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_tokens_after_padding,
                 )
 
-                # NOTE(woosuk): Sampling metadata should be built under the async
-                # barrier to avoid race conditions.
                 pos = input_batch.positions[input_batch.logits_indices]
                 sampling_metadata = self.req_states.make_sampling_metadata(
-                    input_batch.idx_mapping, input_batch.idx_mapping_np, pos
+                    input_batch.expanded_idx_mapping, input_batch.idx_mapping_np, pos
                 )
-                if input_batch.num_draft_tokens > 0:
-                    sampling_metadata = expand_sampling_metadata(
-                        sampling_metadata,
-                        input_batch.cu_num_logits,
-                        max_expand_len=self.num_speculative_steps + 1,
-                    )
 
                 if self.lora_config:
                     # Activate LoRA adapters.
