@@ -134,6 +134,12 @@ class StagedWriteTensor:
             self.write_contents = UvaBackedTensor(
                 new_size, dtype=self.dtype, max_concurrency=self.max_concurrency
             )
+            # NOTE(woosuk): Since the previous write_contents buffer is released,
+            # we perform a synchronization here to ensure that all data transfers
+            # involving the old buffer have finished before allocating a new one.
+            # This prevents potential race conditions. The slight overhead is
+            # negligible because the reallocations are infrequent in practice.
+            torch.cuda.synchronize()
         self.write_contents.np[:diff_len] = self._staged_write_contents
         self.write_contents.copy_to_gpu(diff_len)
 
