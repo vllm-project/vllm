@@ -10,9 +10,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import ApplyRotaryEmb
 
 
+# --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
+
+    # --8<-- [end:rotary_embedding]
 
     def __init__(
         self,

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
+from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -379,7 +380,8 @@ class ModelInfo:
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    pooling_type: str | None = None
+    seq_pooling_type: SequencePoolingType | None = None
+    tok_pooling_type: TokenPoolingType | None = None
     attn_type: AttnTypeStr | None = None
     is_prefix_caching_supported: bool | None = None
     is_chunked_prefill_supported: bool | None = None
