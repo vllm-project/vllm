@@ -11,13 +11,40 @@ from vllm.model_executor.layers.fused_moe.router_factory import create_fused_moe
 from vllm.model_executor.models.llama4 import Llama4MoE
 
 # Test parameters
+# TODO: reduce
 MK_S = [(16, 128), (32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 32, 64]
 
 
-def setup_eplb_state(enable_eplb: bool) -> EplbLayerState:
-    return EplbLayerState() if enable_eplb else EplbLayerState()
+def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerState:
+    if not enable_eplb:
+        return EplbLayerState()
+
+    # Initialize EPLB state with proper tensors for testing
+    # For testing purposes, we use a simple 1:1 mapping (no redundant experts)
+    # expert_load_view: tracks load on each expert (shape: num_experts)
+    expert_load_view = torch.zeros(global_num_experts, dtype=torch.int32, device="cuda")
+
+    # logical_to_physical_map: maps logical experts to physical experts
+    # Shape: (num_logical_experts, max_slots)
+    # For testing, use simple 1:1 mapping with single slot per expert
+    logical_to_physical_map = torch.arange(
+        global_num_experts, dtype=torch.int64, device="cuda"
+    ).unsqueeze(-1)
+
+    # logical_replica_count: number of replicas per logical expert
+    # Shape: (num_logical_experts,)
+    # For testing, each logical expert has exactly 1 replica
+    logical_replica_count = torch.ones(
+        global_num_experts, dtype=torch.int64, device="cuda"
+    )
+
+    return EplbLayerState(
+        expert_load_view=expert_load_view,
+        logical_to_physical_map=logical_to_physical_map,
+        logical_replica_count=logical_replica_count,
+    )
 
 
 def make_test_data(
@@ -230,7 +257,7 @@ def baseline_custom_llama4(
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("enable_eplb", [False])  # EPLB requires more setup
+@pytest.mark.parametrize("enable_eplb", [False, True])
 def test_fused_topk(
     m: int,
     k: int,
@@ -242,7 +269,7 @@ def test_fused_topk(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
-    eplb_state = setup_eplb_state(enable_eplb)
+    eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
@@ -269,7 +296,7 @@ def test_fused_topk(
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("enable_eplb", [False])
+@pytest.mark.parametrize("enable_eplb", [False, True])
 @pytest.mark.parametrize("e_score_correction_bias_val", [1.0])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 def test_fused_topk_bias(
@@ -285,7 +312,7 @@ def test_fused_topk_bias(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
-    eplb_state = setup_eplb_state(enable_eplb)
+    eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
         e_score_correction_bias_val,
@@ -330,7 +357,7 @@ def test_fused_topk_bias(
     ],
 )
 @pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("enable_eplb", [False])
+@pytest.mark.parametrize("enable_eplb", [False, True])
 @pytest.mark.parametrize("e_score_correction_bias_val", [1.0])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 1.1])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
@@ -350,7 +377,7 @@ def test_grouped_topk(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
-    eplb_state = setup_eplb_state(enable_eplb)
+    eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
         e_score_correction_bias_val,
@@ -402,7 +429,7 @@ def test_grouped_topk(
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("enable_eplb", [False])
+@pytest.mark.parametrize("enable_eplb", [False, True])
 @pytest.mark.parametrize("custom_routing_function", [Llama4MoE.custom_routing_function])
 def test_custom(
     m: int,
@@ -416,7 +443,7 @@ def test_custom(
     if top_k > global_num_experts:
         pytest.skip(f"top_k ({top_k}) > global_num_experts ({global_num_experts})")
 
-    eplb_state = setup_eplb_state(enable_eplb)
+    eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     router = create_fused_moe_router(
         top_k=top_k,
