@@ -6,7 +6,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -16,6 +15,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -439,7 +441,7 @@ class BertWithRopeEncoder(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
@@ -668,7 +670,7 @@ class JinaRobertaModel(BertWithRope):
         return super().load_weights(weights)
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
