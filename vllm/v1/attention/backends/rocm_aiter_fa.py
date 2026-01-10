@@ -947,6 +947,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         b_loc=attn_metadata.block_table[:num_decodes],
                         b_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
                         b_seq_len=attn_metadata.seq_lens[:num_decodes],
+                        max_seq_len=attn_metadata.decode_metadata.max_seq_len,
                         max_input_len=attn_metadata.decode_metadata.max_query_len,
                         k_scale=layer._k_scale,
                         v_scale=layer._v_scale,
