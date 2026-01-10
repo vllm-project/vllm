@@ -534,6 +534,7 @@ class FusedMoE(CustomOp):
         self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
+        self.renormalize = renormalize
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
