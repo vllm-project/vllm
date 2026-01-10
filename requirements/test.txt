@@ -27,7 +27,9 @@ aiosignal==1.4.0
 albucore==0.0.16
     # via terratorch
 albumentations==1.4.6
-    # via terratorch
+    # via
+    #   -r requirements/test.in
+    #   terratorch
 alembic==1.16.4
     # via mlflow
 annotated-types==0.7.0
@@ -295,7 +297,7 @@ graphql-relay==3.2.0
     # via graphene
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.71.0
+grpcio==1.76.0
     # via ray
 gunicorn==23.0.0
     # via mlflow
@@ -723,7 +725,6 @@ pillow==10.4.0
     #   perceptron
     #   scikit-image
     #   segmentation-models-pytorch
-    #   sentence-transformers
     #   torchgeo
     #   torchvision
 platformdirs==4.3.6
@@ -757,7 +758,7 @@ propcache==0.2.0
     #   yarl
 proto-plus==1.26.1
     # via google-api-core
-protobuf==5.28.3
+protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
@@ -1023,7 +1024,7 @@ segmentation-models-pytorch==0.4.0
     # via
     #   terratorch
     #   torchgeo
-sentence-transformers==3.2.1
+sentence-transformers==5.2.0
     # via
     #   -r requirements/test.in
     #   mteb
@@ -1248,6 +1249,7 @@ typing-extensions==4.15.0
     #   chz
     #   fastapi
     #   graphene
+    #   grpcio
     #   huggingface-hub
     #   librosa
     #   lightning
@@ -1263,6 +1265,7 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   sentence-transformers
     #   sqlalchemy
     #   torch
     #   torchgeo
