@@ -12,7 +12,9 @@ OR
 vllm serve --model Salesforce/xLAM-2-3b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
 """
 
+import ast
 import json
+import operator
 import time
 
 from openai import OpenAI
@@ -28,10 +30,48 @@ def get_weather(location: str, unit: str):
 
 
 def calculate_expression(expression: str):
+    """Safely evaluate a mathematical expression.
+
+    Uses ast.parse to ensure only safe numeric operations are performed,
+    preventing arbitrary code execution.
+    """
+    # Define allowed operators for safe math evaluation
+    allowed_operators = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+
+    def safe_eval(node):
+        if isinstance(node, ast.Constant):  # Numbers
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise ValueError(f"Unsupported constant: {node.value}")
+        elif isinstance(node, ast.BinOp):  # Binary operations
+            if type(node.op) not in allowed_operators:
+                raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+            left = safe_eval(node.left)
+            right = safe_eval(node.right)
+            return allowed_operators[type(node.op)](left, right)
+        elif isinstance(node, ast.UnaryOp):  # Unary operations (-x, +x)
+            if type(node.op) not in allowed_operators:
+                raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+            operand = safe_eval(node.operand)
+            return allowed_operators[type(node.op)](operand)
+        elif isinstance(node, ast.Expression):
+            return safe_eval(node.body)
+        else:
+            raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+
     try:
-        result = eval(expression)
+        tree = ast.parse(expression, mode="eval")
+        result = safe_eval(tree)
         return f"The result of {expression} is {result}"
-    except Exception as e:
+    except (ValueError, SyntaxError) as e:
         return f"Could not calculate {expression}: {e}"
 
 
