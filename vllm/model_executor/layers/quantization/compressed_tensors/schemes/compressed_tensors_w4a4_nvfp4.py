@@ -155,10 +155,31 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             if self.backend == "fbgemm":
                 swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
-            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight_packed = Parameter(
-                layer.weight_packed.data, requires_grad=False
-            )
+            weight_packed = layer.weight_packed.data
+            weight_scale = swizzled_weight_scale
+            if self.backend == "flashinfer-cutlass":
+                output_size = getattr(
+                    layer, "output_size_per_partition", weight_packed.shape[0]
+                )
+                pad_rows = (-output_size) % 32
+                if pad_rows:
+                    padded_weight = torch.zeros(
+                        pad_rows,
+                        weight_packed.shape[1],
+                        dtype=weight_packed.dtype,
+                        device=weight_packed.device,
+                    )
+                    weight_packed = torch.cat((weight_packed, padded_weight), dim=0)
+                    padded_scale = torch.zeros(
+                        pad_rows,
+                        weight_scale.shape[1],
+                        dtype=weight_scale.dtype,
+                        device=weight_scale.device,
+                    )
+                    weight_scale = torch.cat((weight_scale, padded_scale), dim=0)
+
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            layer.weight_packed = Parameter(weight_packed, requires_grad=False)
 
         layer.alpha = Parameter(
             1 / (layer.input_global_scale * layer.weight_global_scale),
@@ -184,7 +205,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
+        output_size = getattr(
+            layer,
+            "output_size_per_partition",
+            layer.weight_packed.shape[0],
+        )
+        output_shape = [*x.shape[:-1], output_size]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
@@ -213,6 +239,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
 
+        if out.shape[-1] != output_size:
+            out = out[..., :output_size]
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
