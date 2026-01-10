@@ -191,7 +191,6 @@ def select_cutlass_fp8_gemm_impl(
     )
 
 
-
 def align_fp8_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
