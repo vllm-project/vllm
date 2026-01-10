@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Generator, Iterable
 from typing import cast
+from contextlib import nullcontext
 
 import torch
 from torch import nn
@@ -285,7 +286,12 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        weight_loading_ctx = nullcontext()
+        if model_config.quantization == "torchao" and torchao_version_at_least("0.16.0"):
+            weight_loading_ctx = torch.inference_mode()
+
+        with weight_loading_ctx:
+            loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
