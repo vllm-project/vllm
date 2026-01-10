@@ -1566,6 +1566,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.workspace_buffer is not None
 
+        # NOTE(rob): these can be expensive as they fill with 0s,
+        # especially the workplace_buffer fill.
         out = torch.zeros(
             q.shape[0],
             q.shape[1],
@@ -1719,6 +1721,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=k_nope.device,
         )
         # Direct copies with efficient broadcasting
+        # NOTE(rob): these are kind of expensive (copy ops).
+        # instead, why not create this empty k buffer before
+        # and just write each part to the empty k buffer directly?
         k[..., : k_nope.shape[-1]] = k_nope
         k[..., k_nope.shape[-1] :] = k_pe
         return k
