@@ -14,6 +14,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_shutdown,
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
@@ -37,6 +38,12 @@ logger = init_logger(__name__)
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
+    @staticmethod
+    def ensure_kv_transfer_shutdown() -> None:
+        # has_kv_transfer_group can be None during interpreter shutdown.
+        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
+            ensure_kv_transfer_shutdown()
+
     @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
