@@ -381,38 +381,6 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config.use_sep_token = use_sep_token
 
 
-def _get_lm_head_parent_and_inner_model(
-    model: nn.Module,
-) -> tuple[nn.Module, nn.Module | None, nn.Module | None]:
-    """Helper to get lm_head parent and inner_model for text and VL models.
-
-    For VL models, lm_head is under language_model (model.language_model.lm_head).
-    For text-only models, lm_head is directly on the model (model.lm_head).
-    """
-    language_model = getattr(model, "language_model", None)
-    if language_model is not None:
-        return language_model, getattr(language_model, "model", None), language_model
-    return model, getattr(model, "model", None), None
-
-
-def _get_embed_tokens(
-    inner_model: nn.Module | None, lm_head_parent: nn.Module
-) -> nn.Module:
-    """Helper to get embed_tokens for weight tying.
-
-    embed_tokens is the assumed name for input embeddings. If the model does not
-    have this attribute, we fall back to get_input_embeddings(), which is used by
-    the Transformers modeling backend.
-    """
-    if inner_model is not None:
-        return (
-            inner_model.embed_tokens
-            if hasattr(inner_model, "embed_tokens")
-            else inner_model.get_input_embeddings()
-        )
-    return lm_head_parent.get_input_embeddings()
-
-
 def load_weights_using_from_2_way_softmax(
     model, weights: Iterable[tuple[str, torch.Tensor]]
 ):
@@ -433,16 +401,23 @@ def load_weights_using_from_2_way_softmax(
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
-    lm_head_parent, inner_model, language_model = _get_lm_head_parent_and_inner_model(
-        model
+    language_model = (
+        model.get_language_model() if hasattr(model, "get_language_model") else model
     )
-
-    lm_head_parent.lm_head = ParallelLMHead(
+    language_model.lm_head = ParallelLMHead(
         text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
     )
     if text_config.tie_word_embeddings:
-        embed_tokens = _get_embed_tokens(inner_model, lm_head_parent)
-        lm_head_parent.lm_head = lm_head_parent.lm_head.tie_weights(embed_tokens)
+        # embed_tokens is the assumed name for input embeddings. If the model does not
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
+        # the Transformers modeling backend.
+        text_backbone = language_model.model
+        embed_tokens = (
+            text_backbone.embed_tokens
+            if hasattr(text_backbone, "embed_tokens")
+            else text_backbone.get_input_embeddings()
+        )
+        language_model.lm_head = language_model.lm_head.tie_weights(embed_tokens)
 
     # ModelForPooling is dynamically defined inside the _create_pooling_model_cls
     # function, so we need use this hacky method to obtain it.
@@ -462,20 +437,18 @@ def load_weights_using_from_2_way_softmax(
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
     true_id = tokenizer.convert_tokens_to_ids(tokens[1])
-    score_weight = lm_head_parent.lm_head.weight.data[[true_id]].to(
+    lm_head_weight = language_model.lm_head.weight
+    score_weight = lm_head_weight.data[[true_id]].to(
         torch.float32
-    ) - lm_head_parent.lm_head.weight.data[[false_id]].to(torch.float32)
+    ) - lm_head_weight.data[[false_id]].to(torch.float32)
 
     param = model.score.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
-    del lm_head_parent.lm_head
+    del language_model.lm_head
     loaded_weights.add("score.weight")
-    if language_model is not None:
-        loaded_weights.discard("language_model.lm_head.weight")
-    else:
-        loaded_weights.discard("lm_head.weight")
+    loaded_weights.discard("lm_head.weight")
     return loaded_weights
 
 
@@ -491,16 +464,19 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     tokens = cast(list[int], tokens)
     assert len(tokens) > 0
 
-    lm_head_parent, inner_model, language_model = _get_lm_head_parent_and_inner_model(
-        model
-    )
-
-    lm_head_parent.lm_head = ParallelLMHead(
+    model.lm_head = ParallelLMHead(
         text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
     )
     if text_config.tie_word_embeddings:
-        embed_tokens = _get_embed_tokens(inner_model, lm_head_parent)
-        lm_head_parent.lm_head = lm_head_parent.lm_head.tie_weights(embed_tokens)
+        # embed_tokens is the assumed name for input embeddings. If the model does not
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
+        # the Transformers modeling backend.
+        embed_tokens = (
+            model.model.embed_tokens
+            if hasattr(model.model, "embed_tokens")
+            else model.model.get_input_embeddings()
+        )
+        model.lm_head = model.lm_head.tie_weights(embed_tokens)
 
     # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
     loaded_weights = type(model).__mro__[1].load_weights(model, weights)
@@ -515,18 +491,15 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     )
 
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
-    score_weight = lm_head_parent.lm_head.weight.data[token_ids]
+    score_weight = model.lm_head.weight.data[token_ids]
 
     param = model.score.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
-    del lm_head_parent.lm_head
+    del model.lm_head
     loaded_weights.add("score.weight")
-    if language_model is not None:
-        loaded_weights.discard("language_model.lm_head.weight")
-    else:
-        loaded_weights.discard("lm_head.weight")
+    loaded_weights.discard("lm_head.weight")
     return loaded_weights
 
 
