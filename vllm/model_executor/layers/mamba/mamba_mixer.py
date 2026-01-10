@@ -402,12 +402,6 @@ class MambaMixer(MambaBase, CustomOp):
                 initial_state_idx=block_idx_last_computed_token_d,
             ).transpose(0, 1)
 
-            # ROCm: Ensure contiguous tensor for x_proj linear layer.
-            # causal_conv1d_update returns a non-contiguous view, causing incorrect
-            # GEMM results when batch > 1 on ROCm.
-            if current_platform.is_rocm():
-                conv_out_d = conv_out_d.contiguous()
-
             # 3. State Space Model sequence transformation.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(
                 conv_out_d.transpose(-2, -1)
