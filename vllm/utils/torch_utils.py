@@ -219,9 +219,28 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     if quant_method.startswith("modelopt"):
         quantization_inner = quant_cfg.get("quantization", quant_cfg)
         # Check if quant config is specified and use kv cache quant algo
-        kv_algo = quantization_inner.get("kv_cache_quant_algo") or quant_cfg.get(
-            "kv_cache_quant_algo"
+        kv_algo = (
+            quantization_inner.get("kv_cache_scheme")
+            or quant_cfg.get("kv_cache_scheme")
+            or quantization_inner.get("kv_cache_quant_algo")
+            or quant_cfg.get("kv_cache_quant_algo")
         )
+        if isinstance(kv_algo, dict):
+            if (
+                kv_algo.get("dynamic") is False
+                and kv_algo.get("num_bits") == 8
+                and kv_algo.get("type") == "float"
+            ):
+                kv_algo = "fp8"
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    f"{kv_algo}",
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
         if isinstance(kv_algo, str):
             kv_algo_lower = kv_algo.lower()
 
