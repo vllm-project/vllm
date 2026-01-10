@@ -226,14 +226,23 @@ class MistralTokenizer(TokenizerLike):
                 MistralCommonTokenizer as MistralCommonBackend,
             )
 
-        tokenizer = MistralCommonBackend.from_pretrained(
-            path_or_repo_id,
-            *args,
-            mode=ValidationMode.test,
-            cache_dir=download_dir,
-            revision="main" if revision is None else revision,
-            **kwargs,
-        )
+        try:
+            tokenizer = MistralCommonBackend.from_pretrained(
+                path_or_repo_id,
+                *args,
+                mode=ValidationMode.test,
+                cache_dir=download_dir,
+                revision="main" if revision is None else revision,
+                **kwargs,
+            )
+        except (FileNotFoundError, OSError, ValueError) as e:
+            # Provide helpful error message for non-Mistral models that were
+            # incorrectly detected as Mistral (see issue #31444)
+            raise ValueError(
+                f"Failed to load Mistral tokenizer from '{path_or_repo_id}': {e}. "
+                f"If this model is not a Mistral-family model, try using "
+                f"'--tokenizer-mode hf' to force HuggingFace tokenizer."
+            ) from e
 
         return cls(tokenizer)
 

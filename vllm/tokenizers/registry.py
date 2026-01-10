@@ -23,6 +23,18 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
 
+# Mistral architecture indicators - used to validate Mistral tokenizer selection
+_MISTRAL_ARCHITECTURE_INDICATORS = frozenset(
+    {
+        "mistral",
+        "mixtral",
+        "pixtral",
+        "mathstral",
+        "codestral",
+        "ministral",
+    }
+)
+
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig, RunnerType
 
@@ -76,6 +88,62 @@ TokenizerRegistry = _TokenizerRegistry(
         for mode, (mod_relname, cls_name) in _VLLM_TOKENIZERS.items()
     }
 )
+
+
+def _is_mistral_architecture(
+    model_name_or_path: str,
+    revision: str | None = None,
+    trust_remote_code: bool = False,
+) -> bool:
+    """
+    Check if the model's config.json indicates a Mistral-family architecture.
+
+    This prevents false-positive Mistral tokenizer selection for models that
+    happen to have files matching Mistral patterns (e.g., tokenizer.model.v*)
+    but are not actually Mistral models.
+
+    Args:
+        model_name_or_path: HuggingFace model ID or local path
+        revision: Model revision
+        trust_remote_code: Whether to trust remote code
+
+    Returns:
+        True if the model architecture indicates it's a Mistral-family model
+    """
+    try:
+        from vllm.transformers_utils.config import get_config
+
+        config = get_config(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
+
+        # Check architectures list (e.g., ["MistralForCausalLM"])
+        # Use startswith to avoid false positives like "NotMistralForCausalLM"
+        architectures = getattr(config, "architectures", None) or []
+        for arch in architectures:
+            arch_lower = arch.lower()
+            is_mistral = any(
+                arch_lower.startswith(ind) for ind in _MISTRAL_ARCHITECTURE_INDICATORS
+            )
+            if is_mistral:
+                return True
+
+        # Check model_type (e.g., "mistral") for an exact match
+        # to avoid false positives like "not-mistral"
+        model_type = getattr(config, "model_type", None) or ""
+        return model_type.lower() in _MISTRAL_ARCHITECTURE_INDICATORS
+    except Exception as e:
+        # On any error (missing config, network issues, etc.),
+        # don't assume Mistral - let the caller fall back to HF tokenizer
+        logger.debug(
+            "Could not determine model architecture for %s: %s. "
+            "Will not auto-select Mistral tokenizer.",
+            model_name_or_path,
+            e,
+        )
+        return False
 
 
 def resolve_tokenizer_args(
@@ -142,6 +210,8 @@ def resolve_tokenizer_args(
         kwargs["use_fast"] = False
 
     # Try to use official Mistral tokenizer if possible
+    # We check BOTH file patterns AND model architecture to avoid false positives
+    # (e.g., MiniMax models have tokenizer.model.v* files but are not Mistral)
     if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
         allow_patterns = ["tekken.json", "tokenizer.model.v*"]
         files_list = list_filtered_repo_files(
@@ -150,7 +220,20 @@ def resolve_tokenizer_args(
             revision=revision,
         )
         if len(files_list) > 0:
-            tokenizer_mode = "mistral"
+            # Verify this is actually a Mistral-family model before selecting
+            # the Mistral tokenizer (fixes issue #31444)
+            trust_remote_code = kwargs.get("trust_remote_code", False)
+            if _is_mistral_architecture(
+                str(tokenizer_name), revision, trust_remote_code
+            ):
+                tokenizer_mode = "mistral"
+            else:
+                logger.info(
+                    "Found Mistral tokenizer files (%s) but model architecture "
+                    "is not Mistral-family. Using HuggingFace tokenizer for '%s'.",
+                    files_list,
+                    tokenizer_name,
+                )
 
     # Try to use Grok2 tiktoken tokenizer if possible
     if tokenizer_mode == "auto":
