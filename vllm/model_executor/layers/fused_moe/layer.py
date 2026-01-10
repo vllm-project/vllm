@@ -616,35 +616,6 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul:
-            # Avoid circular import
-            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-                CompressedTensorsW4A4Nvfp4MoEMethod,
-            )
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptFp8MoEMethod,
-                ModelOptNvFp4FusedMoE,
-            )
-
-            if not isinstance(
-                self.quant_method,
-                (
-                    UnquantizedFusedMoEMethod,
-                    ModelOptFp8MoEMethod,
-                    ModelOptNvFp4FusedMoE,
-                    CompressedTensorsW4A4Nvfp4MoEMethod,
-                ),
-            ):
-                raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for unquantized "
-                    ", ModelOpt FP8, ModelOpt NvFp4, and CompressedTensors "
-                    "NvFp4 checkpoints"
-                )
-            if not current_platform.is_cuda():
-                raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for CUDA for now"
-                )
-
         if self.enable_eplb and not self.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not

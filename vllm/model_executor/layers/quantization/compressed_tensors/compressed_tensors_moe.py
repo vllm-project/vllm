@@ -234,6 +234,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     ):
         super().__init__(moe)
         self.group_size = 16
+
+        if not moe.is_act_and_mul and not current_platform.is_cuda():
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA for now"
+            )
+
         if use_marlin:
             if not moe.is_act_and_mul:
                 raise NotImplementedError(
