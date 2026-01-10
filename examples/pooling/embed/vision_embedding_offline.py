@@ -31,7 +31,7 @@ def run_qwen3_vl():
         max_model_len=8192,
         limit_mm_per_prompt={"image": 1},
     )
-    image_placeholder = "<vision_start><|image_pad|><vision_end>"
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
 
     llm = LLM(**asdict(engine_args))
 
