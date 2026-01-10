@@ -381,14 +381,13 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config.use_sep_token = use_sep_token
 
 
-def _get_lm_head_parent_and_inner_model(model):
+def _get_lm_head_parent_and_inner_model(
+    model: nn.Module,
+) -> tuple[nn.Module, nn.Module | None, nn.Module | None]:
     """Helper to get lm_head parent and inner_model for text and VL models.
 
     For VL models, lm_head is under language_model (model.language_model.lm_head).
     For text-only models, lm_head is directly on the model (model.lm_head).
-
-    Returns:
-        tuple: (lm_head_parent, inner_model, language_model)
     """
     language_model = getattr(model, "language_model", None)
     if language_model is not None:
@@ -396,7 +395,9 @@ def _get_lm_head_parent_and_inner_model(model):
     return model, getattr(model, "model", None), None
 
 
-def _get_embed_tokens(inner_model, lm_head_parent):
+def _get_embed_tokens(
+    inner_model: nn.Module | None, lm_head_parent: nn.Module
+) -> nn.Module:
     """Helper to get embed_tokens for weight tying.
 
     embed_tokens is the assumed name for input embeddings. If the model does not
