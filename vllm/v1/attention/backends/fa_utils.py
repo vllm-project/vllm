@@ -7,10 +7,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 if current_platform.is_cuda():
-    from vllm import _custom_ops
-
-    ops = _custom_ops
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
+    from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
         flash_attn_varlen_func,
         get_scheduler_metadata,
@@ -19,10 +16,9 @@ if current_platform.is_cuda():
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops
 
-    ops = ipex_ops
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
-    flash_attn_varlen_func = ops.flash_attn_varlen_func
-    get_scheduler_metadata = ops.get_scheduler_metadata
+    reshape_and_cache_flash = ipex_ops.reshape_and_cache_flash
+    flash_attn_varlen_func = ipex_ops.flash_attn_varlen_func
+    get_scheduler_metadata = ipex_ops.get_scheduler_metadata
 
 elif current_platform.is_rocm():
     try:
