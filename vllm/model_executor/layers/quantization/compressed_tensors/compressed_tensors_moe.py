@@ -93,6 +93,24 @@ from vllm.platforms import CpuArchEnum, current_platform
 logger = init_logger(__name__)
 
 
+def _sanitize_global_scale(name: str, scale: torch.Tensor) -> torch.Tensor:
+    scale = scale.to(torch.float32)
+    finite = torch.isfinite(scale) & (scale > 0)
+    if finite.all():
+        return scale
+    if finite.any():
+        fallback = scale[finite].max()
+    else:
+        fallback = torch.tensor(1.0, dtype=scale.dtype, device=scale.device)
+    logger.warning_once(
+        "Invalid %s detected (nan/inf/non-positive). Replacing with %s.",
+        name,
+        float(fallback.item()),
+    )
+    scale = torch.where(finite, scale, fallback)
+    return torch.clamp_min(scale, 1e-6)
+
+
 class GPTQMarlinState(Enum):
     REPACK = enum.auto()
     READY = enum.auto()
@@ -388,6 +406,30 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        layer.w13_input_global_scale = torch.nn.Parameter(
+            _sanitize_global_scale(
+                "w13_input_global_scale", layer.w13_input_global_scale
+            ),
+            requires_grad=False,
+        )
+        layer.w2_input_global_scale = torch.nn.Parameter(
+            _sanitize_global_scale(
+                "w2_input_global_scale", layer.w2_input_global_scale
+            ),
+            requires_grad=False,
+        )
+        layer.w13_weight_global_scale = torch.nn.Parameter(
+            _sanitize_global_scale(
+                "w13_weight_global_scale", layer.w13_weight_global_scale
+            ),
+            requires_grad=False,
+        )
+        layer.w2_weight_global_scale = torch.nn.Parameter(
+            _sanitize_global_scale(
+                "w2_weight_global_scale", layer.w2_weight_global_scale
+            ),
+            requires_grad=False,
+        )
         # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
         # requires this naming convention. However, the name change breaks
         # reloading because the state dict no longer matches disk. Once we
