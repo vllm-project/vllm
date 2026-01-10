@@ -22,7 +22,7 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.modeling_outputs import (
@@ -30,24 +30,21 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
-    dispatch_rotary_emb_function,
+    ApplyRotaryEmb,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -74,9 +71,11 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
 from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
+from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -128,47 +127,6 @@ def smart_resize(
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
-
-
-def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    x1, x2 = x[..., ::2], x[..., 1::2]
-    return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
-
-
-def apply_rotary_emb_torch(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False
-) -> torch.Tensor:
-    """
-    x: (batch_size, seqlen, nheads, headdim)
-    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
-    """
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    sin = repeat(
-        sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
-            x[..., ro_dim:],
-        ],
-        dim=-1,
-    )
-
-
-def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    rotary_emb_function = dispatch_rotary_emb_function(default=apply_rotary_emb_torch)
-    t_ = t.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    output = rotary_emb_function(t_, cos, sin).type_as(t)
-    return output
 
 
 class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
@@ -606,8 +564,13 @@ class SiglipAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            scale=self.hidden_size_per_attention_head**-0.5,
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
+        )
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
         )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -651,7 +614,11 @@ class SiglipAttention(nn.Module):
 
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            qk_rotated = self.apply_rotary_emb(
+                qk_concat,
+                rotary_pos_emb.cos(),
+                rotary_pos_emb.sin(),
+            )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         context_layer = self.attn(
@@ -690,46 +657,6 @@ class SigLIPRotaryEmbedding(nn.Module):
         return freqs
 
 
-class SiglipMLP(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.activation_fn = get_act_fn(config.hidden_act)
-        # Special handling for BNB and torchao quantization
-        if quant_config and quant_config.get_name() in ["bitsandbytes", "torchao"]:
-            quantizable = True
-        else:
-            # For other quantization, we require the hidden size to be a
-            # multiple of 64
-            quantizable = (
-                config.hidden_size % 64 == 0 and config.intermediate_size % 64 == 0
-            )
-        self.fc1 = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config if quantizable else None,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            quant_config=quant_config if quantizable else None,
-            prefix=f"{prefix}.fc2",
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        return hidden_states
-
-
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -753,6 +680,7 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 

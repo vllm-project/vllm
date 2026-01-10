@@ -70,7 +70,6 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    NestedTensors,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
@@ -227,6 +226,10 @@ class Qwen2_5OmniThinkerProcessingInfo(
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Qwen2.5 Omni models (mono)."""
+        return 1
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -311,6 +314,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.info.get_hf_config().vision_config.spatial_merge_size,
             target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
         )
 
     def _call_hf_processor(
@@ -1129,8 +1133,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 multimodal_embeddings += tuple(audio_embeddings)
         return multimodal_embeddings
 
-    # TODO (ywang96): support overlapping modality embeddings so that
-    # `use_audio_in_video` will work on V1.
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -1149,27 +1151,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
-
-    def embed_multimodal_v0(self, **kwargs: object) -> NestedTensors | None:
-        audio_input = self._parse_and_validate_audio_input(**kwargs)
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        video_input = self._parse_and_validate_video_input(**kwargs)
-
-        if audio_input is None and image_input is None and video_input is None:
-            return None
-
-        multimodal_embeddings: list[tuple[NestedTensors, str]] = []
-
-        if audio_input is not None:
-            audio_embeds = self._process_audio_input(audio_input)
-            multimodal_embeddings.append((audio_embeds, "audio"))
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            multimodal_embeddings.append((image_embeds, "image"))
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            multimodal_embeddings.append((video_embeds, "video"))
-        return multimodal_embeddings
 
     def forward(
         self,

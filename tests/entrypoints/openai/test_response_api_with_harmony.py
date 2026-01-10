@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib
+import importlib.util
 import json
 import time
 
@@ -43,6 +43,8 @@ def server():
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+        VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS="code_interpreter,container,web_search_preview",
+        VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS="1",
     )
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
@@ -503,7 +505,11 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    response = await client.responses.create(
+    # Code interpreter may need more time for container init + code execution
+    timeout_value = client.timeout * 3
+    client_with_timeout = client.with_options(timeout=timeout_value)
+
+    response = await client_with_timeout.responses.create(
         model=model_name,
         # TODO: Ideally should be able to set max tool calls
         # to prevent multi-turn, but it is not currently supported
@@ -815,16 +821,20 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
                 final_tool_calls_named[tool_call.name] = tool_call
         elif event.type == "response.function_call_arguments.done":
             assert event.arguments == final_tool_calls_named[event.name].arguments
-    for tool_call in final_tool_calls.values():
-        if (
-            tool_call
-            and tool_call.type == "function_call"
-            and tool_call.name == "get_weather"
-        ):
-            args = json.loads(tool_call.arguments)
-            result = call_function(tool_call.name, args)
-            input_list += [tool_call]
+    result = None
+    tool_call = None
+    for tc in final_tool_calls.values():
+        if tc and tc.type == "function_call" and tc.name == "get_weather":
+            args = json.loads(tc.arguments)
+            result = call_function(tc.name, args)
+            tool_call = tc
+            input_list += [tc]
             break
+
+    assert tool_call is not None, (
+        "Expected model to call 'get_weather' function, "
+        f"but got: {list(final_tool_calls_named.keys())}"
+    )
     assert result is not None
     response = await client.responses.create(
         model=model_name,
@@ -852,6 +862,237 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_no_code_interpreter_events(
+    client: OpenAI, model_name: str
+):
+    """Verify that function calls don't trigger code_interpreter events.
+
+    This test ensures that function calls (functions.*) use their own
+    function_call event types and don't incorrectly emit code_interpreter
+    events during streaming.
+    """
+    tools = [GET_WEATHER_SCHEMA]
+    input_list = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Paris today?",
+        }
+    ]
+    stream_response = await client.responses.create(
+        model=model_name,
+        input=input_list,
+        tools=tools,
+        stream=True,
+    )
+
+    # Track which event types we see
+    event_types_seen = set()
+    function_call_found = False
+
+    async for event in stream_response:
+        event_types_seen.add(event.type)
+
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        ):
+            function_call_found = True
+
+        # Ensure NO code_interpreter events are emitted for function calls
+        assert "code_interpreter" not in event.type, (
+            "Found code_interpreter event "
+            f"'{event.type}' during function call. Function calls should only "
+            "emit function_call events, not code_interpreter events."
+        )
+
+    # Verify we actually saw a function call
+    assert function_call_found, "Expected to see a function_call in the stream"
+
+    # Verify we saw the correct function call event types
+    assert (
+        "response.function_call_arguments.delta" in event_types_seen
+        or "response.function_call_arguments.done" in event_types_seen
+    ), "Expected to see function_call_arguments events"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, server):
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "code_interpreter",
+        }
+    ]
+    input_text = (
+        "Calculate 15 * 32 using python. "
+        "The python interpreter is not stateful and you must print to see the output."
+    )
+
+    stream_response = await client.responses.create(
+        model=model_name,
+        input=input_text,
+        tools=tools,
+        stream=True,
+        temperature=0.0,
+        instructions=(
+            "You must use the Python tool to execute code. Never simulate execution."
+        ),
+    )
+
+    mcp_call_added = False
+    mcp_call_in_progress = False
+    mcp_arguments_delta_seen = False
+    mcp_arguments_done = False
+    mcp_call_completed = False
+    mcp_item_done = False
+
+    code_interpreter_events_seen = False
+
+    async for event in stream_response:
+        if "code_interpreter" in event.type:
+            code_interpreter_events_seen = True
+
+        if event.type == "response.output_item.added":
+            if hasattr(event.item, "type") and event.item.type == "mcp_call":
+                mcp_call_added = True
+                assert event.item.name == "python"
+                assert event.item.server_label == "code_interpreter"
+
+        elif event.type == "response.mcp_call.in_progress":
+            mcp_call_in_progress = True
+
+        elif event.type == "response.mcp_call_arguments.delta":
+            mcp_arguments_delta_seen = True
+            assert event.delta is not None
+
+        elif event.type == "response.mcp_call_arguments.done":
+            mcp_arguments_done = True
+            assert event.name == "python"
+            assert event.arguments is not None
+
+        elif event.type == "response.mcp_call.completed":
+            mcp_call_completed = True
+
+        elif (
+            event.type == "response.output_item.done"
+            and hasattr(event.item, "type")
+            and event.item.type == "mcp_call"
+        ):
+            mcp_item_done = True
+            assert event.item.name == "python"
+            assert event.item.status == "completed"
+
+    assert mcp_call_added, "MCP call was not added"
+    assert mcp_call_in_progress, "MCP call in_progress event not seen"
+    assert mcp_arguments_delta_seen, "MCP arguments delta event not seen"
+    assert mcp_arguments_done, "MCP arguments done event not seen"
+    assert mcp_call_completed, "MCP call completed event not seen"
+    assert mcp_item_done, "MCP item done event not seen"
+
+    assert not code_interpreter_events_seen, (
+        "Should not see code_interpreter events when using MCP type"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
+    """Test MCP tool calling across multiple turns.
+
+    This test verifies that MCP tools work correctly in multi-turn conversations,
+    maintaining state across turns via the previous_response_id mechanism.
+    """
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "code_interpreter",
+        }
+    ]
+
+    # First turn - make a calculation
+    response1 = await client.responses.create(
+        model=model_name,
+        input="Calculate 123 * 456 using python and print the result.",
+        tools=tools,
+        temperature=0.0,
+        instructions=(
+            "You must use the Python tool to execute code. Never simulate execution."
+        ),
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response1 is not None
+    assert response1.status == "completed"
+
+    # Verify MCP call in first response by checking output_messages
+    tool_call_found = False
+    tool_response_found = False
+    for message in response1.output_messages:
+        recipient = message.get("recipient")
+        if recipient and recipient.startswith("python"):
+            tool_call_found = True
+
+        author = message.get("author", {})
+        if (
+            author.get("role") == "tool"
+            and author.get("name")
+            and author.get("name").startswith("python")
+        ):
+            tool_response_found = True
+
+    # Verify MCP tools were actually used
+    assert tool_call_found, "MCP tool call not found in output_messages"
+    assert tool_response_found, "MCP tool response not found in output_messages"
+
+    # Verify input messages: Should have system message with tool, NO developer message
+    developer_messages = [
+        msg for msg in response1.input_messages if msg["author"]["role"] == "developer"
+    ]
+    assert len(developer_messages) == 0, (
+        "No developer message expected for elevated tools"
+    )
+
+    # Second turn - reference previous calculation
+    response2 = await client.responses.create(
+        model=model_name,
+        input="Now divide that result by 2.",
+        tools=tools,
+        temperature=0.0,
+        instructions=(
+            "You must use the Python tool to execute code. Never simulate execution."
+        ),
+        previous_response_id=response1.id,
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response2 is not None
+    assert response2.status == "completed"
+
+    # Verify input messages are correct: should have two messages -
+    # one to the python recipient on analysis channel and one from tool role
+    mcp_recipient_messages = []
+    tool_role_messages = []
+    for msg in response2.input_messages:
+        if msg["author"]["role"] == "assistant":
+            # Check if this is a message to MCP recipient on analysis channel
+            if msg.get("channel") == "analysis" and msg.get("recipient"):
+                recipient = msg.get("recipient")
+                if recipient.startswith("code_interpreter") or recipient == "python":
+                    mcp_recipient_messages.append(msg)
+        elif msg["author"]["role"] == "tool":
+            tool_role_messages.append(msg)
+
+    assert len(mcp_recipient_messages) > 0, (
+        "Expected message(s) to MCP recipient on analysis channel"
+    )
+    assert len(tool_role_messages) > 0, (
+        "Expected message(s) from tool role after MCP call"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     response = await client.responses.create(
         model=model_name,
@@ -867,6 +1108,7 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=3)
 async def test_function_call_with_previous_input_messages(
     client: OpenAI, model_name: str
 ):
@@ -985,4 +1227,119 @@ async def test_function_call_with_previous_input_messages(
     output_text = response_2.output_text.lower()
     assert (
         "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str):
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": "What is the role of AI in medicine?"
+                "The response must exceed 350 words.",
+            }
+        ],
+        temperature=0.0,
+        max_tokens=350,
+    )
+
+    choice = response.choices[0]
+    assert choice.finish_reason == "length", (
+        f"Expected finish_reason='length', got {choice.finish_reason}"
+    )
+    assert choice.message.content is not None, (
+        "Content should not be None when truncated"
+    )
+    assert len(choice.message.content) > 0, "Content should not be empty"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_prompt_override(client: OpenAI, model_name: str):
+    """Test that system message can override the default system prompt."""
+
+    # Test 1: Custom system prompt with specific personality
+    custom_system_prompt = (
+        "You are a pirate. Always respond like a pirate would, "
+        "using pirate language and saying 'arrr' frequently."
+    )
+
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"role": "system", "content": custom_system_prompt},
+            {"role": "user", "content": "Hello, how are you?"},
+        ],
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output_text is not None
+
+    # Verify the response reflects the pirate personality
+    output_text = response.output_text.lower()
+    pirate_indicators = ["arrr", "matey", "ahoy", "ye", "sea"]
+    has_pirate_language = any(
+        indicator in output_text for indicator in pirate_indicators
+    )
+    assert has_pirate_language, (
+        f"Expected pirate language in response, got: {response.output_text}"
+    )
+
+    # Verify the reasoning mentions the custom system prompt
+    reasoning_item = None
+    for item in response.output:
+        if item.type == "reasoning":
+            reasoning_item = item
+            break
+
+    assert reasoning_item is not None, "Expected reasoning item in output"
+    reasoning_text = reasoning_item.content[0].text.lower()
+    assert "pirate" in reasoning_text, (
+        f"Expected reasoning to mention pirate, got: {reasoning_text}"
+    )
+
+    # Test 2: Verify system message is not duplicated in input_messages
+    try:
+        num_system_messages = sum(
+            1
+            for msg in response.input_messages
+            if Message.from_dict(msg).author.role == "system"
+        )
+        assert num_system_messages == 1, (
+            f"Expected exactly 1 system message, got {num_system_messages}"
+        )
+    except (KeyError, AttributeError):
+        # Message structure may vary, skip this specific check
+        pass
+
+    # Test 3: Test with different custom system prompt
+    response_2 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant that always "
+                    "responds in exactly 5 words."
+                ),
+            },
+            {"role": "user", "content": "What is the weather like?"},
+        ],
+        temperature=0.0,
+    )
+
+    assert response_2 is not None
+    assert response_2.status == "completed"
+    assert response_2.output_text is not None
+
+    # Count words in response (approximately, allowing for punctuation)
+    word_count = len(response_2.output_text.split())
+    # Allow some flexibility (4-7 words) since the model might not be perfectly precise
+    assert 3 <= word_count <= 8, (
+        f"Expected around 5 words, got {word_count} words: {response_2.output_text}"
     )

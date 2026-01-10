@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -875,6 +875,37 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "LiquidAI/LFM2-VL-450M"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1424,41 +1455,6 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# HF format Phi-4-multimodal-instruct
-def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    show how to process image inputs.
-    """
-    assert modality == "image"
-    model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
-    )
-    # Since the vision-lora and speech-lora co-exist with the base model,
-    # we have to manually specify the path of the lora weights.
-    vision_lora_path = os.path.join(model_path, "vision-lora")
-    prompts = [
-        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
-    ]
-    engine_args = EngineArgs(
-        model=model_path,
-        max_model_len=5120,
-        max_num_seqs=2,
-        max_num_batched_tokens=12800,
-        enable_lora=True,
-        max_lora_rank=320,
-        # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={"dynamic_hd": 16},
-        limit_mm_per_prompt={"image": 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
-    )
-
-
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1884,6 +1880,7 @@ model_example_map = {
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "lightonocr": run_lightonocr,
+    "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1904,7 +1901,6 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
-    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,

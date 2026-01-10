@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Final
 
@@ -27,6 +28,10 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
+    ResponseMcpCallArgumentsDeltaEvent,
+    ResponseMcpCallArgumentsDoneEvent,
+    ResponseMcpCallCompletedEvent,
+    ResponseMcpCallInProgressEvent,
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -44,6 +49,7 @@ from openai.types.responses import (
     response_function_web_search,
     response_text_delta_event,
 )
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
@@ -94,6 +100,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import (
     GenerationError,
@@ -104,7 +111,6 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
@@ -117,6 +123,23 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class HarmonyStreamingState:
+    """Mutable state for harmony streaming event processing."""
+
+    current_content_index: int = -1
+    current_output_index: int = 0
+    current_item_id: str = ""
+    sent_output_item_added: bool = False
+    is_first_function_call_delta: bool = False
+
+    def reset_for_new_item(self) -> None:
+        """Reset state when expecting a new output item."""
+        self.current_output_index += 1
+        self.sent_output_item_added = False
+        self.is_first_function_call_delta = False
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -272,6 +295,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message=error_message,
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="input",
             )
         return None
 
@@ -283,6 +307,7 @@ class OpenAIServingResponses(OpenAIServing):
                 err_type="invalid_request_error",
                 message="logprobs are not supported with gpt-oss models",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="logprobs",
             )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
@@ -295,6 +320,7 @@ class OpenAIServingResponses(OpenAIServing):
                     "the vLLM server."
                 ),
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="background",
             )
         if request.previous_input_messages and request.previous_response_id:
             return self.create_error_response(
@@ -302,6 +328,7 @@ class OpenAIServingResponses(OpenAIServing):
                 message="Only one of `previous_input_messages` and "
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
+                param="previous_response_id",
             )
         return None
 
@@ -369,7 +396,7 @@ class OpenAIServingResponses(OpenAIServing):
             NotImplementedError,
         ) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            return self.create_error_response(e)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -458,8 +485,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
                 generators.append(generator)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -547,7 +573,7 @@ class OpenAIServingResponses(OpenAIServing):
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _make_request(
         self,
@@ -631,8 +657,7 @@ class OpenAIServingResponses(OpenAIServing):
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
+                return self.create_error_response(e)
 
         # NOTE: Implementation of stauts is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -658,30 +683,33 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            response_messages = context.parser.response_messages[
-                context.parser.num_init_messages :
-            ]
-            output = make_response_output_items_from_parsable_context(response_messages)
+            output = context.parser.make_response_output_items_from_parsable_context()
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
             if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
-                )
+                input_messages = context.input_messages
+                output_messages = context.output_messages
 
             # TODO: Calculate usage.
             # assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
+
+            # Check finish reason from the parser
+            if context.parser.finish_reason == "length":
+                status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
-            final_res = context.last_output
+            # Use final_output which has accumulated text/token_ids/logprobs
+            final_res = context.final_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates retryable internal error
             self._raise_if_error(final_output.finish_reason, request.request_id)
+
+            # Check if generation was stopped due to max_tokens
+            if final_output.finish_reason == "length":
+                status = "incomplete"
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
@@ -742,6 +770,26 @@ class OpenAIServingResponses(OpenAIServing):
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
         return response
+
+    def _is_mcp_tool_by_namespace(self, recipient: str | None) -> bool:
+        """
+        Determine if a tool call is an MCP tool based on recipient prefix.
+
+        - Tools starting with "functions." are function calls
+        - Everything else is an MCP tool
+        """
+        if recipient is None:
+            return False
+
+        # Function calls have "functions." prefix
+        # Everything else is an MCP tool
+        return not recipient.startswith("functions.")
+
+    _TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
+        "python": "code_interpreter",
+        "container": "container",
+        "browser": "web_search_preview",
+    }
 
     def _topk_logprobs(
         self,
@@ -946,9 +994,23 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
+    def _extract_system_message_from_request(self, request) -> str | None:
+        system_msg = None
+        if not isinstance(request.input, str):
+            for response_msg in request.input:
+                if (
+                    isinstance(response_msg, dict)
+                    and response_msg.get("role") == "system"
+                ):
+                    system_msg = response_msg.get("content")
+                    break
+        return system_msg
+
     def _construct_harmony_system_input_message(
         self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
     ) -> OpenAIHarmonyMessage:
+        model_identity = self._extract_system_message_from_request(request)
+
         reasoning_effort = request.reasoning.effort if request.reasoning else None
 
         # Extract allowed_tools from MCP tool requests
@@ -985,6 +1047,7 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         sys_msg = get_system_message(
+            model_identity=model_identity,
             reasoning_effort=reasoning_effort,
             browser_description=browser_description,
             python_description=python_description,
@@ -1039,8 +1102,7 @@ class OpenAIServingResponses(OpenAIServing):
                     del prev_msgs[prev_final_msg_idx + 1 :]
                     for msg in recent_turn_msgs:
                         assert isinstance(msg, OpenAIHarmonyMessage)
-                        if msg.channel != "analysis":
-                            prev_msgs.append(msg)
+                        prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
@@ -1052,7 +1114,10 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 prev_outputs = []
             for response_msg in request.input:
-                messages.append(parse_response_input(response_msg, prev_outputs))
+                new_msg = parse_response_input(response_msg, prev_outputs)
+                if new_msg.author.role != "system":
+                    messages.append(new_msg)
+
                 # User passes in a tool call request and its output. We need
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when
@@ -1080,7 +1145,7 @@ class OpenAIServingResponses(OpenAIServing):
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
 
@@ -1105,7 +1170,7 @@ class OpenAIServingResponses(OpenAIServing):
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
@@ -1122,7 +1187,11 @@ class OpenAIServingResponses(OpenAIServing):
         starting_after: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         if response_id not in self.event_store:
-            raise ValueError(f"Unknown response_id: {response_id}")
+            raise VLLMValidationError(
+                f"Unknown response_id: {response_id}",
+                parameter="response_id",
+                value=response_id,
+            )
 
         event_deque, new_event_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
@@ -1178,6 +1247,7 @@ class OpenAIServingResponses(OpenAIServing):
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message="Cannot cancel a synchronous response.",
+                    param="response_id",
                 )
 
             # Update the status to "cancelled".
@@ -1197,6 +1267,7 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+            param="response_id",
         )
 
     def _make_store_not_supported_error(self) -> ErrorResponse:
@@ -1209,6 +1280,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "starting the vLLM server."
             ),
             status_code=HTTPStatus.BAD_REQUEST,
+            param="store",
         )
 
     async def _process_simple_streaming_events(
@@ -1516,6 +1588,816 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 )
 
+    def _emit_function_call_done_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when a function call completes."""
+        function_name = previous_item.recipient[len("functions.") :]
+        events = []
+        events.append(
+            ResponseFunctionCallArgumentsDoneEvent(
+                type="response.function_call_arguments.done",
+                arguments=previous_item.content[0].text,
+                name=function_name,
+                item_id=state.current_item_id,
+                output_index=state.current_output_index,
+                sequence_number=-1,
+            )
+        )
+        function_call_item = ResponseFunctionToolCall(
+            type="function_call",
+            arguments=previous_item.content[0].text,
+            name=function_name,
+            item_id=state.current_item_id,
+            output_index=state.current_output_index,
+            sequence_number=-1,
+            call_id=f"fc_{random_uuid()}",
+            status="completed",
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=function_call_item,
+            )
+        )
+        return events
+
+    def _emit_mcp_call_done_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when an MCP tool call completes."""
+        server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(
+            previous_item.recipient, previous_item.recipient
+        )
+        events = []
+        events.append(
+            ResponseMcpCallArgumentsDoneEvent(
+                type="response.mcp_call_arguments.done",
+                arguments=previous_item.content[0].text,
+                name=previous_item.recipient,
+                item_id=state.current_item_id,
+                output_index=state.current_output_index,
+                sequence_number=-1,
+            )
+        )
+        events.append(
+            ResponseMcpCallCompletedEvent(
+                type="response.mcp_call.completed",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=McpCall(
+                    type="mcp_call",
+                    arguments=previous_item.content[0].text,
+                    name=previous_item.recipient,
+                    id=state.current_item_id,
+                    server_label=server_label,
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_reasoning_done_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when a reasoning (analysis) item completes."""
+        content = ResponseReasoningTextContent(
+            text=previous_item.content[0].text,
+            type="reasoning_text",
+        )
+        reasoning_item = ResponseReasoningItem(
+            type="reasoning",
+            content=[content],
+            status="completed",
+            id=state.current_item_id,
+            summary=[],
+        )
+        events = []
+        events.append(
+            ResponseReasoningTextDoneEvent(
+                type="response.reasoning_text.done",
+                item_id=state.current_item_id,
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                content_index=state.current_content_index,
+                text=previous_item.content[0].text,
+            )
+        )
+        events.append(
+            ResponseReasoningPartDoneEvent(
+                type="response.reasoning_part.done",
+                sequence_number=-1,
+                item_id=state.current_item_id,
+                output_index=state.current_output_index,
+                content_index=state.current_content_index,
+                part=content,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=reasoning_item,
+            )
+        )
+        return events
+
+    def _emit_text_output_done_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when a final text output item completes."""
+        text_content = ResponseOutputText(
+            type="output_text",
+            text=previous_item.content[0].text,
+            annotations=[],
+        )
+        events = []
+        events.append(
+            ResponseTextDoneEvent(
+                type="response.output_text.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                content_index=state.current_content_index,
+                text=previous_item.content[0].text,
+                logprobs=[],
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseContentPartDoneEvent(
+                type="response.content_part.done",
+                sequence_number=-1,
+                item_id=state.current_item_id,
+                output_index=state.current_output_index,
+                content_index=state.current_content_index,
+                part=text_content,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=ResponseOutputMessage(
+                    id=state.current_item_id,
+                    type="message",
+                    role="assistant",
+                    content=[text_content],
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_previous_item_done_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit done events for the previous item when expecting a new start."""
+        if previous_item.recipient is not None:
+            # Deal with tool call
+            if previous_item.recipient.startswith("functions."):
+                return self._emit_function_call_done_events(previous_item, state)
+            elif (
+                self._is_mcp_tool_by_namespace(previous_item.recipient)
+                and state.current_item_id is not None
+                and state.current_item_id.startswith("mcp_")
+            ):
+                return self._emit_mcp_call_done_events(previous_item, state)
+        elif previous_item.channel == "analysis":
+            return self._emit_reasoning_done_events(previous_item, state)
+        elif previous_item.channel == "final":
+            return self._emit_text_output_done_events(previous_item, state)
+        return []
+
+    def _emit_final_channel_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for final channel text delta streaming."""
+        events = []
+        if not state.sent_output_item_added:
+            state.sent_output_item_added = True
+            state.current_item_id = f"msg_{random_uuid()}"
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=ResponseOutputMessage(
+                        id=state.current_item_id,
+                        type="message",
+                        role="assistant",
+                        content=[],
+                        status="in_progress",
+                    ),
+                )
+            )
+            state.current_content_index += 1
+            events.append(
+                ResponseContentPartAddedEvent(
+                    type="response.content_part.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item_id=state.current_item_id,
+                    content_index=state.current_content_index,
+                    part=ResponseOutputText(
+                        type="output_text",
+                        text="",
+                        annotations=[],
+                        logprobs=[],
+                    ),
+                )
+            )
+        events.append(
+            ResponseTextDeltaEvent(
+                type="response.output_text.delta",
+                sequence_number=-1,
+                content_index=state.current_content_index,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                delta=ctx.last_content_delta,
+                # TODO, use logprobs from ctx.last_request_output
+                logprobs=[],
+            )
+        )
+        return events
+
+    def _emit_analysis_channel_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for analysis channel reasoning delta streaming."""
+        events = []
+        if not state.sent_output_item_added:
+            state.sent_output_item_added = True
+            state.current_item_id = f"msg_{random_uuid()}"
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=ResponseReasoningItem(
+                        type="reasoning",
+                        id=state.current_item_id,
+                        summary=[],
+                        status="in_progress",
+                    ),
+                )
+            )
+            state.current_content_index += 1
+            events.append(
+                ResponseReasoningPartAddedEvent(
+                    type="response.reasoning_part.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item_id=state.current_item_id,
+                    content_index=state.current_content_index,
+                    part=ResponseReasoningTextContent(
+                        text="",
+                        type="reasoning_text",
+                    ),
+                )
+            )
+        events.append(
+            ResponseReasoningTextDeltaEvent(
+                type="response.reasoning_text.delta",
+                item_id=state.current_item_id,
+                output_index=state.current_output_index,
+                content_index=state.current_content_index,
+                delta=ctx.last_content_delta,
+                sequence_number=-1,
+            )
+        )
+        return events
+
+    def _emit_mcp_tool_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+        recipient: str,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for MCP tool delta streaming."""
+        server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
+        events = []
+        if not state.sent_output_item_added:
+            state.sent_output_item_added = True
+            state.current_item_id = f"mcp_{random_uuid()}"
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=McpCall(
+                        type="mcp_call",
+                        id=state.current_item_id,
+                        name=recipient,
+                        arguments="",
+                        server_label=server_label,
+                        status="in_progress",
+                    ),
+                )
+            )
+            events.append(
+                ResponseMcpCallInProgressEvent(
+                    type="response.mcp_call.in_progress",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item_id=state.current_item_id,
+                )
+            )
+        events.append(
+            ResponseMcpCallArgumentsDeltaEvent(
+                type="response.mcp_call_arguments.delta",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                delta=ctx.last_content_delta,
+            )
+        )
+        return events
+
+    def _emit_code_interpreter_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for code interpreter delta streaming."""
+        events = []
+        if not state.sent_output_item_added:
+            state.sent_output_item_added = True
+            state.current_item_id = f"tool_{random_uuid()}"
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=ResponseCodeInterpreterToolCallParam(
+                        type="code_interpreter_call",
+                        id=state.current_item_id,
+                        code=None,
+                        container_id="auto",
+                        outputs=None,
+                        status="in_progress",
+                    ),
+                )
+            )
+            events.append(
+                ResponseCodeInterpreterCallInProgressEvent(
+                    type="response.code_interpreter_call.in_progress",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item_id=state.current_item_id,
+                )
+            )
+        events.append(
+            ResponseCodeInterpreterCallCodeDeltaEvent(
+                type="response.code_interpreter_call_code.delta",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                delta=ctx.last_content_delta,
+            )
+        )
+        return events
+
+    def _emit_mcp_prefix_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for MCP prefix (mcp.*) delta streaming."""
+        events = []
+        if not state.sent_output_item_added:
+            state.sent_output_item_added = True
+            state.current_item_id = f"mcp_{random_uuid()}"
+            mcp_name = ctx.parser.current_recipient[len("mcp.") :]
+
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=McpCall(
+                        type="mcp_call",
+                        id=state.current_item_id,
+                        name=mcp_name,
+                        arguments="",
+                        server_label=mcp_name,
+                        status="in_progress",
+                    ),
+                )
+            )
+            events.append(
+                ResponseMcpCallInProgressEvent(
+                    type="response.mcp_call.in_progress",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item_id=state.current_item_id,
+                )
+            )
+
+        events.append(
+            ResponseMcpCallArgumentsDeltaEvent(
+                type="response.mcp_call_arguments.delta",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                delta=ctx.last_content_delta,
+            )
+        )
+        return events
+
+    def _emit_content_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for content delta streaming based on channel type."""
+        if not ctx.last_content_delta:
+            return []
+
+        if (
+            ctx.parser.current_channel == "final"
+            and ctx.parser.current_recipient is None
+        ):
+            return self._emit_final_channel_delta_events(ctx, state)
+        elif (
+            ctx.parser.current_channel == "analysis"
+            and ctx.parser.current_recipient is None
+        ):
+            return self._emit_analysis_channel_delta_events(ctx, state)
+        # built-in tools will be triggered on the analysis channel
+        # However, occasionally built-in tools will
+        # still be output to commentary.
+        elif (
+            ctx.parser.current_channel == "commentary"
+            or ctx.parser.current_channel == "analysis"
+        ) and ctx.parser.current_recipient is not None:
+            recipient = ctx.parser.current_recipient
+            # Check for function calls first - they have their own event handling
+            if recipient.startswith("functions."):
+                return self._emit_function_call_delta_events(ctx, state)
+            is_mcp_tool = self._is_mcp_tool_by_namespace(recipient)
+            if is_mcp_tool:
+                return self._emit_mcp_tool_delta_events(ctx, state, recipient)
+            else:
+                return self._emit_code_interpreter_delta_events(ctx, state)
+        elif (
+            (
+                ctx.parser.current_channel == "commentary"
+                or ctx.parser.current_channel == "analysis"
+            )
+            and ctx.parser.current_recipient is not None
+            and ctx.parser.current_recipient.startswith("mcp.")
+        ):
+            return self._emit_mcp_prefix_delta_events(ctx, state)
+
+        return []
+
+    def _emit_browser_tool_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for browser tool calls (web search)."""
+        function_name = previous_item.recipient[len("browser.") :]
+        parsed_args = json.loads(previous_item.content[0].text)
+        action = None
+
+        if function_name == "search":
+            action = response_function_web_search.ActionSearch(
+                type="search",
+                query=parsed_args["query"],
+            )
+        elif function_name == "open":
+            action = response_function_web_search.ActionOpenPage(
+                type="open_page",
+                # TODO: translate to url
+                url=f"cursor:{parsed_args.get('cursor', '')}",
+            )
+        elif function_name == "find":
+            action = response_function_web_search.ActionFind(
+                type="find",
+                pattern=parsed_args["pattern"],
+                # TODO: translate to url
+                url=f"cursor:{parsed_args.get('cursor', '')}",
+            )
+        else:
+            raise ValueError(f"Unknown function name: {function_name}")
+
+        state.current_item_id = f"tool_{random_uuid()}"
+        events = []
+        events.append(
+            ResponseOutputItemAddedEvent(
+                type="response.output_item.added",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=response_function_web_search.ResponseFunctionWebSearch(
+                    # TODO: generate a unique id for web search call
+                    type="web_search_call",
+                    id=state.current_item_id,
+                    action=action,
+                    status="in_progress",
+                ),
+            )
+        )
+        events.append(
+            ResponseWebSearchCallInProgressEvent(
+                type="response.web_search_call.in_progress",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseWebSearchCallSearchingEvent(
+                type="response.web_search_call.searching",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        # enqueue
+        events.append(
+            ResponseWebSearchCallCompletedEvent(
+                type="response.web_search_call.completed",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=ResponseFunctionWebSearch(
+                    type="web_search_call",
+                    id=state.current_item_id,
+                    action=action,
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_mcp_tool_completion_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when an MCP tool completes during assistant action turn."""
+        recipient = previous_item.recipient
+        server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
+        events = []
+        events.append(
+            ResponseMcpCallArgumentsDoneEvent(
+                type="response.mcp_call_arguments.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                arguments=previous_item.content[0].text,
+                name=recipient,
+            )
+        )
+        events.append(
+            ResponseMcpCallCompletedEvent(
+                type="response.mcp_call.completed",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=McpCall(
+                    type="mcp_call",
+                    id=state.current_item_id,
+                    name=recipient,
+                    arguments=previous_item.content[0].text,
+                    server_label=server_label,
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_code_interpreter_completion_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when code interpreter completes."""
+        events = []
+        events.append(
+            ResponseCodeInterpreterCallCodeDoneEvent(
+                type="response.code_interpreter_call_code.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                code=previous_item.content[0].text,
+            )
+        )
+        events.append(
+            ResponseCodeInterpreterCallInterpretingEvent(
+                type="response.code_interpreter_call.interpreting",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseCodeInterpreterCallCompletedEvent(
+                type="response.code_interpreter_call.completed",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=ResponseCodeInterpreterToolCallParam(
+                    type="code_interpreter_call",
+                    id=state.current_item_id,
+                    code=previous_item.content[0].text,
+                    container_id="auto",
+                    outputs=[],
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_mcp_prefix_completion_events(
+        self,
+        previous_item,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events when an MCP prefix tool (mcp.*) completes."""
+        mcp_name = previous_item.recipient[len("mcp.") :]
+        events = []
+        events.append(
+            ResponseMcpCallArgumentsDoneEvent(
+                type="response.mcp_call_arguments.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+                arguments=previous_item.content[0].text,
+                name=mcp_name,
+            )
+        )
+        events.append(
+            ResponseMcpCallCompletedEvent(
+                type="response.mcp_call.completed",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item_id=state.current_item_id,
+            )
+        )
+        events.append(
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.current_output_index,
+                item=McpCall(
+                    type="mcp_call",
+                    id=state.current_item_id,
+                    name=mcp_name,
+                    arguments=previous_item.content[0].text,
+                    server_label=mcp_name,
+                    status="completed",
+                ),
+            )
+        )
+        return events
+
+    def _emit_tool_action_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for tool action turn."""
+        if not ctx.is_assistant_action_turn() or len(ctx.parser.messages) == 0:
+            return []
+
+        events = []
+        previous_item = ctx.parser.messages[-1]
+
+        # Handle browser tool
+        if (
+            self.tool_server is not None
+            and self.tool_server.has_tool("browser")
+            and previous_item.recipient is not None
+            and previous_item.recipient.startswith("browser.")
+        ):
+            events.extend(self._emit_browser_tool_events(previous_item, state))
+
+        # Handle tool completion
+        if (
+            self.tool_server is not None
+            and previous_item.recipient is not None
+            and state.current_item_id is not None
+            and state.sent_output_item_added
+        ):
+            recipient = previous_item.recipient
+            # Handle MCP prefix tool completion first
+            if recipient.startswith("mcp."):
+                events.extend(
+                    self._emit_mcp_prefix_completion_events(previous_item, state)
+                )
+            else:
+                # Handle other MCP tool and code interpreter completion
+                is_mcp_tool = self._is_mcp_tool_by_namespace(
+                    recipient
+                ) and state.current_item_id.startswith("mcp_")
+                if is_mcp_tool:
+                    events.extend(
+                        self._emit_mcp_tool_completion_events(previous_item, state)
+                    )
+                else:
+                    events.extend(
+                        self._emit_code_interpreter_completion_events(
+                            previous_item, state
+                        )
+                    )
+
+        return events
+
+    def _emit_function_call_delta_events(
+        self,
+        ctx: StreamingHarmonyContext,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Emit events for developer function calls on commentary channel."""
+        if not (
+            ctx.parser.current_channel == "commentary"
+            and ctx.parser.current_recipient
+            and ctx.parser.current_recipient.startswith("functions.")
+        ):
+            return []
+
+        events = []
+        if state.is_first_function_call_delta is False:
+            state.is_first_function_call_delta = True
+            fc_name = ctx.parser.current_recipient[len("functions.") :]
+            state.current_item_id = f"fc_{random_uuid()}"
+            tool_call_item = ResponseFunctionToolCall(
+                name=fc_name,
+                type="function_call",
+                id=state.current_item_id,
+                call_id=f"call_{random_uuid()}",
+                arguments="",
+                status="in_progress",
+            )
+            events.append(
+                ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    sequence_number=-1,
+                    output_index=state.current_output_index,
+                    item=tool_call_item,
+                )
+            )
+        # Always emit the delta (including on first call)
+        events.append(
+            ResponseFunctionCallArgumentsDeltaEvent(
+                item_id=state.current_item_id,
+                delta=ctx.last_content_delta,
+                output_index=state.current_output_index,
+                sequence_number=-1,
+                type="response.function_call_arguments.delta",
+            )
+        )
+        return events
+
     async def _process_harmony_streaming_events(
         self,
         request: ResponsesRequest,
@@ -1530,11 +2412,8 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        current_content_index = -1
-        current_output_index = 0
-        current_item_id: str = ""
-        sent_output_item_added = False
-        is_first_function_call_delta = False
+        state = HarmonyStreamingState()
+
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
 
@@ -1542,435 +2421,21 @@ class OpenAIServingResponses(OpenAIServing):
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
             if ctx.is_expecting_start():
-                current_output_index += 1
-                sent_output_item_added = False
-                is_first_function_call_delta = False
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
-                    if previous_item.recipient is not None:
-                        # Deal with tool call
-                        if previous_item.recipient.startswith("functions."):
-                            function_name = previous_item.recipient[len("functions.") :]
-                            yield _increment_sequence_number_and_return(
-                                ResponseFunctionCallArgumentsDoneEvent(
-                                    type="response.function_call_arguments.done",
-                                    arguments=previous_item.content[0].text,
-                                    name=function_name,
-                                    item_id=current_item_id,
-                                    output_index=current_output_index,
-                                    sequence_number=-1,
-                                )
-                            )
-                            function_call_item = ResponseFunctionToolCall(
-                                type="function_call",
-                                arguments=previous_item.content[0].text,
-                                name=function_name,
-                                item_id=current_item_id,
-                                output_index=current_output_index,
-                                sequence_number=-1,
-                                call_id=f"fc_{random_uuid()}",
-                                status="completed",
-                            )
-                            yield _increment_sequence_number_and_return(
-                                ResponseOutputItemDoneEvent(
-                                    type="response.output_item.done",
-                                    sequence_number=-1,
-                                    output_index=current_output_index,
-                                    item=function_call_item,
-                                )
-                            )
-                    elif previous_item.channel == "analysis":
-                        content = ResponseReasoningTextContent(
-                            text=previous_item.content[0].text,
-                            type="reasoning_text",
-                        )
-                        reasoning_item = ResponseReasoningItem(
-                            type="reasoning",
-                            content=[content],
-                            status="completed",
-                            id=current_item_id,
-                            summary=[],
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseReasoningTextDoneEvent(
-                                type="response.reasoning_text.done",
-                                item_id=current_item_id,
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                text=previous_item.content[0].text,
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseReasoningPartDoneEvent(
-                                type="response.reasoning_part.done",
-                                sequence_number=-1,
-                                item_id=current_item_id,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                part=content,
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemDoneEvent(
-                                type="response.output_item.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=reasoning_item,
-                            )
-                        )
-                    elif previous_item.channel == "final":
-                        text_content = ResponseOutputText(
-                            type="output_text",
-                            text=previous_item.content[0].text,
-                            annotations=[],
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseTextDoneEvent(
-                                type="response.output_text.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                text=previous_item.content[0].text,
-                                logprobs=[],
-                                item_id=current_item_id,
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseContentPartDoneEvent(
-                                type="response.content_part.done",
-                                sequence_number=-1,
-                                item_id=current_item_id,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                part=text_content,
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemDoneEvent(
-                                type="response.output_item.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseOutputMessage(
-                                    id=current_item_id,
-                                    type="message",
-                                    role="assistant",
-                                    content=[text_content],
-                                    status="completed",
-                                ),
-                            )
-                        )
+                    for event in self._emit_previous_item_done_events(
+                        previous_item, state
+                    ):
+                        yield _increment_sequence_number_and_return(event)
+                state.reset_for_new_item()
 
-            # stream the output of a harmony message
-            if ctx.parser.last_content_delta:
-                if (
-                    ctx.parser.current_channel == "final"
-                    and ctx.parser.current_recipient is None
-                ):
-                    if not sent_output_item_added:
-                        sent_output_item_added = True
-                        current_item_id = f"msg_{random_uuid()}"
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseOutputMessage(
-                                    id=current_item_id,
-                                    type="message",
-                                    role="assistant",
-                                    content=[],
-                                    status="in_progress",
-                                ),
-                            )
-                        )
-                        current_content_index += 1
-                        yield _increment_sequence_number_and_return(
-                            ResponseContentPartAddedEvent(
-                                type="response.content_part.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                content_index=current_content_index,
-                                part=ResponseOutputText(
-                                    type="output_text",
-                                    text="",
-                                    annotations=[],
-                                    logprobs=[],
-                                ),
-                            )
-                        )
-                    yield _increment_sequence_number_and_return(
-                        ResponseTextDeltaEvent(
-                            type="response.output_text.delta",
-                            sequence_number=-1,
-                            content_index=current_content_index,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
-                            # TODO, use logprobs from ctx.last_request_output
-                            logprobs=[],
-                        )
-                    )
-                elif (
-                    ctx.parser.current_channel == "analysis"
-                    and ctx.parser.current_recipient is None
-                ):
-                    if not sent_output_item_added:
-                        sent_output_item_added = True
-                        current_item_id = f"msg_{random_uuid()}"
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseReasoningItem(
-                                    type="reasoning",
-                                    id=current_item_id,
-                                    summary=[],
-                                    status="in_progress",
-                                ),
-                            )
-                        )
-                        current_content_index += 1
-                        yield _increment_sequence_number_and_return(
-                            ResponseReasoningPartAddedEvent(
-                                type="response.reasoning_part.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                content_index=current_content_index,
-                                part=ResponseReasoningTextContent(
-                                    text="",
-                                    type="reasoning_text",
-                                ),
-                            )
-                        )
-                    yield _increment_sequence_number_and_return(
-                        ResponseReasoningTextDeltaEvent(
-                            type="response.reasoning_text.delta",
-                            item_id=current_item_id,
-                            output_index=current_output_index,
-                            content_index=current_content_index,
-                            delta=ctx.parser.last_content_delta,
-                            sequence_number=-1,
-                        )
-                    )
-                # built-in tools will be triggered on the analysis channel
-                # However, occasionally built-in tools will
-                # still be output to commentary.
-                elif (
-                    ctx.parser.current_channel == "commentary"
-                    or ctx.parser.current_channel == "analysis"
-                ) and ctx.parser.current_recipient == "python":
-                    if not sent_output_item_added:
-                        sent_output_item_added = True
-                        current_item_id = f"tool_{random_uuid()}"
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseCodeInterpreterToolCallParam(
-                                    type="code_interpreter_call",
-                                    id=current_item_id,
-                                    code=None,
-                                    container_id="auto",
-                                    outputs=None,
-                                    status="in_progress",
-                                ),
-                            )
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseCodeInterpreterCallInProgressEvent(
-                                type="response.code_interpreter_call.in_progress",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                            )
-                        )
-                    yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCodeDeltaEvent(
-                            type="response.code_interpreter_call_code.delta",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
-                        )
-                    )
+            # Stream the output of a harmony message
+            for event in self._emit_content_delta_events(ctx, state):
+                yield _increment_sequence_number_and_return(event)
 
-            # stream tool call outputs
-            if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
-                previous_item = ctx.parser.messages[-1]
-                if (
-                    self.tool_server is not None
-                    and self.tool_server.has_tool("browser")
-                    and previous_item.recipient is not None
-                    and previous_item.recipient.startswith("browser.")
-                ):
-                    function_name = previous_item.recipient[len("browser.") :]
-                    action = None
-                    parsed_args = json.loads(previous_item.content[0].text)
-                    if function_name == "search":
-                        action = response_function_web_search.ActionSearch(
-                            type="search",
-                            query=parsed_args["query"],
-                        )
-                    elif function_name == "open":
-                        action = response_function_web_search.ActionOpenPage(
-                            type="open_page",
-                            # TODO: translate to url
-                            url=f"cursor:{parsed_args.get('cursor', '')}",
-                        )
-                    elif function_name == "find":
-                        action = response_function_web_search.ActionFind(
-                            type="find",
-                            pattern=parsed_args["pattern"],
-                            # TODO: translate to url
-                            url=f"cursor:{parsed_args.get('cursor', '')}",
-                        )
-                    else:
-                        raise ValueError(f"Unknown function name: {function_name}")
-
-                    current_item_id = f"tool_{random_uuid()}"
-                    yield _increment_sequence_number_and_return(
-                        ResponseOutputItemAddedEvent(
-                            type="response.output_item.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=response_function_web_search.ResponseFunctionWebSearch(
-                                # TODO: generate a unique id for web search call
-                                type="web_search_call",
-                                id=current_item_id,
-                                action=action,
-                                status="in_progress",
-                            ),
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseWebSearchCallInProgressEvent(
-                            type="response.web_search_call.in_progress",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseWebSearchCallSearchingEvent(
-                            type="response.web_search_call.searching",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-
-                    # enqueue
-                    yield _increment_sequence_number_and_return(
-                        ResponseWebSearchCallCompletedEvent(
-                            type="response.web_search_call.completed",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseOutputItemDoneEvent(
-                            type="response.output_item.done",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=ResponseFunctionWebSearch(
-                                type="web_search_call",
-                                id=current_item_id,
-                                action=action,
-                                status="completed",
-                            ),
-                        )
-                    )
-
-                if (
-                    self.tool_server is not None
-                    and self.tool_server.has_tool("python")
-                    and previous_item.recipient is not None
-                    and previous_item.recipient.startswith("python")
-                ):
-                    yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCodeDoneEvent(
-                            type="response.code_interpreter_call_code.done",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            code=previous_item.content[0].text,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallInterpretingEvent(
-                            type="response.code_interpreter_call.interpreting",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCompletedEvent(
-                            type="response.code_interpreter_call.completed",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseOutputItemDoneEvent(
-                            type="response.output_item.done",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=ResponseCodeInterpreterToolCallParam(
-                                type="code_interpreter_call",
-                                id=current_item_id,
-                                code=previous_item.content[0].text,
-                                container_id="auto",
-                                # TODO: add outputs here
-                                outputs=[],
-                                status="completed",
-                            ),
-                        )
-                    )
-            # developer tools will be triggered on the commentary channel
-            # and recipient starts with "functions.TOOL_NAME"
-            if (
-                ctx.parser.current_channel == "commentary"
-                and ctx.parser.current_recipient
-                and ctx.parser.current_recipient.startswith("functions.")
-            ):
-                if is_first_function_call_delta is False:
-                    is_first_function_call_delta = True
-                    fc_name = ctx.parser.current_recipient[len("functions.") :]
-                    tool_call_item = ResponseFunctionToolCall(
-                        name=fc_name,
-                        type="function_call",
-                        id=current_item_id,
-                        call_id=f"call_{random_uuid()}",
-                        arguments="",
-                        status="in_progress",
-                    )
-                    current_item_id = f"fc_{random_uuid()}"
-                    yield _increment_sequence_number_and_return(
-                        ResponseOutputItemAddedEvent(
-                            type="response.output_item.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=tool_call_item,
-                        )
-                    )
-                else:
-                    yield _increment_sequence_number_and_return(
-                        ResponseFunctionCallArgumentsDeltaEvent(
-                            item_id=current_item_id,
-                            delta=ctx.parser.last_content_delta,
-                            output_index=current_output_index,
-                            sequence_number=-1,
-                            type="response.function_call_arguments.delta",
-                        )
-                    )
+            # Stream tool call outputs
+            for event in self._emit_tool_action_events(ctx, state):
+                yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
         self,
@@ -2001,7 +2466,6 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            processer = None
             if self.use_harmony:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697

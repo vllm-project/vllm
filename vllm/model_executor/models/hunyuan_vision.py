@@ -33,14 +33,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -81,6 +80,7 @@ from vllm.transformers_utils.configs.hunyuan_vl import (
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -232,7 +232,7 @@ class HunYuanVisionAttention(nn.Module):
         )
 
         self.scale = self.hidden_size_per_attention_head**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head,
             self.scale,
