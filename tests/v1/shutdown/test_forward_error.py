@@ -58,7 +58,8 @@ def rocm_evil_forward(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")]))
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
     )
 
 
