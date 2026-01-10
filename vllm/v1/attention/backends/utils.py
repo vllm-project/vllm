@@ -96,7 +96,7 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
@@ -107,7 +107,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.14.0)
+    Will be removed in a future release (v0.15.0)
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -121,7 +121,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.14.0)
+    Will be removed in a future release (v0.15.0)
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
