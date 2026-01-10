@@ -145,11 +145,10 @@ def _estimate_sla_bounds(
 ):
     sla_data = list[dict[str, object]]()
 
-    max_passing: int = 0
-    min_failing: int = 0
-
     val: int = init_value
     assert val > 0
+
+    history = dict[int, float]()
 
     while True:
         print(f"Testing {sla_variable}: {val} req/s")
@@ -172,24 +171,33 @@ def _estimate_sla_bounds(
             for k in sla_comb
         }
 
-        sla_results = [
-            criterion.print_and_validate(iter_data_mean, k)
+        sla_margins = [
+            criterion.print_and_compute_margin(iter_data_mean, k)
             for k, criterion in sla_comb.items()
         ]
+        margin = max(sla_margins)
+        history[val] = margin
 
-        if all(sla_results):
+        if margin <= 0:
             print("SLA criteria are met.")
-            max_passing = val
             val *= 2
         else:
             print("SLA criteria are not met.")
-            min_failing = val
             break
 
         if val >= max_value:
             break
 
-    return sla_data, (max_passing, min_failing)
+    max_passing = max(
+        (val for val, margin in history.items() if margin <= 0),
+        default=0,
+    )
+    min_failing = min(
+        (val for val, margin in history.items() if margin > 0),
+        default=max_value,
+    )
+
+    return sla_data, (max_passing, min_failing), history
 
 
 def _find_sla_value(
@@ -210,6 +218,8 @@ def _find_sla_value(
 
     left: int = min_value
     right: int = max_value
+
+    history = dict[int, float]()
 
     while True:
         val = (left + right) // 2
@@ -233,22 +243,24 @@ def _find_sla_value(
             for k in sla_comb
         }
 
-        sla_results = [
-            criterion.print_and_validate(iter_data_mean, k)
+        sla_margins = [
+            criterion.print_and_compute_margin(iter_data_mean, k)
             for k, criterion in sla_comb.items()
         ]
+        margin = max(sla_margins)
+        history[val] = margin
 
-        if all(sla_results):
+        if margin <= 0:
             print("SLA criteria are met.")
             left = val
         else:
             print("SLA criteria are not met.")
             right = val
 
-        if right - left <= 1:
+        if right - left <= 1 and left in history:
             break
 
-    return sla_data, left
+    return sla_data, left, history
 
 
 def search_sla(
@@ -288,7 +300,7 @@ def search_sla(
     )
     print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
 
-    sla_data_1, (sla_min, sla_max) = _estimate_sla_bounds(
+    sla_data_1, (sla_min, sla_max), _ = _estimate_sla_bounds(
         server,
         bench_cmd,
         serve_comb=serve_comb,
@@ -303,7 +315,7 @@ def search_sla(
     )
     print(f"Range of {sla_variable} to search: [{sla_min}, {sla_max}] req/s.")
 
-    sla_data_2, sla_value = _find_sla_value(
+    sla_data_2, sla_value, _ = _find_sla_value(
         server,
         bench_cmd,
         serve_comb=serve_comb,
