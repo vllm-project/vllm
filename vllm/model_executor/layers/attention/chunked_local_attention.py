@@ -4,12 +4,11 @@ import functools
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -17,6 +16,7 @@ from vllm.v1.attention.backends.utils import (
     make_local_attention_virtual_batches,
     subclass_attention_backend,
 )
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
