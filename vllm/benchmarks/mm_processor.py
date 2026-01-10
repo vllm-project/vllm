@@ -55,7 +55,7 @@ def collect_mm_processor_stats(
         "num_encoder_calls",
     ]
     stats_by_stage = {key: [] for key in stat_keys}
-    
+
     for stats_dict in all_stats.values():
         for key in stat_keys:
             if key in stats_dict:
@@ -225,13 +225,16 @@ def benchmark_multimodal_processor(
         percentiles_e2el_ms = [(p, 0.0) for p in selected_percentiles]
 
     encoder_summary = {}
-    if "num_encoder_calls" in mm_stats_by_stage and mm_stats_by_stage["num_encoder_calls"]:
+    if (
+        "num_encoder_calls" in mm_stats_by_stage
+        and mm_stats_by_stage["num_encoder_calls"]
+    ):
         encoder_calls = mm_stats_by_stage["num_encoder_calls"]
         encoder_summary = {
             "total_encoder_calls": int(sum(encoder_calls)),
             "num_requests_with_encoder_calls": len(encoder_calls),
         }
-    
+
     benchmark_result = {
         "completed": completed,
         "failed": failed,
@@ -355,11 +358,14 @@ def main(args: argparse.Namespace) -> None:
 
         mm_df = pd.DataFrame(mm_data)
         print(mm_df.to_string(index=False))
-        
+
         if "encoder_summary" in result and result["encoder_summary"]:
             total_calls = result["encoder_summary"]["total_encoder_calls"]
             num_requests = result["encoder_summary"]["num_requests_with_encoder_calls"]
-            print(f"\nSummary: {total_calls} total encoder calls across {num_requests} requests.")
+            print(
+                f"\nSummary: {total_calls} total encoder calls "
+                f"across {num_requests} requests."
+            )
 
     if "mean_e2el_ms" in result:
         print("\nEnd-to-End Latency (ms):")
