@@ -169,7 +169,11 @@ def solve_sla(
 
             spl = PchipInterpolator(xs, ys, extrapolate=False)
             spl_roots = spl.solve()
-            val = int(next(iter(spl_roots)))
+            if len(spl_roots) == 0:
+                # Fallback to binary search
+                val = (history.get_max_passing() + history.get_min_failing()) // 2
+            else:
+                val = int(spl_roots[0])
 
             if val in history:
                 # Cover both sides (floor and ceil) of the root to be sure
