@@ -7,7 +7,7 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from vllm.config.pooler import PoolingTypeStr
+from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -82,11 +82,11 @@ class MeanPool(SequencePoolingMethod):
         ) / prompt_lens.unsqueeze(1)
 
 
-def get_seq_pooling_method(pooling_type: PoolingTypeStr | str):
-    if pooling_type == "LAST":
-        return LastPool()
+def get_seq_pooling_method(pooling_type: SequencePoolingType | str):
     if pooling_type == "CLS":
         return CLSPool()
+    if pooling_type == "LAST":
+        return LastPool()
     if pooling_type == "MEAN":
         return MeanPool()
 

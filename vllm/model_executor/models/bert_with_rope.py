@@ -441,7 +441,7 @@ class BertWithRopeEncoder(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
@@ -670,7 +670,7 @@ class JinaRobertaModel(BertWithRope):
         return super().load_weights(weights)
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
