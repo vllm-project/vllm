@@ -1,20 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import sys
 import time
 
 import numpy as np
 import torch
 
+# Check VLLM_TARGET_DEVICE before importing vllm modules
+if os.environ.get("VLLM_TARGET_DEVICE", "").lower() != "cpu":
+    print("ERROR: This benchmark is for CPU platforms only.")
+    print("Hint: Set VLLM_TARGET_DEVICE=cpu before running the script.")
+    print(
+        "Example: VLLM_TARGET_DEVICE=cpu python "
+        "benchmarks/kernels/cpu/benchmark_cpu_fused_moe.py"
+    )
+    sys.exit(1)
+
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-# Check if running on CPU platform (following test_cpu_fused_moe.py pattern)
-if not current_platform.is_cpu():
-    print("ERROR: This benchmark is for CPU platforms only.")
-    print("Hint: Set VLLM_TARGET_DEVICE=cpu to run on CPU.")
-    sys.exit(1)
 
 # Check if CPU MoE operations are available
 if not hasattr(torch.ops, "_C") or not hasattr(torch.ops._C, "prepack_moe_weight"):
