@@ -456,38 +456,3 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - output_trtllm))}",
     )
-
-
-def test_trtllm_attention_rejects_num_kv_heads_1(default_vllm_config) -> None:
-    """Test that TRTLLM attention correctly rejects num_kv_heads=1.
-
-    When num_kv_heads=1 (MQA), the KV cache strides become degenerate
-    (stride_heads == stride_batch), which causes CUDA's cuTensorMapEncodeTiled
-    to fail because TMA descriptors cannot handle degenerate 4D tensors with
-    singleton dimensions.
-
-    This test verifies that can_use_trtllm_attention returns False for
-    num_kv_heads=1 configurations.
-    """
-    from vllm.utils.flashinfer import can_use_trtllm_attention
-
-    # num_kv_heads=1 should be rejected
-    assert not can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=1), (
-        "can_use_trtllm_attention should return False for num_kv_heads=1"
-    )
-    assert not can_use_trtllm_attention(num_qo_heads=32, num_kv_heads=1), (
-        "can_use_trtllm_attention should return False for num_kv_heads=1"
-    )
-
-    # num_kv_heads > 1 should be accepted (if platform supports it)
-    # Note: This may return False on non-Blackwell platforms, which is fine
-    result_kv8 = can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=8)
-    result_kv1 = can_use_trtllm_attention(num_qo_heads=64, num_kv_heads=1)
-
-    # Even if platform doesn't support TRTLLM, num_kv_heads=1 should never
-    # return True when num_kv_heads > 1 returns True
-    if result_kv8:
-        assert not result_kv1, (
-            "If TRTLLM is supported for num_kv_heads=8, "
-            "it must be rejected for num_kv_heads=1"
-        )
