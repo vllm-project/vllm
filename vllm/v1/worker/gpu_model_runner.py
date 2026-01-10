@@ -3432,9 +3432,10 @@ class GPUModelRunner(
                     propose_draft_token_ids(sampled_token_ids)
                 elif self.valid_sampled_token_count_event is not None:
                     assert spec_decode_common_attn_metadata is not None
+                    num_reqs = self.input_batch.num_reqs
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
-                            spec_decode_common_attn_metadata,
+                            self.seq_lens.cpu[:num_reqs],
                             sampled_token_ids,
                             self.requests,
                             self.input_batch,
@@ -3680,7 +3681,7 @@ class GPUModelRunner(
                 )
                 next_token_ids, valid_sampled_tokens_count = (
                     self.drafter.prepare_next_token_ids_padded(
-                        common_attn_metadata,
+                        self.seq_lens.cpu[: self.input_batch.num_reqs],
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
