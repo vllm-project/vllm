@@ -598,6 +598,11 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+
+                    # NOTE: we need to untouch the request from the encode cache
+                    # manager
+                    if request.has_encoder_inputs:
+                        self.encoder_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine

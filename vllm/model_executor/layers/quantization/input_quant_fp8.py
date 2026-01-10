@@ -10,6 +10,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
+    group_broadcast,
 )
 from vllm.platforms import current_platform
 
@@ -22,7 +23,7 @@ _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
     """
-    Quantize input tensor to FP8 (per-tensor, per-token, or per-group).
+    Quantize input tensor to FP8 (per-tensor, per-token, per-channel, or per-group).
     This CustomOp supports both static and dynamic quantization.
     """
 
@@ -57,14 +58,14 @@ class QuantFP8(CustomOp):
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
-            assert not static, "Group quantization only supports dynamic mode"
             self.group_size = group_shape.col
         else:
-            assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
-            assert not static or group_shape == GroupShape.PER_TENSOR, (
-                "Only per-tensor scales supported for static quantization."
-            )
             self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+            if not static:
+                assert group_shape in (GroupShape.PER_TOKEN, GroupShape.PER_TENSOR), (
+                    "Only per-token or per-tensor scales are supported for dynamic "
+                    "non-group quantization."
+                )
 
     def forward_cuda(
         self,
@@ -72,8 +73,8 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.is_group_quant:
-            assert scale is None, "Group quantization is always dynamic"
+        if self.is_group_quant and not self.static:
+            assert scale is None, "Dynamic group quantization does not use scale"
             from vllm.model_executor.layers.quantization.utils import fp8_utils
 
             return fp8_utils.per_token_group_quant_fp8(
@@ -90,12 +91,14 @@ class QuantFP8(CustomOp):
             and self.group_shape == GroupShape.PER_TOKEN
             and scale_ub.numel() == 1
         )
+
         return ops.scaled_fp8_quant(
             x,
             scale,
             num_token_padding=self.num_token_padding,
             scale_ub=scale_ub,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
+            group_shape=self.group_shape if self.static else None,
         )
 
     def forward_hip(
@@ -131,8 +134,8 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
     ):
-        if self.is_group_quant:
-            assert scale is None, "Group quantization is always dynamic"
+        if self.is_group_quant and not self.static:
+            assert scale is None, "Dynamic group quantization does not use scale"
             return self._quantize_group_native(x)
 
         assert (scale is not None) == self.static
@@ -155,7 +158,10 @@ class QuantFP8(CustomOp):
 
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
-        out = x.to(torch.float32) * scale.reciprocal()
+        out = (
+            x.to(torch.float32)
+            * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+        )
         out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
         # This currently generates an extra Triton kernel in compilation.

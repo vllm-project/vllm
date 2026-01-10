@@ -599,9 +599,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
   // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
   ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale) -> "
-      "()");
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "(int, int)? group_shape=None) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
@@ -733,6 +736,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
+
+  // Rotate Q and K, then write to kv cache for MLA
+  cache_ops.def(
+      "concat_and_cache_mla_rope_fused("
+      "                     Tensor positions,"
+      "                     Tensor! q_pe,"
+      "                     Tensor! k_pe,"
+      "                     Tensor kv_c,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor! kv_cache,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor kv_cache_scale) -> ()");
+  cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
+                 &concat_and_cache_mla_rope_fused);
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(

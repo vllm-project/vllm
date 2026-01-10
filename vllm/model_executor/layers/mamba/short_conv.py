@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -24,6 +23,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
