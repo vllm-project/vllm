@@ -569,6 +569,7 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
             rank,
             gpus_per_node,
             tp_size=world_size,
+            moe_ep_size=world_size,
         )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (

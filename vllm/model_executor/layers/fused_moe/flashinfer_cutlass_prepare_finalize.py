@@ -418,7 +418,6 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize)
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
-
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             if quant_config.quant_dtype == "nvfp4":
@@ -426,12 +425,9 @@ class FlashInferMoeA2APrepareAndFinalize(FlashInferCutlassMoEPrepareAndFinalize)
         else:
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             a1q_scale_recv = None
-
         a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
-        if a1q_scale_recv is not None:
-            a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
 
         return a1q_recv, a1q_scale_recv, None, topk_ids_recv, topk_weights_recv
 
