@@ -108,15 +108,7 @@ def run_cutlass_moe_fp8(
     assert global_num_experts != -1
     assert a1q_scale is not None
 
-    if expert_map is not None:
-        "Translate info from expert_map to topk_ids"
-        local_topk_ids = torch.where(
-            expert_map[topk_ids] != -1, expert_map[topk_ids], -1
-        )
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.size(1)
+    topk = topk_ids.size(1)
     local_E = w1.size(0)
 
     if use_batched_format:
@@ -164,12 +156,8 @@ def run_cutlass_moe_fp8(
         # during offset calculations
         expert_offsets = expert_offsets.to(torch.int64)
     else:
-        problem_sizes1 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
-        problem_sizes2 = torch.empty(
-            (global_num_experts, 3), dtype=torch.int32, device=device
-        )
+        problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+        problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
         num_expert = global_num_experts if expert_map is None else expert_map.size(0)
         # permuted a1q reuses workspace2
@@ -182,11 +170,12 @@ def run_cutlass_moe_fp8(
             expert_map,
             permuted_hidden_states=a1q_perm,
         )
-        expert_offsets = expert_first_token_offset[:-1]
-
-        ops.get_cutlass_moe_mm_problem_sizes(
-            local_topk_ids, problem_sizes1, problem_sizes2, global_num_experts, N, K
+        # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
+        swap_ab = a1q.size(0) <= 64
+        ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+            expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, swap_ab
         )
+        expert_offsets = expert_first_token_offset[:-1]
 
     if not per_act_token and (expert_map is not None or use_batched_format):
         # this is necessary to avoid imprecise scale calculation caused by
@@ -240,9 +229,7 @@ def run_cutlass_moe_fp8(
             permuted_hidden_states=mm2_out,
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
-            expert_first_token_offset=(
-                expert_first_token_offset if expert_map is not None else None
-            ),
+            expert_first_token_offset=expert_first_token_offset,
         )
 
 
@@ -549,7 +536,8 @@ def run_cutlass_moe_fp4(
         num_topk,
     )
     c1 = _resize_cache(workspace13, (m * topk, n * 2))
-    c2 = _resize_cache(workspace2, (m * topk, n))
+    # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
+    # c3 reuses workspace13 after c1 is consumed.
     c3 = _resize_cache(workspace13, (m * topk, k))
     ops.cutlass_fp4_moe_mm(
         c1,
@@ -563,9 +551,9 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    torch.ops._C.silu_and_mul(c2, c1)
-    int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
-        c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+    # Fused SiLU+Mul+NVFP4 quantization
+    int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
+        c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
     )
 
     ops.cutlass_fp4_moe_mm(
@@ -706,68 +694,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
 
-def cutlass_moe_fp4(
-    a: torch.Tensor,
-    w1_fp4: torch.Tensor,
-    w2_fp4: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    assert expert_map is None, (
-        "Expert Parallelism / expert_map "
-        "is currently not supported for "
-        "ModelOptNvFp4FusedMoE's cutlass_moe_fp4."
-    )
-
-    # TODO(bnell): this feels a bit hacky
-    # NVFP4 requires two levels of quantization, which involves
-    # computing some scaling factors dynamically. This makes it
-    # incompatible with the typical prepare -> MoE -> finalize
-    # pipeline. Move the quantization logic into the MoE body.
-    quant_config = FusedMoEQuantConfig.make(
-        quant_dtype=None,  # skip quantization in prepare/finalize
-        per_act_token_quant=quant_config.per_act_token_quant,
-        per_out_ch_quant=quant_config.per_out_ch_quant,
-        block_shape=quant_config.block_shape,
-        g1_alphas=quant_config.g1_alphas,
-        g2_alphas=quant_config.g2_alphas,
-        a1_gscale=quant_config.a1_gscale,
-        a2_gscale=quant_config.a2_gscale,
-        w1_scale=quant_config.w1_scale,
-        w2_scale=quant_config.w2_scale,
-    )
-
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsFp4(
-            max_experts_per_worker=e,
-            out_dtype=a.dtype,
-            quant_config=quant_config,
-            use_batched_format=False,
-        ),
-    )
-
-    return fn(
-        hidden_states=a,
-        w1=w1_fp4,
-        w2=w2_fp4,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=False,
-        activation="silu",
-        global_num_experts=e,
-        expert_map=None,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
-
-
 # W4A8
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
@@ -833,15 +759,7 @@ def run_cutlass_moe_w4a8_fp8(
         f"w1 hidden size mismatch: got {w1.size(2) * 8}, expected {K=}"
     )
 
-    # Translate info from expert_map to topk_ids
-    if expert_map is not None:
-        local_topk_ids = torch.where(
-            expert_map[topk_ids] != -1, expert_map[topk_ids], -1
-        )
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.size(1)
+    topk = topk_ids.size(1)
     a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K))
     mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     act_out = _resize_cache(workspace2, (M * topk, N))
@@ -851,12 +769,8 @@ def run_cutlass_moe_w4a8_fp8(
     )
     mm2_out = _resize_cache(workspace2, (M * topk, K))
 
-    problem_sizes1 = torch.empty(
-        (global_num_experts, 3), dtype=torch.int32, device=device
-    )
-    problem_sizes2 = torch.empty(
-        (global_num_experts, 3), dtype=torch.int32, device=device
-    )
+    problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
+    problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
     num_expert = global_num_experts if expert_map is None else expert_map.size(0)
     # permuted a1q reuses workspace2
@@ -869,18 +783,11 @@ def run_cutlass_moe_w4a8_fp8(
         expert_map,
         permuted_hidden_states=a1q_perm,
     )
-    expert_offsets = expert_first_token_offset[:-1]
-
-    # For RS gemm SwapAB is always enabled (swap logical M, N in the problem shape)
-    ops.get_cutlass_moe_mm_problem_sizes(
-        local_topk_ids,
-        problem_sizes1,
-        problem_sizes2,
-        global_num_experts,
-        N,
-        K,
-        force_swap_ab=True,
+    # for RS gemm SwapAB is always enabled (swap logical M, N in the problem shape).
+    ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+        expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, True
     )
+    expert_offsets = expert_first_token_offset[:-1]
 
     ops.cutlass_w4a8_moe_mm(
         mm1_out,
@@ -927,9 +834,7 @@ def run_cutlass_moe_w4a8_fp8(
         permuted_hidden_states=mm2_out,
         topk_weights=topk_weights,
         inv_permuted_idx=inv_perm,
-        expert_first_token_offset=(
-            expert_first_token_offset if expert_map is not None else None
-        ),
+        expert_first_token_offset=expert_first_token_offset,
     )
 
 
