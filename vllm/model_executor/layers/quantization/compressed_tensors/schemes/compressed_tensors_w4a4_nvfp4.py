@@ -157,12 +157,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
             weight_packed = layer.weight_packed.data
             weight_scale = swizzled_weight_scale
-            if self.backend == "flashinfer-cutlass":
-                output_size = getattr(
-                    layer, "output_size_per_partition", weight_packed.shape[0]
-                )
-                pad_rows = (-output_size) % 32
-                if pad_rows:
+            if self.backend in ("flashinfer-cutlass", "cutlass"):
+                # swizzle_blockscale pads scales to CUTLASS layout; mirror that
+                # padding in the packed weights to keep shapes aligned.
+                target_rows = weight_scale.shape[0]
+                pad_rows = target_rows - weight_packed.shape[0]
+                if pad_rows > 0:
                     padded_weight = torch.zeros(
                         pad_rows,
                         weight_packed.shape[1],
@@ -170,13 +170,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                         device=weight_packed.device,
                     )
                     weight_packed = torch.cat((weight_packed, padded_weight), dim=0)
-                    padded_scale = torch.zeros(
-                        pad_rows,
-                        weight_scale.shape[1],
-                        dtype=weight_scale.dtype,
-                        device=weight_scale.device,
-                    )
-                    weight_scale = torch.cat((weight_scale, padded_scale), dim=0)
 
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight_packed = Parameter(weight_packed, requires_grad=False)
