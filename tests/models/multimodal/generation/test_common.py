@@ -526,7 +526,10 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
-        models=["PerceptronAI/Isaac-0.1"],
+        models=[
+            "PerceptronAI/Isaac-0.1",
+            "PerceptronAI/Isaac-0.2-2B-Preview",
+        ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: (
             f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
