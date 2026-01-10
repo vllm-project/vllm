@@ -9,7 +9,6 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -52,12 +51,8 @@ else:
 logger = init_logger(__name__)
 
 
-# --8<-- [start:unquantized_fused_moe]
-@CustomOp.register("unquantized_fused_moe")
-class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
-
-    # --8<-- [end:unquantized_fused_moe]
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -95,7 +90,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     @property
     def supports_eplb(self) -> bool:
-        return True
+        return not (current_platform.is_cpu() or current_platform.is_xpu())
 
     @property
     def allow_inplace(self) -> bool:
@@ -208,12 +203,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             import intel_extension_for_pytorch as ipex
 
             ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+            self.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
                 experts_start_id=ep_rank_start,
             )
+            # self.apply = self.apply_xpu
+
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
@@ -240,11 +237,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+
+            # self.apply = self.apply_cpu
+
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.rocm_aiter_moe_enabled:
@@ -286,6 +286,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     shared_experts=None,
                 )
 
+            # self.apply = self.apply_cuda
+
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
@@ -293,12 +295,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(
-            router=router,
-            layer=layer,
-            x=x,
-            router_logits=router_logits,
-        )
+        raise ValueError("apply method not initialized")
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
@@ -309,7 +306,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             return FUSED_MOE_UNQUANTIZED_CONFIG
 
-    def forward_cuda(
+    def apply_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         router: FusedMoERouter,
@@ -321,7 +318,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             router_logits=router_logits,
         )
 
-        result = self.kernel(
+        return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -334,24 +331,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
         )
 
-        return result
-
-    def forward_cpu(
+    def apply_cpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for CPU.")
-
-        return layer.cpu_fused_moe(
+        return self.cpu_fused_moe(
             layer,
             x,
             layer.use_grouped_topk,
@@ -370,21 +357,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.activation,
         )
 
-    def forward_xpu(
+    def apply_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.expert_load_view is not None
-            or layer.logical_to_physical_map is not None
-            or layer.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        return layer.ipex_fusion(
+        return self.ipex_fusion(
             x,
             layer.use_grouped_topk,
             layer.top_k,
@@ -396,8 +376,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     if current_platform.is_cpu():
-        forward_native = forward_cpu
+        apply = apply_cpu
     elif current_platform.is_xpu():
-        forward_native = forward_xpu
+        apply = apply_xpu
     else:
-        forward_native = forward_cuda
+        apply = apply_cuda
