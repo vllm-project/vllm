@@ -254,7 +254,9 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
             "Try loading the original Qwen3 Reranker?, see: "
             "https://github.com/vllm-project/vllm/tree/main/examples/pooling/score/qwen3_reranker_offline.py"
         )
-        model_config.hf_config.method = "from_2_way_softmax"
+        text_config = config.get_text_config()
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = tokens
 
 
 class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
