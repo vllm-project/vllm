@@ -113,7 +113,7 @@ class RayDistributedExecutor(Executor):
         """
         if self.scheduler_config.async_scheduling:
             return 2
-        return self.parallel_config.pipeline_parallel_size
+        return 1
 
     def shutdown(self) -> None:
         if logger:
