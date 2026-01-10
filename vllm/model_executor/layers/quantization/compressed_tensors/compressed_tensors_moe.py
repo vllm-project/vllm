@@ -83,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
+    sanitize_global_scale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -91,24 +92,6 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 
 logger = init_logger(__name__)
-
-
-def _sanitize_global_scale(name: str, scale: torch.Tensor) -> torch.Tensor:
-    scale = scale.to(torch.float32)
-    finite = torch.isfinite(scale) & (scale > 0)
-    if finite.all():
-        return scale
-    if finite.any():
-        fallback = scale[finite].max()
-    else:
-        fallback = torch.tensor(1.0, dtype=scale.dtype, device=scale.device)
-    logger.warning_once(
-        "Invalid %s detected (nan/inf/non-positive). Replacing with %s.",
-        name,
-        float(fallback.item()),
-    )
-    scale = torch.where(finite, scale, fallback)
-    return torch.clamp_min(scale, 1e-6)
 
 
 class GPTQMarlinState(Enum):
@@ -407,25 +390,23 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
         layer.w13_input_global_scale = torch.nn.Parameter(
-            _sanitize_global_scale(
+            sanitize_global_scale(
                 "w13_input_global_scale", layer.w13_input_global_scale
             ),
             requires_grad=False,
         )
         layer.w2_input_global_scale = torch.nn.Parameter(
-            _sanitize_global_scale(
-                "w2_input_global_scale", layer.w2_input_global_scale
-            ),
+            sanitize_global_scale("w2_input_global_scale", layer.w2_input_global_scale),
             requires_grad=False,
         )
         layer.w13_weight_global_scale = torch.nn.Parameter(
-            _sanitize_global_scale(
+            sanitize_global_scale(
                 "w13_weight_global_scale", layer.w13_weight_global_scale
             ),
             requires_grad=False,
         )
         layer.w2_weight_global_scale = torch.nn.Parameter(
-            _sanitize_global_scale(
+            sanitize_global_scale(
                 "w2_weight_global_scale", layer.w2_weight_global_scale
             ),
             requires_grad=False,
