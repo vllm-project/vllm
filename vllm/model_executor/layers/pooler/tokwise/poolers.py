@@ -85,7 +85,7 @@ class TokenPooler(Pooler):
 
 
 def pooler_for_token_embed(pooler_config: PoolerConfig):
-    pooling = get_tok_pooling_method(pooler_config.get_pooling_type())
+    pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
     head = TokenEmbeddingPoolerHead()
 
     return TokenPooler(pooling=pooling, head=head)
@@ -99,7 +99,7 @@ def pooler_for_token_classify(
     act_fn: PoolerActivation | str | None = None,
 ):
     if pooling is None:
-        pooling = get_tok_pooling_method(pooler_config.get_pooling_type())
+        pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
 
     head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
