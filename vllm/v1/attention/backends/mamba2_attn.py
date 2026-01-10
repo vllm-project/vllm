@@ -5,9 +5,9 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
@@ -123,10 +123,11 @@ class Mamba2AttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
-        assert self.chunk_size is not None, (
+        chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        assert chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
+        self.chunk_size: int = chunk_size
 
     def _compute_chunk_metadata(
         self,

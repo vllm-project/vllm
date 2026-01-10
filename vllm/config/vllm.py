@@ -582,11 +582,8 @@ class VllmConfig:
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
-                        "async scheduling for EAGLE/MTP kind of speculative "
-                        "decoding is enabled, but disable_padded_drafter_batch=True "
-                        "disable_padded_drafter_batch=True is not supported for "
-                        "this situation now. please set "
-                        "disable_padded_drafter_batch=Fasle"
+                        "Async scheduling is not compatible with "
+                        "disable_padded_drafter_batch=True."
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -597,32 +594,40 @@ class VllmConfig:
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if self.parallel_config.pipeline_parallel_size > 1:
-                logger.warning(
+                logger.warning_once(
                     "Async scheduling is not yet supported with "
-                    "pipeline_parallel_size > 1 and will be disabled."
+                    "pipeline_parallel_size > 1 and will be disabled.",
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
-            elif self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
-                    logger.warning(
-                        "Async scheduling not supported with %s-based "
-                        "speculative decoding and will be disabled.",
-                        self.speculative_config.method,
-                    )
-                else:
-                    logger.warning(
-                        "Async scheduling will be disabled because some features do "
-                        "not currently work in conjunction with speculative decoding. "
-                        "To use async scheduling with spec decoding anyway, "
-                        "enable it explicitly via async_scheduling=True."
-                    )
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.method not in get_args(EagleModelTypes)
+            ):
+                logger.warning_once(
+                    "Async scheduling not supported with %s-based "
+                    "speculative decoding and will be disabled.",
+                    self.speculative_config.method,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.disable_padded_drafter_batch
+            ):
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "disable_padded_drafter_batch=True and will be disabled.",
+                    scope="local",
+                )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
-                logger.warning(
+                logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1441,11 +1446,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        logger.warning("Current vLLM config is not set.")
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 

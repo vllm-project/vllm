@@ -88,7 +88,7 @@ def test_gemma_multimodal(
         convert="classify",
         load_format="auto",
         hf_overrides=update_config,
-        pooler_config=PoolerConfig(pooling_type="LAST"),
+        pooler_config=PoolerConfig(seq_pooling_type="LAST"),
         max_model_len=512,
         enforce_eager=True,
         tensor_parallel_size=1,

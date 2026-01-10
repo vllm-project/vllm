@@ -199,16 +199,7 @@ from tqdm import tqdm
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionLayer,
-    MLAAttentionImpl,
-)
-from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.attention.utils.fa_utils import get_flash_attn_version
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -222,6 +213,13 @@ from vllm.model_executor.layers.linear import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionLayer,
+    AttentionMetadata,
+    MLAAttentionImpl,
+)
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -230,6 +228,8 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
@@ -251,13 +251,15 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+    )
 
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func
+        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
 
 try:
@@ -386,7 +388,7 @@ D = TypeVar("D", bound=MLACommonDecodeMetadata)
 
 
 @dataclass
-class MLACommonMetadata(Generic[D]):
+class MLACommonMetadata(AttentionMetadata, Generic[D]):
     """Metadata for MLACommon.
 
     NOTE: Please read the comment at the top of the file before trying to
@@ -434,7 +436,7 @@ class MLACommonMetadata(Generic[D]):
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
-A = TypeVar("A")
+A = TypeVar("A", bound=AttentionMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
@@ -473,6 +475,27 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability_family(100)
+    )
+
+
+@dataclass
+class MLADims:
+    q_lora_rank: int | None
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
+
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
     )
 
 
@@ -617,7 +640,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._fi_prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)
+                get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
             )
 
         if self._use_trtllm_ragged_prefill:
@@ -874,7 +897,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     )
                     # Note(qcs): The max local context lengths
                     # padded to `dcp_local_block_size`.
-                    padded_local_context_lens_cpu = (
+                    padded_local_context_lens_cpu: torch.Tensor = (
                         cdiv(
                             context_lens_cpu,
                             self.dcp_virtual_block_size,
@@ -1171,7 +1194,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if layer.quant_method is not None and not isinstance(
+                layer.quant_method, UnquantizedLinearMethod
+            ):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
@@ -1327,12 +1352,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # v with 0s to match the qk head dim for attention backends that do
             # not support different headdims
             # We don't need to pad V if we are on a hopper system with FA3
+            device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
                 self.vllm_flash_attn_version == 3
-                and current_platform.get_device_capability()[0] == 9
+                and device_capability is not None
+                and device_capability[0] == 9
             )
 
-        self.dcp_world_size: int | None = None
+        self.dcp_world_size: int = -1
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
@@ -1583,7 +1610,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if layer.quant_method is not None and not isinstance(
+                layer.quant_method, UnquantizedLinearMethod
+            ):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
@@ -1875,7 +1904,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
-        assert self.dcp_world_size is not None
+        assert self.dcp_world_size != -1
 
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -1975,7 +2004,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # same expert outputs.
             return output.fill_(0)
 
-        if self.dcp_world_size is None:
+        if self.dcp_world_size == -1:
             self.dcp_world_size = get_dcp_group().world_size
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")

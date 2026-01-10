@@ -10,7 +10,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -105,19 +105,7 @@ class JinaVLForSequenceClassification(
         self.score = JinaVLScorer(
             vllm_config.model_config, prefix=maybe_prefix(prefix, "score")
         )
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.score
-                ),
-                "classify": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="classify"
-                ),
-                "score": Pooler.for_classify(
-                    pooler_config, classifier=self.score, act_fn="score"
-                ),
-            }
-        )
+        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

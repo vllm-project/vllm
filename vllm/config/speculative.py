@@ -199,7 +199,6 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {
-                    "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeMTPModel"],
                 }

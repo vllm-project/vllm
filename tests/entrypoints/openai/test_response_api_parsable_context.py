@@ -58,6 +58,7 @@ async def test_basic(client: OpenAI, model_name: str):
     assert response is not None
     print("response: ", response)
     assert response.status == "completed"
+    assert response.incomplete_details is None
 
 
 @pytest.mark.asyncio
@@ -184,3 +185,17 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
     assert len(response.input_messages) == 1
     assert len(response.output_messages) == 3
     assert "312" in response.output_messages[2]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+    )
+    assert response is not None
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"

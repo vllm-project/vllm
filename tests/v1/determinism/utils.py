@@ -6,9 +6,9 @@ import random
 import pytest
 import torch
 
-from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(80)),

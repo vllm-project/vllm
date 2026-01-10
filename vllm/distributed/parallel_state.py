@@ -1177,9 +1177,9 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1251,7 +1251,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        if config.parallel_config.nnodes > 1:
+        if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
@@ -1260,7 +1260,7 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
-    if config.parallel_config.nnodes_within_dp > 1:
+    if config is not None and config.parallel_config.nnodes_within_dp > 1:
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [
@@ -1316,9 +1316,9 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     data_parallel_size = 1
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 
