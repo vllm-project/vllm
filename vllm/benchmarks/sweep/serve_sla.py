@@ -149,7 +149,7 @@ def solve_sla(
     dry_run: bool,
     sla_variable: SLAVariable,
     sla_min_value: int = 1,
-    sla_max_value: int = 65536,  # The value that represents infinite QPS
+    sla_max_value: int = 8192,  # The value that represents infinite QPS
 ):
     sla_data = list[dict[str, object]]()
     history = SLAHistory(min_value=sla_min_value, max_value=sla_max_value)
