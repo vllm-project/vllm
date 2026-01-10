@@ -12,11 +12,11 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.entrypoints.utils import (
     _validate_text_prompt_char_length,
     _validate_truncation_size,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.tokenizers import TokenizerLike
@@ -406,10 +406,9 @@ class CompletionRenderer(BaseRenderer):
         if max_length is not None and len(token_ids) > max_length:
             raise VLLMValidationError(
                 f"This model's maximum context length is {max_length} tokens. "
-                f"However, your request has {len(token_ids)} input tokens. "
+                f"However, your request has more input tokens. "
                 "Please reduce the length of the input messages.",
                 parameter="input_tokens",
-                value=len(token_ids),
             )
 
         tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)
