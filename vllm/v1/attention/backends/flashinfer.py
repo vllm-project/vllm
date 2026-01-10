@@ -40,7 +40,7 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_strictly_contiguos
+from vllm.utils.torch_utils import is_strictly_contiguous
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
