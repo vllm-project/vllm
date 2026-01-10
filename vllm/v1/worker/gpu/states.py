@@ -139,6 +139,7 @@ class RequestState:
         )
         self.prefill_len.np[req_idx] = prefill_len
         self.prefill_token_ids.stage_write(req_idx, 0, prefill_token_ids)
+        self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         if lora_request is not None:
