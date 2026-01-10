@@ -6,14 +6,14 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm.attention.backends.abstract import (
+from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
 )
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
