@@ -508,6 +508,14 @@ class Llama4Model(LlamaModel):
                 # TODO: add EP support for non fused weights
                 pass
 
+            # Ensure tensor is contiguous before GPU transfer.
+            # After transpose() and indexing operations, the tensor may be
+            # non-contiguous, causing slow DMA transfers. Making the final
+            # sliced tensor contiguous here is more efficient than making
+            # the entire weight tensor contiguous after transpose().
+            if fused and isinstance(new_loaded_weight, torch.Tensor):
+                new_loaded_weight = new_loaded_weight.contiguous()
+
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
             weight_loader(
@@ -677,7 +685,7 @@ class Llama4Model(LlamaModel):
                             and loaded_weight.dtype == torch.float8_e4m3fn
                             and loaded_weight.ndim == 3
                         ):
-                            loaded_weight = loaded_weight.transpose(-1, -2)
+                            loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
 
                         # Load the weight into the module parameter with
                         # corresponding shard id and expert id.
@@ -831,6 +839,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                 w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
                 .transpose(1, 2)
                 .reshape(attn_in, attn_out)
+                .contiguous()
             )
 
         modules = name.split(".")
