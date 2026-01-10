@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
+    VLLM_MULTIMODAL_TENSOR_IPC: bool = True
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
@@ -807,6 +808,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
+<<<<<<< HEAD
     # Hash algorithm for multimodal content hashing.
     # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
     # - "sha256": FIPS 140-3 compliant, widely supported
@@ -817,6 +819,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "blake3",
         ["blake3", "sha256", "sha512"],
         case_sensitive=False,
+=======
+    # Enable IPC (inter-process communication) for multimodal tensors.
+    # When enabled, all multimodal tensors (CUDA and CPU) are transferred
+    # via torch.multiprocessing shared memory for zero-copy IPC.
+    # When disabled, all tensors use standard serialization.
+    "VLLM_MULTIMODAL_TENSOR_IPC": lambda: bool(
+        int(os.getenv("VLLM_MULTIMODAL_TENSOR_IPC", "1"))
+>>>>>>> 5a8cec31e (Add tensor IPC transfer mechanism for multimodal data)
     ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -1758,6 +1768,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
+        "VLLM_MULTIMODAL_TENSOR_IPC",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
         "VLLM_WORKER_MULTIPROC_METHOD",

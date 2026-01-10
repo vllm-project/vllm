@@ -475,6 +475,8 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    maximum_concurrent_videos: int | None = MultiModalConfig.max_concurrent_videos
+    multimodal_tensor_ipc: bool | None = MultiModalConfig.multimodal_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -994,6 +996,25 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
+        multimodal_group.add_argument(
+            "--maximum-concurrent-videos",
+            type=int,
+            default=None,
+            help="Maximum number of videos that can be preprocessed concurrently. "
+            "This limits VRAM usage from video decoding. The count is spread "
+            "evenly over API server processes.",
+        )
+        multimodal_group.add_argument(
+            "--enable-multimodal-tensor-ipc",
+            "--disable-multimodal-tensor-ipc",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Enable IPC (inter-process communication) for multimodal tensors. "
+            "When enabled, all multimodal tensors (CUDA and CPU) are transferred "
+            "via torch.multiprocessing shared memory for zero-copy IPC. "
+            "When disabled, all tensors use standard serialization. "
+            "If not specified, defaults to VLLM_MULTIMODAL_TENSOR_IPC env var (default: True).",
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1272,6 +1293,8 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            maximum_concurrent_videos=self.maximum_concurrent_videos,
+            multimodal_tensor_ipc=self.multimodal_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
         )
 
