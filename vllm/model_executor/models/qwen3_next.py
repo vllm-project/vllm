@@ -938,17 +938,23 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     #     ssm_state.index_copy_(0, final_slot_ids, final_states)
 
         elif num_decodes > 0:
-            assert state_indices_decode is not None
-            assert ssm_state_indices_decode is not None
             assert non_spec_query_start_loc is not None
-            # Prepare the initial state for decoding
-            valid_src_decode_slots = ssm_state_indices_decode >= 0
-            ssm_state_indices_decode_clamped = ssm_state_indices_decode.clamp(min=0)
-            # TODO: make backwards compatible
-            initial_state_decode = ssm_state.index_select(
-                0, ssm_state_indices_decode_clamped.to(torch.long)
-            )
-            initial_state_decode[~valid_src_decode_slots] = 0
+            # When APC is enabled, read from the block containing the last computed token
+            # When APC is disabled, read from and write to the same block
+            # We read from ssm_state_indices_* and write to state_indices_*
+            if prefix_caching_enabled:
+                assert ssm_state_indices_decode is not None
+                valid_src_decode_slots = ssm_state_indices_decode >= 0
+                ssm_state_indices_decode_clamped = ssm_state_indices_decode.clamp(min=0)
+                initial_state_decode = ssm_state.index_select(
+                    0, ssm_state_indices_decode_clamped.to(torch.long)
+                )
+                initial_state_decode[~valid_src_decode_slots] = 0
+                # We have already gathered the initial state
+                ssm_state_indices = None
+            else:
+                initial_state_decode = ssm_state
+                ssm_state_indices = non_spec_state_indices_tensor
 
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
@@ -958,41 +964,35 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     g=g_non_spec,
                     beta=beta_non_spec,
                     initial_state=initial_state_decode,
-                    # TODO: make backwards compatible
-                    inplace_final_state=False,
+                    inplace_final_state=not prefix_caching_enabled,
                     cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
-                    # TODO: check if we can pass in the full state indices here alonside last computed/scheduled
-                    # block idx so we can perform the write in the kernel.
-                    ssm_state_indices=None,
+                    ssm_state_indices=ssm_state_indices,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
 
-            # TODO: check that we should really use state_indices_decode here
-            # __import__('fpdb').ForkedPdb().set_trace()
-
-            # Store the final recurrent state
-            # TODO: check if it's fine that we override this BLOCK_SIEZ times,
-            # one time for each decode that gets written to the same block
-            # I would assume it's fine since non-full blocks are anyhow not cached for other requests
-            # so it's fine that the ssm state for a particular block is not "full"
-            valid_decode_slots = state_indices_decode >= 0
-            dest_slots = state_indices_decode.clamp(min=0).to(
-                device=ssm_state.device, dtype=torch.long
-            )
-            valid_decode_slots_broadcast = valid_decode_slots.view(
-                -1, *([1] * (last_recurrent_state.dim() - 1))
-            )
-            prior_state = ssm_state.index_select(0, dest_slots).to(
-                last_recurrent_state.dtype
-            )
-            last_recurrent_state = torch.where(
-                valid_decode_slots_broadcast, last_recurrent_state, prior_state
-            )
-            ssm_state.index_copy_(
-                0, dest_slots, last_recurrent_state.to(ssm_state.dtype)
-            )
-
+            # During APC, store the final recurrent state in the correct destination slot
+            if prefix_caching_enabled:
+                assert state_indices_decode is not None
+                # Record the valid slots as clamping otherwise invalid slots are lost when clamping
+                valid_decode_slots = state_indices_decode >= 0
+                dest_slots = state_indices_decode.clamp(min=0).to(
+                    device=ssm_state.device, dtype=torch.long
+                )
+                # Broadcast the mask to (num_decodes, 1, 1, 1) to match last_recurrent_state's shape
+                valid_decode_slots_broadcast = valid_decode_slots.view(
+                    -1,
+                    *([1] * (last_recurrent_state.dim() - 1)),
+                )
+                prior_state = ssm_state.index_select(0, dest_slots).to(
+                    last_recurrent_state.dtype
+                )
+                last_recurrent_state = torch.where(
+                    valid_decode_slots_broadcast, last_recurrent_state, prior_state
+                )
+                ssm_state.index_copy_(
+                    0, dest_slots, last_recurrent_state.to(ssm_state.dtype)
+                )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
