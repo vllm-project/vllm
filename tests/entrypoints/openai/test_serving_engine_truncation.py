@@ -66,7 +66,7 @@ async def test_default_truncation_uses_guardrail(serving: OpenAIServing):
 
 
 @pytest.mark.asyncio
-async def test_disable_truncation_passes_through(serving: OpenAIServing):
+async def test_truncate_zero_yields_empty_input(serving: OpenAIServing):
     tokenizer = DummyAsyncTokenizer(return_len=3)
     serving._get_async_tokenizer = Mock(return_value=tokenizer)
 
@@ -77,9 +77,9 @@ async def test_disable_truncation_passes_through(serving: OpenAIServing):
 
     assert isinstance(result, dict)
     assert "prompt_token_ids" in result
-    assert tokenizer.calls[0]["truncation"] is True
-    assert tokenizer.calls[0]["max_length"] == 0
-    assert len(result["prompt_token_ids"]) == 3
+    assert result["prompt_token_ids"] == []
+    # truncate_prompt_tokens=0 should bypass tokenization completely.
+    assert tokenizer.calls == []
 
 
 @pytest.mark.asyncio

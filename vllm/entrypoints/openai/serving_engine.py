@@ -956,6 +956,9 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
+        # Keep consistent behavior with renderer: 0 means "empty input".
+        if truncate_prompt_tokens == 0:
+            return TokensPrompt(prompt="", prompt_token_ids=[])
         _validate_text_prompt_char_length(
             prompt, self.max_model_len, truncate_prompt_tokens
         )
@@ -1036,8 +1039,8 @@ class OpenAIServing:
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, your requested "
-                    f"tokens in the input for {operation} is too long."
-                    f"Please reduce the length of the input."
+                    f"tokens in the input for {operation} are too long. "
+                    "Please reduce the length of the input."
                 )
             return
 
