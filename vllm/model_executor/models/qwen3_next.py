@@ -611,8 +611,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             ssm_state_indices_decode = state_indices_decode
 
             # Prefill
-            start_non_spec_prefill = num_decodes
-            end_non_spec_prefill = start_non_spec_prefill + num_prefills
             state_indices_prefill = non_spec_state_indices_tensor[
                 start_non_spec_prefill:end_non_spec_prefill
             ]
@@ -621,9 +619,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert state_indices_decode is not None
         if num_prefills > 0:
             assert state_indices_prefill is not None
-
-        start_non_spec_prefill = num_decodes
-        end_non_spec_prefill = start_non_spec_prefill + num_prefills
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -769,7 +764,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             if prefix_caching_enabled:
                 assert state_indices_tensor_p is not None
                 assert block_idx_last_computed_token_p is not None
-                # TODO: this should not be chunk
                 # Get the cached block indices
                 block_state_indices = state_indices_tensor_p.gather(
                     1, block_idx_last_computed_token_p.unsqueeze(1)
@@ -778,7 +772,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 block_state_indices = state_indices_prefill
             assert block_state_indices is not None
 
-            # Copy the cached ssm state into the initial state
+            # Copy the cached ssm state into the initial state.
+            # Shape [num_prefills, *ssm_state_shape]
             initial_state = ssm_state.new_zeros(
                 (block_state_indices.shape[0], *ssm_state.shape[1:])
             )
@@ -800,7 +795,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     )
 
                 if has_initial_state is not None:
-                    req_has_initial_state = has_initial_state[:end_non_spec_prefill]
+                    req_has_initial_state = has_initial_state[
+                        start_non_spec_prefill:end_non_spec_prefill
+                    ]
                     initial_state[~req_has_initial_state, ...] = 0
 
             assert query_non_spec is not None
