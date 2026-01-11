@@ -5,6 +5,7 @@ import io
 import math
 import time
 from collections.abc import AsyncGenerator, Callable
+from collections.abc import Sequence as GenericSequence
 from functools import cached_property
 from typing import Literal, TypeAlias, TypeVar, cast
 
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
+    TranscriptionLogprob,
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
@@ -36,6 +38,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRe
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import get_tokenizer
@@ -370,6 +373,76 @@ class OpenAISpeechToText(OpenAIServing):
                 last_timestamp_start = idx
         return segments
 
+    def _create_transcription_logprobs(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
+        num_output_top_logprobs: int,
+        tokenizer: PreTrainedTokenizerBase | None,
+    ) -> list[TranscriptionLogprob]:
+        """Create logprobs for transcription API response.
+
+        Returns a list of TranscriptionLogprob objects matching OpenAI's format
+        from openai.types.audio.transcription.Logprob.
+
+        Args:
+            token_ids: Sequence of token IDs.
+            top_logprobs: Sequence of logprob dictionaries for each token.
+            num_output_top_logprobs: Number of top logprobs requested.
+            tokenizer: Tokenizer to decode tokens. Must not be None.
+
+        Raises:
+            VLLMValidationError: If tokenizer is None (skip_tokenizer_init=True).
+        """
+        if tokenizer is None:
+            raise VLLMValidationError(
+                "Unable to get tokenizer because `skip_tokenizer_init=True`",
+                parameter="skip_tokenizer_init",
+                value=True,
+            )
+
+        result: list[TranscriptionLogprob] = []
+
+        for i, token_id in enumerate(token_ids):
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
+                token = tokenizer.decode(token_id)
+                result.append(
+                    TranscriptionLogprob(
+                        token=token,
+                        bytes=list(token.encode("utf-8")),
+                        logprob=None,
+                    )
+                )
+            else:
+                step_token = step_top_logprobs.get(token_id)
+                if step_token is None:
+                    token = tokenizer.decode(token_id)
+                    result.append(
+                        TranscriptionLogprob(
+                            token=token,
+                            bytes=list(token.encode("utf-8")),
+                            logprob=None,
+                        )
+                    )
+                else:
+                    token = (
+                        step_token.decoded_token
+                        if step_token.decoded_token is not None
+                        else tokenizer.decode(token_id)
+                    )
+                    token_logprob = max(step_token.logprob, -9999.0)
+
+                    result.append(
+                        TranscriptionLogprob(
+                            token=token,
+                            bytes=list(token.encode("utf-8")),
+                            logprob=token_logprob,
+                        )
+                    )
+
+        return result
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -469,6 +542,8 @@ class OpenAISpeechToText(OpenAIServing):
         # Non-streaming response.
         total_segments = []
         text_parts = []
+        all_token_ids: list[int] = []
+        all_logprobs: list[dict[int, Logprob] | None] = []
         try:
             assert list_result_generator is not None
             segments_types: dict[str, type[SpeechToTextSegment]] = {
@@ -487,10 +562,11 @@ class OpenAISpeechToText(OpenAIServing):
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
                 async for op in result_generator:
+                    output = op.outputs[0]
                     if request.response_format == "verbose_json":
                         segments: list[SpeechToTextSegment] = (
                             self._get_verbose_segments(
-                                tokens=tuple(op.outputs[0].token_ids),
+                                tokens=tuple(output.token_ids),
                                 segment_class=segment_class,
                                 request=request,
                                 start_time=start_time,
@@ -500,8 +576,32 @@ class OpenAISpeechToText(OpenAIServing):
                         total_segments.extend(segments)
                         text_parts.extend([seg.text for seg in segments])
                     else:
-                        text_parts.append(op.outputs[0].text)
+                        text_parts.append(output.text)
+
+                    # Collect token_ids and logprobs for logprobs response
+                    # Use getattr since TranslationRequest doesn't have logprobs
+                    req_logprobs = getattr(request, "logprobs", None)
+                    if req_logprobs is not None and output.logprobs is not None:
+                        all_token_ids.extend(output.token_ids)
+                        all_logprobs.extend(output.logprobs)
             text = "".join(text_parts)
+
+            # Create logprobs response if requested
+            # Use getattr since TranslationRequest doesn't have logprobs
+            logprobs_response: list[TranscriptionLogprob] | None = None
+            req_logprobs = getattr(request, "logprobs", None)
+            if (
+                req_logprobs is not None
+                and all_logprobs
+                and self.task_type == "transcribe"
+            ):
+                logprobs_response = self._create_transcription_logprobs(
+                    token_ids=all_token_ids,
+                    top_logprobs=all_logprobs,
+                    num_output_top_logprobs=req_logprobs,
+                    tokenizer=self.tokenizer,
+                )
+
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
@@ -512,7 +612,10 @@ class OpenAISpeechToText(OpenAIServing):
                 }
                 if request.response_format != "verbose_json":
                     final_response = cast(
-                        T, TranscriptionResponse(text=text, usage=usage)
+                        T,
+                        TranscriptionResponse(
+                            text=text, usage=usage, logprobs=logprobs_response
+                        ),
                     )
                 else:
                     final_response = cast(
@@ -522,6 +625,7 @@ class OpenAISpeechToText(OpenAIServing):
                             language=request.language,
                             duration=str(duration_s),
                             segments=total_segments,
+                            logprobs=logprobs_response,
                         ),
                     )
             else:
@@ -570,6 +674,11 @@ class OpenAISpeechToText(OpenAIServing):
             else False
         )
 
+        # Check if logprobs are requested (only for transcription)
+        # Use getattr since TranslationRequest doesn't have logprobs
+        req_logprobs = getattr(request, "logprobs", None)
+        include_logprobs = self.task_type == "transcribe" and req_logprobs is not None
+
         try:
             for result_generator in list_result_generator:
                 async for res in result_generator:
@@ -592,13 +701,28 @@ class OpenAISpeechToText(OpenAIServing):
                     delta_message = DeltaMessage(content=output.text)
                     completion_tokens += len(output.token_ids)
 
+                    # Create logprobs for this chunk if requested
+                    chunk_logprobs: list[TranscriptionLogprob] | None = None
+                    if include_logprobs and output.logprobs is not None:
+                        assert req_logprobs is not None  # Checked in include_logprobs
+                        chunk_logprobs = self._create_transcription_logprobs(
+                            token_ids=output.token_ids,
+                            top_logprobs=output.logprobs,
+                            num_output_top_logprobs=req_logprobs,
+                            tokenizer=self.tokenizer,
+                        )
+
                     if output.finish_reason is None:
                         # Still generating, send delta update.
-                        choice_data = response_stream_choice_class(delta=delta_message)
+                        choice_data = response_stream_choice_class(
+                            delta=delta_message,
+                            logprobs=chunk_logprobs,
+                        )
                     else:
                         # Model is finished generating.
                         choice_data = response_stream_choice_class(
                             delta=delta_message,
+                            logprobs=chunk_logprobs,
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason,
                         )
