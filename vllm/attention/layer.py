@@ -491,6 +491,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        rotary_emb: torch.nn.Module | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -503,6 +504,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.rotary_emb = rotary_emb
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -570,6 +572,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            rotary_emb=self.rotary_emb,
             **extra_impl_args,
         )
 
@@ -600,6 +603,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
@@ -621,11 +625,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
+                    positions=positions,
                 )
                 return output
             else:
                 return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    self,
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    positions=positions,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -636,6 +647,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     output,
                     self.layer_name,
+                    positions=positions,
                 )
                 return output
             else:
@@ -644,6 +656,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
+                    positions=positions,
                 )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -843,9 +856,18 @@ def unified_mla_attention(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.impl.forward(
+        self,
+        q,
+        kv_c_normed,
+        k_pe,
+        kv_cache,
+        attn_metadata,
+        positions=positions,
+    )
 
     return output
 
@@ -855,6 +877,7 @@ def unified_mla_attention_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
 
@@ -877,6 +900,7 @@ def unified_mla_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
@@ -889,6 +913,7 @@ def unified_mla_attention_with_output(
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        positions=positions,
     )
 
 
@@ -900,6 +925,7 @@ def unified_mla_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 
