@@ -356,3 +356,68 @@ class TestShouldContinueFinalMessage:
             arguments='{"location": "NYC"}',
         )
         assert should_continue_final_message([tool_call]) is False
+
+    # Tests for dict inputs (e.g., from curl requests)
+    def test_dict_in_progress_message_returns_true(self):
+        """Dict with in_progress status should be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "output_text", "text": "The answer is ("}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_incomplete_message_returns_true(self):
+        """Dict with incomplete status should be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "incomplete",
+            "content": [{"type": "output_text", "text": "Partial answer"}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_completed_message_returns_false(self):
+        """Dict with completed status should not be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Complete answer."}],
+        }
+        assert should_continue_final_message([dict_item]) is False
+
+    def test_dict_reasoning_in_progress_returns_true(self):
+        """Dict reasoning item with in_progress status should be continued."""
+        dict_item = {
+            "id": "reasoning_123",
+            "type": "reasoning",
+            "status": "in_progress",
+            "content": [{"type": "reasoning_text", "text": "Let me think..."}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_without_status_returns_false(self):
+        """Dict without status field should not be continued."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Some text"}],
+        }
+        assert should_continue_final_message([dict_item]) is False
+
+    def test_dict_with_none_status_returns_false(self):
+        """Dict with None status should not be continued."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": None,
+            "content": [{"type": "output_text", "text": "Some text"}],
+        }
+        assert should_continue_final_message([dict_item]) is False
