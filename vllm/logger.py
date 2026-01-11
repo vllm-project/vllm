@@ -178,6 +178,20 @@ def _configure_vllm_root_logger() -> None:
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
 
+        if envs.VLLM_LOG_FILE:
+            # Basic security check for path traversal.
+            if ".." in envs.VLLM_LOG_FILE:
+                raise ValueError("VLLM_LOG_FILE must not contain '..'")
+
+            logging_config["handlers"]["vllm_file"] = {
+                "class": "logging.FileHandler",
+                "filename": envs.VLLM_LOG_FILE,
+                "level": envs.VLLM_LOGGING_LEVEL,
+                "formatter": "vllm",
+                "encoding": "utf-8",
+            }
+            logging_config["loggers"]["vllm"]["handlers"].append("vllm_file")
+
     if envs.VLLM_LOGGING_CONFIG_PATH:
         if not path.exists(envs.VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
