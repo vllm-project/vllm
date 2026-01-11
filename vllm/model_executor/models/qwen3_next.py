@@ -772,11 +772,38 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 block_state_indices = state_indices_prefill
             assert block_state_indices is not None
 
+            assert query_non_spec is not None
+            assert key_non_spec is not None
+            assert value_non_spec is not None
+            assert g_non_spec is not None
+            assert beta_non_spec is not None
+            assert non_spec_query_start_loc is not None
+            cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
+            assert num_decodes + num_prefills == len(cu_seqlens) - 1
+
             # Copy the cached ssm state into the initial state.
-            # Shape [num_prefills, *ssm_state_shape]
+            # This includes both decode and prefill sequences when there's a mixed batch
             initial_state = ssm_state.new_zeros(
-                (block_state_indices.shape[0], *ssm_state.shape[1:])
+                (num_decodes + num_prefills, *ssm_state.shape[1:])
             )
+
+            # For decode sequences (if any), copy their existing state from ssm_state
+            if num_decodes > 0 and state_indices_decode is not None:
+                valid_decode_positions = torch.nonzero(
+                    state_indices_decode >= 0, as_tuple=False
+                ).squeeze(-1)
+                if valid_decode_positions.numel() > 0:
+                    decode_state_indices = state_indices_decode.index_select(
+                        0, valid_decode_positions
+                    ).to(device=ssm_state.device, dtype=torch.long)
+                    decode_states = ssm_state.index_select(0, decode_state_indices)
+                    initial_state.index_copy_(
+                        0,
+                        valid_decode_positions,
+                        decode_states,
+                    )
+
+            # For prefill sequences, copy cached state from block_state_indices
             if block_state_indices.numel() > 0:
                 valid_block_positions = torch.nonzero(
                     block_state_indices >= 0, as_tuple=False
@@ -788,9 +815,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             device=ssm_state.device, dtype=torch.long
                         ),
                     )
+                    # Prefill positions start after the decodes in initial_state
+                    prefill_positions_in_initial_state = (
+                        valid_block_positions + num_decodes
+                    )
                     initial_state.index_copy_(
                         0,
-                        valid_block_positions,
+                        prefill_positions_in_initial_state,
                         ssm_state_initials,
                     )
 
@@ -798,15 +829,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     req_has_initial_state = has_initial_state[
                         start_non_spec_prefill:end_non_spec_prefill
                     ]
-                    initial_state[~req_has_initial_state, ...] = 0
+                    # Map prefill positions to their positions in initial_state
+                    prefill_indices = torch.arange(
+                        num_decodes,
+                        num_decodes + num_prefills,
+                        device=initial_state.device,
+                    )
+                    initial_state[prefill_indices[~req_has_initial_state], ...] = 0
 
-            assert query_non_spec is not None
-            assert key_non_spec is not None
-            assert value_non_spec is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
-            assert non_spec_query_start_loc is not None
-            cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
             # chunk_state_history contains the `chunks_per_block` matrix states,
             # *excluding* the last recurrent state
             (
