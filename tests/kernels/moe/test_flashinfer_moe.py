@@ -12,12 +12,12 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.flashinfer_all2all_prepare_finalize import (
+    create_flashinfer_cutlass_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    create_flashinfer_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
@@ -87,7 +87,7 @@ def test_flashinfer_fp4_moe_no_graph(
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
         flashinfer_experts = FusedMoEModularKernel(
-            create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
+            create_flashinfer_cutlass_prepare_finalize(use_dp=False, use_nvfp4=True),
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
 
