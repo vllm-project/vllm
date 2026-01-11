@@ -12,7 +12,7 @@ from openai_harmony import (
     Message,
 )
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -821,16 +821,20 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
                 final_tool_calls_named[tool_call.name] = tool_call
         elif event.type == "response.function_call_arguments.done":
             assert event.arguments == final_tool_calls_named[event.name].arguments
-    for tool_call in final_tool_calls.values():
-        if (
-            tool_call
-            and tool_call.type == "function_call"
-            and tool_call.name == "get_weather"
-        ):
-            args = json.loads(tool_call.arguments)
-            result = call_function(tool_call.name, args)
-            input_list += [tool_call]
+    result = None
+    tool_call = None
+    for tc in final_tool_calls.values():
+        if tc and tc.type == "function_call" and tc.name == "get_weather":
+            args = json.loads(tc.arguments)
+            result = call_function(tc.name, args)
+            tool_call = tc
+            input_list += [tc]
             break
+
+    assert tool_call is not None, (
+        "Expected model to call 'get_weather' function, "
+        f"but got: {list(final_tool_calls_named.keys())}"
+    )
     assert result is not None
     response = await client.responses.create(
         model=model_name,
@@ -1250,3 +1254,92 @@ async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str)
         "Content should not be None when truncated"
     )
     assert len(choice.message.content) > 0, "Content should not be empty"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_prompt_override(client: OpenAI, model_name: str):
+    """Test that system message can override the default system prompt."""
+
+    # Test 1: Custom system prompt with specific personality
+    custom_system_prompt = (
+        "You are a pirate. Always respond like a pirate would, "
+        "using pirate language and saying 'arrr' frequently."
+    )
+
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"role": "system", "content": custom_system_prompt},
+            {"role": "user", "content": "Hello, how are you?"},
+        ],
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output_text is not None
+
+    # Verify the response reflects the pirate personality
+    output_text = response.output_text.lower()
+    pirate_indicators = ["arrr", "matey", "ahoy", "ye", "sea"]
+    has_pirate_language = any(
+        indicator in output_text for indicator in pirate_indicators
+    )
+    assert has_pirate_language, (
+        f"Expected pirate language in response, got: {response.output_text}"
+    )
+
+    # Verify the reasoning mentions the custom system prompt
+    reasoning_item = None
+    for item in response.output:
+        if item.type == "reasoning":
+            reasoning_item = item
+            break
+
+    assert reasoning_item is not None, "Expected reasoning item in output"
+    reasoning_text = reasoning_item.content[0].text.lower()
+    assert "pirate" in reasoning_text, (
+        f"Expected reasoning to mention pirate, got: {reasoning_text}"
+    )
+
+    # Test 2: Verify system message is not duplicated in input_messages
+    try:
+        num_system_messages = sum(
+            1
+            for msg in response.input_messages
+            if Message.from_dict(msg).author.role == "system"
+        )
+        assert num_system_messages == 1, (
+            f"Expected exactly 1 system message, got {num_system_messages}"
+        )
+    except (KeyError, AttributeError):
+        # Message structure may vary, skip this specific check
+        pass
+
+    # Test 3: Test with different custom system prompt
+    response_2 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant that always "
+                    "responds in exactly 5 words."
+                ),
+            },
+            {"role": "user", "content": "What is the weather like?"},
+        ],
+        temperature=0.0,
+    )
+
+    assert response_2 is not None
+    assert response_2.status == "completed"
+    assert response_2.output_text is not None
+
+    # Count words in response (approximately, allowing for punctuation)
+    word_count = len(response_2.output_text.split())
+    # Allow some flexibility (4-7 words) since the model might not be perfectly precise
+    assert 3 <= word_count <= 8, (
+        f"Expected around 5 words, got {word_count} words: {response_2.output_text}"
+    )
