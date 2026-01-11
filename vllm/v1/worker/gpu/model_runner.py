@@ -236,15 +236,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_computed_tokens = torch.zeros(
             input_batch.num_reqs, dtype=torch.int32, device=self.device
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
-        query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
-            query_start_loc_gpu=query_start_loc_gpu,
-            query_start_loc_cpu=query_start_loc_cpu,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_np=input_batch.seq_lens_np,
             num_computed_tokens_cpu=num_computed_tokens,
