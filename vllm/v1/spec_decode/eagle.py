@@ -117,7 +117,9 @@ class EagleProposer:
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
-        self.uses_mrope = self.vllm_config.model_config.uses_mrope
+        # Use draft model's M-RoPE setting, not target model's
+        # Draft models may be text-only even if target is multimodal
+        self.uses_mrope = self.draft_model_config.uses_mrope
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -248,6 +250,11 @@ class EagleProposer:
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+
+        # Convert M-RoPE positions to 1D if draft model is text-only
+        if not self.uses_mrope and target_positions.dim() == 2:
+            # For text inputs, all M-RoPE dimensions are identical
+            target_positions = target_positions[0]
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -1040,6 +1047,7 @@ class EagleProposer:
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
