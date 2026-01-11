@@ -470,6 +470,8 @@ class BertWithRope(nn.Module, SupportsQuant):
             assert pooler_config is not None
 
             self.pooler = BertPooler(self.config, pooler_config.seq_pooling_type)
+        else:
+            self.pooler = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
