@@ -8,6 +8,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
@@ -250,6 +254,41 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     )
 
 
+def _quantize_input_fp4_with_linear_scales(
+    x: torch.Tensor, a1_gscale: torch.Tensor | float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 using vLLM native quantization and convert
+    scales to linear layout (for TRTLLM kernels, issue #32057).
+
+    Args:
+        x: Input tensor to quantize
+        a1_gscale: Global scale (tensor or scalar)
+
+    Returns:
+        Tuple of (quantized_fp4_tensor, linear_scale_tensor)
+    """
+    # Normalize a1_gscale to a scalar tensor on the correct device
+    if not isinstance(a1_gscale, torch.Tensor):
+        a1_gscale = torch.tensor(a1_gscale, device=x.device, dtype=torch.float32)
+    else:
+        a1_gscale = (
+            (a1_gscale.max() if a1_gscale.numel() != 1 else a1_gscale)
+            .to(x.device)
+            .to(torch.float32)
+        )
+
+    # Quantize using vLLM native op (outputs swizzled scales)
+    hidden_states_fp4, hidden_states_scale_swizzled = ops.scaled_fp4_quant(x, a1_gscale)
+
+    # Convert swizzled scales to linear layout (required by TRTLLM kernels)
+    hidden_states_scale_linear_fp4 = convert_swizzled_to_linear(
+        hidden_states_scale_swizzled, x.shape[0], x.shape[1], block_size=16
+    )
+
+    return hidden_states_fp4, hidden_states_scale_linear_fp4
+
+
 def flashinfer_trtllm_fp4_moe(
     layer: torch.nn.Module,
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -286,11 +325,8 @@ def flashinfer_trtllm_fp4_moe(
     if isinstance(x, tuple):
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
-        # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        hidden_states_fp4, hidden_states_scale_linear_fp4 = (
+            _quantize_input_fp4_with_linear_scales(x, layer.a1_gscale)
         )
 
     # Determine routing method type
@@ -381,11 +417,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         # Hidden_states is the already quantized
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
-        # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        hidden_states_fp4, hidden_states_scale_linear_fp4 = (
+            _quantize_input_fp4_with_linear_scales(x, layer.a1_gscale)
         )
 
     # Call TRT-LLM FP4 block-scale MoE kernel
