@@ -432,6 +432,12 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
+        extra_args: dict[str, Any] = {}
+        if self.reasoning is not None and self.reasoning.effort is not None:
+            extra_args.update(reasoning_effort=self.reasoning.effort)
+        if self.parallel_tool_calls is not None:
+            extra_args.update(parallel_tool_calls=self.parallel_tool_calls)
+
         # TODO: add more parameters
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -446,6 +452,7 @@ class ResponsesRequest(OpenAIBaseModel):
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            extra_args=extra_args,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -558,7 +565,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -818,6 +825,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.reasoning_effort is not None:
+            extra_args["reasoning_effort"] = self.reasoning_effort
+        if self.parallel_tool_calls is not None:
+            extra_args["parallel_tool_calls"] = self.parallel_tool_calls
+
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
