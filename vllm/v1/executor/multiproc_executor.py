@@ -71,17 +71,29 @@ class FutureWrapper(Future):
         super().__init__()
 
     def result(self, timeout=None):
-        if timeout is not None:
-            raise RuntimeError("timeout not implemented")
+        # Support optional timeout for awaiting the result of this future.
+        deadline = None if timeout is None else time.monotonic() + timeout
+
         # Drain any futures ahead of us in the queue.
         while not self.done():
             future, get_response = self.futures_queue.pop()
-            future.wait_for_response(get_response)
+
+            # Compute remaining time for this drain step.
+            remaining = None if deadline is None else (deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("timeout while waiting for pending RPC futures")
+            future.wait_for_response(get_response, timeout=remaining)
+
         return super().result()
 
-    def wait_for_response(self, get_response: Callable):
+    def wait_for_response(self, get_response: Callable, timeout: float | None = None):
         try:
-            response = self.aggregate(get_response())
+            # Try calling get_response with a timeout parameter if it accepts one.
+            try:
+                response = self.aggregate(get_response(timeout=timeout))
+            except TypeError:
+                # Fallback for callables that don't accept timeout.
+                response = self.aggregate(get_response())
             with suppress(InvalidStateError):
                 self.set_result(response)
         except Exception as e:
@@ -326,12 +338,24 @@ class MultiprocExecutor(Executor):
 
         shutdown_event = self.shutdown_event
 
-        def get_response():
+        def get_response(timeout: float | None = None):
             responses = []
+            start = time.monotonic()
             for mq in response_mqs:
-                dequeue_timeout = (
-                    None if deadline is None else (deadline - time.monotonic())
-                )
+                # If a specific timeout was provided to this call, treat it as
+                # an overall timeout for collecting responses from all MQs.
+                dequeue_timeout: float | None
+                if timeout is not None:
+                    elapsed = time.monotonic() - start
+                    dequeue_timeout = timeout - elapsed
+                    if dequeue_timeout <= 0:
+                        raise TimeoutError(f"RPC call to {method} timed out.")
+                else:
+                    dequeue_timeout = (
+                        None if deadline is None else (deadline - time.monotonic())
+                    )
+                    if dequeue_timeout is not None and dequeue_timeout <= 0:
+                        raise TimeoutError(f"RPC call to {method} timed out.")
                 try:
                     status, result = mq.dequeue(
                         timeout=dequeue_timeout, cancel=shutdown_event
