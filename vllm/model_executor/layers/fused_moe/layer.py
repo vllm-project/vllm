@@ -557,21 +557,15 @@ class FusedMoE(CustomOp):
                 num_fused_shared_experts=self.num_fused_shared_experts,
             )
 
-        if self.scoring_func != "softmax" and not self.use_grouped_topk:
-            raise ValueError(
-                "Only softmax scoring function is supported for non-grouped topk."
-            )
-
         # ToDo: Better logic to determine the routing method type
         if routing_method_type is not None:
             self.routing_method_type: RoutingMethodType = routing_method_type
         else:
-            if scoring_func == "sigmoid":
-                if self.use_grouped_topk:
-                    self.routing_method_type = RoutingMethodType.DeepSeekV3
-                elif self.top_k == 1:
-                    self.routing_method_type = RoutingMethodType.Llama4
-            elif self.scoring_func == "softmax":
+            if self.use_grouped_topk:
+                self.routing_method_type = RoutingMethodType.DeepSeekV3
+            elif self.top_k == 1:
+                self.routing_method_type = RoutingMethodType.Llama4
+            elif self.scoring_func == "softmax" or self.scoring_func == "sigmoid":
                 self.routing_method_type = (
                     RoutingMethodType.Renormalize
                     if not self.renormalize
@@ -1618,6 +1612,7 @@ class FusedMoE(CustomOp):
                 e_score_correction_bias=self.e_score_correction_bias.data,
                 topk=self.top_k,
                 renormalize=self.renormalize,
+                scoring_func=self.scoring_func,
             )
             if self.routed_scaling_factor != 1.0:
                 topk_weights *= self.routed_scaling_factor
@@ -1628,6 +1623,7 @@ class FusedMoE(CustomOp):
                 topk=self.top_k,
                 renormalize=self.renormalize,
                 indices_type=indices_type,
+                scoring_func=self.scoring_func,
             )
         else:
             topk_weights, topk_ids = self.custom_routing_function(
