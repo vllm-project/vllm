@@ -149,11 +149,11 @@ def validate_file(file_path: str):
         print(e)
         raise SystemExit(1) from e
     else:
-        print("✅")
+        print("OK")
 
 
 def fail(message: str, node: ast.stmt):
-    raise ValueError(f"❌ line({node.lineno}): {message}")
+    raise ValueError(f"Error line({node.lineno}): {message}")
 
 
 def main():
