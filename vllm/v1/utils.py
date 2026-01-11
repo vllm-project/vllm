@@ -174,6 +174,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        tensor_queues: list[Any] | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -186,6 +187,7 @@ class APIServerProcessManager:
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
+            tensor_queues: Optional tensor IPC queues for CUDA tensor sharing
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -206,6 +208,8 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if tensor_queues is not None:
+                client_config["tensor_queues"] = tensor_queues
 
             proc = spawn_context.Process(
                 target=target_server_fn,

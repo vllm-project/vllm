@@ -360,6 +360,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
+    tensor_queues: list[Any] | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -450,9 +451,6 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
-        # Serialization setup.
-        self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -469,11 +467,14 @@ class MPClient(EngineCoreClient):
             self.engines_running = False
 
             self.stats_update_address: str | None = None
+            tensor_queues: list[Any] | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                # Tensor queues passed via client_addresses for multi-API-server case
+                tensor_queues = client_addresses.get("tensor_queues")  # type: ignore[assignment]
             else:
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class, log_stats) as (
@@ -487,10 +488,34 @@ class MPClient(EngineCoreClient):
                 (input_address,) = addresses.inputs
                 (output_address,) = addresses.outputs
                 self.stats_update_address = addresses.frontend_stats_publish_address
+                tensor_queues = addresses.tensor_queues
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            # Serialization setup with tensor queues for multimodal tensor IPC.
+            # Get IPC config from multimodal_config, falling back to env var
+            multimodal_tensor_ipc = True  # Default
+            if vllm_config.model_config.multimodal_config is not None:
+                mm_ipc = (
+                    vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
+                )
+                if mm_ipc is not None:
+                    multimodal_tensor_ipc = mm_ipc
+                else:
+                    # Fall back to environment variable
+                    from vllm import envs
+
+                    multimodal_tensor_ipc = envs.VLLM_MULTIMODAL_TENSOR_IPC
+
+            self.encoder = MsgpackEncoder(
+                tensor_queues=tensor_queues,
+                multimodal_tensor_ipc=multimodal_tensor_ipc,
+            )
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
+            # Store tensor queues for routing
+            self.resources.tensor_queues = tensor_queues
 
             # Create input and output sockets.
             self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -726,8 +751,16 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
         self.free_pending_messages()
+
+        # Set request context if this is an ADD request with a request_id
+        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+            self.encoder.set_request_context(request.request_id)
+
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+
+        # Clear request context after encoding
+        self.encoder.set_request_context(None)
 
         if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
@@ -908,7 +941,19 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
+        # Set target engine index for CUDA tensor routing
+        engine_index = int.from_bytes(engine, "little")
+        self.encoder.set_target_engine(engine_index)
+
+        # Set request context if this is an ADD request with a request_id
+        if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+            self.encoder.set_request_context(request.request_id)
+
         message = (request_type.value, *self.encoder.encode(request))
+
+        # Clear request context after encoding
+        self.encoder.set_request_context(None)
+
         return self._send_input_message(message, engine, request)
 
     def _send_input_message(

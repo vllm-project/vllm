@@ -140,6 +140,17 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    max_concurrent_videos: int | None = Field(default=None, gt=0)
+    """Maximum number of videos that can be preprocessed concurrently in this
+    process. This limits VRAM usage from video decoding libraries like
+    PyNvVideoCodec that allocate VRAM separately from PyTorch."""
+    multimodal_tensor_ipc: bool | None = None
+    """Enable IPC (inter-process communication) for multimodal tensors.
+    When enabled, all multimodal tensors (CUDA and CPU) are transferred
+    via torch.multiprocessing shared memory for zero-copy IPC.
+    When disabled, all tensors use standard serialization.
+    If None, defaults to the value of VLLM_MULTIMODAL_TENSOR_IPC environment
+    variable (default: True)."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
