@@ -18,9 +18,6 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
-    fused_moe as iterative_moe,
-)
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import fused_moe
@@ -41,6 +38,9 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
     modular_triton_fused_moe,
+)
+from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
+    fused_moe as iterative_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
