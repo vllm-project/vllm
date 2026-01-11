@@ -10,7 +10,7 @@ import torch.fx as fx
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.compilation import Range
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

@@ -581,15 +581,6 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
-    bs_to_padded_graph_size: list[int] = field(
-        default=None,  # type: ignore
-        init=False,
-    )
-    """optimization:
-    Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_cudagraph_capture_size],
-    we can optimize it to list[int] for better lookup performance."""
-
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are enabled"""
@@ -639,7 +630,6 @@ class CompilationConfig:
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
-            "bs_to_padded_graph_size",
             "traced_files",
             "compilation_time",
             "static_forward_context",
@@ -661,7 +651,6 @@ class CompilationConfig:
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
             "compilation_time": True,
-            "bs_to_padded_graph_size": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
@@ -882,7 +871,6 @@ class CompilationConfig:
         """To complete the initialization after cudagraph related
         configs are set. This includes:
         - initialize compile_sizes
-        - pre-compute the mapping bs_to_padded_graph_size
         """
 
         computed_compile_sizes = []
@@ -905,9 +893,6 @@ class CompilationConfig:
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
-
-        # May get recomputed in the model runner if adjustment is needed for spec-decode
-        self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
@@ -1119,24 +1104,6 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
-
-        # Recompute after adjusting the cudagraph sizes
-        self.compute_bs_to_padded_graph_size()
-
-    def compute_bs_to_padded_graph_size(self):
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_cudagraph_capture_size + 1)
-        ]
-        for end, start in zip(
-            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
-            [0] + self.cudagraph_capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
