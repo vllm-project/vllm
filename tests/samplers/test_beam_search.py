@@ -184,3 +184,71 @@ def test_beam_search_passes_multimodal_data(
                 filtered_hf_output_ids = filtered_hf_output_ids[:-1]
 
             assert filtered_hf_output_ids == filtered_vllm_output_ids
+
+
+# Our results are very similar to hf, but not exactly the same as. so we chose
+# Levenshtein distance as a simple test metric. When `dist <= 10`, we thought
+# the result is correct.
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", MAX_TOKENS)
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_by_levenshtein(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    beam_width: int,
+) -> None:
+    import importlib
+    from collections.abc import Hashable, Sequence
+
+    try:
+        importlib.import_module("rapidfuzz")
+        from rapidfuzz.distance import Levenshtein
+    except ImportError:
+        return
+
+    def levenshtein_dist(a: Sequence[Hashable], b: Sequence[Hashable]) -> int:
+        """
+        Levenshtein distance of two token lists.
+        """
+
+        if a is b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        return Levenshtein.distance(a, b)
+
+    dist_threshold = 10
+    example_prompts = example_prompts[:1]
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
+
+    with vllm_runner(model, dtype=dtype, enable_prefix_caching=False) as vllm_model:
+        vllm_outputs = vllm_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
+
+    for i in range(len(example_prompts)):
+        hf_output_ids, hf_output_texts = hf_outputs[i]
+        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+        for j, (hf_text, vllm_text) in enumerate(
+            zip(hf_output_texts, vllm_output_texts)
+        ):
+            print(f">>>{j}-th hf output:")
+            print(hf_text)
+            print(f">>>{j}-th vllm output:")
+            print(vllm_text)
+        assert len(hf_output_ids) == len(vllm_output_ids)
+        for j, (hf_ids, vllm_ids) in enumerate(zip(hf_output_ids, vllm_output_ids)):
+            assert len(hf_ids) == len(vllm_ids)
+            assert levenshtein_dist(hf_ids, vllm_ids) <= dist_threshold, (
+                f"Test{i} output{j}:\nHF: {hf_ids}\nvLLM: {vllm_ids}"
+            )  # use levenshtein distance to check
