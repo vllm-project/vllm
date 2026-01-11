@@ -222,10 +222,10 @@ pull_request_rules:
       - files~=^csrc/rocm/
       - files~=^docker/Dockerfile.rocm
       - files~=^requirements/rocm.*\.txt
-      - files~=^vllm/attention/backends/rocm.*\.py
-      - files~=^vllm/attention/ops/rocm.*\.py
       - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/rocm.*\.py
       - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^vllm/v1/attention/ops/rocm.*\.py
       - files~=^tests/kernels/.*_rocm.*\.py
       - files=vllm/platforms/rocm.py
       - title~=(?i)AMD
@@ -234,6 +234,20 @@ pull_request_rules:
     label:
       add:
         - rocm
+
+- name: label-cpu
+  description: Automatically apply cpu label
+  conditions:
+    - label != stale
+    - files~=^(?!.*kv_offload)(?!.*cpu_offload).*\bcpu.*
+  actions:
+    label:
+      add:
+        - cpu
+    assign:
+      users:
+        - "fadara01"
+        - "aditew01"
 
 - name: label-structured-output
   description: Automatically apply structured-output label
@@ -334,6 +348,18 @@ pull_request_rules:
     label:
       add:
         - tool-calling
+
+- name: auto-rebase if approved, ready, and 40 commits behind main
+  conditions:
+    - base = main
+    - label=ready
+    - "#approved-reviews-by >= 1"
+    - "#commits-behind >= 40"
+    - -closed
+    - -draft
+    - -conflict
+  actions:
+    rebase: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:

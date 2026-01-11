@@ -10,8 +10,8 @@ from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 SIMPLE_ARGS_DICT = {
     "action": "create",

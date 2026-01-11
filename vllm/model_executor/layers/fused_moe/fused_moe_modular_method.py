@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
@@ -20,8 +21,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 logger = init_logger(__name__)
 
 
+# --8<-- [start:modular_fused_moe]
 @CustomOp.register("modular_fused_moe")
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
+    # --8<-- [end:modular_fused_moe]
+
     def __init__(
         self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
     ):
@@ -43,19 +47,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         shared_experts: torch.nn.Module | None,
     ) -> "FusedMoEModularMethod":
-        parallel_config = getattr(
-            getattr(moe_layer, "vllm_config", None),
-            "parallel_config",
-            None,
-        )
         return FusedMoEModularMethod(
             old_quant_method,
             FusedMoEModularKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
-                getattr(moe_layer, "shared_experts_stream", None),
-                parallel_config=parallel_config,
+                moe_parallel_config=moe_layer.moe_parallel_config,
             ),
         )
 
@@ -94,10 +92,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, zero_expert_result = layer.select_experts(
+        topk_weights, topk_ids = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -115,10 +114,4 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=None if self.disable_expert_map else layer.expert_map,
         )
 
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
-            assert not isinstance(result, tuple), (
-                "Shared + zero experts are mutually exclusive not yet supported"
-            )
-            return result, zero_expert_result
-        else:
-            return result
+        return result

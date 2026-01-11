@@ -7,23 +7,33 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
     DispatchPooler,
     Pooler,
-    PoolingMethod,
     PoolingParamsUpdate,
-    PoolingType,
+)
+from vllm.model_executor.layers.pooler.seqwise import (
+    CLSPool,
+    SequencePooler,
+    SequencePoolerHeadOutput,
+    SequencePoolerOutput,
+    SequencePoolingMethodOutput,
+)
+from vllm.model_executor.layers.pooler.tokwise import (
+    pooler_for_token_classify,
+    pooler_for_token_embed,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -55,7 +65,9 @@ class BertEmbedding(nn.Module):
             "position_ids",
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
-        self.position_embedding_type = config.position_embedding_type
+        self.position_embedding_type = getattr(
+            config, "position_embedding_type", "absolute"
+        )
         if self.position_embedding_type != "absolute":
             raise ValueError(
                 "Only 'absolute' position_embedding_type" + " is supported"
@@ -81,38 +93,27 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(Pooler):
+class BertPooler(SequencePooler):
     def __init__(self, config: BertConfig):
-        super().__init__()
+        super().__init__(
+            pooling=CLSPool(),
+            head=self.head,
+        )
 
-        self.pooling = PoolingMethod.from_pooling_type(PoolingType.CLS)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
-    def _head(self, pooled_output: torch.Tensor):
-        pooled_output = self.dense(pooled_output)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
-    def forward(
+    def head(
         self,
-        hidden_states: torch.Tensor | list[torch.Tensor],
+        pooled_data: SequencePoolingMethodOutput,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata)
+    ) -> SequencePoolerHeadOutput:
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
 
-        if isinstance(pooled_output, list):
-            pooled_output = [self._head(output) for output in pooled_output]
-        else:
-            pooled_output = self._head(pooled_output)
-
-        return pooled_output
+        pooled_data = self.dense(pooled_data)
+        pooled_data = self.activation(pooled_data)
+        return pooled_data
 
 
 class BertEncoder(nn.Module):
@@ -356,7 +357,7 @@ class BertOutput(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertModel(nn.Module, SupportsQuant):
     is_pooling_model = True
 
@@ -460,7 +461,7 @@ class BertPoolingModel(BertModel):
         return loaded_params
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -518,12 +519,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         )
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
-        return DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        return DispatchPooler.for_embedding(pooler_config)
 
 
 # Here we encode the token type ids together with the input ids.
@@ -614,6 +610,7 @@ class SPLADESparsePooler(Pooler):
         remove_cls_sep: bool = True,
     ):
         super().__init__()
+
         assert pooling in ("max", "sum")
         self.mlm_head = mlm_head
         self.cls_token_id = cls_token_id
@@ -631,10 +628,8 @@ class SPLADESparsePooler(Pooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor:
-        assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
-
-        lens_tensor: torch.Tensor = pooling_metadata.prompt_lens
+    ) -> SequencePoolerOutput:
+        lens_tensor = pooling_metadata.prompt_lens
         lens: list[int] = lens_tensor.tolist()
         B: int = len(lens)
 
@@ -680,7 +675,7 @@ class SPLADESparsePooler(Pooler):
         return torch.stack(pooled_list, dim=0).contiguous()
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
     """
     BertEmbeddingModel + SPLADE sparse embedding.
@@ -723,7 +718,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
 
         return DispatchPooler(
             {
-                "token_embed": Pooler.for_token_embed(pooler_config),
+                "token_embed": pooler_for_token_embed(pooler_config),
                 "embed": SPLADESparsePooler(
                     mlm_head=self.mlm_head,
                     cls_token_id=cls_id,
@@ -785,7 +780,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
         return loaded
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -818,20 +813,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
-                ),
-                "classify": ClassifierPooler(
-                    pooling=self.bert.pooler,
-                    classifier=self.classifier,
-                    act_fn="classify",
-                ),
-                "score": ClassifierPooler(
-                    pooling=self.bert.pooler, classifier=self.classifier, act_fn="score"
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.bert.pooler,
+            classifier=self.classifier,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -864,7 +849,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
 
 @attn_type("encoder_only")
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
 
@@ -885,13 +870,7 @@ class BertForTokenClassification(nn.Module):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config
-                ),
-            }
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.bert.embed_input_ids(input_ids)

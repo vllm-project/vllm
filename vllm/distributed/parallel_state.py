@@ -1007,10 +1007,17 @@ class GroupCoordinator:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(
-                hidden_states, router_logits, is_sequence_parallel
+            return self.device_communicator.dispatch(  # type: ignore[call-arg]
+                hidden_states,
+                router_logits,
+                is_sequence_parallel,
+                extra_tensors,
             )
         else:
             return hidden_states, router_logits
@@ -1108,7 +1115,11 @@ _EP: GroupCoordinator | None = None
 
 
 def get_ep_group() -> GroupCoordinator:
-    assert _EP is not None, "expert parallel group is not initialized"
+    assert _EP is not None, (
+        "expert parallel group is not initialized. "
+        "EP group is only created for MoE models with num_experts > 0. "
+        "This function should only be called for MoE models."
+    )
     return _EP
 
 
@@ -1166,9 +1177,9 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1240,7 +1251,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        if config.parallel_config.nnodes > 1:
+        if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
@@ -1249,7 +1260,7 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
-    if config.parallel_config.nnodes_within_dp > 1:
+    if config is not None and config.parallel_config.nnodes_within_dp > 1:
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [
@@ -1305,9 +1316,9 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     data_parallel_size = 1
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 
@@ -1393,20 +1404,23 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = (
-        all_ranks.transpose(1, 2)
-        .reshape(
-            -1,
-            data_parallel_size
-            * prefill_context_model_parallel_size
-            * tensor_model_parallel_size,
+    # Don't create EP group for dense models.
+    if config is None or config.model_config is None or config.model_config.is_moe:
+        group_ranks = (
+            all_ranks.transpose(1, 2)
+            .reshape(
+                -1,
+                data_parallel_size
+                * prefill_context_model_parallel_size
+                * tensor_model_parallel_size,
+            )
+            .unbind(0)
         )
-        .unbind(0)
-    )
-    group_ranks = [x.tolist() for x in group_ranks]
-    _EP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="ep"
-    )
+        group_ranks = [x.tolist() for x in group_ranks]
+        _EP = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="ep"
+        )
+    # If no EP group needed, _EP remains None
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
@@ -1418,7 +1432,7 @@ def initialize_model_parallel(
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
-        _EP.rank_in_group,
+        _EP.rank_in_group if _EP is not None else "N/A",
     )
 
 
@@ -1586,6 +1600,8 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Reset environment variable cache
+    envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 
