@@ -475,7 +475,6 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
-    maximum_concurrent_videos: int | None = MultiModalConfig.max_concurrent_videos
     multimodal_tensor_ipc: bool | None = MultiModalConfig.multimodal_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
@@ -1295,7 +1294,6 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
-            maximum_concurrent_videos=self.maximum_concurrent_videos,
             multimodal_tensor_ipc=self.multimodal_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
         )
