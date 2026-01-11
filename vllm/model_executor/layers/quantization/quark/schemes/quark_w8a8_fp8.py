@@ -7,10 +7,18 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
@@ -22,6 +30,8 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkW8A8Fp8"]
+
+logger = init_logger(__name__)
 
 
 class QuarkW8A8Fp8(QuarkScheme):
@@ -35,15 +45,16 @@ class QuarkW8A8Fp8(QuarkScheme):
             self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
 
-        per_token = (
+        per_token_activation = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
-        self.act_quant_group_shape = (
-            GroupShape.PER_TOKEN if per_token else GroupShape.PER_TENSOR
+        per_token_weight = self.weight_qscheme == "per_channel"
+
+        self.activation_quant_key = (
+            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
         )
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_quant_group_shape,
+        self.weight_quant_key = (
+            kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
         )
         self.out_dtype = torch.get_default_dtype()
 
@@ -94,7 +105,7 @@ class QuarkW8A8Fp8(QuarkScheme):
                     layer.input_scale = Parameter(input_scale, requires_grad=False)
             else:
                 weight_scale = layer.weight_scale.data
-            if self.act_quant_group_shape == GroupShape.PER_TOKEN:
+            if self.activation_quant_key.scale.group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
@@ -106,8 +117,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         # INPUT SCALE
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
-        else:
-            layer.input_scale = None
 
     def create_weights(
         self,
@@ -163,17 +172,17 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)

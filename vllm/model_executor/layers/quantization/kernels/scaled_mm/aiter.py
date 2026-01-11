@@ -9,58 +9,40 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 
 from .cutlass import CutlassScaledMMLinearKernel
-from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 90
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return (
-                False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not "
-                + "currently supported on non-ROCm platform.",
-            )
-        if compute_capability is None:
-            _cc = current_platform.get_device_capability()
-            if _cc is not None:
-                compute_capability = _cc.major * 10 + _cc.minor
-        if compute_capability is not None and compute_capability < 90:
-            return False, f"requires capability 90, got {compute_capability}"
+            return False, "Requires ROCm."
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
         except Exception:
-            return (
-                False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not "
-                + "installed on ROCm.",
-            )
+            return False, "requires `aiter` to be installed."
 
         if not rocm_aiter_ops.is_linear_enabled():
             return (
                 False,
-                "AiterScaledMMLinearKernel is disabled. "
-                + "Enable by setting `VLLM_ROCM_USE_AITER=1` "
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
                 + "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
                 + "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
             )
-
         return True, None
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
-            return (
-                False,
-                "AiterScaledMMLinearKernel only supports symmetric " + "quantization.",
-            )
+            return False, "supports symmetric quantization only."
         return True, None
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -78,7 +60,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         w8a8 scaled gemm. `AiterScaledMMLinearKernel` also does not support
         ATIER block scaled GEMM and mix-precision GEMM.
         """
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
+        w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
