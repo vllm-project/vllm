@@ -3349,3 +3349,148 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 # ==============================================================================
 # EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
 # ==============================================================================
+
+
+# ==============================================================================
+# Concurrent Partial Prefill tests start
+# ==============================================================================
+def test_concurrent_partial_prefill():
+    """Verify prefills are chunked properly when
+    --max-num-partial-prefills is > 1"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=100,
+        max_model_len=200,
+    )
+
+    requests = create_requests(
+        num_tokens=48,  # both are short prefills
+        num_requests=2,
+        block_size=4,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # Verify both requests are chunked with half of max_num_batched_tokens each
+    assert len(scheduler.running) == 2
+    for request in requests:
+        scheduled_tokens = output.num_scheduled_tokens[request.request_id]
+        assert scheduled_tokens == 32  # 32 tokens per prefill
+
+    # test tail case
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    for request in requests:
+        scheduled_tokens = output.num_scheduled_tokens[request.request_id]
+        assert scheduled_tokens == 16
+
+
+def test_concurrent_partial_prefill_long_requests():
+    """Verify large prefills are run one at a time"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=100,
+        max_model_len=200,
+    )
+    long_requests = create_requests(
+        num_tokens=200,  # both are long prefill
+        num_requests=2,
+        block_size=4,
+    )
+    for request in long_requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    scheduled_tokens = output.num_scheduled_tokens[long_requests[0].request_id]
+    assert scheduled_tokens == 64  # only one request scheduled with full batch size
+
+
+def test_concurrent_partial_prefill_mixed_requests():
+    """Verify large prefill requests are punted behind smaller ones if
+    another large prefill request is already running"""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        max_num_batched_tokens=64,
+        long_prefill_token_threshold=75,
+        max_model_len=200,
+    )
+    mixed_requests = create_requests(
+        num_tokens=[200, 200, 48, 48],  # mixed long and short prefill
+        num_requests=4,
+        block_size=4,
+        req_ids=["long_1", "long_2", "short_1", "short_2"],
+    )
+    long_requests = mixed_requests[:2]
+    short_requests = mixed_requests[2:]
+
+    for request in long_requests:
+        scheduler.add_request(request)
+    for request in short_requests:
+        scheduler.add_request(request)
+    # first iteration
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[0].request_id] == 32
+
+    # second iteration
+    # short_requests[0] only has 16 tokens left, so should finish
+    # short_requests[1] should start prefill
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[0].request_id] == 16
+    assert output.num_scheduled_tokens[short_requests[1].request_id] == 16
+
+    # third iteration
+    # short_requests[0] should be finished
+    # short_requests[1] should continue prefill
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 32
+    assert output.num_scheduled_tokens[short_requests[1].request_id] == 32
+
+    # forth iteration
+    # short_requests[1] should be finished
+    # long_requests[0] gets all the budget
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert output.num_scheduled_tokens[long_requests[0].request_id] == 64
+
+
+def test_finishing_prefill_prioritized():
+    scheduler = create_scheduler(
+        enable_chunked_prefill=True,
+        max_num_partial_prefills=2,
+        long_prefill_token_threshold=1500,
+        max_num_batched_tokens=1000,
+        max_model_len=4096,
+    )
+    requests = create_requests(num_requests=2, num_tokens=[2000, 400])
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[requests[0].request_id] == 500
+    assert output.num_scheduled_tokens[requests[1].request_id] == 400
+    # Request 1 will be finished after this scheduling
+    # so it should be first in running list
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert scheduler.running[1].request_id == requests[0].request_id
+
+
+# ==============================================================================
+# Concurrent Partial Prefill tests end
+# ==============================================================================

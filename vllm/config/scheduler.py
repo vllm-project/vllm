@@ -278,6 +278,18 @@ class SchedulerConfig:
             )
 
         if self.max_num_partial_prefills > 1:
+            if self.max_num_partial_prefills > self.max_num_batched_tokens:
+                # Ensure that each partial prefill can make progress.
+                raise ValueError(
+                    f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
+                    "cannot be greater than max_num_batched_tokens "
+                    f"({self.max_num_batched_tokens})."
+                )
+
+            if self.long_prefill_token_threshold == 0:
+                # heuristic: 4% of max_model_len as default threshold
+                self.long_prefill_token_threshold = int(max_model_len * 0.04)
+
             if not self.enable_chunked_prefill:
                 raise ValueError(
                     "Chunked prefill must be enabled to set "

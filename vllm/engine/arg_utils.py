@@ -1769,14 +1769,6 @@ class EngineArgs:
         if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
             _raise_unsupported_error(feature_name="--logits-processor-pattern")
 
-        # No Concurrent Partial Prefills so far.
-        if (
-            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
-            or self.max_long_partial_prefills
-            != SchedulerConfig.max_long_partial_prefills
-        ):
-            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
-
         # N-gram, Medusa, and Eagle are supported for speculative decoding.
         if self.speculative_config is not None:
             # speculative_config could still be a dict at this point
