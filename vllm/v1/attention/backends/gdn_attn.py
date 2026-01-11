@@ -9,7 +9,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba_attn import (
+    BaseMambaAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     AttentionCGSupport,
@@ -36,6 +38,14 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
+    # When APC is enabled, the state_indices_tensor is the mapping from logical
+    # block indices to the state indices used to extract the (ssm, conv) state.
+    # When prefix caching is enabled: shape [batch, max_num_blocks]
+    # otherwise [batch_size,]
+    # When APC is disabled, state_indices_tensor is unused and logic is driven by the
+    # spec/non_spec_state_indices_tensor
+    state_indices_tensor: torch.Tensor
+
     has_initial_state: torch.Tensor | None = None
     block_size: int | None = None
     chunk_size: int | None = None
@@ -54,14 +64,6 @@ class GDNAttentionMetadata:
     non_spec_token_indx: torch.Tensor | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
-
-    # When APC is enabled, state_indices_tensor is the mapping from logical block indices
-    # to the state indices used to extract the (ssm, conv) state.
-    # When prefix caching is enabled: shape [batch, max_num_blocks]
-    # otherwise [batch_size,]
-    # When APC is disabled, state_indices_tensor is None and logic is driven by the
-    # spec/non_spec_state_indices_tensor
-    state_indices_tensor: torch.Tensor | None = None
 
     # The following tensors are only used for prefix caching and are None if disabled
     # E.g., for a request i with cached state we can think of the corresponding
@@ -83,7 +85,7 @@ class GDNAttentionMetadata:
 
 
 class GDNAttentionMetadataBuilder(
-    BaseMambaAttentionMetadataBuilder[GDNAttentionMetadata]
+    BaseMambaAttentionMetadataBuilder[GDNAttentionMetadata]  # type: ignore
 ):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
@@ -108,7 +110,7 @@ class GDNAttentionMetadataBuilder(
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         # 64 is a hardcoded value in the FLA GDN kernel.
-        # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439
+        # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439  # noqa: E501
         self.chunk_size = 64
         if self.vllm_config.cache_config.enable_prefix_caching and (
             kv_cache_spec.block_size % self.chunk_size != 0
