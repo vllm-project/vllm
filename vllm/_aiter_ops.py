@@ -831,6 +831,7 @@ class rocm_aiter_ops:
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+    _CK_MXFP4_MOE = envs.VLLM_ROCM_USE_CK_MXFP4_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -890,6 +891,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_mxfp4_aiter_moe(cls) -> bool:
+        return cls._AITER_ENABLED and cls._CK_MXFP4_MOE
 
     @classmethod
     @if_aiter_supported
