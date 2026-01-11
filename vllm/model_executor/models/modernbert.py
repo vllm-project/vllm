@@ -284,14 +284,12 @@ class ModernBertModel(nn.Module):
 class ModernBertPooler(SequencePooler):
     def __init__(self, config: ModernBertConfig, pooler_config: PoolerConfig):
         hf_pooling_type = config.classifier_pooling.upper()
-        vllm_pooling_type = pooler_config.seq_pooling_type
-        assert hf_pooling_type == vllm_pooling_type, (
-            f"Found inconsistent sequence pooling type: {hf_pooling_type=!r} "
-            f"vs. {vllm_pooling_type=!r}"
-        )
+        # vllm_pooling_type = pooler_config.seq_pooling_type
+        # Currently we don't have a way to see if the user set the pooling type
+        # explicitly or not, so we always use the HF pooling type for now.
 
         super().__init__(
-            pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
+            pooling=get_seq_pooling_method(hf_pooling_type),
             head=self.head,
         )
 
