@@ -76,7 +76,7 @@ def default_server_args(
         "--reasoning-parser",
         "openai_gptoss",
         "--gpu-memory-utilization",
-        "0.8",
+        "0.85",
     ]
     if with_tool_parser:
         args.extend(
