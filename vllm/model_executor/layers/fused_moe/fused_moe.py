@@ -2321,6 +2321,32 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.Standard,
         )
 
+    def supports_current_device(self) -> bool:
+        return current_platform.is_cuda_alike()
+
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        # Supports unquantized and fp8.
+        # TODO(rob): allow int4 (for kimi --- no, we have marlinexperts for this.
+        if not (
+            quant_config.use_fp8_w8a8
+            or quant_config.quant_dtype == None  # TODO: how to express unquantized?
+        ):
+            return False
+
+        if quant_config.use_fp8_w8a8:
+            return current_platform.is_rocm or current_platform.has_device_capability(
+                9, 0
+            )
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu", "gelu", "swigluoai"]
+
+    def supports_ep(self) -> bool:
+        return True
+
     def supports_chunking(self) -> bool:
         return True
 

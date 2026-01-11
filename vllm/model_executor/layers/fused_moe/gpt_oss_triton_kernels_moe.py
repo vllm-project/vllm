@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
@@ -241,8 +242,23 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    def supports_current_device(self) -> bool:
+        if current_platform.is_cuda():
+            return current_platform.has_device_capability(9, 0)
+        else:
+            return current_platform.is_cuda_alike()
+
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        return quant_config.use_mxfp4_w4a16
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["swigluoai"]
+
+    def supports_ep(self) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return True
