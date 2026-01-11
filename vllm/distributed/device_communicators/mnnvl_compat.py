@@ -29,6 +29,12 @@ class CustomCommunicator(CommBackend):
         dist.broadcast_object_list(obj_list, src=root, group=self._group)
         return obj_list[0]
 
+    def bcast(self, data, root: int = 0):
+        obj_list = [data]
+        # broadcast_object_list mutates obj_list in-place
+        dist.broadcast_object_list(obj_list, src=root, group=self._group)
+        return obj_list[0]
+
     def Split(self, color: int, key: int) -> "CustomCommunicator":
         return self
 

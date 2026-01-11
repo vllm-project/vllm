@@ -954,8 +954,8 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/attention/selector.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
@@ -1104,6 +1104,7 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
+  - .buildkite/scripts/run-multi-node-test.sh
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
@@ -1266,8 +1267,8 @@ steps:
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
 
-- label: NixlConnector PD accuracy tests (Distributed) # 30min
-  timeout_in_minutes: 30
+- label: NixlConnector PD accuracy tests (Distributed) # 40min
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -1277,8 +1278,8 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: DP EP NixlConnector PD accuracy tests (Distributed)
-  timeout_in_minutes: 30
+- label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:

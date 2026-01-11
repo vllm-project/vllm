@@ -179,7 +179,7 @@ class CompilerManager:
         example_inputs: list[Any],
         graph_index: int,
         compile_range: Range,
-    ) -> Callable | None:
+    ) -> Callable[..., Any] | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(compile_range, graph_index, self.compiler.name)]
@@ -199,7 +199,7 @@ class CompilerManager:
         self,
         graph: fx.GraphModule,
         example_inputs: list[Any],
-        additional_inductor_config,
+        additional_inductor_config: dict[str, Any],
         compilation_config: CompilationConfig,
         compile_range: Range,
         graph_index: int = 0,
@@ -355,7 +355,7 @@ def split_graph(
 compilation_start_time = 0.0
 
 
-class PiecewiseCompileInterpreter(torch.fx.Interpreter):
+class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
     It runs the given graph with fake inputs, and compile some
     submodules specified by `compile_submod_names` with the given
@@ -506,9 +506,9 @@ class VllmBackend:
     # the stiching graph module for all the piecewise graphs
     split_gm: fx.GraphModule
     piecewise_graphs: list[SplitItem]
-    returned_callable: Callable
+    returned_callable: Callable[..., Any]
     # Inductor passes to run on the graph pre-defunctionalization
-    post_grad_passes: Sequence[Callable]
+    post_grad_passes: Sequence[Callable[..., Any]]
     sym_tensor_indices: list[int]
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
@@ -821,7 +821,7 @@ class VllmBackend:
         ]
 
         # this is the callable we return to Dynamo to run
-        def copy_and_call(*args):
+        def copy_and_call(*args: Any) -> Any:
             list_args = list(args)
             for i, index in enumerate(self.sym_tensor_indices):
                 runtime_tensor = list_args[index]

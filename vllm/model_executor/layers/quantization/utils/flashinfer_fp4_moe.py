@@ -14,14 +14,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_all2all_prepare_finalize import (  # noqa: E501
+    create_flashinfer_cutlass_prepare_finalize,
+    create_flashinfer_trtllm_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
@@ -45,6 +46,8 @@ __all__ = [
     "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
     "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
+    "build_flashinfer_fp4_trtllm_moe_prepare_finalize",
+    "FlashInferTRTLLMFP4Experts",
 ]
 
 
@@ -92,9 +95,27 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
     use_dp = moe.moe_parallel_config.dp_size > 1
     enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
     enable_moe_a2a = moe.moe_parallel_config.all2all_backend == "flashinfer_moe_a2a"
-    return create_flashinfer_prepare_finalize(
+    return create_flashinfer_cutlass_prepare_finalize(
         use_dp=use_dp,
         use_nvfp4=True,
+        enable_alltoallv=enable_alltoallv,
+        enable_moe_a2a=enable_moe_a2a,
+        moe=moe,
+    )
+
+
+def build_flashinfer_fp4_trtllm_moe_prepare_finalize(
+    moe: FusedMoEConfig,
+) -> mk.FusedMoEPrepareAndFinalize:
+    """Create a FlashInfer TRT-LLM fused-MoE prepare finalize kernel.
+
+    TRT-LLM kernel expects linear scale layout, not interleaved.
+    """
+    use_dp = moe.moe_parallel_config.dp_size > 1
+    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
+    enable_moe_a2a = moe.moe_parallel_config.all2all_backend == "flashinfer_moe_a2a"
+    return create_flashinfer_trtllm_prepare_finalize(
+        use_dp=use_dp,
         enable_alltoallv=enable_alltoallv,
         enable_moe_a2a=enable_moe_a2a,
         moe=moe,
@@ -105,6 +126,7 @@ def select_nvfp4_gemm_impl(
     moe: FusedMoEConfig,
     moe_quant_config: FusedMoEQuantConfig,
     allow_flashinfer: bool,
+    intermediate_size_per_partition: int | None = None,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
 
@@ -123,6 +145,19 @@ def select_nvfp4_gemm_impl(
                 tp_rank=moe.moe_parallel_config.tp_rank,
                 tp_size=moe.moe_parallel_config.tp_size,
                 use_dp=moe.moe_parallel_config.dp_size > 1,
+            )
+        elif envs.VLLM_FLASHINFER_MOE_BACKEND == "latency":
+            assert intermediate_size_per_partition is not None, (
+                "intermediate_size_per_partition is required for "
+                "Flashinfer TRT-LLM backend"
+            )
+            return FlashInferTRTLLMFP4Experts(
+                out_dtype=moe.in_dtype,
+                quant_config=moe_quant_config,
+                local_num_experts=moe.num_local_experts,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                ep_rank=moe.moe_parallel_config.ep_rank,
+                ep_size=moe.moe_parallel_config.ep_size,
             )
 
     # native cutlass experts currently don't support DP; TP case won't call this
@@ -256,6 +291,142 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     )
 
 
+class FlashInferTRTLLMFP4Experts(mk.FusedMoEPermuteExpertsUnpermute):
+    """
+    FlashInfer TensorRT-LLM FP4 MoE experts implementation.
+
+    This class wraps the TRT-LLM FP4 block-scale MoE kernel in the modular
+    kernel pattern used by vLLM's fused MoE infrastructure.
+    """
+
+    def __init__(
+        self,
+        out_dtype: torch.dtype,
+        quant_config: FusedMoEQuantConfig,
+        local_num_experts: int,
+        intermediate_size_per_partition: int,
+        ep_rank: int = 0,
+        ep_size: int = 1,
+    ):
+        super().__init__(quant_config)
+        self.out_dtype = out_dtype
+        self.local_num_experts = local_num_experts
+        self.intermediate_size_per_partition = intermediate_size_per_partition
+        self.ep_rank = ep_rank
+        self.ep_size = ep_size
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # TRT-LLM kernel does finalization internally
+        from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+            TopKWeightAndReduceNoOP,
+        )
+
+        return TopKWeightAndReduceNoOP()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # FI TRT-LLM kernel handles workspace internally, so we just need output
+        workspace1 = (0,)  # No external workspace needed
+        workspace2 = (0,)
+        # FI TRT-LLM kernel expects the full unpacked hidden size, which is K * 2
+        output_shape = (M, K * 2)
+        return (workspace1, workspace2, output_shape)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool | None,
+    ):
+        import flashinfer
+
+        top_k = topk_ids.size(1)
+
+        # Pack top k ids and expert weights into a single int32 tensor,
+        # as required by TRT-LLM
+        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+            torch.bfloat16
+        ).view(torch.int16)
+        # Get scales from quant_config
+        w1_scale = self.w1_scale
+        w2_scale = self.w2_scale
+        g1_alphas = self.g1_alphas
+        g2_alphas = self.g2_alphas
+        # g1_scale_c is computed from a2_gscale * g1_alphas in quant_config
+        g1_scale_c = self.quant_config.g1_scale_c
+        intermediate_size_per_partition = self.intermediate_size_per_partition
+
+        # Call TRT-LLM FP4 block-scale MoE kernel
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+            topk_ids=packed_tensor,
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).flatten(),
+            gemm1_weights=w1,
+            gemm1_weights_scale=w1_scale.view(torch.float8_e4m3fn)
+            if w1_scale is not None
+            else None,
+            gemm1_bias=None,
+            gemm1_alpha=None,
+            gemm1_beta=None,
+            gemm1_clamp_limit=None,
+            gemm2_weights=w2,
+            gemm2_weights_scale=w2_scale.view(torch.float8_e4m3fn)
+            if w2_scale is not None
+            else None,
+            gemm2_bias=None,
+            output1_scale_scalar=g1_scale_c,
+            output1_scale_gate_scalar=g1_alphas,
+            output2_scale_scalar=g2_alphas,
+            num_experts=global_num_experts,
+            top_k=top_k,
+            n_group=0,
+            topk_group=0,
+            intermediate_size=intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=1,  # Default routing
+            do_finalize=True,
+        )[0]
+        output.copy_(result)
+
+
 def flashinfer_trtllm_fp4_moe(
     layer: torch.nn.Module,
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -287,7 +458,6 @@ def flashinfer_trtllm_fp4_moe(
     import flashinfer
     from vllm.model_executor.models.llama4 import Llama4MoE
 
-    # Quantize input to FP4
     if isinstance(x, tuple):
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
@@ -297,7 +467,6 @@ def flashinfer_trtllm_fp4_moe(
             layer.a1_gscale,
             is_sf_swizzled_layout=False,
         )
-
     # Determine routing method type
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
     routing_method_type = layer.routing_method_type
@@ -343,7 +512,6 @@ def flashinfer_trtllm_fp4_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
     )[0]
@@ -382,6 +550,7 @@ def flashinfer_trtllm_fp4_routed_moe(
         torch.bfloat16
     ).view(torch.int16)
 
+    # Quantize input to FP4
     if isinstance(x, tuple):
         # Hidden_states is the already quantized
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
@@ -461,7 +630,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
@@ -495,6 +664,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         # it is not used during the weight (re)-loading process.
         layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
         layer.a1_gscale = 1.0 / a13_scale
+        layer.a2_gscale = 1.0 / a2_scale
         layer.g1_alphas = a13_scale * w13_scale_2
         layer.g2_alphas = a2_scale * w2_scale_2
     else:
