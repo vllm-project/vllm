@@ -476,8 +476,10 @@ def run_dp_sharded_mrope_vision_model(
     # The output embedding of every DP rank has to be
     # padded to this length for tensor_model_parallel_all_gather
     # to work
+    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+
     vllm_config = get_current_vllm_config()
-    use_cudagraph = False
 
     # Context setup
     if cudagraph_dispatcher is not None:
@@ -489,28 +491,17 @@ def run_dp_sharded_mrope_vision_model(
 
     if (vllm_config and
         vllm_config.compilation_config.vit_cudagraph_capture_sizes):
-        max_input_len = max(grouped_pixel_values_len) if grouped_pixel_values_len else 0
+        current_input_len = pixel_values_local.shape[0]
         cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
-            num_tokens=max_input_len,
+            num_tokens=current_input_len,
             uniform_decode=False,
             has_lora=False,
             disable_full=False,
             is_vit=True,
         )
         target_input_len = batch_descriptor.num_tokens
-        max_len_per_rank = target_input_len // embed_dim_reduction_factor
-        use_cudagraph = True
-    else:
-        max_len_per_rank = (max(grouped_pixel_values_len) if grouped_pixel_values_len else 0) // embed_dim_reduction_factor
-
-    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-
-    # Pad pixel_values_local for CUDA graph if needed
-    if use_cudagraph:
-        current_input_len = pixel_values_local.shape[0]
-        # target_input_len derived from max_len_per_rank for consistency
-        target_input_len = max_len_per_rank * embed_dim_reduction_factor
-        
+    
+        # Pad pixel_values_local for CUDA graph if needed
         if current_input_len < target_input_len:
             padding_size = target_input_len - current_input_len
             padding = torch.empty(
