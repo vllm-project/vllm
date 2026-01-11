@@ -195,6 +195,7 @@ def benchmark_config(
         )
 
         with override_config(config):
+            # TODO(rob): shift to use DeepGEMM experts directly.
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )

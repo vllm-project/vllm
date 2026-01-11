@@ -113,6 +113,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
 
     # DeepGemm
+    # TODO(rob): shift to use DeepGEMM experts directly.
     out_deepgemm = fused_experts(
         hidden_states=tokens_bf16,
         w1=w1,
