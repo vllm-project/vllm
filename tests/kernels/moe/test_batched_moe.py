@@ -10,7 +10,6 @@ from tests.kernels.moe.utils import (
     batched_moe,
     make_quantized_test_activations,
     make_test_weights,
-    naive_batched_moe,
 )
 from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
@@ -318,21 +317,6 @@ def test_fused_moe_batched_experts(
             block_shape=block_shape,
         )
 
-        batched_output = naive_batched_moe(
-            a,
-            w1,
-            w2,
-            topk_weight,
-            topk_ids,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
-        )
-
         triton_output = batched_moe(
             a,
             w1,
@@ -348,6 +332,4 @@ def test_fused_moe_batched_experts(
             block_shape=block_shape,
         )
 
-    torch.testing.assert_close(batched_output, baseline_output, atol=3e-2, rtol=2e-2)
-
-    torch.testing.assert_close(triton_output, batched_output, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(triton_output, baseline_output, atol=2e-2, rtol=2e-2)

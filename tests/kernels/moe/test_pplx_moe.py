@@ -31,7 +31,6 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import _set_vllm_conf
 from tests.kernels.moe.utils import (
     make_shared_experts,
     make_test_weights,
-    naive_batched_moe,
 )
 from tests.kernels.quant_utils import dequant
 from tests.kernels.utils import torch_experts
@@ -169,40 +168,6 @@ def torch_batched_moe(
             out[expert, :num, :] = tmp[:num] @ w2[expert].transpose(0, 1)
 
     return torch_finalize(out, topk_weight, topk_ids)
-
-
-@pytest.mark.parametrize("m,n,k", BATCHED_MOE_MNK_FACTORS)
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_fused_moe_batched_experts(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-    dtype: torch.dtype,
-    workspace_init,
-):
-    set_random_seed(7)
-
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
-
-    with set_current_vllm_config(vllm_config):
-        topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        baseline_output = torch_experts(
-            a, w1, w2, topk_weight, topk_ids
-        )  # only for baseline
-        torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
-        batched_output = naive_batched_moe(
-            a, w1, w2, topk_weight, topk_ids
-        )  # pick torch_experts or this
-
-    torch.testing.assert_close(baseline_output, torch_output, atol=2e-2, rtol=0)
-    torch.testing.assert_close(baseline_output, batched_output, atol=2e-2, rtol=0)
 
 
 def create_pplx_prepare_finalize(
@@ -716,21 +681,6 @@ def _pplx_moe(
                 block_shape=block_shape,
             )
 
-            batched_output = naive_batched_moe(
-                a,
-                w1,
-                w2,
-                topk_weight,
-                topk_ids,
-                w1_scale=w1_s,
-                w2_scale=w2_s,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
-                quant_dtype=quant_dtype,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            )
-
             pplx_outputs = pplx_moe(
                 group_name,
                 rank,
@@ -766,14 +716,12 @@ def _pplx_moe(
         else:
             chunked_shared_output = None
 
-        chunked_batch_output = chunk_by_rank(
-            batched_output, pgi.rank, pgi.world_size
+        chunked_torch_output = chunk_by_rank(
+            torch_output, pgi.rank, pgi.world_size
         ).to(pplx_output.device)
 
-        torch.testing.assert_close(batched_output, torch_output, atol=3e-2, rtol=3e-2)
-
         torch.testing.assert_close(
-            pplx_output, chunked_batch_output, atol=3e-2, rtol=3e-2
+            pplx_output, chunked_torch_output, atol=3e-2, rtol=3e-2
         )
 
         if shared_experts is not None:

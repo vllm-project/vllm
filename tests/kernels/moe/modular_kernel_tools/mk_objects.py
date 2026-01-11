@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
-    NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -182,15 +181,6 @@ register_experts(
     supports_chunking=True,
     supports_expert_map=True,
     needs_matching_quant=True,
-)
-
-register_experts(
-    NaiveBatchedExperts,
-    batched_format,
-    common_float_and_int_types,
-    blocked_quantization_support=True,
-    supports_chunking=False,
-    supports_expert_map=True,
 )
 
 # Disable on blackwell for now
@@ -455,10 +445,6 @@ def make_fused_experts(
         kwargs = quant_kwargs | deepgemm_kwargs
         print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
         experts = TritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == NaiveBatchedExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making NaiveBatchedExperts {kwargs} ...")
-        experts = NaiveBatchedExperts(**kwargs)
     elif fused_experts_type == CutlassExpertsFp8:
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {

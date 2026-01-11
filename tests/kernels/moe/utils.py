@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
-    NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -78,46 +77,6 @@ def batched_moe(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
         BatchedTritonExperts(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=1,
-            quant_config=quant_config,
-        ),
-    )
-
-    return fused_experts(a, w1, w2, topk_weight, topk_ids)
-
-
-def naive_batched_moe(
-    a: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-    quant_dtype: torch.dtype | None = None,
-    per_act_token_quant: bool = False,
-    block_shape: list[int] | None = None,
-) -> torch.Tensor:
-    max_num_tokens = round_up(a.shape[0], 64)
-
-    quant_config = FusedMoEQuantConfig.make(
-        quant_dtype,
-        per_act_token_quant=per_act_token_quant,
-        block_shape=block_shape,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-    )
-
-    fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
-        ),
-        NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
