@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
     UnfusedOAITritonExperts,
 )
-from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
+from vllm.model_executor.layers.fused_moe.trtllm_mxfp4_moe import TrtllmMxFp4Experts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -873,7 +873,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     # TODO(bnell): part of quant_config
                     "max_capture_size": self.max_capture_size,
                 }
-                return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
+                return TrtllmMxFp4Experts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:

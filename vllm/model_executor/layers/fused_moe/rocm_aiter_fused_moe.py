@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.platforms import current_platform
 
 
 class QuantMethod(IntEnum):
@@ -280,6 +281,25 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.Standard,
             mk.FusedMoEActivationFormat.Standard,
         )
+
+    def supports_current_device(self) -> bool:
+        return current_platform.is_rocm()
+
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        return (
+            quant_config.use_fp8_w8a8
+            or quant_config.use_mxfp4_w4a4
+            or False  # TODO: how to represent unquantizes?
+        )
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu", "gelu"]
+
+    def supports_ep(self) -> bool:
+        return True
 
     def supports_expert_map(self):
         return True
