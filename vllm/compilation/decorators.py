@@ -522,7 +522,9 @@ def _support_torch_compile(
         # assume_32bit_indexing is only available in torch 2.10.0.dev+
         inductor_config_patches = {}
         if is_torch_equal_or_newer("2.10.0.dev"):
-            inductor_config_patches["assume_32bit_indexing"] = True
+            inductor_config_patches["assume_32bit_indexing"] = (
+                self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
+            )
 
         with (
             patch.object(
