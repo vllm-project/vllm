@@ -152,21 +152,26 @@ class MarkdownFormatter(HelpFormatter):
             heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
             self._markdown_output.append(heading_md)
 
-            if choices := action.choices:
-                choices = f"`{'`, `'.join(str(c) for c in choices)}`"
-                self._markdown_output.append(f"Possible choices: {choices}\n\n")
-            elif (metavar := action.metavar) and isinstance(metavar, (list, tuple)):
-                metavar = f"`{'`, `'.join(str(m) for m in metavar)}`"
-                self._markdown_output.append(f"Possible choices: {metavar}\n\n")
+            description = []
 
             if action.help:
-                self._markdown_output.append(f"{action.help}\n\n")
+                description.append(f"{action.help}\n")
+
+            if choices := action.choices:
+                choices = f"`{'`, `'.join(str(c) for c in choices)}`"
+                description.append(f"- **Possible choices**: {choices}\n")
+            elif (metavar := action.metavar) and isinstance(metavar, (list, tuple)):
+                metavar = f"`{'`, `'.join(str(m) for m in metavar)}`"
+                description.append(f"- **Possible choices**: {metavar}\n")
 
             if (default := action.default) != SUPPRESS:
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
-                self._markdown_output.append(f"Default: `{default}`\n\n")
+                description.append(f"- **Default**: `{default}`\n")
+
+            self._markdown_output.append("\n".join(description) + "\n")
+            self._markdown_output.append("---\n")
 
     def format_help(self):
         """Return the formatted help as markdown."""
