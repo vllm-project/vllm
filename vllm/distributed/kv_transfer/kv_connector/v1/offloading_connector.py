@@ -75,6 +75,10 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        assert self.connector_worker is not None
+        self.connector_worker.handle_preemptions(preempted_req_ids)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
@@ -348,6 +352,15 @@ class OffloadingConnectorScheduler:
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
         )
         self._reqs_to_load = {}
+
+        # NOTE (orozery): we should move this logic to update_connector_output
+        # once KVConnectorOutput allows us to report completed transfers
+        for req_id in scheduler_output.preempted_req_ids or ():
+            block_hashes = self._reqs_being_stored.get(req_id)
+            if block_hashes:
+                self.manager.complete_store(block_hashes)
+                block_hashes.clear()
+
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -465,6 +478,17 @@ class OffloadingConnectorWorker:
         kv_caches = {cross_layer_name: kv_cache}
         attn_backends = {cross_layer_name: attn_backend}
         self._register_handlers(kv_caches, attn_backends)
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        for job_id, transfer_spec in self._unsubmitted_store_jobs:
+            success = self.worker.transfer_async(job_id, transfer_spec)
+            assert success
+        self._unsubmitted_store_jobs.clear()
+
+        for req_id in preempted_req_ids:
+            job_ids = self._store_jobs.get(req_id)
+            if job_ids:
+                self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:

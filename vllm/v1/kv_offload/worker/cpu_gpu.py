@@ -96,6 +96,8 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
 
+        # job_id -> event
+        self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[tuple[int, torch.cuda.Stream, torch.Event]] = deque()
         # list of CUDA streams available for re-use
@@ -152,6 +154,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                     ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
             event.record(stream)
 
+        self._transfer_events[job_id] = event
         self._transfers.append((job_id, stream, event))
 
         # success
@@ -164,7 +167,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             results.append((job_id, True))
             self._stream_pool.append(stream)
             self._event_pool.append(event)
+            del self._transfer_events[job_id]
         return results
+
+    def wait(self, job_ids: set[int]):
+        for job_id in job_ids:
+            event = self._transfer_events.get(job_id)
+            if event is not None:
+                event.synchronize()
 
 
 class CpuGpuOffloadingHandlers:
