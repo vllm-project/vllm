@@ -12,8 +12,11 @@ import torch
 from torch import fx
 
 from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -765,3 +768,30 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
         t |= ((nib - 8) & 0xF) << shift
 
     return t
+
+
+def sanitize_global_scale(name: str, scale: torch.Tensor) -> torch.Tensor:
+    """Sanitize global scale tensor by handling NaN, Inf, and non-positive values.
+
+    Args:
+        name: Name of the scale parameter for logging purposes.
+        scale: The scale tensor to sanitize.
+
+    Returns:
+        A sanitized scale tensor with all values finite and positive.
+    """
+    scale = scale.to(torch.float32)
+    finite = torch.isfinite(scale) & (scale > 0)
+    if finite.all():
+        return scale
+    if finite.any():
+        fallback = scale[finite].max()
+    else:
+        fallback = torch.tensor(1.0, dtype=scale.dtype, device=scale.device)
+    logger.warning_once(
+        "Invalid %s detected (nan/inf/non-positive). Replacing with %s.",
+        name,
+        float(fallback.item()),
+    )
+    scale = torch.where(finite, scale, fallback)
+    return torch.clamp_min(scale, 1e-6)

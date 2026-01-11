@@ -92,6 +92,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -1336,15 +1337,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_config = quant_config
         self.nvfp4_backend = select_nvfp4_moe_backend()
-        # TODO: move this type of check into the oracle.
-        if (
-            not self.moe.is_act_and_mul
-            and not self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS
-        ):
-            raise NotImplementedError(
-                "Non-gated activations are only supported by FlashInfer "
-                "CUTLASS NvFP4 MoE backend."
-            )
+
+        if not self.moe.is_act_and_mul:
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "is_act_and_mul=False is supported only for CUDA for now"
+                )
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_CUTLASS:
+                raise NotImplementedError(
+                    "Non-gated activations are only supported by FlashInfer "
+                    "CUTLASS NvFP4 MoE backend."
+                )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend

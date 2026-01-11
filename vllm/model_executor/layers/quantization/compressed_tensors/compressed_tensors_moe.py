@@ -83,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,
     convert_packed_uint4b8_to_signed_int4_inplace,
+    sanitize_global_scale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -231,15 +232,20 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer_name: str | None = None,
         use_marlin: bool = False,
     ):
-        if not moe.is_act_and_mul:
-            raise ValueError(
-                "CompressedTensorsW4A4Nvfp4MoEMethod does not yet "
-                "support non gated MoE models."
-            )
-
         super().__init__(moe)
         self.group_size = 16
+
+        if not moe.is_act_and_mul and not current_platform.is_cuda():
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA for now"
+            )
+
         if use_marlin:
+            if not moe.is_act_and_mul:
+                raise NotImplementedError(
+                    "Non-gated activations are only supported by FlashInfer "
+                    "CUTLASS NvFP4 MoE backend."
+                )
             if is_fp4_marlin_supported():
                 self.nvfp4_backend = NvFp4MoeBackend.MARLIN
             else:
@@ -249,6 +255,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 )
         else:
             self.nvfp4_backend = select_nvfp4_moe_backend()
+            if (
+                not moe.is_act_and_mul
+                and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_CUTLASS
+            ):
+                raise NotImplementedError(
+                    "Non-gated activations are only supported by FlashInfer "
+                    "CUTLASS NvFP4 MoE backend."
+                )
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
@@ -263,13 +277,19 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        fc1_out_features = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
+        w13_scale_cols = 2 if self.moe.is_act_and_mul else 1
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
 
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                fc1_out_features,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 requires_grad=False,
@@ -297,7 +317,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                fc1_out_features,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.group_size,
                 dtype=torch.float8_e4m3fn,
@@ -328,7 +348,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         # Weight Global Scales
         w13_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
+            torch.empty(num_experts, w13_scale_cols, dtype=torch.float32),
+            requires_grad=False,
         )
         layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
         extra_weight_attrs.update(
@@ -346,8 +367,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
         # Input Global Scales
+        global_num_experts = extra_weight_attrs.get("global_num_experts", num_experts)
+        global_sf_num_experts = (
+            global_num_experts if self.use_global_sf else num_experts
+        )
         w13_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
+            torch.empty(global_sf_num_experts, w13_scale_cols, dtype=torch.float32),
+            requires_grad=False,
         )
         layer.register_parameter("w13_input_global_scale", w13_input_scale)
         extra_weight_attrs.update(
@@ -356,7 +382,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
         w2_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            torch.empty(global_sf_num_experts, dtype=torch.float32),
+            requires_grad=False,
         )
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
@@ -368,6 +395,28 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        layer.w13_input_global_scale = torch.nn.Parameter(
+            sanitize_global_scale(
+                "w13_input_global_scale", layer.w13_input_global_scale
+            ),
+            requires_grad=False,
+        )
+        layer.w2_input_global_scale = torch.nn.Parameter(
+            sanitize_global_scale("w2_input_global_scale", layer.w2_input_global_scale),
+            requires_grad=False,
+        )
+        layer.w13_weight_global_scale = torch.nn.Parameter(
+            sanitize_global_scale(
+                "w13_weight_global_scale", layer.w13_weight_global_scale
+            ),
+            requires_grad=False,
+        )
+        layer.w2_weight_global_scale = torch.nn.Parameter(
+            sanitize_global_scale(
+                "w2_weight_global_scale", layer.w2_weight_global_scale
+            ),
+            requires_grad=False,
+        )
         # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
         # requires this naming convention. However, the name change breaks
         # reloading because the state dict no longer matches disk. Once we
@@ -490,7 +539,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
+        if self.moe.is_act_and_mul:
+            assert layer.activation == "silu", "Only SiLU activation is supported."
+        else:
+            assert layer.activation == "relu2_no_mul", (
+                "Only ReLU2 activation is supported for non-gated MoE."
+            )
 
         if (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM

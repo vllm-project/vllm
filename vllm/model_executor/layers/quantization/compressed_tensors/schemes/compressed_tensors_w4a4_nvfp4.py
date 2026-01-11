@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
+    sanitize_global_scale,
     swizzle_blockscale,
 )
 from vllm.model_executor.parameter import (
@@ -124,11 +125,17 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.register_parameter("input_global_scale", input_global_scale)
 
     def process_weights_after_loading(self, layer) -> None:
-        global_input_scale = layer.input_global_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(global_input_scale, requires_grad=False)
-
+        input_global_scale = sanitize_global_scale(
+            "input_global_scale", layer.input_global_scale
+        )
+        weight_global_scale = sanitize_global_scale(
+            "weight_global_scale", layer.weight_global_scale
+        )
+        layer.input_global_scale = Parameter(
+            input_global_scale.max().to(torch.float32), requires_grad=False
+        )
         layer.weight_global_scale = Parameter(
-            layer.weight_global_scale.max().to(torch.float32), requires_grad=False
+            weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
         if self.backend == "flashinfer-trtllm":
@@ -155,10 +162,24 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             if self.backend == "fbgemm":
                 swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
-            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight_packed = Parameter(
-                layer.weight_packed.data, requires_grad=False
-            )
+            weight_packed = layer.weight_packed.data
+            weight_scale = swizzled_weight_scale
+            if self.backend in ("flashinfer-cutlass", "cutlass"):
+                # swizzle_blockscale pads scales to CUTLASS layout; mirror that
+                # padding in the packed weights to keep shapes aligned.
+                target_rows = weight_scale.shape[0]
+                pad_rows = target_rows - weight_packed.shape[0]
+                if pad_rows > 0:
+                    padded_weight = torch.zeros(
+                        pad_rows,
+                        weight_packed.shape[1],
+                        dtype=weight_packed.dtype,
+                        device=weight_packed.device,
+                    )
+                    weight_packed = torch.cat((weight_packed, padded_weight), dim=0)
+
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            layer.weight_packed = Parameter(weight_packed, requires_grad=False)
 
         layer.alpha = Parameter(
             1 / (layer.input_global_scale * layer.weight_global_scale),
@@ -184,7 +205,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
+        output_size = getattr(
+            layer,
+            "output_size_per_partition",
+            layer.weight_packed.shape[0],
+        )
+        output_shape = [*x.shape[:-1], output_size]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
@@ -213,6 +239,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
 
+        if out.shape[-1] != output_size:
+            out = out[..., :output_size]
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
