@@ -254,12 +254,19 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if (
+            lora_request.lora_int_id not in self.list_adapters()
+            or lora_request.load_inplace
+        ):
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
+
+            # Remove the existing adapter if it exists
+            # Use case for LoRA inplace
+            self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
