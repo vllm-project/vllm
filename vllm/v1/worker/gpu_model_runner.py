@@ -2199,7 +2199,7 @@ class GPUModelRunner(
         if not mm_kwargs:
             return []
 
-        should_time = (
+        should_time = bool(
             self.observability_config
             and self.observability_config.enable_mm_processor_stats
             and scheduler_output.scheduled_encoder_inputs
