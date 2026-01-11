@@ -66,6 +66,9 @@ def should_continue_final_message(
     if isinstance(last_item, ResponseReasoningItem):
         return last_item.status in ("in_progress", "incomplete")
 
+    if isinstance(last_item, dict):
+        return last_item.get("status") in ("in_progress", "incomplete")
+
     return False
 
 
@@ -109,6 +112,9 @@ def construct_input_messages(
     else:
         input_messages = construct_chat_messages_with_tool_call(request_input)
         messages.extend(input_messages)
+
+    # TODO: validate that messages can only have the last one in progress
+
     return messages
 
 
