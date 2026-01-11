@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+from contextlib import nullcontext
 from dataclasses import replace
 from importlib.util import find_spec
 
@@ -14,7 +15,9 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import (get_pp_group, get_world_group,
+                                             init_model_parallel_group,
+                                             patch_tensor_parallel_group)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -215,6 +218,23 @@ class EagleProposer:
         self.tree_draft_pos_offsets = torch.arange(
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
+        
+        # NOTE:
+        # `draft_tensor_parallel_size` does not take effect for Eagle3:
+        # the draft model uses the same TP size as the target model in practice.
+        # so we applied this patch.
+        if (vllm_config.parallel_config.tensor_parallel_size > 1
+                and self.speculative_config.draft_tensor_parallel_size == 1):
+            tp_group = init_model_parallel_group(
+                [[get_world_group().rank]],
+                get_world_group().local_rank,
+                torch.distributed.get_backend(get_world_group().device_group),
+                use_message_queue_broadcaster=True,
+                group_name="tp",
+            )
+            self.tp_group_context = patch_tensor_parallel_group(tp_group)
+        else:
+            self.tp_group_context = nullcontext()
 
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
