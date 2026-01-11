@@ -510,6 +510,14 @@ class Llama4Model(LlamaModel):
                 # TODO: add EP support for non fused weights
                 pass
 
+            # Ensure tensor is contiguous before GPU transfer.
+            # After transpose() and indexing operations, the tensor may be
+            # non-contiguous, causing slow DMA transfers. Making the final
+            # sliced tensor contiguous here is more efficient than making
+            # the entire weight tensor contiguous after transpose().
+            if fused and isinstance(new_loaded_weight, torch.Tensor):
+                new_loaded_weight = new_loaded_weight.contiguous()
+
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
             weight_loader(
