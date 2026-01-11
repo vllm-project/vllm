@@ -15,6 +15,41 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+def get_tied_weight_names(model: PreTrainedModel) -> set[str]:
+    """
+    Get names of weights that are tied to other weights.
+    Uses HuggingFace's internal _tied_weights_keys attribute.
+    """
+    tied_keys = getattr(model, "_tied_weights_keys", None)
+    return set(tied_keys) if tied_keys else set()
+
+
+def filter_tied_weights(
+    weight_names: set[str],
+    ref_weight_names: set[str],
+    tied_weight_names: set[str],
+) -> set[str]:
+    """
+    Remove tied weights that appear in named_parameters() but not in checkpoint.
+
+    In transformers v5+, tied weights (e.g., lm_head tied to embed_tokens) appear
+    separately in named_parameters() even though only one copy is stored in the
+    checkpoint. _tied_weights_keys stores names relative to submodules, so we
+    match by suffix (e.g., "lm_head.weight" matches "language_model.lm_head.weight").
+    """
+    if not tied_weight_names:
+        return weight_names
+
+    def is_tied_and_missing(name: str) -> bool:
+        if name in ref_weight_names:
+            return False
+        return any(
+            name == tied or name.endswith(f".{tied}") for tied in tied_weight_names
+        )
+
+    return {name for name in weight_names if not is_tied_and_missing(name)}
+
+
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
     """Create weights from safetensors checkpoint metadata"""
     metadata = try_get_safetensors_metadata(repo)
@@ -83,6 +118,7 @@ def test_hf_model_weights_mapper(model_arch: str):
     hf_dummy_model = create_dummy_model(model_id, model_arch)
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
+    tied_weight_names = get_tied_weight_names(hf_dummy_model)
     mapper: WeightsMapper = model_cls.hf_to_vllm_mapper
 
     mapped_original_weights = mapper.apply(original_weights)
@@ -92,9 +128,12 @@ def test_hf_model_weights_mapper(model_arch: str):
     ref_weight_names = set(map(lambda x: x[0], mapped_original_weights))
     weight_names = set(map(lambda x: x[0], mapped_hf_converted_weights))
     buffer_names = set(map(lambda x: x[0], mapped_hf_converted_buffers))
-
-    # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
+
+    # Filter out tied weights that don't exist in the checkpoint
+    weight_names = filter_tied_weights(
+        weight_names, ref_weight_names, tied_weight_names
+    )
 
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names
