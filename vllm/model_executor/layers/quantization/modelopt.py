@@ -74,6 +74,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     cutlass_fp4_supported,
@@ -1571,15 +1574,34 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Optionally prepare extra tensors to carry through DP allgather/EP."""
-        import flashinfer
-
         assert self.moe_quant_config is not None
         a1_gscale = self.moe_quant_config.a1_gscale
-        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
-            hidden_states,
-            a1_gscale,
-            is_sf_swizzled_layout=False,
+
+        # Normalize a1_gscale to a scalar tensor on the correct device
+        if not isinstance(a1_gscale, torch.Tensor):
+            a1_gscale_tensor = torch.tensor(
+                a1_gscale, device=hidden_states.device, dtype=torch.float32
+            )
+        else:
+            a1_gscale_tensor = (
+                (a1_gscale.max() if a1_gscale.numel() != 1 else a1_gscale)
+                .to(hidden_states.device)
+                .to(torch.float32)
+            )
+
+        # Quantize using vLLM native op (outputs swizzled scales)
+        hidden_states_fp4, hidden_states_scale_swizzled = scaled_fp4_quant(
+            hidden_states, a1_gscale_tensor
         )
+
+        # Convert swizzled scales to linear layout (required by DP allgather path)
+        hidden_states_sf = convert_swizzled_to_linear(
+            hidden_states_scale_swizzled,
+            hidden_states.shape[0],
+            hidden_states.shape[1],
+            block_size=16,
+        )
+
         extra_tensors: list[torch.Tensor] = [hidden_states_sf]
         return hidden_states_fp4, extra_tensors
 
