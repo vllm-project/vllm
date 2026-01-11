@@ -279,6 +279,29 @@ class OpenAIServingResponses(OpenAIServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+        
+        # Initialize MediaConnector for video semaphore management
+        try:
+            from vllm import envs as vllm_envs
+            from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY
+            multimodal_config = self.model_config.multimodal_config
+            media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None) if multimodal_config else None
+            max_concurrent_videos = getattr(multimodal_config, "max_concurrent_videos", None) if multimodal_config else None
+            self._media_connector = MEDIA_CONNECTOR_REGISTRY.load(
+                vllm_envs.VLLM_MEDIA_CONNECTOR,
+                media_io_kwargs=media_io_kwargs,
+                allowed_local_media_path=self.model_config.allowed_local_media_path or "",
+                allowed_media_domains=self.model_config.allowed_media_domains,
+                max_concurrent_videos=max_concurrent_videos,
+            )
+            if max_concurrent_videos:
+                logger.info(
+                    "Responses service initialized with video concurrency limit: %d",
+                    max_concurrent_videos
+                )
+        except Exception as e:
+            logger.warning("Failed to initialize MediaConnector for video semaphore: %s", e)
+            self._media_connector = None
 
     def _validate_generator_input(
         self, engine_prompt: TokensPrompt
@@ -354,7 +377,66 @@ class OpenAIServingResponses(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+        
+        # Count videos in the request to acquire appropriate semaphore slots
+        video_count = 0
+        try:
+            from vllm.entrypoints.chat_utils import count_videos_in_content_parts
+            if isinstance(request.input, list):
+                for item in request.input:
+                    if isinstance(item, dict):
+                        content = item.get("content")
+                        video_count += count_videos_in_content_parts(content)
+            if video_count > 0:
+                logger.debug("Request has %d video(s), will acquire semaphore", video_count)
+        except Exception as e:
+            logger.warning("Failed to count videos in request: %s", e)
+            video_count = 0
 
+        # Acquire semaphore for entire request lifecycle (including video loading)
+        if video_count > 0 and hasattr(self, '_media_connector') and self._media_connector:
+            # Check if response will be streaming - need to handle differently
+            if request.stream:
+                # For streaming, wrap the generator to hold semaphore during iteration
+                return self._stream_with_video_semaphore(
+                    request, raw_request, video_count
+                )
+            else:
+                # For non-streaming, acquire semaphore for the entire await
+                async with self._media_connector.acquire_video_semaphore(video_count):
+                    return await self._create_responses_inner(request, raw_request)
+        else:
+            return await self._create_responses_inner(request, raw_request)
+    
+    async def _stream_with_video_semaphore(
+        self,
+        request: ResponsesRequest,
+        raw_request: Request | None,
+        video_count: int,
+    ) -> AsyncGenerator[StreamingResponsesResponse, None]:
+        """
+        Wrapper for streaming responses that holds the video semaphore
+        while the stream is being consumed.
+        """
+        async with self._media_connector.acquire_video_semaphore(video_count):
+            result = await self._create_responses_inner(request, raw_request)
+            # result should be an AsyncGenerator for streaming
+            async for item in result:
+                yield item
+
+    async def _create_responses_inner(
+        self,
+        request: ResponsesRequest,
+        raw_request: Request | None,
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
+        """
+        Inner method that processes the responses request.
+        Called after semaphore acquisition.
+        """
         if request.store and not self.enable_store:
             # Disable the store option.
             # NOTE(woosuk): Although returning an error is possible, we opted
@@ -560,6 +642,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
             )
 
+        # Non-streaming response
         try:
             return await self.responses_full_generator(
                 request,

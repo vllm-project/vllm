@@ -140,6 +140,10 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    max_concurrent_videos: int | None = Field(default=None, gt=0)
+    """Maximum number of videos that can be preprocessed concurrently in this
+    process. This limits VRAM usage from video decoding libraries like
+    PyNvVideoCodec that allocate VRAM separately from PyTorch."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

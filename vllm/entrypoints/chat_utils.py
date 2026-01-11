@@ -910,12 +910,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
+        max_concurrent_videos = getattr(multimodal_config, "max_concurrent_videos", None)
 
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
+            max_concurrent_videos=max_concurrent_videos,
         )
 
     @property
@@ -1022,11 +1024,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
+        max_concurrent_videos = getattr(multimodal_config, "max_concurrent_videos", None)
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
+            max_concurrent_videos=max_concurrent_videos,
         )
 
     @property
@@ -1910,3 +1914,55 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+
+
+def count_videos_in_messages(messages: list[ChatCompletionMessageParam]) -> int:
+    """
+    Count the number of videos in chat messages.
+    
+    Args:
+        messages: List of chat completion messages
+        
+    Returns:
+        The total number of videos in the messages
+    """
+    video_count = 0
+    
+    for msg in messages:
+        content = msg.get("content")
+        if content is None or isinstance(content, str):
+            continue
+            
+        # Content is a list of parts
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
+                    if part_type == "video_url":
+                        video_count += 1
+    
+    return video_count
+
+
+def count_videos_in_content_parts(content: str | list | None) -> int:
+    """
+    Count the number of videos in content parts (used by Responses API).
+    
+    Args:
+        content: Content from ResponseInputOutputItem (can be string or list of parts)
+        
+    Returns:
+        The total number of videos in the content
+    """
+    if content is None or isinstance(content, str):
+        return 0
+    
+    video_count = 0
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == "input_video":
+                    video_count += 1
+    
+    return video_count

@@ -577,7 +577,7 @@ class MultiModalFlatField(BaseMultiModalField):
                     (*shape_before, shape_concat, *shape_after),
                     dtype=batch[0].dtype,
                     device=batch[0].device,
-                    pin_memory=pin_memory,
+                    pin_memory=pin_memory and batch[0].device.type == 'cpu',
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
