@@ -129,11 +129,12 @@ class Mamba2AttentionMetadataBuilder(
         )
         self.chunk_size: int = chunk_size
 
+    @staticmethod
     def _compute_chunk_metadata(
-        self,
         num_prefills: int,
         num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
+        chunk_size: int,
     ) -> tuple[list[int], list[int], list[int]]:
         """
         Compute chunk-specific metadata for Mamba2.
@@ -163,24 +164,23 @@ class Mamba2AttentionMetadataBuilder(
 
             # if computed tokens are not chunk-aligned, use the first
             # chunk to finish it off
-            if this_num_computed % self.chunk_size != 0:
+            if this_num_computed % chunk_size != 0:
                 seq_idx.append(req_idx)
                 cu_chunk_seqlen.append(seqlen_pos)
                 # how many tokens to finish the chunk?
                 chunk_len = (
-                    cdiv(this_num_computed, self.chunk_size) * self.chunk_size
-                    - this_num_computed
+                    cdiv(this_num_computed, chunk_size) * chunk_size - this_num_computed
                 )
                 # we can only use at most this_new_tokens
                 chunk_len = min(chunk_len, this_new_tokens)
                 seqlen_pos += chunk_len
                 this_new_tokens -= chunk_len
 
-            n_chunks = cdiv(this_new_tokens, self.chunk_size)
+            n_chunks = cdiv(this_new_tokens, chunk_size)
             for chunk in range(n_chunks):
                 seq_idx.append(req_idx)
                 cu_chunk_seqlen.append(seqlen_pos)
-                chunk_len = min(self.chunk_size, this_new_tokens)
+                chunk_len = min(chunk_size, this_new_tokens)
                 seqlen_pos += chunk_len
                 this_new_tokens -= chunk_len
 
@@ -231,6 +231,7 @@ class Mamba2AttentionMetadataBuilder(
                 num_prefills,
                 num_computed_tokens_p_cpu,
                 query_start_loc_p_cpu,
+                chunk_size=self.chunk_size,
             )
 
             seq_idx_p = torch.as_tensor(
