@@ -228,9 +228,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
-        num_computed_tokens = torch.zeros(
-            input_batch.num_reqs, dtype=torch.int32, device=self.device
-        )
         query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
         query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
@@ -241,8 +238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=input_batch.seq_lens_np,
-            num_computed_tokens_cpu=num_computed_tokens,
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -522,16 +518,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
         )
 
-        # Get num_computed_tokens.
-        # HACK(woosuk): Here, we use num_computed_tokens on GPU instead of
-        # num_computed_tokens_cpu. This works for most cases.
-        num_computed_tokens = self.req_states.num_computed_tokens[idx_mapping]
-        # HACK(woosuk): Only GPU has the exact seq_lens because at this point
-        # CPU does not know how many draft tokens are accepted/rejected in the
-        # previous step. Therefore, we use max_model_len to be safe.
-        # NOTE(woosuk): This only works for FA3 backend.
-        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
-
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
@@ -540,8 +526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=seq_lens_np,
-            num_computed_tokens_cpu=num_computed_tokens,
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -561,7 +546,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc=query_start_loc_gpu,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
             attn_metadata=attn_metadata,
