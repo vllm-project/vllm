@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
@@ -653,6 +654,26 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.BatchedExperts,
             mk.FusedMoEActivationFormat.BatchedExperts,
         )
+    
+    def supports_current_device(self) -> bool:
+        return current_platform.is_cuda_alike()
+
+    def supports_no_act_and_mul(self) -> bool:
+        return False
+
+    def supports_quant_config(self, quant_config: FusedMoEQuantConfig) -> bool:
+        return (
+            quant_config.use_fp8_w8a8 and
+            quant_config.is_block_quantized() and
+            quant_config.block_shape[0] == 128 and
+            quant_config.block_shape[1] == 128
+        )
+
+    def supports_act_fn(self, activation: str) -> bool:
+        return activation in ["silu", "gelu", "swigluoai"]
+
+    def supports_ep(self) -> bool:
+        return True
 
     def supports_chunking(self) -> bool:
         return False
