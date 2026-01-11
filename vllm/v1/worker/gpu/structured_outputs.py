@@ -16,7 +16,7 @@ class StructuredOutputsWorker:
         vocab_size: int,
     ):
         # NOTE(woosuk): Here, we use UvaBufferPool instead of UvaBackedTensor
-        # to save a CPU-to-CPU copy.
+        # to save a unnecessary CPU-to-CPU copy.
         self.logits_indices = UvaBufferPool(max_num_logits, torch.int32)
         self.grammar_bitmask = UvaBufferPool(
             (max_num_logits, cdiv(vocab_size, 32)), torch.int32
