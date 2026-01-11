@@ -229,7 +229,7 @@ def prepare_inputs_to_capture(
 ) -> dict[str, Any]:
     num_tokens_per_req = num_tokens // num_reqs
 
-    query_start_loc_np = np.arange(num_reqs + 1) * num_tokens_per_req
+    query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
     query_start_loc_np[-1] = num_tokens
     query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
     input_buffers.query_start_loc[: num_reqs + 1] = query_start_loc_cpu
