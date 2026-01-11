@@ -5,7 +5,7 @@ from collections.abc import Set
 import numpy as np
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (
     DispatchPooler,
@@ -178,12 +178,12 @@ class GritLMMeanPool(SequencePoolingMethod):
 
 
 class GritLMPooler(SequencePooler):
-    def __init__(self, model_config: ModelConfig, seq_pooling_type: str):
+    def __init__(self, model_config: ModelConfig, pooler_config: PoolerConfig):
         super().__init__(
             pooling=(
                 GritLMMeanPool(model_config)
-                if seq_pooling_type == "MEAN"
-                else get_seq_pooling_method(seq_pooling_type)
+                if pooler_config.seq_pooling_type == "MEAN"
+                else get_seq_pooling_method(pooler_config.seq_pooling_type)
             ),
             head=self.head,
         )
@@ -240,9 +240,6 @@ class GritLM(LlamaForCausalLM):
             self.pooler = DispatchPooler(
                 {
                     "token_embed": pooler_for_token_embed(pooler_config),
-                    "embed": GritLMPooler(
-                        vllm_config.model_config,
-                        pooler_config.seq_pooling_type,
-                    ),
+                    "embed": GritLMPooler(vllm_config.model_config, pooler_config),
                 }
             )

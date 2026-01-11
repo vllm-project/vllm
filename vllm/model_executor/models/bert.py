@@ -94,9 +94,9 @@ class BertEmbedding(nn.Module):
 
 
 class BertPooler(SequencePooler):
-    def __init__(self, config: BertConfig, seq_pooling_type: str):
+    def __init__(self, config: BertConfig, pooler_config: PoolerConfig):
         super().__init__(
-            pooling=get_seq_pooling_method(seq_pooling_type),
+            pooling=get_seq_pooling_method(pooler_config.seq_pooling_type),
             head=self.head,
         )
 

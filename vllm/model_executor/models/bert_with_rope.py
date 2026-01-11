@@ -469,7 +469,7 @@ class BertWithRope(nn.Module, SupportsQuant):
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = BertPooler(self.config, pooler_config.seq_pooling_type)
+            self.pooler = BertPooler(self.config, pooler_config)
         else:
             self.pooler = None
 
